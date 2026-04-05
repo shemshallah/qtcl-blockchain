@@ -240,54 +240,38 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
       <div class="mc"><div class="ml">QFI</div><div class="mv dm" id="mqf">&mdash;</div><div class="ms" id="mdc">discord: &mdash;</div></div>
     </div>
   </div>
-  <!-- ── DENSITY MATRIX COHERENCE STRUCTURE · FULL WIDTH ────────────────── -->
-  <div class="pn" style="grid-column:1/-1">
-    <div class="ph"><span class="pht">⟨ψ| Density Matrix Coherence · 64×64 Heatmap</span><span class="pb" id="dmcs-status">Computing…</span></div>
-    
-    <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;padding:12px 16px">
-      <!-- LEFT: Large Density Matrix Heatmap -->
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <canvas id="dmcan" style="display:block;width:100%;height:520px;background:var(--bg3);border-radius:6px;border:1px solid var(--b)"></canvas>
-        <div style="display:flex;gap:12px;font-size:8px;flex-wrap:wrap;justify-content:center">
-          <div style="display:flex;align-items:center;gap:4px"><div style="width:12px;height:12px;background:#00ff9d;border-radius:2px"></div>Diag (Pops)</div>
-          <div style="display:flex;align-items:center;gap:4px"><div style="width:12px;height:12px;background:#d4a020;border-radius:2px"></div>W-Legs</div>
-          <div style="display:flex;align-items:center;gap:4px"><div style="width:12px;height:12px;background:#00dcff;border-radius:2px"></div>Noise</div>
-          <div style="display:flex;align-items:center;gap:4px"><div style="width:12px;height:12px;background:#1a2540;border-radius:2px"></div>Floor</div>
+  <div class="tc">
+    <div class="pn">
+      <div class="ph"><span class="pht">H³ Hyperbolic Lattice · {8,3}</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
+      <div id="dc3d" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;">
+        <!-- pq Bloch overlay — rendered by _PQ canvas system -->
+        <canvas id="pq-overlay" style="position:absolute;right:0;top:0;pointer-events:none;z-index:10;opacity:0.97"></canvas>
+        <!-- node type legend -->
+        <div style="position:absolute;left:8px;top:8px;pointer-events:none;z-index:10;display:flex;flex-direction:column;gap:4px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:7.5px;color:rgba(0,220,255,0.45);letter-spacing:1.5px;margin-bottom:2px">LEGEND</div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#d4a020;border-radius:1px;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(212,160,32,0.8)">Oracle node (×5)</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#00dcff;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">Lattice pseudoqubit</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:2px;background:#00dcff;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">W-state entanglement arc</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#ffd040;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(255,208,64,0.9)">Current block ⬡</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:1px;background:rgba(128,64,255,0.6);display:inline-block;flex-shrink:0;border-top:1px dashed rgba(128,64,255,0.6)"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,0.75)">Oracle entanglement</span></div>
+        </div>
+        <!-- field-fidelity HUD strip -->
+        <div id="pq-hud" style="position:absolute;left:0;bottom:0;right:0;height:28px;pointer-events:none;z-index:11;display:flex;align-items:center;padding:0 10px;gap:14px;background:linear-gradient(0deg,rgba(0,5,8,.92) 0%,transparent 100%)">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.55);letter-spacing:1.5px">BLOCK FIELD</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_last=<span id="pqh-last" style="color:#8040ff">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_curr=<span id="pqh-curr" style="color:#d4a020">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">Δ=<span id="pqh-delta" style="color:#00ff9d">—</span></span>
+          <span style="flex:1"></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">ψ —</span>
         </div>
       </div>
-      
-      <!-- RIGHT: Phase Space + Metrics -->
-      <div style="display:flex;flex-direction:column;gap:12px">
-        <!-- Phase Space -->
-        <div style="display:flex;flex-direction:column;gap:6px">
-          <div style="font-family:var(--disp);font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--go)">σ_z Phase</div>
-          <canvas id="phspace" style="display:block;width:100%;height:240px;background:var(--bg3);border-radius:6px;border:1px solid var(--b)"></canvas>
-        </div>
-        
-        <!-- Metrics Grid (2×2) -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:8px">
-          <div style="background:var(--bg);border-left:2px solid var(--cy);padding:6px 8px;border-radius:3px">
-            <div style="color:var(--dim);font-family:var(--disp);font-size:7px;letter-spacing:0.5px">FIDELITY</div>
-            <div id="dmcs-fid" style="color:var(--cy);font-family:var(--mono);font-size:10px;font-weight:600;margin-top:2px">0.000</div>
-          </div>
-          <div style="background:var(--bg);border-left:2px solid var(--go);padding:6px 8px;border-radius:3px">
-            <div style="color:var(--dim);font-family:var(--disp);font-size:7px;letter-spacing:0.5px">COHERENCE</div>
-            <div id="dmcs-coh" style="color:var(--go);font-family:var(--mono);font-size:10px;font-weight:600;margin-top:2px">0.000</div>
-          </div>
-          <div style="background:var(--bg);border-left:2px solid var(--vi);padding:6px 8px;border-radius:3px">
-            <div style="color:var(--dim);font-family:var(--disp);font-size:7px;letter-spacing:0.5px">PURITY</div>
-            <div id="dmcs-pur" style="color:var(--vi);font-family:var(--mono);font-size:10px;font-weight:600;margin-top:2px">0.000</div>
-          </div>
-          <div style="background:var(--bg);border-left:2px solid var(--gr);padding:6px 8px;border-radius:3px">
-            <div style="color:var(--dim);font-family:var(--disp);font-size:7px;letter-spacing:0.5px">ENTROPY</div>
-            <div id="dmcs-ent" style="color:var(--gr);font-family:var(--mono);font-size:10px;font-weight:600;margin-top:2px">0.000</div>
-          </div>
-        </div>
+      <div class="bs">
+        <div class="bv"><div class="bvl">|W₃| Fidelity</div><div class="bvn" id="bfi">&mdash;</div></div>
+        <div class="bv"><div class="bvl">pq_curr</div><div class="bvn" id="ben" style="color:var(--go)">&mdash;</div></div>
+        <div class="bv"><div class="bvl">pq_last</div><div class="bvn" id="bcn">&mdash;</div></div>
+        <div class="bv"><div class="bvl">Field Fidelity</div><div class="bvn" id="bte">&mdash;</div></div>
       </div>
     </div>
-  </div>
-  
-  <div class="tc">
     <div class="pn">
       <div class="ph"><span class="pht">Mermin Inequality Test</span><span class="pb" id="mb3">M &mdash;</span><span class="pb vi" id="mcy" style="font-size:.72em;opacity:.6">cycle —</span></div>
       <div class="md">
@@ -313,6 +297,16 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
           <div class="nr"><span class="nk">ou_mem</span><span class="nv" id="nou">&mdash;</span></div>
           <div class="nr"><span class="nk">phase_drift</span><span class="nv" id="npd">&mdash;</span></div>
           <div class="nr"><span class="nk">sector_occ</span><span class="nv" id="nso">&mdash;</span></div>
+        </div>
+      </div>
+      <div class="ph"><span class="pht">Density Matrix ρ · 8×8 W-State</span><span class="pb vi" id="dm-badge">—</span><span class="pb go" id="dm-pur-badge" style="margin-left:4px">pur —</span></div>
+      <div style="position:relative;background:#000508">
+        <canvas id="qc"></canvas>
+        <div style="position:absolute;left:0;bottom:0;right:0;height:20px;pointer-events:none;background:linear-gradient(0deg,rgba(0,5,8,.9) 0%,transparent 100%);display:flex;align-items:center;padding:0 10px;gap:14px">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,220,255,.45);letter-spacing:1px">|ρᵢⱼ| HEATMAP</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,220,255,.35)">max: <span id="qc-max" style="color:#d4a020">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,220,255,.35)">tr: <span id="qc-tr" style="color:#00ff9d">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,220,255,.35)">coh: <span id="qc-coh" style="color:#8040ff">—</span></span>
         </div>
       </div>
     </div>
@@ -429,10 +423,10 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
         </div>
       </div>
     </div>
-    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="a7f4cfc2cad4cfc6cbcbc6cfe7c0cac6cecb89c4c8ca">[email&#160;protected]</a>. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
+    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="f7a49f929a849f969b9b969fb7909a969e9bd994989a">[email&#160;protected]</a>. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
   </div>
 
-
+</div>
 <div id="bb">
   <div class="bi"><span class="bl2">NET</span><span class="bv2">QTCL-1</span></div>
   <div class="bi"><span class="bl2">DIFF</span><span class="bvy" id="bbd">&mdash;</span></div>
@@ -492,6 +486,8 @@ var S = {
   // reward (computed from height via canonical schedule)
   miner_reward_qtcl: 7.20, treasury_reward_qtcl: 0.80,
   tessellation_depth: 5, treasury_pct: 10.0,
+  // density matrix — 2048-hex big-endian '>dd' 8×8 complex128
+  dm_hex: '',
   // oracle_consensus
   oracle_consensus_reached: false,
   quantum_validation_status: '--', pq_validation_status: '--',
@@ -1203,13 +1199,13 @@ function renderTxRow(tx,isNew){
 }
 
 // TX loading — pure RPC, qtcl_getTransactions, no REST, no fallback
-// FIXED: Proper error handling and response validation
 async function loadTxPage(){
   if(txLoading) return;
   txLoading=true;
   var _wd=setTimeout(function(){txLoading=false;},8000);
   var tb=document.getElementById('ttb');
-  if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
+  // Only flash "Loading…" on first load — background refreshes keep existing rows visible
+  if(!txs.length && tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
   try{
     var req={page:txPage_n,per_page:txPerPage};
     if(txFilterMode&&txFilterMode!=='all') req.type=txFilterMode;
@@ -1535,6 +1531,9 @@ async function unifiedPoll(){
       S.entropy = qm.von_neumann_entropy;
     }
     S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
+    // Capture density matrix hex from quantum metrics (8×8 complex128, 2048 hex chars)
+    if(qm.density_matrix_hex && qm.density_matrix_hex.length === 2048 && !S.dm_hex)
+      S.dm_hex = qm.density_matrix_hex;
   }
   
   // 2c. DM Snapshot (AUTHORITATIVE for: Mermin, pq, oracle per_node, derived metrics)
@@ -1608,6 +1607,10 @@ async function unifiedPoll(){
       }
     }
     
+    // ── AUTHORITATIVE: density_matrix_hex from oracle snapshot ──
+    if(dm.density_matrix_hex && dm.density_matrix_hex.length === 2048)
+      S.dm_hex = dm.density_matrix_hex;
+
     // ── Derived quantum bath metrics ──
     var _p = dm.purity || S.purity || 0.8;
     var _f = dm.w_state_fidelity || S.fidelity || 0;
@@ -1746,440 +1749,245 @@ unifiedPoll();
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── TX background refresh — 30s
-setInterval(function() { if (!txLoading) loadTxPage(); }, 30);
+setInterval(function() { if (!txLoading) loadTxPage(); }, 30000);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ⟨ψ| DENSITY MATRIX COHERENCE STRUCTURE — Crown Jewel Visualization Engine
+// DENSITY MATRIX RENDERER — #qc canvas
+// Decodes the real density_matrix_hex from qtcl_getLatestDMSnapshot / qtcl_getQuantumMetrics.
+// Format: 2048 hex chars = 1024 bytes = 64 complex128 values (big-endian '>dd') = 8×8 matrix.
+// Each complex128 = two float64 = 16 bytes: [real_hi real_lo imag_hi imag_lo] big-endian.
+// Renders: magnitude heatmap + phase wheel per cell + diagonal population bars + colorscale.
 // ═══════════════════════════════════════════════════════════════════════════════
-// 64×64 high-res heatmap of |ρ[i,j]| magnitude with semantic coloring:
-//   • GREEN diagonal: populations (purity sink)
-//   • YELLOW (1,2)/(1,4)/(2,4): W-state coherence legs (entanglement signature)
-//   • CYAN off-diagonal: classical noise coupling
-//   • DARK noise floor: decoherence battlefield
-//
-// Phase space: polar projection of σ_z measurement histogram with oracle consensus rings
-// Real-time animation: watch entanglement die as Mermin collapses, noise floor rises
-//
-// All Canvas2D, zero deps, pure stdlib. Pixel-perfect quantum state tomography.
-// ═════════════════════════════════════════════════════════════════════════════════
+(function(){
+'use strict';
 
-var _DMCS = {
-  // ── Canvas state ──
-  canDM: null, ctxDM: null, w: 0, h: 0,
-  canPH: null, ctxPH: null,
-  
-  // ── Quantum state cache ──
-  rho: new Float64Array(128),  // 64 complex doubles: [re0,im0,re1,im1,...]
-  rho_mag: new Float64Array(64),  // |ρ[i,j]| magnitudes for heatmap
-  fidelity: 0, coherence: 0, purity: 0, entropy: 0,
-  
-  // ── Measurement history ──
-  meas_hist: new Uint32Array(8),  // σ_z outcomes for 8 qubits
-  mermin_m: 0,
-  block_height: 0,
-  
-  // ── Heatmap colormap (pre-computed) ──
-  cmap: null,
-  
-  // ── W-state leg tracker ──
-  w_leg_intensity: [0,0,0],  // (1,2), (1,4), (2,4)
-  w_leg_baseline: [0,0,0],
-  
-  // ── Animation state ──
-  last_render_time: 0,
-  frame_count: 0,
-  
-  init: function() {
-    _DMCS.canDM = document.getElementById('dmcan');
-    _DMCS.ctxDM = _DMCS.canDM.getContext('2d');
-    
-    _DMCS.canPH = document.getElementById('phspace');
-    _DMCS.ctxPH = _DMCS.canPH.getContext('2d');
-    
-    // ── DPI awareness ──
-    var dpr = window.devicePixelRatio || 1;
-    _DMCS.w = _DMCS.canDM.clientWidth;
-    _DMCS.h = _DMCS.canDM.clientHeight;
-    _DMCS.canDM.width = _DMCS.w * dpr;
-    _DMCS.canDM.height = _DMCS.h * dpr;
-    _DMCS.ctxDM.scale(dpr, dpr);
-    
-    _DMCS.canPH.width = _DMCS.canPH.clientWidth * dpr;
-    _DMCS.canPH.height = _DMCS.canPH.clientHeight * dpr;
-    _DMCS.ctxPH.scale(dpr, dpr);
-    
-    // ── Build 256-step colormap: dark → blue → cyan → green → yellow → red ──
-    _DMCS.cmap = new Uint8ClampedArray(256 * 4);
-    for(var i = 0; i < 256; i++){
-      var t = i / 255;  // [0,1]
-      var r, g, b;
-      
-      if(t < 0.15){
-        // Dark blue: #1a2540 → #003366
-        var s = t / 0.15;
-        r = Math.round(26 + (0-26)*s);
-        g = Math.round(37 + (51-37)*s);
-        b = Math.round(64 + (102-64)*s);
-      }else if(t < 0.35){
-        // Blue → Cyan: #003366 → #00dcff
-        var s = (t - 0.15) / 0.20;
-        r = Math.round(0 + (0-0)*s);
-        g = Math.round(51 + (220-51)*s);
-        b = Math.round(102 + (255-102)*s);
-      }else if(t < 0.55){
-        // Cyan → Green: #00dcff → #00ff9d
-        var s = (t - 0.35) / 0.20;
-        r = Math.round(0 + (0-0)*s);
-        g = Math.round(220 + (255-220)*s);
-        b = Math.round(255 + (157-255)*s);
-      }else if(t < 0.75){
-        // Green → Yellow: #00ff9d → #d4a020
-        var s = (t - 0.55) / 0.20;
-        r = Math.round(0 + (212-0)*s);
-        g = Math.round(255 + (160-255)*s);
-        b = Math.round(157 + (32-157)*s);
-      }else{
-        // Yellow → Red/Hot: #d4a020 → #ff3355
-        var s = (t - 0.75) / 0.25;
-        r = Math.round(212 + (255-212)*s);
-        g = Math.round(160 + (51-160)*s);
-        b = Math.round(32 + (85-32)*s);
-      }
-      
-      _DMCS.cmap[i*4+0] = r;
-      _DMCS.cmap[i*4+1] = g;
-      _DMCS.cmap[i*4+2] = b;
-      _DMCS.cmap[i*4+3] = 255;
-    }
-    
-    // ── W-state leg baseline: in ideal W₃, these should be ~1/3 ──
-    _DMCS.w_leg_baseline = [1/3, 1/3, 1/3];
-  },
-  
-  // ── Hex string → Complex array decoder (64 complex doubles) ──
-  decode_hex_to_rho: function(hex_str){
-    if(!hex_str || hex_str.length < 2048) return false;  // 64*8bytes*2 = 1024 hex chars min
-    
-    try{
-      for(var i = 0; i < 64; i++){
-        var re_hex = hex_str.substring(i*32, i*32+16);
-        var im_hex = hex_str.substring(i*32+16, i*32+32);
-        
-        var re_buf = new Uint8Array(8);
-        var im_buf = new Uint8Array(8);
-        for(var j = 0; j < 8; j++){
-          re_buf[j] = parseInt(re_hex.substring(j*2, j*2+2), 16);
-          im_buf[j] = parseInt(im_hex.substring(j*2, j*2+2), 16);
-        }
-        
-        // ── IEEE 754 double unpack ──
-        var re_dv = new DataView(re_buf.buffer);
-        var im_dv = new DataView(im_buf.buffer);
-        _DMCS.rho[i*2] = re_dv.getFloat64(0, false);
-        _DMCS.rho[i*2+1] = im_dv.getFloat64(0, false);
-      }
-      return true;
-    }catch(e){
-      return false;
-    }
-  },
-  
-  // ── Compute |ρ[i,j]| magnitude for all 64 elements ──
-  compute_magnitudes: function(){
-    for(var k = 0; k < 64; k++){
-      var re = _DMCS.rho[k*2];
-      var im = _DMCS.rho[k*2+1];
-      _DMCS.rho_mag[k] = Math.sqrt(re*re + im*im);
-    }
-  },
-  
-  // ── Track W-state legs and overall coherence ──
-  analyze_w_state: function(){
-    // W₃ coherence legs: (1,2), (1,4), (2,4) in ρ matrix indexing
-    // Map to linear indices: ρ[1,2] = idx[1*8+2] = 10, ρ[1,4] = 12, ρ[2,4] = 20
-    var leg_12 = _DMCS.rho_mag[1*8+2];
-    var leg_14 = _DMCS.rho_mag[1*8+4];
-    var leg_24 = _DMCS.rho_mag[2*8+4];
-    
-    _DMCS.w_leg_intensity[0] = leg_12;
-    _DMCS.w_leg_intensity[1] = leg_14;
-    _DMCS.w_leg_intensity[2] = leg_24;
-  },
-  
-  // ── Render 64×64 heatmap with semantic coloring ──
-  render_heatmap: function(){
-    var ctx = _DMCS.ctxDM;
-    var w = _DMCS.w;
-    var h = _DMCS.h;
-    
-    // ── Clear & border ──
-    ctx.fillStyle = 'rgba(10,18,40,1)';
-    ctx.fillRect(0, 0, w, h);
-    
-    // ── Heatmap grid: 64×64 cells ──
-    var cell_w = (w - 20) / 64;
-    var cell_h = (h - 20) / 64;
-    var margin = 10;
-    
-    var img_data = ctx.createImageData(64, 64);
-    var data = img_data.data;
-    
-    // ── Populate pixel data for all 64 matrix elements ──
-    for(var y = 0; y < 8; y++){
-      for(var x = 0; x < 8; x++){
-        var idx = y * 8 + x;
-        var mag = _DMCS.rho_mag[idx];
-        
-        // ── Determine color channel ──
-        var is_diag = (x === y);
-        var is_w_leg = (x === 1 && y === 2) || (x === 1 && y === 4) || (x === 2 && y === 4) ||
-                       (x === 2 && y === 1) || (x === 4 && y === 1) || (x === 4 && y === 2);
-        
-        // ── Magnitude → [0, 255] colormap index ──
-        var cmap_idx = Math.min(255, Math.floor(mag * 300));  // Scale for visibility
-        
-        // ── Semantic override: emphasize W-legs and diagonal ──
-        if(is_w_leg && mag > 0.05){
-          cmap_idx = Math.min(255, Math.floor(180 + mag * 100));  // Push toward yellow/hot
-        }else if(is_diag && mag > 0.01){
-          cmap_idx = Math.min(255, Math.floor(60 + mag * 150));  // Push toward green
-        }
-        
-        var cmapIdx = cmap_idx * 4;
-        var r = _DMCS.cmap[cmapIdx];
-        var g = _DMCS.cmap[cmapIdx+1];
-        var b = _DMCS.cmap[cmapIdx+2];
-        var a = 255;
-        
-        // ── Write to 64×64 pixel grid (8×8 matrix → 8×8 pixel blocks) ──
-        // For higher res, expand each matrix element to 8×8 pixels
-        for(var py = 0; py < 8; py++){
-          for(var px = 0; px < 8; px++){
-            var pix_idx = ((y*8+py)*64 + (x*8+px)) * 4;
-            data[pix_idx] = r;
-            data[pix_idx+1] = g;
-            data[pix_idx+2] = b;
-            data[pix_idx+3] = a;
-          }
-        }
-      }
-    }
-    
-    ctx.putImageData(img_data, margin, margin);
-    
-    // ── Draw grid lines every 8px (marking matrix structure) ──
-    ctx.strokeStyle = 'rgba(0,220,255,0.1)';
-    ctx.lineWidth = 0.5;
-    for(var i = 1; i < 8; i++){
-      ctx.beginPath();
-      ctx.moveTo(margin + i*cell_w, margin);
-      ctx.lineTo(margin + i*cell_w, margin + 64*cell_w);
-      ctx.stroke();
-      
-      ctx.beginPath();
-      ctx.moveTo(margin, margin + i*cell_h);
-      ctx.lineTo(margin + 64*cell_w, margin + i*cell_h);
-      ctx.stroke();
-    }
-    
-    // ── Border ──
-    ctx.strokeStyle = 'rgba(0,220,255,0.3)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(margin, margin, 64*cell_w, 64*cell_h);
-    
-    // ── Axis labels (minimal) ──
-    ctx.fillStyle = 'rgba(58,74,104,1)';
-    ctx.font = '9px JetBrains Mono';
-    ctx.textAlign = 'center';
-    for(var i = 0; i < 8; i++){
-      ctx.fillText(i.toString(), margin + (i+0.5)*cell_w, margin - 4);
-      ctx.fillText(i.toString(), margin - 6, margin + (i+0.5)*cell_h + 3);
-    }
-  },
-  
-  // ── Render phase space: polar plot of measurement outcomes ──
-  render_phase_space: function(){
-    var ctx = _DMCS.ctxPH;
-    var w = _DMCS.canPH.clientWidth;
-    var h = _DMCS.canPH.clientHeight;
-    
-    ctx.fillStyle = 'rgba(10,18,40,1)';
-    ctx.fillRect(0, 0, w, h);
-    
-    var cx = w / 2;
-    var cy = h / 2;
-    var R = Math.min(w, h) / 2 - 20;  // Radius
-    
-    // ── Draw polar grid ──
-    ctx.strokeStyle = 'rgba(0,220,255,0.15)';
-    ctx.lineWidth = 0.5;
-    for(var r = 1; r <= 3; r++){
-      ctx.beginPath();
-      ctx.arc(cx, cy, R*r/3, 0, Math.PI*2);
-      ctx.stroke();
-    }
-    
-    // ── Draw radial lines (8 spokes for 8 qubits) ──
-    for(var i = 0; i < 8; i++){
-      var ang = (i / 8) * Math.PI * 2;
-      var x1 = cx + Math.cos(ang) * R;
-      var y1 = cy + Math.sin(ang) * R;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(x1, y1);
-      ctx.stroke();
-    }
-    
-    // ── Plot measurement histogram as radial bars ──
-    var max_count = Math.max(1, Math.max(..._DMCS.meas_hist));
-    for(var i = 0; i < 8; i++){
-      var prob = _DMCS.meas_hist[i] / Math.max(1, max_count);
-      var ang = (i / 8) * Math.PI * 2;
-      var len = R * prob;
-      
-      var x1 = cx + Math.cos(ang) * len;
-      var y1 = cy + Math.sin(ang) * len;
-      
-      // ── Color by oracle consensus strength ──
-      var hue = i * 45;  // HSL cycling
-      ctx.strokeStyle = 'rgba(212,160,32,' + (0.3 + 0.7*prob) + ')';
-      ctx.lineWidth = 8;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(x1, y1);
-      ctx.stroke();
-    }
-    
-    // ── Mermin indicator ring ──
-    if(_DMCS.mermin_m > 0){
-      var mermin_norm = Math.min(_DMCS.mermin_m / 4, 1);  // Max=2√2≈2.83, norm to [0,1]
-      ctx.strokeStyle = 'rgba(0,255,157,' + mermin_norm + ')';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(cx, cy, R * mermin_norm, 0, Math.PI*2);
-      ctx.stroke();
-    }
-    
-    // ── Center dot ──
-    ctx.fillStyle = 'rgba(0,220,255,0.8)';
-    ctx.beginPath();
-    ctx.arc(cx, cy, 3, 0, Math.PI*2);
-    ctx.fill();
-    
-    // ── Label ──
-    ctx.fillStyle = 'rgba(58,74,104,0.8)';
-    ctx.font = '8px Orbitron';
-    ctx.textAlign = 'center';
-    ctx.fillText('σ_z phase space', cx, cy - R - 8);
-  },
-  
-  // ── Update metric display boxes ──
-  update_metrics: function(){
-    var fmt = function(v){ return (v || 0).toFixed(3); };
-    
-    document.getElementById('dmcs-fid').textContent = fmt(_DMCS.fidelity);
-    document.getElementById('dmcs-coh').textContent = fmt(_DMCS.coherence);
-    document.getElementById('dmcs-pur').textContent = fmt(_DMCS.purity);
-    document.getElementById('dmcs-ent').textContent = fmt(_DMCS.entropy);
-  },
-  
-  // ── Main render function (called every poll cycle) ──
-  render: function(){
-    _DMCS.compute_magnitudes();
-    _DMCS.analyze_w_state();
-    _DMCS.render_heatmap();
-    _DMCS.render_phase_space();
-    _DMCS.update_metrics();
-    _DMCS.frame_count++;
-  },
-  
-  // ── Ingest oracle snapshot from JSON-RPC ──
-  update_from_snapshot: function(snap){
-    if(!snap) return;
-    
-    // ── Density matrix hex ──
-    if(snap.density_matrix_hex){
-      _DMCS.decode_hex_to_rho(snap.density_matrix_hex);
-    }
-    
-    // ── Metrics ──
-    _DMCS.fidelity = snap.w_state_fidelity || 0;
-    _DMCS.coherence = snap.coherence_l1 || 0;
-    _DMCS.purity = snap.purity || 0;
-    _DMCS.entropy = snap.von_neumann_entropy || 0;
-    
-    // ── Mermin ──
-    _DMCS.mermin_m = snap.mermin_test || S.mermin || 0;
-    
-    // ── Optional: measurement outcomes (if available) ──
-    if(snap.measurement_counts && typeof snap.measurement_counts === 'object'){
-      var counts = snap.measurement_counts;
-      for(var i = 0; i < 8; i++){
-        _DMCS.meas_hist[i] = counts[i.toString()] || Math.random() * 100;
-      }
-    }
-    
-    _DMCS.render();
+var N = 8;  // 8×8 matrix
+var _canvas = null, _ctx = null;
+var _rho = null;          // Float64Array[128]: [re00,im00, re01,im01, ...]
+var _rhoAnim = null;      // smoothed copy for animation
+var _lastHex = '';
+var _animId = null;
+var _prevT = 0;
+
+// ── Parse 2048-char hex → Float64Array[128] big-endian '>dd' complex128 ───────
+function _parseHex(hex) {
+  if (!hex || hex.length !== 2048) return null;
+  var buf = new ArrayBuffer(1024);
+  var u8  = new Uint8Array(buf);
+  for (var i = 0; i < 1024; i++) {
+    u8[i] = parseInt(hex.substr(i*2, 2), 16);
   }
-};
-
-// ── Initialize on page load ──
-if(document.readyState === 'loading'){
-  document.addEventListener('DOMContentLoaded', function(){ _DMCS.init(); });
-}else{
-  _DMCS.init();
+  // Each element is two float64 big-endian. DataView needed for big-endian reads.
+  var dv = new DataView(buf);
+  var out = new Float64Array(128);
+  for (var k = 0; k < 64; k++) {
+    out[k*2]   = dv.getFloat64(k*16,     false); // real, big-endian
+    out[k*2+1] = dv.getFloat64(k*16 + 8, false); // imag, big-endian
+  }
+  return out;
 }
 
-// ── Hook into unifiedPoll cycle: render whenever we get oracle data ──
-var _orig_unified = unifiedPoll;
-window.unifiedPoll = function(){
-  _orig_unified.apply(this, arguments);
-  
-  // After unified poll completes, try to grab latest oracle snapshot
-  // and update DMCS visualization
-  try{
-    fetch('https://qtcl-blockchain.koyeb.app/rpc/oracle/snapshot')
-      .then(r => r.json())
-      .then(j => {
-        if(j.result){
-          _DMCS.update_from_snapshot(j.result);
-        }
-      })
-      .catch(e => {
-        // Silently fail - oracle may not be ready yet
-      });
-  }catch(e){}
-};
+// ── Lerp Float64Array in place ─────────────────────────────────────────────────
+function _lerpRho(src, dst, alpha) {
+  for (var k = 0; k < 128; k++) src[k] += (dst[k] - src[k]) * alpha;
+}
 
-// ── Also trigger on manual S data updates ──
-var _orig_update_dom = updateDOM;
-window.updateDOM = function(){
-  _orig_update_dom.apply(this, arguments);
-  
-  // Use whatever oracle data we have in S
-  if(S.fidelity || S.coherence){
-    _DMCS.fidelity = S.fidelity;
-    _DMCS.coherence = S.coherence;
-    _DMCS.purity = S.purity || 0.8;
-    _DMCS.entropy = S.entropy || 0;
-    _DMCS.mermin_m = S.mermin || 0;
-    
-    // Render if we have matrix data
-    if(_DMCS.rho[0] !== 0){
-      _DMCS.render();
+// ── Colormap: magnitude [0..1] → CSS rgba ──────────────────────────────────────
+// Dark-space → deep blue → cyan → violet → gold → white
+function _col(m, a) {
+  m = m < 0 ? 0 : m > 1 ? 1 : m;
+  var r,g,b;
+  if (m < 0.15) {
+    var t = m / 0.15;
+    r = Math.round(2 + t*0);   g = Math.round(4 + t*16);  b = Math.round(14 + t*50);
+  } else if (m < 0.40) {
+    var t = (m-0.15)/0.25;
+    r = Math.round(0);         g = Math.round(20 + t*140); b = Math.round(64 + t*100);
+  } else if (m < 0.65) {
+    var t = (m-0.40)/0.25;
+    r = Math.round(0 + t*100); g = Math.round(160 - t*96); b = Math.round(164 + t*91);
+  } else if (m < 0.85) {
+    var t = (m-0.65)/0.20;
+    r = Math.round(100+t*112); g = Math.round(64  + t*96); b = Math.round(255 - t*200);
+  } else {
+    var t = (m-0.85)/0.15;
+    r = Math.round(212+t*43);  g = Math.round(160+t*80);   b = Math.round(55  + t*100);
+  }
+  return 'rgba('+r+','+g+','+b+','+(a==null?1:a)+')';
+}
+
+// ── Draw ───────────────────────────────────────────────────────────────────────
+function _draw(ts) {
+  _animId = requestAnimationFrame(_draw);
+  var dt = Math.min(0.12, (ts - _prevT) * 0.001);
+  _prevT = ts;
+
+  // Lazy canvas init — size to container
+  if (!_canvas) {
+    _canvas = document.getElementById('qc');
+    if (!_canvas) return;
+    _ctx = _canvas.getContext('2d');
+  }
+  var W = _canvas.offsetWidth  || _canvas.parentElement.clientWidth  || 320;
+  var H = Math.round(W * 0.62); // ~62% aspect keeps cells nearly square with label room
+  if (_canvas.width !== W || _canvas.height !== H) { _canvas.width = W; _canvas.height = H; }
+
+  // Pull latest hex from S — decode only when changed
+  var hex = S.dm_hex || '';
+  if (hex && hex !== _lastHex) {
+    var parsed = _parseHex(hex);
+    if (parsed) { _rho = parsed; _lastHex = hex; }
+  }
+
+  // Synthesize fallback from S.* fields when no real hex yet
+  if (!_rho) {
+    _rho = new Float64Array(128);
+    var fid = S.fidelity || 0.9, coh = S.coherence || 0.7;
+    var C_val = S.concurrence || 0, gamma = S.gammaphi || 0.12;
+    // W-state structure: equal diagonal + off-diagonal coherences
+    var pop = fid / N;
+    for (var i = 0; i < N; i++) {
+      _rho[(i*N+i)*2] = pop; // diagonal real
+      for (var j = 0; j < N; j++) {
+        if (i === j) continue;
+        var d = Math.abs(i-j), decay = Math.exp(-d * gamma * 2.5);
+        var mag = Math.sqrt(pop*pop) * C_val * decay * coh;
+        var phi = (i*1.618 + j*2.094) * 0.8 + (S.phase_drift||0)*Math.PI*2 + (S.omega||0.5)*0.3;
+        _rho[(i*N+j)*2]   = mag * Math.cos(phi);
+        _rho[(i*N+j)*2+1] = mag * Math.sin(phi);
+      }
     }
   }
-};
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║  DENSITY MATRIX COHERENCE STRUCTURE — Live Quantum State Tomography      ║
-// ║  64×64 heatmap | Phase space | Real-time entanglement collapse tracking  ║
-// ║  Watch the yellow W-state legs fade as decoherence rises. See the noise  ║
-// ║  floor climb. Green populations weaken. When mermin drops, coherences    ║
-// ║  wash out. This is the museum-grade dense code. Cathedral architecture. ║
-// ╚═══════════════════════════════════════════════════════════════════════════╝
-// ═════════════════════════════════════════════════════════════════════════════
+  // Smooth animation
+  if (!_rhoAnim) { _rhoAnim = new Float64Array(_rho); }
+  else { _lerpRho(_rhoAnim, _rho, Math.min(1, dt * 3.5)); }
+
+  var ctx = _ctx;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#000508'; ctx.fillRect(0, 0, W, H);
+
+  // Layout
+  var PAD_L = 30, PAD_T = 16, PAD_R = 10, PAD_B = 28;
+  var GW = W - PAD_L - PAD_R, GH = H - PAD_T - PAD_B;
+  var cs = Math.min(GW, GH) / N; // cell size
+  var ox = PAD_L, oy = PAD_T;   // grid origin
+
+  // Find max |ρᵢⱼ| for normalization
+  var maxMag = 1e-12, trRe = 0;
+  for (var i = 0; i < N; i++) {
+    for (var j = 0; j < N; j++) {
+      var re = _rhoAnim[(i*N+j)*2], im = _rhoAnim[(i*N+j)*2+1];
+      var mag = Math.sqrt(re*re + im*im);
+      if (mag > maxMag) maxMag = mag;
+      if (i === j) trRe += re;
+    }
+  }
+  // Normalize so max diagonal = 1.0 for display (preserve relative magnitudes)
+  var norm = maxMag > 0 ? 1.0 / maxMag : 1;
+
+  // ── Cells ─────────────────────────────────────────────────────────────────
+  for (var i = 0; i < N; i++) {
+    for (var j = 0; j < N; j++) {
+      var re = _rhoAnim[(i*N+j)*2], im = _rhoAnim[(i*N+j)*2+1];
+      var mag = Math.sqrt(re*re + im*im) * norm;
+      var x = ox + j*cs, y = oy + i*cs;
+
+      // Cell background fill — colormap on magnitude
+      ctx.fillStyle = _col(mag);
+      ctx.fillRect(x, y, cs, cs);
+
+      // Diagonal: gold border + faint population bar at bottom
+      if (i === j) {
+        ctx.strokeStyle = 'rgba(212,160,32,0.55)'; ctx.lineWidth = 1.2;
+        ctx.strokeRect(x+0.6, y+0.6, cs-1.2, cs-1.2);
+        // Population bar — height proportional to diagonal magnitude
+        var bh = cs * mag * 0.9;
+        ctx.fillStyle = 'rgba(212,160,32,0.3)';
+        ctx.fillRect(x+2, y + cs - bh - 2, cs-4, bh);
+      }
+
+      // Off-diagonal: phase wheel if coherence large enough
+      if (i !== j && mag > 0.08) {
+        var phase = Math.atan2(im, re);
+        var cx2 = x + cs/2, cy2 = y + cs/2;
+        var pr = cs * 0.28 * mag;
+        // Phase arc from 0 to phase
+        ctx.beginPath();
+        ctx.moveTo(cx2, cy2);
+        ctx.arc(cx2, cy2, pr, -Math.PI/2, -Math.PI/2 + phase, phase < 0);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(0,255,157,' + Math.min(0.7, mag * 1.4) + ')';
+        ctx.fill();
+        // Phase dot on rim
+        ctx.beginPath();
+        ctx.arc(cx2 + Math.cos(-Math.PI/2 + phase)*pr, cy2 + Math.sin(-Math.PI/2 + phase)*pr, Math.max(1, cs*0.06), 0, Math.PI*2);
+        ctx.fillStyle = 'rgba(0,255,157,0.9)'; ctx.fill();
+      }
+
+      // Magnitude text — only if cell large enough
+      if (cs >= 30) {
+        ctx.font = 'bold ' + Math.round(cs * 0.165) + 'px JetBrains Mono,monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = mag > 0.55 ? 'rgba(0,0,0,0.75)' : 'rgba(255,255,255,0.5)';
+        ctx.fillText(mag.toFixed(2), x + cs/2, y + cs/2);
+      }
+    }
+  }
+
+  // ── Grid lines ─────────────────────────────────────────────────────────────
+  ctx.strokeStyle = 'rgba(0,220,255,0.10)'; ctx.lineWidth = 0.5;
+  for (var k = 0; k <= N; k++) {
+    ctx.beginPath(); ctx.moveTo(ox + k*cs, oy);       ctx.lineTo(ox + k*cs, oy + N*cs); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox,        oy + k*cs); ctx.lineTo(ox + N*cs, oy + k*cs); ctx.stroke();
+  }
+
+  // ── Row / col labels ───────────────────────────────────────────────────────
+  ctx.font = '8px JetBrains Mono,monospace';
+  ctx.fillStyle = 'rgba(0,180,220,0.5)';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (var k = 0; k < N; k++) {
+    ctx.fillText('|'+k+'⟩', ox + k*cs + cs/2, oy - 7);  // col header
+    ctx.fillText('⟨'+k+'|', ox - 15, oy + k*cs + cs/2);  // row header
+  }
+
+  // ── Colorscale bar ─────────────────────────────────────────────────────────
+  var sbY = oy + N*cs + 6, sbH = 7, sbW = N*cs;
+  var grad = ctx.createLinearGradient(ox, 0, ox+sbW, 0);
+  for (var s = 0; s <= 20; s++) grad.addColorStop(s/20, _col(s/20));
+  ctx.fillStyle = grad; ctx.fillRect(ox, sbY, sbW, sbH);
+  ctx.strokeStyle = 'rgba(0,220,255,0.2)'; ctx.lineWidth = 0.5;
+  ctx.strokeRect(ox, sbY, sbW, sbH);
+  ctx.fillStyle = 'rgba(0,180,220,0.45)'; ctx.font = '7px JetBrains Mono,monospace';
+  ctx.textAlign = 'left';  ctx.textBaseline = 'top'; ctx.fillText('0', ox, sbY+sbH+1);
+  ctx.textAlign = 'center';ctx.fillText('|ρᵢⱼ|', ox+sbW/2, sbY+sbH+1);
+  ctx.textAlign = 'right'; ctx.fillText('max', ox+sbW, sbY+sbH+1);
+
+  // ── HUD stat line ──────────────────────────────────────────────────────────
+  var _se = function(id,v){var e=document.getElementById(id);if(e)e.textContent=v;};
+  _se('qc-max',  maxMag.toFixed(4));
+  _se('qc-tr',   trRe.toFixed(4));
+  // Off-diagonal coherence sum (W-state quality measure)
+  var cohSum = 0;
+  for (var i = 0; i < N; i++) for (var j = 0; j < N; j++) {
+    if (i !== j) { var re=_rhoAnim[(i*N+j)*2],im=_rhoAnim[(i*N+j)*2+1]; cohSum+=Math.sqrt(re*re+im*im); }
+  }
+  _se('qc-coh', (cohSum / (N*N - N)).toFixed(4));
+
+  // Badge
+  var badgeEl = document.getElementById('dm-badge');
+  if (badgeEl) badgeEl.textContent = _lastHex ? 'live ✓' : 'synth';
+  var purEl = document.getElementById('dm-pur-badge');
+  if (purEl) purEl.textContent = 'pur ' + ((S.purity||0)*100).toFixed(1)+'%';
+}
+
+// Boot when DOM ready
+(function _boot(){
+  if (!document.getElementById('qc')) { setTimeout(_boot, 120); return; }
+  requestAnimationFrame(_draw);
+})();
+
+})(); // end DM renderer IIFE
 
 </script>
 </body>
