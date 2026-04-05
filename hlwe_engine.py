@@ -187,59 +187,60 @@ class HyperbolicGeometry:
         """Fetch hyperbolic triangles up to max_depth."""
         try:
             conn = self._get_connection()
-            if self._use_supabase:
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT triangle_id, depth, parent_id,
-                           v0_x, v0_y,
-                           v1_x, v1_y,
-                           v2_x, v2_y
-                    FROM hyperbolic_triangles
-                    WHERE depth <= %s
-                    ORDER BY triangle_id
-                """, (max_depth,))
-                rows = cur.fetchall()
-                triangles = []
-                for row in rows:
-                    tri = {
-                        'id': row[0],
-                        'depth': row[1],
-                        'parent_id': row[2],
-                        'v0': (float(row[3]), float(row[4])),
-                        'v1': (float(row[5]), float(row[6])),
-                        'v2': (float(row[7]), float(row[8])),
-                    }
-                    triangles.append(tri)
-                cur.close()
-            else:
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT triangle_id, depth, parent_id,
-                           v0_x, v0_y,
-                           v1_x, v1_y,
-                           v2_x, v2_y
-                    FROM hyperbolic_triangles
-                    WHERE depth <= ?
-                    ORDER BY triangle_id
-                """, (max_depth,))
-                rows = cur.fetchall()
-                triangles = []
-                for row in rows:
-                    tri = {
-                        'id': row['triangle_id'],
-                        'depth': row['depth'],
-                        'parent_id': row['parent_id'],
-                        'v0': (float(row['v0_x']), float(row['v0_y'])),
-                        'v1': (float(row['v1_x']), float(row['v1_y'])),
-                        'v2': (float(row['v2_x']), float(row['v2_y'])),
-                    }
-                    triangles.append(tri)
+            try:
+                if self._use_supabase:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT triangle_id, depth, parent_id,
+                               v0_x, v0_y,
+                               v1_x, v1_y,
+                               v2_x, v2_y
+                        FROM hyperbolic_triangles
+                        WHERE depth <= %s
+                        ORDER BY triangle_id
+                    """, (max_depth,))
+                    rows = cur.fetchall()
+                    triangles = []
+                    for row in rows:
+                        tri = {
+                            'id': row[0],
+                            'depth': row[1],
+                            'parent_id': row[2],
+                            'v0': (float(row[3]), float(row[4])),
+                            'v1': (float(row[5]), float(row[6])),
+                            'v2': (float(row[7]), float(row[8])),
+                        }
+                        triangles.append(tri)
+                    cur.close()
+                else:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT triangle_id, depth, parent_id,
+                               v0_x, v0_y,
+                               v1_x, v1_y,
+                               v2_x, v2_y
+                        FROM hyperbolic_triangles
+                        WHERE depth <= ?
+                        ORDER BY triangle_id
+                    """, (max_depth,))
+                    rows = cur.fetchall()
+                    triangles = []
+                    for row in rows:
+                        tri = {
+                            'id': row['triangle_id'],
+                            'depth': row['depth'],
+                            'parent_id': row['parent_id'],
+                            'v0': (float(row['v0_x']), float(row['v0_y'])),
+                            'v1': (float(row['v1_x']), float(row['v1_y'])),
+                            'v2': (float(row['v2_x']), float(row['v2_y'])),
+                        }
+                        triangles.append(tri)
+                return triangles
+            finally:
                 conn.close()
-            return triangles
         except Exception as e:
             logger.error(f"[HyperbolicGeometry] Failed to fetch triangles: {e}")
             raise
-    
     def compute_geometry_hash(self, max_depth: int = 5) -> bytes:
         """Compute SHA3-256 hash of hyperbolic geometry (cached with TTL)."""
         import time
