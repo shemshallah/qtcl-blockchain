@@ -206,17 +206,27 @@ def get_hyperbolic_geometry() -> HyperbolicGeometry:
 # ENTROPY SOURCE (Block Field from globals if available)
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-try:
-    from globals import get_block_field_entropy
-    ENTROPY_AVAILABLE = True
-except ImportError:
-    ENTROPY_AVAILABLE = False
-    def get_block_field_entropy():
-        """Fallback to os.urandom if globals unavailable"""
-        return os.urandom(32)
+ENTROPY_AVAILABLE = False
+_GM_LOADED = False
 
-logger.info("[HLWE] Block field entropy available: {}".format(
-    "✅ YES" if ENTROPY_AVAILABLE else "⚠️  FALLBACK (os.urandom)"))
+def get_block_field_entropy():
+    """Lazy-load globals to avoid circular import deadlock. Falls back to os.urandom."""
+    global ENTROPY_AVAILABLE, _GM_LOADED
+    if not _GM_LOADED:
+        try:
+            import globals as _gm
+            if hasattr(_gm, 'get_block_field_entropy'):
+                globals_func = _gm.get_block_field_entropy
+                globals.__dict__['_cached_func'] = globals_func
+                ENTROPY_AVAILABLE = True
+        except Exception:
+            pass
+        _GM_LOADED = True
+    if ENTROPY_AVAILABLE:
+        return globals.__dict__.get('_cached_func', lambda: os.urandom(32))()
+    return os.urandom(32)
+
+logger.info("[HLWE] Block field entropy available: lazy-load enabled")
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # BIP39 WORDLIST — 2048 STANDARDIZED MNEMONIC WORDS (EMBEDDED)

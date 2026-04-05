@@ -240,21 +240,22 @@ def _init_qrng_ensemble():
             raise RuntimeError(f"[INIT-QRNG] Cannot initialize Quantum RNG. Error: {e}")
 
 def _init_hlwe_engine():
-    """Lazy init HLWE_ENGINE on first demand."""
+    """Lazy init HLWE_ENGINE on first demand. Non-blocking, no circular imports."""
     global HLWE_ENGINE
     if HLWE_ENGINE is not None:
         return HLWE_ENGINE
     with _HLWE_INIT_LOCK:
-        if HLWE_ENGINE is not None:  # double-check
+        if HLWE_ENGINE is not None:
             return HLWE_ENGINE
         try:
             from hlwe_engine import HLWEEngine
             HLWE_ENGINE = HLWEEngine()
-            logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized on first use")
+            logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized")
             return HLWE_ENGINE
         except Exception as e:
-            logger.critical(f"[INIT-HLWE] ❌ FATAL: Cannot initialize HLWE_ENGINE: {e}")
-            raise RuntimeError(f"[INIT-HLWE] Cannot initialize HLWE cryptography. Error: {e}")
+            logger.warning(f"[INIT-HLWE] ⚠️  HLWE init failed (non-fatal): {e}")
+            HLWE_ENGINE = None
+            return None
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
@@ -2486,21 +2487,27 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         except Exception as _ce:
             logger.debug(f"[RPC-METHOD] client pool inject: {_ce}")
 
-        # ── HLWE SIGN THE SNAPSHOT ─────────────────────────────────────────
+        # ── HLWE SIGN THE SNAPSHOT (non-blocking, never breaks RPC) ─────────
         try:
             _hlwe_engine = _init_hlwe_engine()
-            _snap_for_signing = {k: v for k, v in result.items() if k not in ('ts',)}
-            _snap_json = json.dumps(_snap_for_signing, sort_keys=True, default=str)
-            _snap_hash = hashlib.sha3_256(_snap_json.encode('utf-8')).digest()
-            _oracle_kp = _hlwe_engine.generate_keypair()
-            _hlwe_sig = _hlwe_engine.sign_hash(_snap_hash, _oracle_kp['private_key'])
-            result['hlwe_signature'] = _hlwe_sig
-            result['oracle_public_key'] = _oracle_kp['public_key']
-            result['oracle_address'] = _oracle_kp['address']
-            result['cycle'] = _bh  # use block height as cycle counter
-            logger.debug(f"[RPC-METHOD] Oracle snapshot HLWE-signed: {_oracle_kp['address'][:16]}…")
+            if _hlwe_engine is not None:
+                _snap_for_signing = {k: v for k, v in result.items() if k not in ('ts',)}
+                _snap_json = json.dumps(_snap_for_signing, sort_keys=True, default=str)
+                _snap_hash = hashlib.sha3_256(_snap_json.encode('utf-8')).digest()
+                _oracle_kp = _hlwe_engine.generate_keypair()
+                _hlwe_sig = _hlwe_engine.sign_hash(_snap_hash, _oracle_kp['private_key'])
+                result['hlwe_signature'] = _hlwe_sig
+                result['oracle_public_key'] = _oracle_kp['public_key']
+                result['oracle_address'] = _oracle_kp['address']
+                result['cycle'] = _bh
+                logger.debug(f"[RPC-METHOD] Oracle snapshot HLWE-signed: {_oracle_kp['address'][:16]}…")
+            else:
+                result['cycle'] = _bh
         except Exception as _hlwe_err:
-            logger.warning(f"[RPC-METHOD] Oracle HLWE signing failed (non-fatal): {_hlwe_err}")
+            logger.debug(f"[RPC-METHOD] Oracle HLWE signing skipped: {_hlwe_err}")
+            result['cycle'] = _bh
+            result['cycle'] = _bh
+            result['cycle'] = _bh
 
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success  block_height={_bh}")
         return _rpc_ok(result, rpc_id)
@@ -2541,8 +2548,24 @@ def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
         try:
             logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: fetching snapshot for symbols={symbols}")
             snap = po.get_snapshot(symbols)
+            snap_dict = snap.to_dict()
+            # HLWE sign the Pyth snapshot
+            try:
+                _hlwe_engine = _init_hlwe_engine()
+                if _hlwe_engine is not None:
+                    _snap_json = json.dumps(snap_dict, sort_keys=True, default=str)
+                    _snap_hash = hashlib.sha3_256(_snap_json.encode('utf-8')).digest()
+                    _oracle_kp = _hlwe_engine.generate_keypair()
+                    _hlwe_sig = _hlwe_engine.sign_hash(_snap_hash, _oracle_kp['private_key'])
+                    snap_dict['hlwe_sig'] = _hlwe_sig.get('auth_tag', '')
+                    snap_dict['hlwe_signature'] = _hlwe_sig
+                    snap_dict['oracle_public_key'] = _oracle_kp['public_key']
+                    snap_dict['oracle_address'] = _oracle_kp['address']
+                    logger.debug(f"[RPC-METHOD] qtcl_getPythPrice HLWE-signed: {_oracle_kp['address'][:16]}…")
+            except Exception as _hlwe_err:
+                logger.debug(f"[RPC-METHOD] qtcl_getPythPrice HLWE signing skipped: {_hlwe_err}")
             logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: snapshot obtained successfully")
-            return _rpc_ok(snap.to_dict(), rpc_id)
+            return _rpc_ok(snap_dict, rpc_id)
         except Exception as pe:
             logger.exception(f"[RPC-METHOD] qtcl_getPythPrice: Pyth fetch error: {pe}")
             return _rpc_error(-32002, f"Pyth fetch failed: {str(pe)}", rpc_id, {"exception": str(pe).__class__.__name__})
