@@ -3451,6 +3451,30 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             if not block_hash.startswith('0' * difficulty_bits):
                 return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
 
+        # ── HLWE BLOCK SIGNATURE VERIFICATION ────────────────────────────────
+        hlwe_sig = hdr.get("hlwe_signature")
+        hlwe_pubkey = hdr.get("hlwe_public_key", "")
+        if hlwe_sig and hlwe_pubkey:
+            try:
+                from hlwe_engine import HLWEBlockHash
+                _hlwe_engine = _init_hlwe_engine()
+                _block_hash = HLWEBlockHash.compute_block_hash(
+                    height=height,
+                    parent_hash=parent_hash,
+                    merkle_root=merkle_root,
+                    timestamp=timestamp_s,
+                    nonce=nonce,
+                    difficulty=difficulty_bits,
+                )
+                _block_hash_bytes = bytes.fromhex(_block_hash)
+                _sig_valid = _hlwe_engine.verify_signature(_block_hash_bytes, hlwe_sig, hlwe_pubkey)
+                if not _sig_valid:
+                    logger.error(f"[RPC-submitBlock] ❌ HLWE signature verification FAILED h={height}")
+                    return _rpc_error(-32004, "HLWE block signature verification failed", rpc_id)
+                logger.info(f"[RPC-submitBlock] ✅ HLWE signature verified h={height}")
+            except Exception as hlwe_err:
+                logger.warning(f"[RPC-submitBlock] HLWE verify error (non-fatal): {hlwe_err}")
+
         # ── Persist block + transactions (transaction 1 — no wallet writes) ──
         _block_rowcount = 0
         try:

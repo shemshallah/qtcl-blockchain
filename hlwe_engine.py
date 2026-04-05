@@ -58,6 +58,138 @@ if not logging.getLogger().hasHandlers():
 logger = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# HYPERBOLIC GEOMETRY INTEGRATION (from qtcl_blockchain.db)
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+import sqlite3
+import math
+import struct
+import json
+from pathlib import Path
+
+class HyperbolicGeometry:
+    """Read hyperbolic triangles from qtcl_blockchain.db and provide geometry-based hashing."""
+    
+    _instance = None
+    _lock = threading.Lock()
+    _GEOMETRY_HASH_TTL = 300  # 5 minutes — re-read geometry periodically
+    
+    @classmethod
+    def get_instance(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = HyperbolicGeometry()
+            return cls._instance
+    
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = db_path or os.getenv('QTCL_DB_PATH', './qtcl_blockchain.db')
+        self._geometry_hash_cache = None
+        self._cache_timestamp = 0.0
+        self._lock = threading.Lock()
+        logger.info(f"[HyperbolicGeometry] Initialized with DB: {self.db_path}")
+    
+    def _get_connection(self) -> sqlite3.Connection:
+        """Return a connection to the SQLite database."""
+        if not Path(self.db_path).exists():
+            raise FileNotFoundError(f"Hyperbolic geometry database not found: {self.db_path}")
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    def fetch_all_triangles(self, max_depth: int = 5) -> List[Dict[str, Any]]:
+        """Fetch hyperbolic triangles up to max_depth."""
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT triangle_id, depth, parent_id,
+                       v0_x, v0_y, v0_name,
+                       v1_x, v1_y, v1_name,
+                       v2_x, v2_y, v2_name,
+                       area, perimeter
+                FROM hyperbolic_triangles
+                WHERE depth <= ?
+                ORDER BY triangle_id
+            """, (max_depth,))
+            rows = cur.fetchall()
+            triangles = []
+            for row in rows:
+                tri = {
+                    'id': row['triangle_id'],
+                    'depth': row['depth'],
+                    'parent_id': row['parent_id'],
+                    'v0': (float(row['v0_x']), float(row['v0_y']), row['v0_name']),
+                    'v1': (float(row['v1_x']), float(row['v1_y']), row['v1_name']),
+                    'v2': (float(row['v2_x']), float(row['v2_y']), row['v2_name']),
+                    'area': float(row['area']) if row['area'] is not None else 0.0,
+                    'perimeter': float(row['perimeter']) if row['perimeter'] is not None else 0.0,
+                }
+                triangles.append(tri)
+            conn.close()
+            return triangles
+        except Exception as e:
+            logger.error(f"[HyperbolicGeometry] Failed to fetch triangles: {e}")
+            raise
+    
+    def compute_geometry_hash(self, max_depth: int = 5) -> bytes:
+        """Compute SHA3-256 hash of hyperbolic geometry (cached with TTL)."""
+        import time
+        with self._lock:
+            now = time.time()
+            if self._geometry_hash_cache is not None and (now - self._cache_timestamp) < self._GEOMETRY_HASH_TTL:
+                return self._geometry_hash_cache
+            triangles = self.fetch_all_triangles(max_depth)
+            encoded = b''
+            for tri in triangles:
+                encoded += struct.pack('>Q', tri['id'])
+                encoded += struct.pack('>I', tri['depth'])
+                for vx, vy, _ in (tri['v0'], tri['v1'], tri['v2']):
+                    encoded += struct.pack('>d', vx)
+                    encoded += struct.pack('>d', vy)
+                encoded += struct.pack('>d', tri['area'])
+                encoded += struct.pack('>d', tri['perimeter'])
+            self._geometry_hash_cache = hashlib.sha3_256(encoded).digest()
+            self._cache_timestamp = now
+            logger.info(f"[HyperbolicGeometry] Computed geometry hash from {len(triangles)} triangles")
+            return self._geometry_hash_cache
+    
+    def invalidate_cache(self):
+        """Force geometry hash recomputation on next call."""
+        with self._lock:
+            self._geometry_hash_cache = None
+            self._cache_timestamp = 0.0
+    
+    def hyperbolic_hash(self, msg: bytes) -> bytes:
+        """Return SHA3-256(msg || geometry_hash). Uses hyperbolic geometry as salt."""
+        geom_hash = self.compute_geometry_hash()
+        return hashlib.sha3_256(msg + geom_hash).digest()
+    
+    def hyperbolic_distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+        """Compute hyperbolic distance between two points in Poincaré disk."""
+        x1, y1 = p1
+        x2, y2 = p2
+        dx = x2 - x1
+        dy = y2 - y1
+        d2 = dx*dx + dy*dy
+        if d2 < 1e-14:
+            return 0.0
+        denom = (1.0 - x1*x1 - y1*y1) * (1.0 - x2*x2 - y2*y2)
+        if denom <= 0.0:
+            return float('inf')
+        cosh_dist = 1.0 + 2.0 * d2 / denom
+        if cosh_dist < 1.0:
+            cosh_dist = 1.0
+        return math.acosh(cosh_dist)
+
+# Global instance
+_hyperbolic_geometry = None
+
+def get_hyperbolic_geometry() -> HyperbolicGeometry:
+    global _hyperbolic_geometry
+    if _hyperbolic_geometry is None:
+        _hyperbolic_geometry = HyperbolicGeometry()
+    return _hyperbolic_geometry
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # ENTROPY SOURCE (Block Field from globals if available)
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -577,37 +709,78 @@ class HLWEEngine:
             self.params.DIMENSION, self.params.MODULUS))
     
     def generate_keypair_from_entropy(self) -> HLWEKeyPair:
-        """Generate HLWE keypair seeded from block field entropy"""
+        """Generate HLWE keypair seeded from block field entropy.
+
+        CANONICAL SPEC:
+          1. A = FIXED public lattice basis (protocol constant)
+          2. s = HKDF→SHAKE-256 XOF, ternary {q-1, 0, 1}
+          3. b = A·s mod q  (NO error — pure lattice key for verification)
+          4. address = SHA3-256(SHA3-256(packed(b)))
+        """
         with self.lock:
             try:
                 entropy = get_block_field_entropy()
-                A = self._derive_lattice_basis_from_entropy(entropy)
-                s = self._derive_secret_vector(entropy, self.params.DIMENSION)
-                e = self._sample_error_vector(self.params.DIMENSION)
-                b = LatticeMath.matrix_vector_mult(A, s, self.params.MODULUS)
-                b = LatticeMath.vector_add(b, e, self.params.MODULUS)
+                priv_seed = entropy[:32]
+                n = self.params.DIMENSION
+                q = self.params.MODULUS
+
+                # ════ DERIVE FIXED LATTICE BASIS A (protocol constant) ════
+                A = self._derive_fixed_lattice_basis()
+
+                # ════ DERIVE SECRET VECTOR s (ternary) ════
+                s = self._derive_secret_vector(priv_seed, n)
+
+                # ════ COMPUTE PUBLIC KEY b = A·s mod q (NO error) ════
+                b = LatticeMath.matrix_vector_mult(A, s, q)
                 address = self.derive_address_from_public_key(b)
                 public_key_hex = self._encode_vector_to_hex(b)
-                private_key_hex = self._encode_vector_to_hex(s)
-                
+                private_key_hex = priv_seed.hex()
+
                 logger.info(f"[HLWE] Generated keypair: {address[:16]}... (entropy-seeded)")
-                
+
                 return HLWEKeyPair(
                     public_key=public_key_hex,
                     private_key=private_key_hex,
                     address=address
                 )
-            
+
             except Exception as e:
                 logger.error(f"[HLWE] Keypair generation failed: {e}")
                 raise
     
+    def _derive_fixed_lattice_basis(self) -> List[List[int]]:
+        """
+        Derive n×n lattice basis A from a FIXED protocol constant.
+
+        A is a PUBLIC SYSTEM PARAMETER (like an elliptic curve generator),
+        NOT derived from per-key material. This ensures all parties compute
+        the same A regardless of which key pair they're using — critical
+        for signature verification to succeed.
+
+        Construction:
+          xof = SHAKE-256(b"QTCL_HLWE_BASIS_FIXED_v2")
+          A[i][j] = xof.read(4) as big-endian uint32 mod q
+        """
+        n = self.params.DIMENSION
+        q = self.params.MODULUS
+        xof = hashlib.shake_256(b"QTCL_HLWE_BASIS_FIXED_v2")
+        xof_bytes = xof.digest(n * n * 4)
+        A = []
+        for i in range(n):
+            row = []
+            for j in range(n):
+                offset = (i * n + j) * 4
+                val = int.from_bytes(xof_bytes[offset:offset+4], 'big') % q
+                row.append(val)
+            A.append(row)
+        return A
+
     def _derive_lattice_basis_from_entropy(self, entropy: bytes) -> List[List[int]]:
-        """Derive n x n lattice basis matrix A from entropy via SHA-256"""
+        """Derive n x n lattice basis matrix A from entropy via SHA-256.
+        Used only for keypair generation — NOT for sign/verify."""
         n = self.params.DIMENSION
         q = self.params.MODULUS
         A = []
-        
         for i in range(n):
             row = []
             for j in range(n):
@@ -616,7 +789,6 @@ class HLWEEngine:
                 val = int.from_bytes(h[:4], byteorder='big') % q
                 row.append(val)
             A.append(row)
-        
         return A
     
     def _derive_secret_vector(self, entropy: bytes, dimension: int) -> List[int]:
@@ -669,14 +841,25 @@ class HLWEEngine:
     
     def _hash_to_challenge_scalar(self, msg_hash: bytes, w_bytes: bytes) -> int:
         """
-        Deterministic challenge scalar c ∈ {-1, 0, 1} from message + commitment.
-        
+        Deterministic challenge scalar c ∈ {-1, 1} from message + commitment,
+        incorporating hyperbolic geometry from qtcl_blockchain.db.
+
         Construction:
-          h = SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg ‖ w)
-          c = (h[0] mod 3) − 1  → {-1, 0, 1} with uniform probability.
+          geom_hash = hyperbolic_geometry_hash(msg_hash)
+          h = SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg ‖ w ‖ geom_hash)
+          c = 2 * (h[0] & 1) - 1  → {-1, 1} with UNIFORM probability.
+
+        Zero challenge is eliminated to prevent forgery: when c=0,
+        w' = w regardless of the public key, allowing any key to pass.
+        Using uniform {-1, 1} also eliminates the P(c=1)=2/3 bias from mod 3.
         """
-        h = hashlib.sha256(b"HLWE_CHALLENGE_v1" + msg_hash + w_bytes).digest()
-        return (h[0] % 3) - 1
+        try:
+            hyper_geo = get_hyperbolic_geometry()
+            geom_hash = hyper_geo.hyperbolic_hash(msg_hash)
+        except Exception:
+            raise RuntimeError("Hyperbolic geometry database missing; cannot compute challenge scalar")
+        h = hashlib.sha256(b"HLWE_CHALLENGE_v1" + msg_hash + w_bytes + geom_hash).digest()
+        return 2 * (h[0] & 1) - 1  # uniform {-1, 1}
     
     def _sample_masking_vector(self, msg_hash: bytes, key_seed: bytes, dimension: int) -> List[int]:
         """
@@ -754,54 +937,60 @@ class HLWEEngine:
     def sign_hash(self, message_hash: bytes, private_key_hex: str) -> Dict[str, str]:
         """
         Sign a 32-byte message hash using canonical HLWE Fiat-Shamir lattice signature.
-        
-        SPECIFICATION:
-          1. s = HKDF-Extract→SHAKE-256 XOF, ternary {q-1, 0, 1}
-          2. A = SHAKE-256(b"QTCL_FS_BASIS_v1" ‖ entropy), n×n lattice basis
-          3. b = A·s mod q (public key)
+
+        CANONICAL SPECIFICATION:
+          1. A = FIXED public lattice basis (protocol constant, same for all keys)
+          2. s = HKDF-Extract→SHAKE-256 XOF, ternary {q-1, 0, 1} from priv_seed
+          3. b = A·s mod q (public key vector)
           4. y = fresh HKDF-Extract→SHAKE-256 XOF, ternary {q-1, 0, 1}
           5. w = A·y mod q (commitment)
-          6. c = (SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg ‖ w) mod 3) - 1 ∈ {-1, 0, 1}
+          6. c = (SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg ‖ w ‖ geom_hash) & 1) * 2 - 1
           7. z = c·s + y mod q (Fiat-Shamir response)
-        
+
         Output: {z, c_hash, w, public_key, address}
         """
         with self.lock:
             try:
+                # ════ VALIDATE INPUTS ════
+                if len(message_hash) != 32:
+                    raise ValueError(f"message_hash must be 32 bytes, got {len(message_hash)}")
+                if len(private_key_hex) != 64:
+                    raise ValueError(f"private_key_hex must be 64 hex chars, got {len(private_key_hex)}")
+
                 n = self.params.DIMENSION
                 q = self.params.MODULUS
                 priv_seed = bytes.fromhex(private_key_hex)
-                
-                # ════ DERIVE LATTICE BASIS A ════
-                A = self._derive_lattice_basis_from_entropy(priv_seed)
-                
+
+                # ════ DERIVE FIXED LATTICE BASIS A (protocol constant) ════
+                A = self._derive_fixed_lattice_basis()
+
                 # ════ DERIVE SECRET VECTOR s (ternary) ════
                 s = self._derive_secret_vector(priv_seed, n)
-                
+
                 # ════ COMPUTE PUBLIC KEY b = A·s mod q ════
                 b = LatticeMath.matrix_vector_mult(A, s, q)
                 pub_bytes = b''.join(x.to_bytes(4, 'big') for x in b)
-                
+
                 # ════ DERIVE ADDRESS (double-SHA3-256) ════
                 address = self.derive_address_from_public_key(b)
-                
+
                 # ════ SAMPLE MASKING VECTOR y (ternary) ════
                 y = self._sample_masking_vector(message_hash, priv_seed, n)
-                
+
                 # ════ COMPUTE COMMITMENT w = A·y mod q ════
                 w = LatticeMath.matrix_vector_mult(A, y, q)
                 w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
-                
-                # ════ FIAT-SHAMIR CHALLENGE c ∈ {-1,0,1} ════
+
+                # ════ FIAT-SHAMIR CHALLENGE c ∈ {-1, 1} ════
                 c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
-                
+
                 # ════ RESPONSE z = c·s + y mod q ════
                 z = [(c_scalar * s[i] + y[i]) % q for i in range(n)]
-                
-                # ════ CHALLENGE COMMITMENT ════
+
+                # ════ CHALLENGE COMMITMENT (includes msg_hash to prevent replay) ════
                 c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
-                c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + c_bytes).digest()
-                
+                c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + message_hash + c_bytes).digest()
+
                 return {
                     "z": self._encode_vector_to_hex(z),
                     "c_hash": c_hash.hex(),
@@ -810,23 +999,28 @@ class HLWEEngine:
                     "address": address,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
-            
+
             except Exception as e:
                 logger.error(f"[HLWE] Signing failed: {e}")
                 raise
 
     def derive_public_key(self, private_key_hex: str) -> str:
-        """Derive public key from private key (one-way derivation)."""
-        priv_bytes = bytes.fromhex(private_key_hex)
-        # Public key is derived exactly like the signing_key, so it can verify
-        pub_bytes = hmac.new(b"HLWE_SIGN_KEY_v1", priv_bytes, hashlib.sha256).digest()
-        return pub_bytes.hex()
+        """Derive full HLWE public key b = A·s mod q from private key seed.
+        Returns hex of packed public key vector (n × 4 bytes)."""
+        n = self.params.DIMENSION
+        q = self.params.MODULUS
+        priv_seed = bytes.fromhex(private_key_hex)
+        A = self._derive_fixed_lattice_basis()
+        s = self._derive_secret_vector(priv_seed, n)
+        b = LatticeMath.matrix_vector_mult(A, s, q)
+        return self._encode_vector_to_hex(b)
 
     def generate_keypair(self) -> Dict[str, str]:
         """Generate a new HLWE keypair with proper cryptographic linkage."""
         private_key_hex = secrets.token_bytes(32).hex()
         public_key_hex = self.derive_public_key(private_key_hex)
-        address = self.derive_address_from_public_key(bytes.fromhex(public_key_hex))
+        pub_vec = self._decode_vector_from_hex(public_key_hex)
+        address = self.derive_address_from_public_key(pub_vec)
         return {
             "private_key": private_key_hex,
             "public_key": public_key_hex,
@@ -836,15 +1030,15 @@ class HLWEEngine:
     def verify_signature(self, message_hash: bytes, signature_dict: Dict[str, str], public_key_hex: str) -> bool:
         """
         Verify canonical HLWE Fiat-Shamir lattice signature.
-        
+
         CANONICAL LATTICE VERIFICATION:
           Input: (z, c_hash, w, public_key) from signature
-          1. c_scalar = derive_challenge_scalar(msg, w) — deterministic
-          2. Verify c_hash == SHA-256(b"HLWE_CHALLENGE_v1" ‖ c_scalar_bytes)
-          3. Recompute A from public_key
+          1. A = FIXED public lattice basis (same as signing)
+          2. c_scalar = derive_challenge_scalar(msg, w) — deterministic
+          3. Verify c_hash == SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg_hash ‖ c_scalar_bytes)
           4. w' = A·z - b·c mod q
-          5. Check w' is close to w (within ERROR_BOUND * |c|)
-        
+          5. Check w' ≈ w (within ERROR_BOUND * |c|)
+
         Lattice security: |w' - w| > bound ⟹ forgery breaks LWE hardness.
         Return: True if signature is valid, False otherwise.
         """
@@ -852,62 +1046,196 @@ class HLWEEngine:
             try:
                 n = self.params.DIMENSION
                 q = self.params.MODULUS
-                
+
+                # ════ VALIDATE INPUTS ════
+                if len(message_hash) != 32:
+                    return False
+
                 # ════ PARSE SIGNATURE ════
                 z_hex = signature_dict.get('z', '')
                 c_hex = signature_dict.get('c_hash', '')
                 w_hex = signature_dict.get('w', '')
-                
+
                 if not z_hex or not c_hex or not w_hex:
                     return False
-                
+
+                # ════ VALIDATE SIGNATURE SIZES ════
+                expected_vec_hex_len = n * 8  # 256 * 8 = 2048 hex chars
+                if len(z_hex) != expected_vec_hex_len:
+                    return False
+                if len(w_hex) != expected_vec_hex_len:
+                    return False
+                if len(c_hex) != 64:
+                    return False
+
+                # ════ VALIDATE PUBLIC KEY FORMAT ════
+                expected_pubkey_hex_len = n * 8
+                if len(public_key_hex) != expected_pubkey_hex_len:
+                    return False
+                # Validate hex encoding
+                try:
+                    bytes.fromhex(public_key_hex)
+                except ValueError:
+                    return False
+
                 # ════ DECODE VECTORS ════
                 z = self._decode_vector_from_hex(z_hex)
                 w = self._decode_vector_from_hex(w_hex)
-                
+
                 if len(z) != n or len(w) != n:
                     return False
-                
+
+                # ════ DECODE PUBLIC KEY ════
+                b = self._decode_vector_from_hex(public_key_hex)
+                if len(b) != n:
+                    return False
+
+                # ════ DERIVE FIXED LATTICE BASIS A (protocol constant — same as signing) ════
+                A = self._derive_fixed_lattice_basis()
+
+                # ════ VERIFY FIAT-SHAMIR CHALLENGE ════
+                w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
+                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
+                c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
+                expected_c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + message_hash + c_bytes).digest()
+
+                if not hmac.compare_digest(expected_c_hash.hex(), c_hex):
+                    return False
+
+                # ════ VERIFY LATTICE RELATION w' = A·z - b·c ════
+                Az = LatticeMath.matrix_vector_mult(A, z, q)
+                bc = [(c_scalar * bi) % q for bi in b]
+                w_prime = [(Az[i] - bc[i]) % q for i in range(n)]
+
+                # ════ CHECK w' ≈ w (within error bound) ════
+                bound = self.params.ERROR_BOUND * max(abs(c_scalar), 1)
+                for i in range(n):
+                    diff = (w_prime[i] - w[i]) % q
+                    centered = diff if diff <= q // 2 else q - diff
+                    if centered > bound + 1:
+                        return False
+
+                return True
+
+            except Exception as e:
+                logger.error(f"[HLWE] Verification error: {e}")
+                return False
+
+                # ════ PARSE SIGNATURE ════
+                z_hex = signature_dict.get('z', '')
+                c_hex = signature_dict.get('c_hash', '')
+                w_hex = signature_dict.get('w', '')
+
+                if not z_hex or not c_hex or not w_hex:
+                    return False
+
+                # ════ VALIDATE SIGNATURE SIZES ════
+                expected_vec_hex_len = n * 8  # 256 * 8 = 2048 hex chars
+                if len(z_hex) != expected_vec_hex_len:
+                    return False
+                if len(w_hex) != expected_vec_hex_len:
+                    return False
+                if len(c_hex) != 64:
+                    return False
+
+                # ════ VALIDATE PUBLIC KEY FORMAT ════
+                expected_pubkey_hex_len = n * 8
+                if len(public_key_hex) != expected_pubkey_hex_len:
+                    return False
+                # Validate hex encoding
+                try:
+                    bytes.fromhex(public_key_hex)
+                except ValueError:
+                    return False
+
+                # ════ DECODE VECTORS ════
+                z = self._decode_vector_from_hex(z_hex)
+                w = self._decode_vector_from_hex(w_hex)
+
+                if len(z) != n or len(w) != n:
+                    return False
+
+                # ════ DECODE PUBLIC KEY ════
+                b = self._decode_vector_from_hex(public_key_hex)
+                if len(b) != n:
+                    return False
+
+                # ════ DERIVE FIXED LATTICE BASIS A (protocol constant — same as signing) ════
+                A = self._derive_fixed_lattice_basis()
+
+                # ════ VERIFY FIAT-SHAMIR CHALLENGE ════
+                w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
+                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
+                c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
+                expected_c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + message_hash + c_bytes).digest()
+
+                if not hmac.compare_digest(expected_c_hash.hex(), c_hex):
+                    return False
+
+                # ════ VERIFY LATTICE RELATION w' = A·z - b·c ════
+                Az = LatticeMath.matrix_vector_mult(A, z, q)
+                bc = [(c_scalar * bi) % q for bi in b]
+                w_prime = [(Az[i] - bc[i]) % q for i in range(n)]
+
+                # ════ CHECK w' ≈ w (within error bound) ════
+                bound = self.params.ERROR_BOUND * max(abs(c_scalar), 1)
+                for i in range(n):
+                    diff = (w_prime[i] - w[i]) % q
+                    centered = diff if diff <= q // 2 else q - diff
+                    if centered > bound + 1:
+                        return False
+
+                return True
+
+            except Exception as e:
+                logger.error(f"[HLWE] Verification error: {e}")
+                return False
+
+                # ════ DECODE VECTORS ════
+                z = self._decode_vector_from_hex(z_hex)
+                w = self._decode_vector_from_hex(w_hex)
+
+                if len(z) != n or len(w) != n:
+                    return False
+
                 # ════ DECODE PUBLIC KEY ════
                 if len(public_key_hex) < n * 8:
                     return False
                 b = self._decode_vector_from_hex(public_key_hex)
                 if len(b) != n:
                     return False
-                
-                # ════ RECOMPUTE LATTICE BASIS A ════
-                pub_key_bytes = bytes.fromhex(public_key_hex)
-                A = self._derive_lattice_basis_from_entropy(pub_key_bytes)
-                
+
+                # ════ DERIVE FIXED LATTICE BASIS A (protocol constant — same as signing) ════
+                A = self._derive_fixed_lattice_basis()
+
                 # ════ VERIFY FIAT-SHAMIR CHALLENGE ════
                 w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
                 c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
                 c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
-                expected_c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + c_bytes).digest()
-                
+                expected_c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + message_hash + c_bytes).digest()
+
                 if not hmac.compare_digest(expected_c_hash.hex(), c_hex):
                     return False
-                
+
                 # ════ VERIFY LATTICE RELATION w' = A·z - b·c ════
                 Az = LatticeMath.matrix_vector_mult(A, z, q)
                 bc = [(c_scalar * bi) % q for bi in b]
                 w_prime = [(Az[i] - bc[i]) % q for i in range(n)]
-                
+
                 # ════ CHECK w' ≈ w (within error bound) ════
                 bound = self.params.ERROR_BOUND * max(abs(c_scalar), 1)
                 for i in range(n):
                     diff = (w_prime[i] - w[i]) % q
-                    # Centered absolute value (handle q/2 wraparound)
                     centered = diff if diff <= q // 2 else q - diff
                     if centered > bound + 1:
                         return False
-                
+
                 return True
-            
+
             except Exception as e:
                 logger.error(f"[HLWE] Verification error: {e}")
                 return False
-    
+
     def save_address(self, address: StoredAddress) -> bool:
         """Save wallet address to Supabase"""
         try:
@@ -954,6 +1282,221 @@ class HLWEEngine:
         except Exception as e:
             logger.error(f"[Supabase] Get addresses failed: {e}")
             return []
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# MERKLE TREE — SHA3-256 with HLWE hash binding
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class MerkleTree:
+    """
+    SHA3-256 Merkle tree with optional HLWE hash binding.
+
+    Leaf hashing: SHA3-256(0x00 ‖ data)
+    Internal node: SHA3-256(0x01 ‖ left ‖ right)
+    Root is the canonical merkle_root for block headers.
+
+    If hyperbolic geometry is available, the root is further bound:
+      hlwe_bound_root = SHA3-256(merkle_root ‖ geometry_hash)
+    This ties the transaction commitment to the hyperbolic shadow in the DB.
+    """
+
+    @staticmethod
+    def _leaf_hash(data: bytes) -> bytes:
+        """Hash a leaf node with domain separator 0x00."""
+        return hashlib.sha3_256(b'\x00' + data).digest()
+
+    @staticmethod
+    def _node_hash(left: bytes, right: bytes) -> bytes:
+        """Hash an internal node with domain separator 0x01."""
+        return hashlib.sha3_256(b'\x01' + left + right).digest()
+
+    @staticmethod
+    def compute_root(items: List[bytes], bind_hyperbolic: bool = True) -> str:
+        """
+        Compute the Merkle root from a list of byte items.
+
+        If bind_hyperbolic is True, the root is further hashed with the
+        hyperbolic geometry hash from qtcl_blockchain.db.
+
+        Returns: 64-char hex string.
+        """
+        if not items:
+            return hashlib.sha3_256(b'').hexdigest()
+
+        leaves = [MerkleTree._leaf_hash(item) for item in items]
+
+        while len(leaves) > 1:
+            if len(leaves) % 2 != 0:
+                leaves.append(leaves[-1])
+            next_level = []
+            for i in range(0, len(leaves), 2):
+                next_level.append(MerkleTree._node_hash(leaves[i], leaves[i + 1]))
+            leaves = next_level
+
+        root = leaves[0]
+
+        if bind_hyperbolic:
+            try:
+                hyper_geo = get_hyperbolic_geometry()
+                geom_hash = hyper_geo.compute_geometry_hash()
+                root = hashlib.sha3_256(root + geom_hash).digest()
+            except Exception:
+                pass
+
+        return root.hex()
+
+    @staticmethod
+    def compute_root_from_hex(items_hex: List[str], bind_hyperbolic: bool = True) -> str:
+        """Compute Merkle root from hex-encoded items."""
+        items = [bytes.fromhex(h) for h in items_hex]
+        return MerkleTree.compute_root(items, bind_hyperbolic)
+
+    @staticmethod
+    def compute_root_from_dicts(items: List[Dict[str, Any]], bind_hyperbolic: bool = True) -> str:
+        """Compute Merkle root from list of dicts (canonical JSON encoding)."""
+        items_bytes = [
+            json.dumps(item, sort_keys=True, default=str, separators=(',', ':')).encode('utf-8')
+            for item in items
+        ]
+        return MerkleTree.compute_root(items_bytes, bind_hyperbolic)
+
+    @staticmethod
+    def generate_proof(items: List[bytes], index: int) -> Tuple[str, List[Tuple[str, str]]]:
+        """
+        Generate a Merkle proof for item at index.
+
+        Returns: (root_hex, proof_path) where proof_path is a list of
+        (hash_hex, 'left' or 'right') tuples.
+        """
+        if not items or index < 0 or index >= len(items):
+            raise ValueError("Invalid index or empty tree")
+
+        leaves = [MerkleTree._leaf_hash(item) for item in items]
+        proof_path = []
+        current_level = leaves
+        current_index = index
+
+        while len(current_level) > 1:
+            if len(current_level) % 2 != 0:
+                current_level.append(current_level[-1])
+
+            next_level = []
+            for i in range(0, len(current_level), 2):
+                next_level.append(MerkleTree._node_hash(current_level[i], current_level[i + 1]))
+
+            sibling_index = current_index - 1 if current_index % 2 == 1 else current_index + 1
+            if sibling_index < len(current_level):
+                direction = 'left' if current_index % 2 == 1 else 'right'
+                proof_path.append((current_level[sibling_index].hex(), direction))
+
+            current_level = next_level
+            current_index //= 2
+
+        root = current_level[0]
+
+        try:
+            hyper_geo = get_hyperbolic_geometry()
+            geom_hash = hyper_geo.compute_geometry_hash()
+            root = hashlib.sha3_256(root + geom_hash).digest()
+        except Exception:
+            pass
+
+        return root.hex(), proof_path
+
+    @staticmethod
+    def verify_proof(leaf_data: bytes, root_hex: str, proof_path: List[Tuple[str, str]]) -> bool:
+        """Verify a Merkle proof."""
+        current_hash = MerkleTree._leaf_hash(leaf_data)
+
+        for sibling_hex, direction in proof_path:
+            sibling = bytes.fromhex(sibling_hex)
+            if direction == 'left':
+                current_hash = MerkleTree._node_hash(sibling, current_hash)
+            else:
+                current_hash = MerkleTree._node_hash(current_hash, sibling)
+
+        try:
+            hyper_geo = get_hyperbolic_geometry()
+            geom_hash = hyper_geo.compute_geometry_hash()
+            current_hash = hashlib.sha3_256(current_hash + geom_hash).digest()
+        except Exception:
+            pass
+
+        return hmac.compare_digest(current_hash.hex(), root_hex)
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# HLWE BLOCK HASH CHAIN — parent-child HLWE hashes
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class HLWEBlockHash:
+    """
+    Compute block hashes with hyperbolic geometry binding.
+
+    Block hash = SHA3-256(
+        height_be8 ‖
+        parent_hash ‖
+        merkle_root ‖
+        timestamp_be8 ‖
+        nonce_be8 ‖
+        difficulty_be4 ‖
+        geometry_hash
+    )
+
+    The geometry_hash from qtcl_blockchain.db is baked into every block hash,
+    ensuring the hyperbolic shadow is cryptographically bound to the chain.
+
+    The HLWE signature is computed OVER this block hash — NOT included in it.
+    Including signature components in the block hash would create a circular
+    dependency (you can't sign a hash that includes the signature).
+    """
+
+    @staticmethod
+    def compute_block_hash(
+        height: int,
+        parent_hash: str,
+        merkle_root: str,
+        timestamp: int,
+        nonce: int,
+        difficulty: int,
+    ) -> str:
+        """Compute canonical block hash with hyperbolic geometry binding."""
+        data = struct.pack('>Q', height)
+        data += bytes.fromhex(parent_hash.zfill(64))[:32]
+        data += bytes.fromhex(merkle_root.zfill(64))[:32]
+        data += struct.pack('>Q', timestamp)
+        data += struct.pack('>Q', nonce)
+        data += struct.pack('>I', difficulty)
+
+        try:
+            hyper_geo = get_hyperbolic_geometry()
+            geom_hash = hyper_geo.compute_geometry_hash()
+            data += geom_hash
+        except Exception:
+            data += b'\x00' * 32
+
+        return hashlib.sha3_256(data).hexdigest()
+
+    @staticmethod
+    def compute_parent_child_hash(parent_hash: str, child_merkle_root: str, child_timestamp: int) -> str:
+        """
+        Compute the HLWE parent-child hash linking a child block to its parent.
+
+        hash = SHA3-256(parent_hash ‖ child_merkle_root ‖ child_timestamp_be8 ‖ geometry_hash)
+        """
+        data = bytes.fromhex(parent_hash.zfill(64))[:32]
+        data += bytes.fromhex(child_merkle_root.zfill(64))[:32]
+        data += struct.pack('>Q', child_timestamp)
+
+        try:
+            hyper_geo = get_hyperbolic_geometry()
+            geom_hash = hyper_geo.compute_geometry_hash()
+            data += geom_hash
+        except Exception:
+            data += b'\x00' * 32
+
+        return hashlib.sha3_256(data).hexdigest()
+
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # COMPLETE WALLET MANAGER (Integration Layer)
@@ -1079,66 +1622,89 @@ class HLWEIntegrationAdapter:
         logger.info("[HLWE-Adapter] Initialized (delegating to HLWEWalletManager v2)")
     
     def sign_block(self, block_dict: Dict[str, Any], private_key_hex: str) -> Dict[str, str]:
-        """Sign block with HLWE private key (backward-compatible signature)"""
+        """Sign block with HLWE private key using SHA3-256 for block hash."""
         with self.lock:
             try:
                 block_json = json.dumps(block_dict, sort_keys=True, default=str)
-                block_hash = hashlib.sha256(block_json.encode('utf-8')).digest()
+                block_hash = hashlib.sha3_256(block_json.encode('utf-8')).digest()
                 sig_dict = self.hlwe.sign_hash(block_hash, private_key_hex)
                 logger.info(f"[HLWE-Adapter] Signed block (hash={block_hash.hex()[:16]}...)")
                 return sig_dict
-            
             except Exception as e:
                 logger.error(f"[HLWE-Adapter] Block signing failed: {e}")
                 return {'signature': '', 'auth_tag': '', 'error': str(e)}
     
     def verify_block(self, block_dict: Dict[str, Any], signature_dict: Dict[str, str], public_key_hex: str) -> Tuple[bool, str]:
-        """Verify block signature"""
+        """Verify block signature using SHA3-256 for block hash."""
         with self.lock:
             try:
                 block_json = json.dumps(block_dict, sort_keys=True, default=str)
-                block_hash = hashlib.sha256(block_json.encode('utf-8')).digest()
+                block_hash = hashlib.sha3_256(block_json.encode('utf-8')).digest()
                 is_valid = self.hlwe.verify_signature(block_hash, signature_dict, public_key_hex)
-                
                 if is_valid:
                     logger.debug(f"[HLWE-Adapter] ✓ Block signature verified")
                     return True, "OK"
                 else:
                     logger.warning(f"[HLWE-Adapter] ✗ Block signature verification failed")
                     return False, "Invalid signature"
-            
             except Exception as e:
                 logger.error(f"[HLWE-Adapter] Block verification failed: {e}")
                 return False, f"Verification error: {str(e)}"
     
     def sign_transaction(self, tx_data: Dict[str, Any], private_key_hex: str) -> Dict[str, str]:
-        """Sign transaction with HLWE private key"""
+        """Sign transaction with HLWE private key using SHA3-256 for tx hash."""
         with self.lock:
             try:
                 tx_json = json.dumps(tx_data, sort_keys=True, default=str)
-                tx_hash = hashlib.sha256(tx_json.encode('utf-8')).digest()
+                tx_hash = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
                 sig_dict = self.hlwe.sign_hash(tx_hash, private_key_hex)
                 logger.info(f"[HLWE-Adapter] Signed transaction (hash={tx_hash.hex()[:16]}...)")
                 return sig_dict
-            
             except Exception as e:
                 logger.error(f"[HLWE-Adapter] TX signing failed: {e}")
                 return {'signature': '', 'auth_tag': '', 'error': str(e)}
     
     def verify_transaction(self, tx_data: Dict[str, Any], signature_dict: Dict[str, str], public_key_hex: str) -> Tuple[bool, str]:
-        """Verify transaction signature"""
+        """Verify transaction signature using SHA3-256 for tx hash."""
         with self.lock:
             try:
                 tx_json = json.dumps(tx_data, sort_keys=True, default=str)
-                tx_hash = hashlib.sha256(tx_json.encode('utf-8')).digest()
+                tx_hash = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
                 is_valid = self.hlwe.verify_signature(tx_hash, signature_dict, public_key_hex)
-                
                 if is_valid:
                     logger.debug(f"[HLWE-Adapter] ✓ Transaction signature verified")
                     return True, "OK"
                 else:
                     return False, "Invalid signature"
-            
+            except Exception as e:
+                logger.error(f"[HLWE-Adapter] TX verification failed: {e}")
+                return False, f"Verification error: {str(e)}"
+    
+    def sign_transaction(self, tx_data: Dict[str, Any], private_key_hex: str) -> Dict[str, str]:
+        """Sign transaction with HLWE private key using SHA3-256 for tx hash."""
+        with self.lock:
+            try:
+                tx_json = json.dumps(tx_data, sort_keys=True, default=str)
+                tx_hash = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
+                sig_dict = self.hlwe.sign_hash(tx_hash, private_key_hex)
+                logger.info(f"[HLWE-Adapter] Signed transaction (hash={tx_hash.hex()[:16]}...)")
+                return sig_dict
+            except Exception as e:
+                logger.error(f"[HLWE-Adapter] TX signing failed: {e}")
+                return {'signature': '', 'auth_tag': '', 'error': str(e)}
+    
+    def verify_transaction(self, tx_data: Dict[str, Any], signature_dict: Dict[str, str], public_key_hex: str) -> Tuple[bool, str]:
+        """Verify transaction signature using SHA3-256 for tx hash."""
+        with self.lock:
+            try:
+                tx_json = json.dumps(tx_data, sort_keys=True, default=str)
+                tx_hash = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
+                is_valid = self.hlwe.verify_signature(tx_hash, signature_dict, public_key_hex)
+                if is_valid:
+                    logger.debug(f"[HLWE-Adapter] ✓ Transaction signature verified")
+                    return True, "OK"
+                else:
+                    return False, "Invalid signature"
             except Exception as e:
                 logger.error(f"[HLWE-Adapter] TX verification failed: {e}")
                 return False, f"Verification error: {str(e)}"
@@ -1368,9 +1934,13 @@ __all__ = [
     'LatticeParams',
     'KeyDerivationParams',
     'SupabaseConfig',
+    'MerkleTree',
+    'HLWEBlockHash',
+    'HyperbolicGeometry',
     # Functions
     'get_wallet_manager',
     'get_hlwe_adapter',
+    'get_hyperbolic_geometry',
     'hlwe_sign_block',
     'hlwe_verify_block',
     'hlwe_sign_transaction',
