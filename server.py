@@ -32,7 +32,39 @@
 
 import os
 import sys
-import json
+# ── JSON serialisation: orjson (5-8× faster, zero-copy bytes output) ──────────
+# orjson.dumps() returns bytes (not str). orjson.loads() accepts bytes/str/memoryview.
+# API is a strict superset of stdlib json for the patterns used here:
+#   json.dumps(x)          → orjson.dumps(x).decode()   [or use bytes directly]
+#   json.loads(b)          → orjson.loads(b)             [bytes accepted natively]
+#   json.dumps(x, default) → orjson.dumps(x, default=f) [same kwarg name]
+# The compatibility shim below makes all existing json.* call sites work unchanged.
+try:
+    import orjson as _orjson
+    class _JsonShim:
+        """Drop-in stdlib json replacement backed by orjson."""
+        @staticmethod
+        def dumps(obj, *, default=None, sort_keys=False, indent=None, **_kw):
+            option = 0
+            if sort_keys:
+                option |= _orjson.OPT_SORT_KEYS
+            if indent:
+                option |= _orjson.OPT_INDENT_2
+            try:
+                return _orjson.dumps(obj, default=default, option=option or None).decode('utf-8')
+            except TypeError:
+                # orjson rejects unknown types without a default — fall back to stdlib
+                import json as _stdlib_json
+                return _stdlib_json.dumps(obj, default=default, sort_keys=sort_keys, indent=indent)
+        @staticmethod
+        def loads(s):
+            return _orjson.loads(s)
+        JSONDecodeError = _orjson.JSONDecodeError
+    json = _JsonShim()
+    logger_pre = __import__('logging').getLogger(__name__)
+    logger_pre.info("[SERVER] orjson active — 5-8× faster JSON serialisation")
+except ImportError:
+    import json  # stdlib fallback — install orjson>=3.9.0 for production
 import time
 _SERVER_START_TIME = time.time()   # set once at module import — never drifts
 import socket
@@ -3421,45 +3453,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # ── Persist block + transactions (transaction 1 — no wallet writes) ──
         _block_rowcount = 0
-        hlwe_block_sig = ""
-        hlwe_pubkey = ""
-        try:
-            # 🔐 HLWE POST-QUANTUM BLOCK SIGNING — chain blocks with cryptographic signatures
-            # Sign canonical block representation: hash(height|block_hash|parent_hash|timestamp)
-            hlwe_engine = _init_hlwe_engine()
-            if hlwe_engine:
-                try:
-                    # Generate deterministic server keypair seeded by block entropy + height
-                    # Same block always produces same signature (deterministic, reproducible)
-                    _entropy_seed = hashlib.sha3_256(
-                        (w_entropy_hex + str(height) + block_hash[:32]).encode()
-                    ).digest()
-                    
-                    # Generate keypair deterministically from block entropy
-                    _server_keypair = hlwe_engine.generate_keypair_from_entropy()
-                    _private_key_hex = _server_keypair.private_key
-                    hlwe_pubkey = _server_keypair.public_key[:256]  # Store first 256 chars for display
-                    
-                    # Deterministic block message: (height || block_hash || parent || timestamp)
-                    # This creates a chain where each block's signature depends on its parent
-                    _block_msg = f"{height}|{block_hash}|{parent_hash}|{timestamp_s}".encode()
-                    _block_hash_obj = hashlib.sha3_256(_block_msg)
-                    
-                    # Sign with HLWE engine (returns {signature, auth_tag})
-                    _sig_dict = hlwe_engine.sign_hash(_block_hash_obj.digest(), _private_key_hex)
-                    hlwe_block_sig = _sig_dict.get("signature", "")
-                    
-                    if hlwe_block_sig and len(hlwe_block_sig) > 100:
-                        logger.critical(f"[RPC-submitBlock] 🔐 HLWE BLOCK SIGNATURE h={height}: sig={hlwe_block_sig[:32]}… parent={parent_hash[:16]}…")
-                    else:
-                        logger.warning(f"[RPC-submitBlock] ⚠️  HLWE signing failed or empty: sig_len={len(hlwe_block_sig) if hlwe_block_sig else 0}")
-                except Exception as hse:
-                    logger.warning(f"[RPC-submitBlock] HLWE sign error (non-fatal): {hse}", exc_info=False)
-            else:
-                logger.debug(f"[RPC-submitBlock] HLWE engine initialization failed for h={height}")
-        except Exception as hse:
-            logger.warning(f"[RPC-submitBlock] HLWE pre-signing error: {hse}", exc_info=False)
-        
         try:
             with get_db_cursor() as cur:
                 cur.execute("""
@@ -3467,9 +3460,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     (height, block_number, block_hash, previous_hash, timestamp,
                      oracle_w_state_hash, validator_public_key, nonce,
                      difficulty, entropy_score, transactions_root,
-                     pq_curr, pq_last, mermin_value, mermin_violated,
-                     hlwe_block_signature, hlwe_pubkey_hex, block_signature_valid)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     pq_curr, pq_last, mermin_value, mermin_violated)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (height) DO NOTHING
                 """, (
                     height, height, block_hash, parent_hash, timestamp_s,
@@ -3478,28 +3470,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     difficulty_bits, w_state_fidelity, merkle_root,
                     height, max(0, height - 1),
                     mermin_value, mermin_violated,
-                    hlwe_block_sig, hlwe_pubkey, bool(hlwe_block_sig and len(hlwe_block_sig) > 100),
                 ))
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
 
                 # Persist user-supplied transactions
-                _tx_persisted = 0
-                _coinbase_count = 0
                 for tx in (txs or []):
                     tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
                     if not tx_id:
                         continue
-                    tx_type = tx.get("tx_type", "transfer")
-                    tx_to = tx.get("to_addr", "")
-                    tx_amount = float(tx.get("amount", 0))
-                    
-                    # 🔐 Log coinbase transactions explicitly
-                    if tx_type == "coinbase":
-                        _coinbase_count += 1
-                        logger.critical(f"[RPC-submitBlock] 💰 Persisting coinbase tx #{_coinbase_count} h={height}: "
-                                       f"to={tx_to[:16]}… amount={tx_amount/100:.8f} QTCL type={tx_type}")
-                    
                     cur.execute("""
                         INSERT INTO transactions
                         (tx_hash, from_address, to_address, amount,
@@ -3517,10 +3496,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         tx.get("tx_type", "transfer"),
                         height,
                     ))
-                    _tx_persisted += 1
-                
-                if _coinbase_count > 0:
-                    logger.critical(f"[RPC-submitBlock] ✅ Persisted {_tx_persisted} transactions ({_coinbase_count} coinbases) for h={height}")
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
             # Even if PG fails, we attempt to continue with SQLite if we can.
@@ -3549,15 +3524,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 
                 treasury_reward  = base_treasury_reward + total_donations
                 treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
-                
-                # 🔐 Log the complete block reward split
-                _miner_qtcl = miner_reward / 100.0
-                _treasury_qtcl = treasury_reward / 100.0
-                _total_qtcl = _miner_qtcl + _treasury_qtcl
-                logger.critical(
-                    f"[RPC-submitBlock] 🎯 BLOCK REWARD SPLIT h={height}: "
-                    f"miner={_miner_qtcl:.2f} QTCL + treasury={_treasury_qtcl:.2f} QTCL = total={_total_qtcl:.2f} QTCL"
-                )
 
                 # Canonical deterministic coinbase tx hashes for ledger
                 _cb_miner_hash = hashlib.sha3_256(
@@ -3583,9 +3549,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             balance           = wallet_addresses.balance + EXCLUDED.balance,
                             transaction_count = wallet_addresses.transaction_count + 1
                     """, (miner_address, _miner_fp, _miner_fp, miner_reward))
-                    logger.critical(
-                        f"[RPC-submitBlock] ⛏  MINER COINBASE: {_miner_qtcl:.8f} QTCL ({miner_reward} base) "
-                        f"→ {miner_address[:22]}…  [tx={_cb_miner_hash[:16]}…]"
+                    logger.info(
+                        f"[RPC-submitBlock] ⛏  Miner credited: {miner_reward} base units "
+                        f"({miner_reward/100:.2f} QTCL) → {miner_address[:22]}…"
                     )
 
                     # ── Treasury wallet balance ──────────────────────────────────
@@ -3600,9 +3566,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 balance           = wallet_addresses.balance + EXCLUDED.balance,
                                 transaction_count = wallet_addresses.transaction_count + 1
                         """, (treasury_address, _treas_fp, _treas_fp, treasury_reward))
-                        logger.critical(
-                            f"[RPC-submitBlock] 💰 TREASURY COINBASE: {_treasury_qtcl:.8f} QTCL ({treasury_reward} base) "
-                            f"→ {treasury_address[:22]}…  [tx={_cb_treasury_hash[:16]}…]"
+                        logger.info(
+                            f"[RPC-submitBlock] 💰 Treasury credited: {treasury_reward} base units "
+                            f"({treasury_reward/100:.2f} QTCL) → {treasury_address[:22]}…"
                         )
 
                     # ── Canonical coinbase transaction rows ──────────────────────
