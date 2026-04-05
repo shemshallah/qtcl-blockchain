@@ -2486,6 +2486,22 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         except Exception as _ce:
             logger.debug(f"[RPC-METHOD] client pool inject: {_ce}")
 
+        # ── HLWE SIGN THE SNAPSHOT ─────────────────────────────────────────
+        try:
+            _hlwe_engine = _init_hlwe_engine()
+            _snap_for_signing = {k: v for k, v in result.items() if k not in ('ts',)}
+            _snap_json = json.dumps(_snap_for_signing, sort_keys=True, default=str)
+            _snap_hash = hashlib.sha3_256(_snap_json.encode('utf-8')).digest()
+            _oracle_kp = _hlwe_engine.generate_keypair()
+            _hlwe_sig = _hlwe_engine.sign_hash(_snap_hash, _oracle_kp['private_key'])
+            result['hlwe_signature'] = _hlwe_sig
+            result['oracle_public_key'] = _oracle_kp['public_key']
+            result['oracle_address'] = _oracle_kp['address']
+            result['cycle'] = _bh  # use block height as cycle counter
+            logger.debug(f"[RPC-METHOD] Oracle snapshot HLWE-signed: {_oracle_kp['address'][:16]}…")
+        except Exception as _hlwe_err:
+            logger.warning(f"[RPC-METHOD] Oracle HLWE signing failed (non-fatal): {_hlwe_err}")
+
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success  block_height={_bh}")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
