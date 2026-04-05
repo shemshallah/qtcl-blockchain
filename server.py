@@ -2383,17 +2383,33 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
             try:
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching W-state snapshot (timeout=5s)")
                 w_snap = _call_with_timeout(
-                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
+                    lambda: ORACLE_W_STATE_MANAGER.get_latest_density_matrix() if ORACLE_W_STATE_MANAGER else None,
                     timeout_sec=5.0
                 )
                 if w_snap:
                     result["w_state"] = {
-                        "purity":     getattr(w_snap, "purity",     None),
-                        "entropy":    getattr(w_snap, "entropy",    None),
-                        "coherence":  getattr(w_snap, "coherence",  None),
-                        "fidelity":   getattr(w_snap, "fidelity",   None),
-                        "snapshot_id": getattr(w_snap, "snapshot_id", None),
+                        "purity":     w_snap.get("purity"),
+                        "entropy":    w_snap.get("von_neumann_entropy"),
+                        "coherence":  w_snap.get("coherence_l1"),
+                        "fidelity":   w_snap.get("w_state_fidelity"),
+                        "snapshot_id": None,
                     }
+                    # ── Extract ALL oracle fields for frontend (NO FALLBACKS) ──
+                    result["w_state_fidelity"] = w_snap.get("w_state_fidelity")
+                    result["coherence_l1"] = w_snap.get("coherence_l1")
+                    result["von_neumann_entropy"] = w_snap.get("von_neumann_entropy")
+                    result["purity"] = w_snap.get("purity")
+                    # Mermin from oracle snapshot (authoritative source)
+                    result["mermin_test"] = w_snap.get("mermin_test") or w_snap.get("bell_test")
+                    result["bell_test"] = w_snap.get("bell_test")
+                    # Density matrix hex
+                    if w_snap.get("density_matrix_hex"):
+                        result["density_matrix_hex"] = w_snap.get("density_matrix_hex")
+                    # Broadcast to ring buffer for /rpc/oracle/snapshots
+                    try:
+                        _broadcast_snapshot_to_database(w_snap)
+                    except Exception as _bd_err:
+                        logger.debug(f"[RPC-METHOD] broadcast skip: {_bd_err}")
                     logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained")
                 else:
                     logger.warning(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot is None")
@@ -2444,8 +2460,8 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 result["lattice_error"] = str(le)
 
 
-        # ── MERMIN FALLBACK ──
-        if "mermin_test" not in result:
+        # ── MERMIN FROM DB (when oracle hasn't computed it yet) ──
+        if "mermin_test" not in result or result.get("mermin_test") is None:
             try:
                 with get_db_cursor() as cur:
                     cur.execute("SELECT mermin_violation, mermin_angles FROM oracle_measurements ORDER BY id DESC LIMIT 1")
@@ -2461,27 +2477,47 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 logger.debug(f"Mermin fallback error: {e}")
 
         # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
-        # Extract DM from oracle snapshot if available
-        try:
-            if ORACLE_W_STATE_MANAGER is not None:
-                w_snap = _call_with_timeout(
-                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
-                    timeout_sec=2.0
-                )
-                if w_snap and hasattr(w_snap, 'density_matrix_hex'):
-                    dm_hex = getattr(w_snap, 'density_matrix_hex', '')
-                    if dm_hex:
+        # Already fetched in oracle block above - use that result if available
+        # If not available, use lattice DM and broadcast to ring buffer
+        if "density_matrix_hex" not in result or not result.get("density_matrix_hex"):
+            try:
+                if LATTICE is not None:
+                    cdm = getattr(LATTICE, 'current_density_matrix', None)
+                    if cdm is not None and hasattr(cdm, 'shape') and cdm.shape == (256, 256):
+                        dm_8x8 = cdm[::32, ::32]
+                        import struct as _ds
+                        dm_hex = b''.join(
+                            _ds.pack('>dd', float(np.real(dm_8x8[i,j])), float(np.imag(dm_8x8[i,j])))
+                            for i in range(8) for j in range(8)
+                        ).hex()
                         result["density_matrix_hex"] = dm_hex
-                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex from oracle ({len(dm_hex)} chars)")
-                elif w_snap and hasattr(w_snap, 'density_matrix'):
-                    # Extract DM as hex if it's raw bytes
-                    dm = getattr(w_snap, 'density_matrix', b'')
-                    if dm:
-                        dm_hex = dm.hex() if isinstance(dm, bytes) else str(dm)
-                        result["density_matrix_hex"] = dm_hex
-                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extracted ({len(dm_hex)} chars)")
-        except Exception as dme:
-            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extraction (non-fatal): {dme}")
+                        # Set oracle-like fields from lattice
+                        result["w_state_fidelity"] = getattr(LATTICE, 'fidelity', 0.0)
+                        result["coherence_l1"] = getattr(LATTICE, 'coherence', 0.0)
+                        result["purity"] = float(np.real(np.trace(cdm)))
+                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex from lattice ({len(dm_hex)} chars)")
+            except Exception as dme:
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice DM extraction (non-fatal): {dme}")
+        
+        # ── ALWAYS BROADCAST TO RING BUFFER (for /rpc/oracle/snapshots) ────────
+        # This ensures the frontend can poll snapshots regardless of oracle state
+        dm_to_broadcast = result.get("density_matrix_hex")
+        if dm_to_broadcast and len(dm_to_broadcast) >= 1024:
+            try:
+                _broadcast_snapshot_to_database({
+                    'timestamp_ns': int(time.time() * 1e9),
+                    'oracle_id': 0,
+                    'density_matrix_hex': dm_to_broadcast,
+                    'purity': result.get("purity"),
+                    'w_state_fidelity': result.get("w_state_fidelity"),
+                    'von_neumann_entropy': result.get("von_neumann_entropy"),
+                    'coherence_l1': result.get("coherence_l1"),
+                    'aer_noise_state': {},
+                    'mermin_test': result.get("mermin_test"),
+                    'lattice_refresh_counter': result.get("lattice",{}).get("cycle",0),
+                })
+            except Exception as _bd_err:
+                logger.debug(f"[RPC-METHOD] broadcast skip: {_bd_err}")
 
         # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
         # No fallback — DB is authoritative
@@ -4852,11 +4888,13 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
         _cache_snapshot(snapshot)
         
         # 2. Queue into DM snapshot ring buffer for streaming
-        if 'density_matrix_hex' in snapshot:
+        dm_hex = snapshot.get('density_matrix_hex')
+        logger.debug(f"[RPC-BROADCAST] received snapshot with dm_hex={type(dm_hex)}, len={len(dm_hex) if dm_hex else 0}")
+        if dm_hex and len(dm_hex) > 0:
             dm_snap = {
                 'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
                 'oracle_id': snapshot.get('oracle_id'),
-                'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
+                'density_matrix_hex': dm_hex,
                 'purity': snapshot.get('purity'),
                 'w_state_fidelity': snapshot.get('w_state_fidelity'),
                 'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
@@ -4873,13 +4911,15 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
                 'oracle_address': snapshot.get('oracle_address'),
                 'aer_noise_state': snapshot.get('aer_noise_state', {}),
                 'measurement_counts': snapshot.get('measurement_counts', {}),
-                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),  # Client expects mermin_test
-                'bell_test': snapshot.get('bell_test'),  # Backward compatibility
+                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),
+                'bell_test': snapshot.get('bell_test'),
                 'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
             }
             with _DM_SNAPSHOT_LOCK:
                 _DM_SNAPSHOT_RING.append(dm_snap)
             logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
+        else:
+            logger.debug(f"[RPC-BROADCAST] ❌ skipped - no dm_hex in snapshot, keys={list(snapshot.keys())}")
         
         # 3. Persist to SQLite asynchronously (P2P replication)
         def async_sqlite():

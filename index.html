@@ -461,6 +461,8 @@ var S = {
   oracle_consensus_reached: false,
   quantum_validation_status: '--', pq_validation_status: '--',
 };
+// Latest oracle snapshot from worker
+var _latestOracleSnap = null;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // REWARD SCHEDULE — mirrors TessellationRewardSchedule from globals.py exactly
@@ -1468,7 +1470,7 @@ var _lastBlockHeight = 0;
 async function unifiedPoll(){
   // ── STEP 1: Batch fetch ALL data in single round-trip
   var fromH = Math.max(0, S.height - 20);
-  var batchPromise = rpcBatch([
+  var results = await rpcBatch([
     ['qtcl_getBlockHeight', []],
     ['qtcl_getQuantumMetrics', []],
     ['qtcl_getMempoolStats', []],
@@ -1476,12 +1478,8 @@ async function unifiedPoll(){
     ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
     ['qtcl_getBlockRange', [fromH, S.height]],
   ]);
-  var oraclePromise = fetch('/rpc/oracle/snapshots?limit=1')
-    .then(r => r.json())
-    .then(data => data.result && data.result.snapshots && data.result.snapshots[0] ? data.result.snapshots[0] : null)
-    .catch(() => null);
-  var [results, oracleSnap] = await Promise.all([batchPromise, oraclePromise]);
   var [hr, qm, mp, peers, events, blockRange] = results;
+  var oracleSnap = _latestOracleSnap; // from worker
   
   // ── STEP 2: Process each metric ONCE with clear priority
   // Priority: DM Snapshot > Quantum Metrics > Block Data > Fallback
@@ -1521,6 +1519,9 @@ async function unifiedPoll(){
     // Mermin from quantum metrics
     if(qm.mermin_test) S.mermin = qm.mermin_test;
     else if(qm.bell_test) S.mermin = qm.bell_test;
+    
+    // Density matrix from quantum metrics (fallback when oracle snapshots empty)
+    if(qm.density_matrix_hex) S.dm_hex = qm.density_matrix_hex;
     
     // Oracle data (flat fields)
     var oid1 = 'oracle_1';
@@ -1751,6 +1752,32 @@ async function unifiedPoll(){
 setInterval(unifiedPoll, 3000);
 unifiedPoll();
 loadTxPage();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORACLE SNAPSHOT POLLING THREAD — Separate thread for DM/Mermin data
+// Polls /rpc/oracle/snapshots independently to maximize parallelism
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var _oraclePollTimer = null;
+
+async function pollOracleSnapshots() {
+  try {
+    var r = await fetch(BASE + '/rpc/oracle/snapshots?limit=1', {
+      method: 'GET',
+      headers: {'Accept': 'application/json'},
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!r.ok) return;
+    var j = await r.json();
+    var snaps = j && j.result && j.result.snapshots ? j.result.snapshots : [];
+    if (!snaps || !snaps.length) return;
+    _latestOracleSnap = snaps[0];
+  } catch(e) {}
+}
+
+// Poll oracle snapshots every 2.5s (offset from main poll for parallelism)
+setInterval(pollOracleSnapshots, 2500);
+pollOracleSnapshots();
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CLEANUP COMPLETE — All legacy polling loops removed
