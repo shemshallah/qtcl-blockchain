@@ -83,29 +83,38 @@ class HyperbolicGeometry:
     def __init__(self, db_path: Optional[str] = None):
         # Server (Koyeb) → Supabase via POOLER_* env vars
         # Client → local SQLite DB
-        pooler_host = os.getenv('POOLER_HOST', '').strip()
-        self._use_supabase = bool(pooler_host)
+        pooler_host = os.environ.get('POOLER_HOST', '').strip()
+        self._use_supabase = len(pooler_host) > 0
         self._supabase_conn = None
         self.db_path = None
+        
+        # Debug: log all POOLER_* env vars
+        all_pooler = {k: ('***' if 'PASS' in k else v) for k, v in os.environ.items() if k.startswith('POOLER_')}
+        logger.info(f"[HyperbolicGeometry] POOLER_* env vars: {all_pooler}")
+        logger.info(f"[HyperbolicGeometry] pooler_host='{pooler_host}' → use_supabase={self._use_supabase}")
         
         if self._use_supabase:
             logger.info(f"[HyperbolicGeometry] Server mode: Supabase at {pooler_host}")
         else:
+            # Try explicit path, then env var, then common locations
             candidates = [db_path] if db_path else []
-            env_path = os.getenv('QTCL_DB_PATH', '').strip()
+            env_path = os.environ.get('QTCL_DB_PATH', '').strip()
             if env_path:
                 candidates.append(env_path)
             candidates.extend(['./qtcl_blockchain.db', '/data/qtcl_blockchain.db', './data/qtcl_blockchain.db'])
             
             for candidate in candidates:
-                if candidate and Path(candidate).exists():
-                    self.db_path = candidate
+                if candidate and Path(str(candidate)).exists():
+                    self.db_path = str(candidate)
                     break
             
             if self.db_path:
                 logger.info(f"[HyperbolicGeometry] Client mode: SQLite at {self.db_path}")
             else:
-                raise RuntimeError("[HyperbolicGeometry] No geometry DB found — POOLER_HOST not set and no SQLite DB available")
+                raise RuntimeError(
+                    f"[HyperbolicGeometry] No geometry DB found. "
+                    f"POOLER_HOST='{pooler_host}'. Candidates checked: {candidates}"
+                )
         
         self._geometry_hash_cache = None
         self._cache_timestamp = 0.0
@@ -134,11 +143,13 @@ class HyperbolicGeometry:
         except ImportError:
             raise RuntimeError("psycopg2 not installed — cannot connect to Supabase")
         
-        host = os.getenv('POOLER_HOST', '').strip()
-        port = os.getenv('POOLER_PORT', '5432').strip()
-        dbname = os.getenv('POOLER_DB', '').strip() or os.getenv('POOLER_DATABASE', '').strip()
-        user = os.getenv('POOLER_USER', '').strip()
-        password = os.getenv('POOLER_PASSWORD', '').strip()
+        host = os.environ.get('POOLER_HOST', '').strip()
+        port = os.environ.get('POOLER_PORT', '5432').strip()
+        dbname = os.environ.get('POOLER_DB', '').strip() or os.environ.get('POOLER_DATABASE', '').strip()
+        user = os.environ.get('POOLER_USER', '').strip()
+        password = os.environ.get('POOLER_PASSWORD', '').strip()
+        
+        logger.info(f"[HyperbolicGeometry] Supabase connect attempt: host={host}, port={port}, db={dbname}, user={user}")
         
         if not all([host, dbname, user, password]):
             raise RuntimeError(
