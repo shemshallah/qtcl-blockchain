@@ -1433,7 +1433,7 @@ function updateDOM() {
   st('bbq',S.qrng_health.toFixed(3));
   // ── Oracle + Mermin ──
   renderOracles();
-  if(S.mermin) renderMermin(S.mermin);
+  renderMermin(S.mermin || {M_value:0, verdict:'NO DATA'});
 }
 
 function setOnline(ok) {
@@ -1732,7 +1732,7 @@ async function unifiedPoll(){
   // ── STEP 3: Single DOM update
   updateDOM();
   renderOracles();
-  if(S.mermin) renderMermin(S.mermin);
+  renderMermin(S.mermin || {M_value:0, verdict:'NO DATA'});
   setOnline(true);
   stamp();
 }
