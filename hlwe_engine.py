@@ -71,7 +71,7 @@ class HyperbolicGeometry:
     
     _instance = None
     _lock = threading.Lock()
-    _GEOMETRY_HASH_TTL = 300  # 5 minutes — re-read geometry periodically
+    _CACHE_TTL_SECONDS = 300  # 5 minutes
     
     @classmethod
     def get_instance(cls):
@@ -102,10 +102,9 @@ class HyperbolicGeometry:
             cur = conn.cursor()
             cur.execute("""
                 SELECT triangle_id, depth, parent_id,
-                       v0_x, v0_y, v0_name,
-                       v1_x, v1_y, v1_name,
-                       v2_x, v2_y, v2_name,
-                       area, perimeter
+                       v0_x, v0_y,
+                       v1_x, v1_y,
+                       v2_x, v2_y
                 FROM hyperbolic_triangles
                 WHERE depth <= ?
                 ORDER BY triangle_id
@@ -117,11 +116,9 @@ class HyperbolicGeometry:
                     'id': row['triangle_id'],
                     'depth': row['depth'],
                     'parent_id': row['parent_id'],
-                    'v0': (float(row['v0_x']), float(row['v0_y']), row['v0_name']),
-                    'v1': (float(row['v1_x']), float(row['v1_y']), row['v1_name']),
-                    'v2': (float(row['v2_x']), float(row['v2_y']), row['v2_name']),
-                    'area': float(row['area']) if row['area'] is not None else 0.0,
-                    'perimeter': float(row['perimeter']) if row['perimeter'] is not None else 0.0,
+                    'v0': (float(row['v0_x']), float(row['v0_y'])),
+                    'v1': (float(row['v1_x']), float(row['v1_y'])),
+                    'v2': (float(row['v2_x']), float(row['v2_y'])),
                 }
                 triangles.append(tri)
             conn.close()
@@ -135,18 +132,34 @@ class HyperbolicGeometry:
         import time
         with self._lock:
             now = time.time()
-            if self._geometry_hash_cache is not None and (now - self._cache_timestamp) < self._GEOMETRY_HASH_TTL:
+            if self._geometry_hash_cache is not None and (now - self._cache_timestamp) < self._CACHE_TTL_SECONDS:
                 return self._geometry_hash_cache
             triangles = self.fetch_all_triangles(max_depth)
             encoded = b''
             for tri in triangles:
                 encoded += struct.pack('>Q', tri['id'])
                 encoded += struct.pack('>I', tri['depth'])
-                for vx, vy, _ in (tri['v0'], tri['v1'], tri['v2']):
+                for vx, vy in (tri['v0'], tri['v1'], tri['v2']):
                     encoded += struct.pack('>d', vx)
                     encoded += struct.pack('>d', vy)
-                encoded += struct.pack('>d', tri['area'])
-                encoded += struct.pack('>d', tri['perimeter'])
+            self._geometry_hash_cache = hashlib.sha3_256(encoded).digest()
+            self._cache_timestamp = now
+            logger.info(f"[HyperbolicGeometry] Computed geometry hash from {len(triangles)} triangles")
+            return self._geometry_hash_cache
+    
+    def invalidate_cache(self):
+        """Force geometry hash recomputation on next call."""
+        with self._lock:
+            self._geometry_hash_cache = None
+            self._cache_timestamp = 0.0
+            triangles = self.fetch_all_triangles(max_depth)
+            encoded = b''
+            for tri in triangles:
+                encoded += struct.pack('>Q', tri['id'])
+                encoded += struct.pack('>I', tri['depth'])
+                for vx, vy in (tri['v0'], tri['v1'], tri['v2']):
+                    encoded += struct.pack('>d', vx)
+                    encoded += struct.pack('>d', vy)
             self._geometry_hash_cache = hashlib.sha3_256(encoded).digest()
             self._cache_timestamp = now
             logger.info(f"[HyperbolicGeometry] Computed geometry hash from {len(triangles)} triangles")
@@ -159,9 +172,9 @@ class HyperbolicGeometry:
             self._cache_timestamp = 0.0
     
     def hyperbolic_hash(self, msg: bytes) -> bytes:
-        """Return SHA3-256(msg || geometry_hash). Uses hyperbolic geometry as salt."""
+        """Return SHA3-256(domain ‖ msg ‖ geometry_hash). Uses hyperbolic geometry as salt."""
         geom_hash = self.compute_geometry_hash()
-        return hashlib.sha3_256(msg + geom_hash).digest()
+        return hashlib.sha3_256(b"QTCL_HYPERBOLIC_HASH_v1" + msg + geom_hash).digest()
     
     def hyperbolic_distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
         """Compute hyperbolic distance between two points in Poincaré disk."""
@@ -839,26 +852,25 @@ class HLWEEngine:
         
         return e
     
-    def _hash_to_challenge_scalar(self, msg_hash: bytes, w_bytes: bytes) -> int:
+    def _hash_to_challenge_scalar(self, msg_hash: bytes, w_bytes: bytes, public_key_bytes: bytes = b'') -> int:
         """
         Deterministic challenge scalar c ∈ {-1, 1} from message + commitment,
         incorporating hyperbolic geometry from qtcl_blockchain.db.
 
         Construction:
           geom_hash = hyperbolic_geometry_hash(msg_hash)
-          h = SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg ‖ w ‖ geom_hash)
+          h = SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg ‖ w ‖ pubkey ‖ geom_hash)
           c = 2 * (h[0] & 1) - 1  → {-1, 1} with UNIFORM probability.
 
-        Zero challenge is eliminated to prevent forgery: when c=0,
-        w' = w regardless of the public key, allowing any key to pass.
-        Using uniform {-1, 1} also eliminates the P(c=1)=2/3 bias from mod 3.
+        Including public_key_bytes prevents cross-key attacks where an attacker
+        could reuse a signature across different keys with the same (msg, w).
         """
         try:
             hyper_geo = get_hyperbolic_geometry()
             geom_hash = hyper_geo.hyperbolic_hash(msg_hash)
         except Exception:
             raise RuntimeError("Hyperbolic geometry database missing; cannot compute challenge scalar")
-        h = hashlib.sha256(b"HLWE_CHALLENGE_v1" + msg_hash + w_bytes + geom_hash).digest()
+        h = hashlib.sha256(b"HLWE_CHALLENGE_v1" + msg_hash + w_bytes + public_key_bytes + geom_hash).digest()
         return 2 * (h[0] & 1) - 1  # uniform {-1, 1}
     
     def _sample_masking_vector(self, msg_hash: bytes, key_seed: bytes, dimension: int) -> List[int]:
@@ -886,27 +898,31 @@ class HLWEEngine:
         return y
     
     def _encode_vector_to_hex(self, vector: List[int]) -> str:
-        """Encode lattice vector to hex string (unsigned int32 big-endian per element)"""
+        """Encode lattice vector to hex string (unsigned int32 big-endian per element).
+        Validates that each element is in [0, q)."""
         result = []
         for x in vector:
-            x_mod = x % self.params.MODULUS
-            chunk = struct.pack('>I', x_mod)
+            if x < 0 or x >= 2**32:
+                raise ValueError(f"Vector element {x} out of uint32 range")
+            chunk = struct.pack('>I', x % self.params.MODULUS)
             result.append(chunk.hex())
         return ''.join(result)
     
     def _decode_vector_from_hex(self, hex_str: str) -> List[int]:
-        """Decode hex string to lattice vector (unsigned int32 big-endian per element)"""
+        """Decode hex string to lattice vector (unsigned int32 big-endian per element).
+        Validates hex encoding and element ranges."""
         vector = []
         for i in range(0, len(hex_str), 8):
             chunk = hex_str[i:i+8]
             if len(chunk) < 8:
                 break
             try:
-                val = int(chunk, 16) % self.params.MODULUS
-                vector.append(val)
+                val = int(chunk, 16)
+                if val >= 2**32:
+                    raise ValueError(f"Element {val} exceeds uint32 range")
+                vector.append(val % self.params.MODULUS)
             except ValueError:
-                logger.warning(f"[HLWE] Skipped malformed hex chunk: {chunk}")
-                continue
+                raise ValueError(f"Invalid hex chunk at position {i}: {chunk}")
         return vector
     
     def derive_address_from_public_key(self, public_key: List[int]) -> str:
@@ -982,7 +998,7 @@ class HLWEEngine:
                 w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
 
                 # ════ FIAT-SHAMIR CHALLENGE c ∈ {-1, 1} ════
-                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
+                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes, pub_bytes)
 
                 # ════ RESPONSE z = c·s + y mod q ════
                 z = [(c_scalar * s[i] + y[i]) % q for i in range(n)]
@@ -1095,122 +1111,8 @@ class HLWEEngine:
 
                 # ════ VERIFY FIAT-SHAMIR CHALLENGE ════
                 w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
-                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
-                c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
-                expected_c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + message_hash + c_bytes).digest()
-
-                if not hmac.compare_digest(expected_c_hash.hex(), c_hex):
-                    return False
-
-                # ════ VERIFY LATTICE RELATION w' = A·z - b·c ════
-                Az = LatticeMath.matrix_vector_mult(A, z, q)
-                bc = [(c_scalar * bi) % q for bi in b]
-                w_prime = [(Az[i] - bc[i]) % q for i in range(n)]
-
-                # ════ CHECK w' ≈ w (within error bound) ════
-                bound = self.params.ERROR_BOUND * max(abs(c_scalar), 1)
-                for i in range(n):
-                    diff = (w_prime[i] - w[i]) % q
-                    centered = diff if diff <= q // 2 else q - diff
-                    if centered > bound + 1:
-                        return False
-
-                return True
-
-            except Exception as e:
-                logger.error(f"[HLWE] Verification error: {e}")
-                return False
-
-                # ════ PARSE SIGNATURE ════
-                z_hex = signature_dict.get('z', '')
-                c_hex = signature_dict.get('c_hash', '')
-                w_hex = signature_dict.get('w', '')
-
-                if not z_hex or not c_hex or not w_hex:
-                    return False
-
-                # ════ VALIDATE SIGNATURE SIZES ════
-                expected_vec_hex_len = n * 8  # 256 * 8 = 2048 hex chars
-                if len(z_hex) != expected_vec_hex_len:
-                    return False
-                if len(w_hex) != expected_vec_hex_len:
-                    return False
-                if len(c_hex) != 64:
-                    return False
-
-                # ════ VALIDATE PUBLIC KEY FORMAT ════
-                expected_pubkey_hex_len = n * 8
-                if len(public_key_hex) != expected_pubkey_hex_len:
-                    return False
-                # Validate hex encoding
-                try:
-                    bytes.fromhex(public_key_hex)
-                except ValueError:
-                    return False
-
-                # ════ DECODE VECTORS ════
-                z = self._decode_vector_from_hex(z_hex)
-                w = self._decode_vector_from_hex(w_hex)
-
-                if len(z) != n or len(w) != n:
-                    return False
-
-                # ════ DECODE PUBLIC KEY ════
-                b = self._decode_vector_from_hex(public_key_hex)
-                if len(b) != n:
-                    return False
-
-                # ════ DERIVE FIXED LATTICE BASIS A (protocol constant — same as signing) ════
-                A = self._derive_fixed_lattice_basis()
-
-                # ════ VERIFY FIAT-SHAMIR CHALLENGE ════
-                w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
-                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
-                c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
-                expected_c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + message_hash + c_bytes).digest()
-
-                if not hmac.compare_digest(expected_c_hash.hex(), c_hex):
-                    return False
-
-                # ════ VERIFY LATTICE RELATION w' = A·z - b·c ════
-                Az = LatticeMath.matrix_vector_mult(A, z, q)
-                bc = [(c_scalar * bi) % q for bi in b]
-                w_prime = [(Az[i] - bc[i]) % q for i in range(n)]
-
-                # ════ CHECK w' ≈ w (within error bound) ════
-                bound = self.params.ERROR_BOUND * max(abs(c_scalar), 1)
-                for i in range(n):
-                    diff = (w_prime[i] - w[i]) % q
-                    centered = diff if diff <= q // 2 else q - diff
-                    if centered > bound + 1:
-                        return False
-
-                return True
-
-            except Exception as e:
-                logger.error(f"[HLWE] Verification error: {e}")
-                return False
-
-                # ════ DECODE VECTORS ════
-                z = self._decode_vector_from_hex(z_hex)
-                w = self._decode_vector_from_hex(w_hex)
-
-                if len(z) != n or len(w) != n:
-                    return False
-
-                # ════ DECODE PUBLIC KEY ════
-                if len(public_key_hex) < n * 8:
-                    return False
-                b = self._decode_vector_from_hex(public_key_hex)
-                if len(b) != n:
-                    return False
-
-                # ════ DERIVE FIXED LATTICE BASIS A (protocol constant — same as signing) ════
-                A = self._derive_fixed_lattice_basis()
-
-                # ════ VERIFY FIAT-SHAMIR CHALLENGE ════
-                w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
-                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
+                pub_bytes_verify = bytes.fromhex(public_key_hex)
+                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes, pub_bytes_verify)
                 c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
                 expected_c_hash = hashlib.sha256(b"HLWE_CHALLENGE_v1" + message_hash + c_bytes).digest()
 
@@ -1321,7 +1223,7 @@ class MerkleTree:
         Returns: 64-char hex string.
         """
         if not items:
-            return hashlib.sha3_256(b'').hexdigest()
+            raise ValueError("Cannot compute Merkle root of empty item list")
 
         leaves = [MerkleTree._leaf_hash(item) for item in items]
 
