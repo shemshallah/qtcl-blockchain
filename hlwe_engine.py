@@ -67,7 +67,7 @@ import json
 from pathlib import Path
 
 class HyperbolicGeometry:
-    """Read hyperbolic triangles from qtcl_blockchain.db and provide geometry-based hashing."""
+    """Read hyperbolic triangles from Supabase (server) or SQLite (client)."""
     
     _instance = None
     _lock = threading.Lock()
@@ -83,20 +83,29 @@ class HyperbolicGeometry:
     def __init__(self, db_path: Optional[str] = None):
         # Server (Koyeb) → Supabase via POOLER_* env vars
         # Client → local SQLite DB
-        self._use_supabase = bool(os.getenv('POOLER_HOST'))
+        pooler_host = os.getenv('POOLER_HOST', '').strip()
+        self._use_supabase = bool(pooler_host)
         self._supabase_conn = None
-        self.db_path = None  # only for SQLite mode
+        self.db_path = None
         
         if self._use_supabase:
-            logger.info("[HyperbolicGeometry] Server mode: using Supabase (POOLER_*)")
+            logger.info(f"[HyperbolicGeometry] Server mode: Supabase at {pooler_host}")
         else:
-            self.db_path = db_path or os.getenv('QTCL_DB_PATH', './qtcl_blockchain.db')
-            if not Path(self.db_path).exists():
-                for candidate in ['/data/qtcl_blockchain.db', './data/qtcl_blockchain.db']:
-                    if Path(candidate).exists():
-                        self.db_path = candidate
-                        break
-            logger.info(f"[HyperbolicGeometry] Client mode: SQLite at {self.db_path}")
+            candidates = [db_path] if db_path else []
+            env_path = os.getenv('QTCL_DB_PATH', '').strip()
+            if env_path:
+                candidates.append(env_path)
+            candidates.extend(['./qtcl_blockchain.db', '/data/qtcl_blockchain.db', './data/qtcl_blockchain.db'])
+            
+            for candidate in candidates:
+                if candidate and Path(candidate).exists():
+                    self.db_path = candidate
+                    break
+            
+            if self.db_path:
+                logger.info(f"[HyperbolicGeometry] Client mode: SQLite at {self.db_path}")
+            else:
+                raise RuntimeError("[HyperbolicGeometry] No geometry DB found — POOLER_HOST not set and no SQLite DB available")
         
         self._geometry_hash_cache = None
         self._cache_timestamp = 0.0
@@ -120,21 +129,34 @@ class HyperbolicGeometry:
             except Exception:
                 self._supabase_conn = None
         
-        import psycopg2
-        host = os.getenv('POOLER_HOST', '')
-        port = os.getenv('POOLER_PORT', '5432')
-        dbname = os.getenv('POOLER_DATABASE', '')
-        user = os.getenv('POOLER_USER', '')
-        password = os.getenv('POOLER_PASSWORD', '')
+        try:
+            import psycopg2
+        except ImportError:
+            raise RuntimeError("psycopg2 not installed — cannot connect to Supabase")
+        
+        host = os.getenv('POOLER_HOST', '').strip()
+        port = os.getenv('POOLER_PORT', '5432').strip()
+        dbname = os.getenv('POOLER_DB', '').strip() or os.getenv('POOLER_DATABASE', '').strip()
+        user = os.getenv('POOLER_USER', '').strip()
+        password = os.getenv('POOLER_PASSWORD', '').strip()
+        
+        if not all([host, dbname, user, password]):
+            raise RuntimeError(
+                f"POOLER_* env vars incomplete: "
+                f"host={bool(host)}, db={bool(dbname)}, user={bool(user)}, pw={bool(password)}"
+            )
+        
         self._supabase_conn = psycopg2.connect(
-            host=host, port=port, dbname=dbname, user=user, password=password
+            host=host, port=int(port), dbname=dbname, user=user, password=password
         )
-        logger.info("[HyperbolicGeometry] ✅ Supabase connection established")
+        logger.info(f"[HyperbolicGeometry] ✅ Supabase: {host}:{port}/{dbname}")
         return self._supabase_conn
     
     def _get_sqlite_connection(self) -> sqlite3.Connection:
         """Return a connection to the SQLite database."""
-        if not self.db_path or not Path(self.db_path).exists():
+        if not self.db_path:
+            raise FileNotFoundError("Hyperbolic geometry database path not set")
+        if not Path(self.db_path).exists():
             raise FileNotFoundError(f"Hyperbolic geometry database not found: {self.db_path}")
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -950,14 +972,10 @@ class HLWEEngine:
           h = SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg ‖ w ‖ pubkey ‖ geom_hash)
           c = 2 * (h[0] & 1) - 1  → {-1, 1} with UNIFORM probability.
 
-        Including public_key_bytes prevents cross-key attacks where an attacker
-        could reuse a signature across different keys with the same (msg, w).
+        NO FALLBACKS — hyperbolic geometry is mandatory for signing.
         """
-        try:
-            hyper_geo = get_hyperbolic_geometry()
-            geom_hash = hyper_geo.hyperbolic_hash(msg_hash)
-        except Exception:
-            raise RuntimeError("Hyperbolic geometry database missing; cannot compute challenge scalar")
+        hyper_geo = get_hyperbolic_geometry()
+        geom_hash = hyper_geo.hyperbolic_hash(msg_hash)
         h = hashlib.sha256(b"HLWE_CHALLENGE_v1" + msg_hash + w_bytes + public_key_bytes + geom_hash).digest()
         return 2 * (h[0] & 1) - 1  # uniform {-1, 1}
     
