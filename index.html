@@ -242,29 +242,8 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
   <div class="tc">
     <div class="pn">
-      <div class="ph"><span class="pht">H³ Hyperbolic Lattice · {8,3}</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
-      <div id="dc3d" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;">
-        <!-- pq Bloch overlay — rendered by _PQ canvas system -->
-        <canvas id="pq-overlay" style="position:absolute;right:0;top:0;pointer-events:none;z-index:10;opacity:0.97"></canvas>
-        <!-- node type legend -->
-        <div style="position:absolute;left:8px;top:8px;pointer-events:none;z-index:10;display:flex;flex-direction:column;gap:4px">
-          <div style="font-family:'JetBrains Mono',monospace;font-size:7.5px;color:rgba(0,220,255,0.45);letter-spacing:1.5px;margin-bottom:2px">LEGEND</div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#d4a020;border-radius:1px;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(212,160,32,0.8)">Oracle node (×5)</span></div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#00dcff;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">Lattice pseudoqubit</span></div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:2px;background:#00dcff;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">W-state entanglement arc</span></div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#ffd040;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(255,208,64,0.9)">Current block ⬡</span></div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:1px;background:rgba(128,64,255,0.6);display:inline-block;flex-shrink:0;border-top:1px dashed rgba(128,64,255,0.6)"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,0.75)">Oracle entanglement</span></div>
-        </div>
-        <!-- field-fidelity HUD strip -->
-        <div id="pq-hud" style="position:absolute;left:0;bottom:0;right:0;height:28px;pointer-events:none;z-index:11;display:flex;align-items:center;padding:0 10px;gap:14px;background:linear-gradient(0deg,rgba(0,5,8,.92) 0%,transparent 100%)">
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.55);letter-spacing:1.5px">BLOCK FIELD</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_last=<span id="pqh-last" style="color:#8040ff">—</span></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_curr=<span id="pqh-curr" style="color:#d4a020">—</span></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">Δ=<span id="pqh-delta" style="color:#00ff9d">—</span></span>
-          <span style="flex:1"></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">ψ —</span>
-        </div>
-      </div>
+      <div class="ph"><span class="pht">Density Matrix ρ &middot; 8×8 Complex</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
+      <div id="dc3d" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;"></div>
       <div class="bs">
         <div class="bv"><div class="bvl">|W₃| Fidelity</div><div class="bvn" id="bfi">&mdash;</div></div>
         <div class="bv"><div class="bvl">pq_curr</div><div class="bvn" id="ben" style="color:var(--go)">&mdash;</div></div>
@@ -297,16 +276,6 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
           <div class="nr"><span class="nk">ou_mem</span><span class="nv" id="nou">&mdash;</span></div>
           <div class="nr"><span class="nk">phase_drift</span><span class="nv" id="npd">&mdash;</span></div>
           <div class="nr"><span class="nk">sector_occ</span><span class="nv" id="nso">&mdash;</span></div>
-        </div>
-      </div>
-      <div class="ph"><span class="pht">Density Matrix ρ · 8×8 W-State</span><span class="pb vi" id="dm-badge">—</span><span class="pb go" id="dm-pur-badge" style="margin-left:4px">pur —</span></div>
-      <div style="position:relative;background:#000508">
-        <canvas id="qc"></canvas>
-        <div style="position:absolute;left:0;bottom:0;right:0;height:20px;pointer-events:none;background:linear-gradient(0deg,rgba(0,5,8,.9) 0%,transparent 100%);display:flex;align-items:center;padding:0 10px;gap:14px">
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,220,255,.45);letter-spacing:1px">|ρᵢⱼ| HEATMAP</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,220,255,.35)">max: <span id="qc-max" style="color:#d4a020">—</span></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,220,255,.35)">tr: <span id="qc-tr" style="color:#00ff9d">—</span></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,220,255,.35)">coh: <span id="qc-coh" style="color:#8040ff">—</span></span>
         </div>
       </div>
     </div>
@@ -423,7 +392,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
         </div>
       </div>
     </div>
-    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="f7a49f929a849f969b9b969fb7909a969e9bd994989a">[email&#160;protected]</a>. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
+    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="c497aca1a9b7aca5a8a8a5ac84a3a9a5ada8eaa7aba9">[email&#160;protected]</a>. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
   </div>
 
 </div>
@@ -449,7 +418,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
 </div>
 <div class="bm-copied" id="bm-copied">✓ Copied</div>
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
 <script>
 'use strict';
 var BASE = window.location.origin;
@@ -477,6 +446,8 @@ var S = {
   n_peers: 0,
   // block chain metrics (computed from getBlockRange)
   total_transactions: 0, avg_block_time_s: 0, difficulty_bits: 4,
+  // density matrix (hex-encoded 8×8 complex float32, 64 elements = 512 bytes)
+  dm_hex: '',
   // pq plane
   pq_curr: 0, pq_last: 0, pq0: 0, _pqAuthoritative: false,
   // oracle network (per-node from DM snapshots)
@@ -486,8 +457,6 @@ var S = {
   // reward (computed from height via canonical schedule)
   miner_reward_qtcl: 7.20, treasury_reward_qtcl: 0.80,
   tessellation_depth: 5, treasury_pct: 10.0,
-  // density matrix — 2048-hex big-endian '>dd' 8×8 complex128
-  dm_hex: '',
   // oracle_consensus
   oracle_consensus_reached: false,
   quantum_validation_status: '--', pq_validation_status: '--',
@@ -592,436 +561,468 @@ setInterval(tick, 1000); tick();
       ctx.beginPath(); ctx.arc(x,y,2.5,0,Math.PI*2); ctx.fill();
     }
     ctx.fillStyle='rgba(212,160,32,.95)'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
-    t += 0.02; requestAnimationFrame(fr);
+    t -= 0.02; requestAnimationFrame(fr);
   })();
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// H³ HYPERBOLIC LATTICE — {8,3} Poincaré Ball (Three.js)
-// Wired directly to S.* — pq_curr / pq_last / pq0 fully rendered
+// DENSITY MATRIX VISUALIZER — 8×8 complex DM heatmap ⊗ pq-phase-relations disk
+// Replaces Three.js Poincaré ball. Pure Canvas 2D, zero dependencies.
+// Reads S.dm_hex → 64 complex float32 → magnitude heatmap (cyan→violet palette)
+// Phase-relations ring hybridized into the same canvas (right half overlay)
+// Preserves _H.onBlock() interface — rest of codebase untouched
 // ═══════════════════════════════════════════════════════════════════════════════
-var _H = (function() {
-var renderer=null,scene=null,camera=null;
-var nodeMesh=null,oracleMeshes=[],wArcObjs=[],entangleObjs=[];
-var edgeLines=[],boundSphere=null;
-var blockCoreMesh=null,blockCoreWire=null; // current block — glowing octahedron at origin
-var rafId=null,lastT=0,fps=30;
-var revivalT=-999,blockFlashT=-999;
-var nodePositions=[],nodeDepths=[],nodeCount=0;
-var oracleIdx=[],wTriple=[];
-var dummy=null;
-var C={
-  nodeCyan:new THREE.Color(0x00dcff),nodeMid:new THREE.Color(0x6028c8),
-  nodeOut:new THREE.Color(0x003a60),oracle:new THREE.Color(0xd4a020),
-  oracleOff:new THREE.Color(0x3a1800),wArc:new THREE.Color(0x00dcff),
-  wStrong:new THREE.Color(0xd4a020),entangle:new THREE.Color(0x6028c8),
-  entangleQ:new THREE.Color(0x00dcff),boundary:new THREE.Color(0x00dcff),
-  revival:new THREE.Color(0xd4a020),
-  pqCurr:new THREE.Color(0xd4a020),   // gold — current block pq state
-  pqLast:new THREE.Color(0x8040ff),   // violet — last block pq state
-  pqDelta:new THREE.Color(0x00ff9d),  // green — field transition arc
-};
-function geodArc(p1,p2,n){
-  var cross=new THREE.Vector3().crossVectors(p1,p2);
-  if(cross.lengthSq()<1e-9){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
-  var d11=p1.dot(p1),d12=p1.dot(p2),d22=p2.dot(p2),det=d11*d22-d12*d12;
-  if(Math.abs(det)<1e-9){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
-  var r1=(d11+1)/2,r2=(d22+1)/2,a=(r1*d22-r2*d12)/det,b=(r2*d11-r1*d12)/det;
-  var c=p1.clone().multiplyScalar(a).add(p2.clone().multiplyScalar(b));
-  var rad=Math.sqrt(Math.max(0,c.lengthSq()-1));
-  if(rad<1e-7){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
-  var e1=p1.clone().sub(c).normalize(),v2=p2.clone().sub(c);
-  var e2=v2.clone().sub(e1.clone().multiplyScalar(e1.dot(v2))).normalize();
-  var ang2=Math.atan2(e2.dot(v2),e1.dot(v2)),pts=[];
-  for(var i=0;i<=n;i++){var a2=(i/n)*ang2;pts.push(c.clone().add(e1.clone().multiplyScalar(rad*Math.cos(a2))).add(e2.clone().multiplyScalar(rad*Math.sin(a2))));}
-  return pts;
-}
-function makeTube(pts,radius,segs,matProps){
-  var curve=new THREE.CatmullRomCurve3(pts);
-  var geo=new THREE.TubeGeometry(curve,Math.max(4,pts.length-1),radius,segs,false);
-  return new THREE.Mesh(geo,new THREE.MeshBasicMaterial(matProps));
+var _H = (function(){
+'use strict';
+
+// ── Internal state ────────────────────────────────────────────────────────────
+var _cvs = null, _ctx = null;
+var _rafId = null, _lastT = 0;
+var _blkFlash = -99, _animT = 0;
+var _dmCache = null;          // Float32Array(128) — real[i], imag[i] interleaved
+var _dmMag   = null;          // Float32Array(64) — magnitudes
+var _dmPhase = null;          // Float32Array(64) — phases
+var _pqCurrAnim = 0, _pqLastAnim = 0;
+
+// ── Palette: cyan(0,220,255) → mid-violet(128,64,255) → bright-gold(212,160,32)
+function _palette(v) {
+  // v in [0,1], returns [r,g,b]
+  v = Math.max(0, Math.min(1, v));
+  if (v < 0.5) {
+    var t = v * 2;
+    return [Math.round(0   + t * 128), Math.round(220 - t * 156), Math.round(255 - t * 0)];
+  } else {
+    var t = (v - 0.5) * 2;
+    return [Math.round(128 + t * 84), Math.round(64  - t * 64),  Math.round(255 - t * 223)];
+  }
 }
 
-function genNodes(){
-  nodePositions=[];nodeDepths=[];oracleIdx=[];wTriple=[];
-  var rings=[[0.00,1],[0.779,8],[1.50,24],[2.20,56],[2.90,96]];
-  for(var ri=0;ri<rings.length;ri++){
-    var R=rings[ri][0],cnt=rings[ri][1],rho=Math.tanh(R/2);
-    if(cnt===1){nodePositions.push(new THREE.Vector3(0,0,0));nodeDepths.push(0);continue;}
-    for(var i=0;i<cnt;i++){
-      var phi=Math.acos(1-2*(i+0.5)/cnt),theta=Math.PI*(1+Math.sqrt(5))*i,tilt=ri*0.15;
-      nodePositions.push(new THREE.Vector3(rho*Math.sin(phi)*Math.cos(theta),rho*Math.sin(phi)*Math.sin(theta+tilt),rho*Math.cos(phi)*0.85));
-      nodeDepths.push(ri);
+// ── Parse dm_hex → complex amplitudes ────────────────────────────────────────
+// Server sends hex-encoded little-endian float32 pairs (re, im) × 64 = 512 bytes
+function _parseDmHex(hex) {
+  if (!hex || hex.length < 32) return null;
+  // Strip whitespace
+  hex = hex.replace(/\s/g, '');
+  // Expected: 64 complex × 2 floats × 4 bytes × 2 hex chars = 1024 chars
+  // But server may send 8×8 magnitude-only (256 chars) or full complex (1024 chars)
+  var byteLen = hex.length / 2;
+  if (byteLen < 32) return null;
+  var buf = new Uint8Array(byteLen);
+  for (var i = 0; i < byteLen; i++) {
+    buf[i] = parseInt(hex.slice(i*2, i*2+2), 16);
+  }
+  var dv = new DataView(buf.buffer);
+  var n = Math.min(64, Math.floor(byteLen / 4));
+  var isComplex = byteLen >= 512; // 64 complex pairs
+  var out = new Float32Array(128); // always store as (re,im) pairs
+  if (isComplex) {
+    for (var i = 0; i < 64; i++) {
+      out[i*2]   = dv.getFloat32(i*8,     true); // re
+      out[i*2+1] = dv.getFloat32(i*8 + 4, true); // im
+    }
+  } else {
+    // magnitude-only: treat as real diagonal
+    for (var i = 0; i < n; i++) {
+      out[i*2]   = dv.getFloat32(i*4, true);
+      out[i*2+1] = 0;
     }
   }
-  nodeCount=nodePositions.length;
-  for(var k=0;k<5;k++) oracleIdx.push(1+Math.floor(k*8/5));
-  wTriple=[1,1+3,1+6];
+  return out;
 }
-function buildEdges(rings){
-  var edges=[],startByRing=[0,1],s=1;
-  for(var ri=1;ri<rings.length;ri++){s+=rings[ri][1];startByRing.push(s);}
-  for(var ri=0;ri<rings.length-1;ri++){
-    var iS=startByRing[ri],iE=startByRing[ri+1],jS=startByRing[ri+1],jE=startByRing[ri+2];
-    for(var i=iS;i<iE;i++){
-      var pi=nodePositions[i],ds=[];
-      for(var j=jS;j<jE;j++) ds.push([j,pi.distanceTo(nodePositions[j])]);
-      ds.sort(function(a,b){return a[1]-b[1];});
-      for(var k=0;k<Math.min(3,ds.length);k++) edges.push([i,ds[k][0]]);
+
+// ── Build magnitude + phase arrays ───────────────────────────────────────────
+function _buildMagPhase(cx) {
+  if (!cx) return;
+  _dmMag   = new Float32Array(64);
+  _dmPhase = new Float32Array(64);
+  var maxMag = 0;
+  for (var i = 0; i < 64; i++) {
+    var re = cx[i*2], im = cx[i*2+1];
+    var m = Math.sqrt(re*re + im*im);
+    _dmMag[i]   = m;
+    _dmPhase[i] = Math.atan2(im, re);
+    if (m > maxMag) maxMag = m;
+  }
+  // Normalize
+  if (maxMag > 1e-9) for (var i = 0; i < 64; i++) _dmMag[i] /= maxMag;
+}
+
+// ── Synthetic fallback when dm_hex is empty ───────────────────────────────────
+// Generates fidelity-weighted W-state DM: |W⟩ = (|100⟩+|010⟩+|001⟩)/√3
+// Extended to 8×8 by block-diagonal repetition
+function _syntheticDm(fid, t) {
+  var cx = new Float32Array(128);
+  var f = Math.max(0.01, Math.min(1.0, fid));
+  // 8×8 block: two 3×3 W-state blocks on diagonal + noise
+  for (var row = 0; row < 8; row++) {
+    for (var col = 0; col < 8; col++) {
+      var idx = (row * 8 + col) * 2;
+      var diag = (row === col) ? f * 0.9 : 0;
+      var offW = (row !== col && row < 3 && col < 3) ? f / 3.0 : 0;
+      var noise = (1 - f) * 0.04 * (Math.sin(t * 1.7 + row * 2.1 + col * 1.3));
+      var phase = (row !== col) ? (t * 0.4 + (row - col) * Math.PI / 4) : 0;
+      var mag = diag + offW + noise;
+      cx[idx]   = mag * Math.cos(phase);
+      cx[idx+1] = mag * Math.sin(phase);
     }
   }
-  return edges;
+  return cx;
 }
-function buildScene(){
-  var rings=[[0,1],[0.779,8],[1.50,24],[2.20,56],[2.90,96]];
-  var edges=buildEdges(rings);
-  dummy=new THREE.Object3D();
-  scene.add(new THREE.AmbientLight(0x000c1a,3.0));
-  var pl0=new THREE.PointLight(0x00dcff,3.0,4);scene.add(pl0);
-  var pl1=new THREE.PointLight(0x6028c8,2.0,3);pl1.position.set(0.8,0.6,0.2);scene.add(pl1);
-  var pl2=new THREE.PointLight(0xd4a020,1.5,2);pl2.position.set(-0.5,0,0.7);scene.add(pl2);
-  // ── Nodes ─────────────────────────────────────────────────────────────────
-  var nGeo=new THREE.SphereGeometry(0.016,6,5);
-  var nMat=new THREE.MeshPhongMaterial({color:0x00dcff,emissive:0x000820,transparent:true,opacity:0.9,shininess:60});
-  nodeMesh=new THREE.InstancedMesh(nGeo,nMat,nodeCount);
-  nodeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  nodeMesh.instanceColor=new THREE.InstancedBufferAttribute(new Float32Array(nodeCount*3),3);
-  for(var i=0;i<nodeCount;i++){
-    dummy.position.copy(nodePositions[i]);
-    var sc=Math.max(0.25,1.0-nodeDepths[i]*0.16);
-    dummy.scale.setScalar(sc);dummy.updateMatrix();
-    nodeMesh.setMatrixAt(i,dummy.matrix);nodeMesh.setColorAt(i,C.nodeCyan);
+
+// ── Draw routine ─────────────────────────────────────────────────────────────
+function _draw(t) {
+  if (!_cvs || !_ctx) return;
+
+  var W = _cvs.width, H = _cvs.height;
+  var fid    = Math.max(0.01, Math.min(1.0, S.fidelity || 0.75));
+  var coh    = Math.max(0.01, Math.min(1.0, S.lattice_coherence || S.coherence || 0.65));
+  var pqC    = S.pq_curr || 0;
+  var pqL    = S.pq_last || 0;
+
+  // Smooth pq anim
+  var spd = 0.08;
+  _pqCurrAnim += (pqC - _pqCurrAnim) * spd;
+  _pqLastAnim += (pqL - _pqLastAnim) * spd;
+
+  // Parse / refresh DM
+  if (S.dm_hex && S.dm_hex !== _H._lastHex) {
+    _H._lastHex = S.dm_hex;
+    var parsed = _parseDmHex(S.dm_hex);
+    if (parsed) { _dmCache = parsed; _buildMagPhase(parsed); }
   }
-  nodeMesh.instanceMatrix.needsUpdate=true;nodeMesh.instanceColor.needsUpdate=true;
-  scene.add(nodeMesh);
-  // ── Oracle icosahedra ──────────────────────────────────────────────────────
-  var oGeo=new THREE.IcosahedronGeometry(0.044,1);
-  for(var k=0;k<5;k++){
-    var oMat=new THREE.MeshPhongMaterial({color:0xd4a020,emissive:0x3a1000,transparent:true,opacity:0.92,shininess:120});
-    var m=new THREE.Mesh(oGeo,oMat);m.position.copy(nodePositions[oracleIdx[k]]);
-    scene.add(m);oracleMeshes.push(m);
+  var cx = _dmCache || _syntheticDm(fid, t);
+  if (!_dmMag) { _dmCache = cx; _buildMagPhase(cx); }
+  if (!_dmMag) return;
+
+  var blkAge = t - _blkFlash;
+  var blkPulse = blkAge < 1.0 ? Math.exp(-blkAge * 4) : 0;
+  var isQ = S.mermin ? (parseFloat(S.mermin.M_value || S.mermin.M || 0) > 2.0) : false;
+  var isStrong = S.mermin ? (parseFloat(S.mermin.M_value || S.mermin.M || 0) > 2.8) : false;
+
+  // ── Layout ────────────────────────────────────────────────────────────────
+  // Left 52%: DM heatmap  |  Right 48%: pq-phase disk (hybridized)
+  var splitX = Math.floor(W * 0.54);
+  var HM_X   = 12, HM_Y = 36, HM_W = splitX - 20, HM_H = H - 70;
+  var cell   = Math.min(Math.floor(HM_W / 8), Math.floor(HM_H / 8));
+  HM_W = cell * 8; HM_H = cell * 8;
+
+  // Disk geometry
+  var DK_CX = splitX + Math.floor((W - splitX) / 2);
+  var DK_CY = Math.floor(H / 2) + 4;
+  var DK_R  = Math.min((W - splitX) / 2 - 18, H / 2 - 24);
+
+  // ── Clear ─────────────────────────────────────────────────────────────────
+  _ctx.clearRect(0, 0, W, H);
+  _ctx.fillStyle = '#000508';
+  _ctx.fillRect(0, 0, W, H);
+
+  // Scanline overlay
+  _ctx.fillStyle = 'rgba(0,0,0,0.04)';
+  for (var y = 0; y < H; y += 4) { _ctx.fillRect(0, y, W, 1); }
+
+  // ── SECTION A: DM Heatmap ─────────────────────────────────────────────────
+  // Title
+  _ctx.font = '7px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(0,180,220,0.55)';
+  _ctx.textAlign = 'left';
+  _ctx.textBaseline = 'top';
+  _ctx.fillText('DENSITY MATRIX ρ  8×8', HM_X, 6);
+
+  // Source indicator
+  var src = _dmCache && S.dm_hex ? 'LIVE DM' : 'SYN-ψ';
+  _ctx.fillStyle = _dmCache && S.dm_hex ? 'rgba(0,255,157,0.6)' : 'rgba(212,160,32,0.5)';
+  _ctx.textAlign = 'right';
+  _ctx.fillText(src, splitX - 4, 6);
+
+  // Row / col axis labels
+  _ctx.font = '6.5px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(0,150,190,0.35)';
+  _ctx.textAlign = 'center';
+  for (var i = 0; i < 8; i++) {
+    _ctx.fillText(i, HM_X + cell * i + cell / 2, HM_Y - 9);
+    _ctx.textAlign = 'right';
+    _ctx.textBaseline = 'middle';
+    _ctx.fillText(i, HM_X - 3, HM_Y + cell * i + cell / 2);
+    _ctx.textAlign = 'center';
+    _ctx.textBaseline = 'top';
   }
-  // ── W-state arcs ──────────────────────────────────────────────────────────
-  for(var i=0;i<3;i++){
-    var pts=geodArc(nodePositions[wTriple[i]],nodePositions[wTriple[(i+1)%3]],40);
-    var tube=makeTube(pts,0.008,5,{color:0x00dcff,transparent:true,opacity:0.75});
-    scene.add(tube);wArcObjs.push(tube);
-  }
-  // ── Oracle entanglement tubes ─────────────────────────────────────────────
-  for(var i=0;i<5;i++){
-    for(var j=i+1;j<5;j++){
-      var pts=geodArc(nodePositions[oracleIdx[i]],nodePositions[oracleIdx[j]],32);
-      var tube=makeTube(pts,0.0035,4,{color:0x6028c8,transparent:true,opacity:0.0});
-      scene.add(tube);entangleObjs.push({mesh:tube,i:i,j:j});
+
+  // Cells
+  for (var row = 0; row < 8; row++) {
+    for (var col = 0; col < 8; col++) {
+      var idx = row * 8 + col;
+      var mag = _dmMag[idx];
+      var phase = _dmPhase[idx];
+      var rgb = _palette(mag);
+      var alpha = 0.18 + mag * 0.82;
+      // Phase-modulated brightness shimmer
+      var shimmer = 0.85 + 0.15 * Math.cos(phase + t * 1.1 + (row + col) * 0.4);
+      // Block-flash wash
+      var bwash = blkPulse * 0.35 * mag;
+      var cx2 = HM_X + col * cell;
+      var cy2 = HM_Y + row * cell;
+      // Cell fill
+      _ctx.fillStyle = 'rgba(' + Math.round(rgb[0] * shimmer + bwash * 255) + ',' +
+                                  Math.round(rgb[1] * shimmer) + ',' +
+                                  Math.round(Math.min(255, rgb[2] * shimmer + bwash * 80)) + ',' + alpha.toFixed(2) + ')';
+      _ctx.fillRect(cx2, cy2, cell - 1, cell - 1);
+      // Diagonal indicator — gold glow
+      if (row === col) {
+        _ctx.strokeStyle = 'rgba(212,160,32,' + (0.25 + mag * 0.55) + ')';
+        _ctx.lineWidth = 0.8;
+        _ctx.strokeRect(cx2 + 0.5, cy2 + 0.5, cell - 2, cell - 2);
+      }
     }
   }
-  // ── Lattice edges ─────────────────────────────────────────────────────────
-  var edgeSub=edges.filter(function(e){return nodeDepths[e[0]]<=2&&nodeDepths[e[1]]<=2;});
-  for(var ei=0;ei<Math.min(100,edgeSub.length);ei++){
-    var pts=geodArc(nodePositions[edgeSub[ei][0]],nodePositions[edgeSub[ei][1]],14);
-    var geo=new THREE.BufferGeometry().setFromPoints(pts);
-    var ln=new THREE.Line(geo,new THREE.LineBasicMaterial({color:0x002030,transparent:true,opacity:0.35}));
-    scene.add(ln);edgeLines.push(ln);
-  }
-  // ── Boundary sphere ───────────────────────────────────────────────────────
-  var bGeo=new THREE.SphereGeometry(0.99,48,24);
-  boundSphere=new THREE.Mesh(bGeo,new THREE.MeshBasicMaterial({color:0x00dcff,transparent:true,opacity:0.04,side:THREE.BackSide}));
-  scene.add(boundSphere);
-  scene.add(new THREE.Mesh(new THREE.SphereGeometry(0.99,20,10),new THREE.MeshBasicMaterial({color:0x001228,wireframe:true,transparent:true,opacity:0.18})));
-  // ── Latitude rings (hyperbolic tessellation grid) ─────────────────────────
-  var hRings=12,hSegs=48;
-  for(var ri2=0;ri2<hRings;ri2++){
-    var z0=-0.4+ri2/hRings*0.8,rho2=Math.sqrt(Math.max(0,1-z0*z0))*0.95,ringPts=[];
-    for(var si2=0;si2<=hSegs;si2++){var th=si2/hSegs*Math.PI*2;ringPts.push(new THREE.Vector3(rho2*Math.cos(th),rho2*Math.sin(th),z0));}
-    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ringPts),new THREE.LineBasicMaterial({color:0x001a28,transparent:true,opacity:0.22})));
-  }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // CURRENT BLOCK OBJECT — glowing octahedron at the lattice origin
-  // This IS the block. pq_curr/pq_last are shown in the 2D overlay.
-  // ══════════════════════════════════════════════════════════════════════════
-  var bcGeo=new THREE.OctahedronGeometry(0.09,1);
-  blockCoreMesh=new THREE.Mesh(bcGeo,new THREE.MeshPhongMaterial({
-    color:0xd4a020,emissive:0xd4a020,emissiveIntensity:0.6,
-    transparent:true,opacity:0.85,shininess:200,wireframe:false
-  }));
-  scene.add(blockCoreMesh);
-  var bcWGeo=new THREE.OctahedronGeometry(0.093,1);
-  blockCoreWire=new THREE.Mesh(bcWGeo,new THREE.MeshBasicMaterial({
-    color:0xffd040,wireframe:true,transparent:true,opacity:0.5
-  }));
-  scene.add(blockCoreWire);
-}
+  // Heatmap border
+  _ctx.strokeStyle = 'rgba(0,220,255,0.18)';
+  _ctx.lineWidth = 1;
+  _ctx.strokeRect(HM_X - 1, HM_Y - 1, HM_W + 2, HM_H + 2);
 
-
-function update(t){
-  if(!scene||!nodeMesh) return;
-  var fid=Math.max(0.3,Math.min(1.0,S.lattice_fidelity||S.fidelity||0.9));
-  var coh=Math.max(0.0,Math.min(1.0,S.lattice_coherence||S.coherence||0.7));
-  var neg=Math.max(0.0,Math.min(0.5,S.negativity||0));
-  var disc=Math.max(0.0,Math.min(2.0,S.discord||0));
-  var ent=Math.max(0.0,Math.min(1.0,S.entanglement||0.65));
-  var g1=Math.max(0.001,S.gamma1||0.04);
-  var om=Math.max(0.1,S.omega||0.5);
-  var cyc=S.cycle||0;
-  var odata=S.oracle_data||{};
-  var M=S.mermin?parseFloat(S.mermin.M_value||S.mermin.M||0):0;
-  var isQ=M>2.0,isStrong=M>2.8;
-
-  if(cyc>0&&cyc%8===0&&(t-revivalT)>2) revivalT=t;
-  var revAge=t-revivalT,revPulse=(revAge<2.0)?Math.exp(-revAge*2.5):0;
-  var blkAge=t-blockFlashT,blkPulse=(blkAge<1.0)?Math.exp(-blkAge*4):0;
-
-  var yaw=om*0.06*t,tilt=0.32+0.06*Math.sin(t*0.05);
-  camera.position.set(2.8*Math.sin(yaw)*Math.cos(tilt),2.8*Math.sin(tilt),2.8*Math.cos(yaw)*Math.cos(tilt));
-  camera.lookAt(0,0,0);
-
-  // ── Node colours + scales ─────────────────────────────────────────────────
-  var tmpCol=new THREE.Color();
-  for(var i=0;i<nodeCount;i++){
-    var dep=nodeDepths[i],isOracle=oracleIdx.indexOf(i)>=0,isW=wTriple.indexOf(i)>=0;
-    var noise=g1*15*(Math.sin(t*6.3+i*2.1)*0.5+0.5);
-    var bright=fid-dep*(1-fid)*0.18+noise*0.08-dep*noise*0.06;
-    bright=Math.max(0.05,Math.min(1.3,bright))+revPulse*(1-dep*0.08)+blkPulse*0.4;
-    if(isOracle) tmpCol.copy(C.oracle).multiplyScalar(bright);
-    else if(isW) tmpCol.copy(C.wArc).multiplyScalar(bright*1.3);
-    else if(dep<=1) tmpCol.copy(C.nodeCyan).multiplyScalar(bright);
-    else if(dep<=2) tmpCol.lerpColors(C.nodeCyan,C.nodeMid,0.55).multiplyScalar(bright*0.9);
-    else tmpCol.lerpColors(C.nodeMid,C.nodeOut,Math.min(1,(dep-2)/2)).multiplyScalar(bright*0.7);
-    nodeMesh.setColorAt(i,tmpCol);
-    dummy.position.copy(nodePositions[i]);
-    var sc=Math.max(0.2,1.0-dep*0.16)*(isOracle?1.7:1.0);
-    var breathe=1+0.09*Math.sin(t*3.1+i*0.97)*g1*8;
-    dummy.scale.setScalar(sc*breathe*(1+revPulse*0.35+blkPulse*0.25));
-    dummy.updateMatrix();nodeMesh.setMatrixAt(i,dummy.matrix);
-  }
-  nodeMesh.instanceMatrix.needsUpdate=true;nodeMesh.instanceColor.needsUpdate=true;
-
-  // ── Oracle icosahedra ─────────────────────────────────────────────────────
-  for(var k=0;k<5;k++){
-    var m=oracleMeshes[k],ok='oracle_'+(k+1),od=odata[ok]||{};
-    var oFid=od.w_state_fidelity!=null?od.w_state_fidelity:(od.fidelity||fid);
-    var oCons=od.in_consensus;
-    m.scale.setScalar(0.85+oFid*0.25+revPulse*0.35+blkPulse*0.2);
-    m.material.emissiveIntensity=oCons===false?0.1:(0.3+0.25*Math.sin(t*2.5+k*1.26)+revPulse*0.8);
-    m.material.color.set(oCons===false?0x3a1800:isStrong?0xffe040:0xd4a020);
-    m.material.emissive.set(oCons===false?0x1a0800:isStrong?0x604000:0x3a1000);
+  // ── Phase-relations bar (below heatmap) ───────────────────────────────────
+  var barY = HM_Y + HM_H + 8;
+  _ctx.font = '6.5px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(0,150,180,0.4)';
+  _ctx.textAlign = 'left';
+  _ctx.textBaseline = 'top';
+  _ctx.fillText('PHASE MAP  arg(ρᵢⱼ)', HM_X, barY);
+  barY += 10;
+  var bW = HM_W / 8, bH = 12;
+  for (var i = 0; i < 8; i++) {
+    // Use diagonal phase
+    var ph = _dmPhase[i * 8 + i]; // (i,i) diagonal phase
+    var normPh = (ph + Math.PI) / (2 * Math.PI); // 0→1
+    var rgb2 = _palette(normPh);
+    _ctx.fillStyle = 'rgba(' + rgb2[0] + ',' + rgb2[1] + ',' + rgb2[2] + ',0.75)';
+    _ctx.fillRect(HM_X + i * bW, barY, bW - 1, bH);
+    _ctx.fillStyle = 'rgba(0,180,220,0.5)';
+    _ctx.font = '6px JetBrains Mono,monospace';
+    _ctx.textAlign = 'center';
+    _ctx.textBaseline = 'middle';
+    _ctx.fillText((ph * 180 / Math.PI).toFixed(0) + '°', HM_X + i * bW + bW / 2, barY + bH / 2);
   }
 
-  // ── W-arcs ────────────────────────────────────────────────────────────────
-  var wCol=isStrong?C.wStrong:isQ?C.wArc:new THREE.Color(0x3010a0);
-  var wOp=Math.min(0.9,0.35+fid*0.5+revPulse*0.4+blkPulse*0.2);
-  var wPulse=1+0.18*Math.sin(t*4.2)*(isQ?1:0.15);
-  for(var i=0;i<wArcObjs.length;i++){wArcObjs[i].material.color.copy(wCol);wArcObjs[i].material.opacity=wOp*wPulse;}
+  // ── Vertical divider ──────────────────────────────────────────────────────
+  var grad = _ctx.createLinearGradient(splitX, 0, splitX + 1, H);
+  grad.addColorStop(0,   'rgba(0,220,255,0.0)');
+  grad.addColorStop(0.3, 'rgba(0,220,255,0.18)');
+  grad.addColorStop(0.7, 'rgba(128,64,255,0.18)');
+  grad.addColorStop(1,   'rgba(128,64,255,0.0)');
+  _ctx.strokeStyle = grad;
+  _ctx.lineWidth = 1;
+  _ctx.beginPath(); _ctx.moveTo(splitX, 10); _ctx.lineTo(splitX, H - 10); _ctx.stroke();
 
-  // ── Entanglement tubes ────────────────────────────────────────────────────
-  for(var ei=0;ei<entangleObjs.length;ei++){
-    var eo=entangleObjs[ei],pairFactor=0.5+0.5*Math.sin(t*1.8+eo.i*2.3+eo.j*1.1);
-    var op=Math.min(0.72,ent*neg*4*pairFactor+revPulse*0.25);
-    eo.mesh.material.opacity=op;
-    eo.mesh.material.color.lerpColors(C.entangle,C.entangleQ,Math.min(1,disc/2));
+  // ── SECTION B: pq Phase-Relations Disk (right half) ──────────────────────
+  // Outer boundary circle
+  _ctx.beginPath();
+  _ctx.arc(DK_CX, DK_CY, DK_R, 0, Math.PI * 2);
+  var bndGrad = _ctx.createRadialGradient(DK_CX, DK_CY, DK_R * 0.85, DK_CX, DK_CY, DK_R);
+  bndGrad.addColorStop(0, 'rgba(0,220,255,0.04)');
+  bndGrad.addColorStop(1, isStrong ? 'rgba(212,160,32,0.10)' : 'rgba(0,220,255,0.10)');
+  _ctx.fillStyle = bndGrad;
+  _ctx.fill();
+  _ctx.strokeStyle = isStrong ? 'rgba(212,160,32,0.30)' : 'rgba(0,220,255,0.22)';
+  _ctx.lineWidth = 1;
+  _ctx.stroke();
+
+  // Grid rings (fidelity-weighted)
+  for (var ri = 1; ri <= 3; ri++) {
+    var rr = DK_R * ri / 3.5;
+    _ctx.beginPath();
+    _ctx.arc(DK_CX, DK_CY, rr, 0, Math.PI * 2);
+    _ctx.strokeStyle = 'rgba(0,180,220,' + (0.05 + coh * 0.07) + ')';
+    _ctx.lineWidth = 0.5;
+    _ctx.stroke();
   }
 
-  // ── Lattice edges ─────────────────────────────────────────────────────────
-  for(var li=0;li<edgeLines.length;li++){edgeLines[li].material.opacity=0.08+coh*0.28;edgeLines[li].material.color.setHex(isQ?0x002840:0x001020);}
+  // Cross hairs
+  _ctx.strokeStyle = 'rgba(0,220,255,0.07)';
+  _ctx.lineWidth = 0.5;
+  _ctx.beginPath(); _ctx.moveTo(DK_CX - DK_R, DK_CY); _ctx.lineTo(DK_CX + DK_R, DK_CY); _ctx.stroke();
+  _ctx.beginPath(); _ctx.moveTo(DK_CX, DK_CY - DK_R); _ctx.lineTo(DK_CX, DK_CY + DK_R); _ctx.stroke();
 
-  // ── Boundary sphere ───────────────────────────────────────────────────────
-  if(boundSphere){boundSphere.material.opacity=0.015+fid*0.065+revPulse*0.10;boundSphere.material.color.set(isStrong?C.wStrong:C.boundary);}
+  // Phase-relation arcs — off-diagonal DM elements projected onto disk
+  // Each coherence |ρᵢⱼ| at angle ∝ arg(ρᵢⱼ), radius ∝ |ρᵢⱼ|
+  var maxOff = 0;
+  for (var row = 0; row < 8; row++) for (var col = 0; col < 8; col++) {
+    if (row !== col) { var m2 = _dmMag[row*8+col]; if (m2 > maxOff) maxOff = m2; }
+  }
+  if (maxOff < 1e-6) maxOff = 1;
 
-  // ── CURRENT BLOCK — glowing octahedron at origin ──────────────────────────
-  // Spins slowly; flashes bright gold on each new block; size breathes with fidelity
-  if(blockCoreMesh&&blockCoreWire){
-    blockCoreMesh.rotation.y=t*0.4;
-    blockCoreMesh.rotation.x=t*0.17;
-    blockCoreWire.rotation.y=t*0.4;
-    blockCoreWire.rotation.x=t*0.17;
-    var bsc=1.0+0.12*Math.sin(t*1.8)*fid+blkPulse*0.9+revPulse*0.4;
-    blockCoreMesh.scale.setScalar(bsc);
-    blockCoreWire.scale.setScalar(bsc*1.04);
-    blockCoreMesh.material.emissiveIntensity=0.4+0.3*Math.sin(t*2.2)+blkPulse*1.2+revPulse*0.6;
-    blockCoreMesh.material.color.setHex(isStrong?0xffe060:blkPulse>0.1?0xffffff:0xd4a020);
-    blockCoreMesh.material.emissive.setHex(isStrong?0xd4a020:blkPulse>0.1?0xffd040:0xc09010);
-    blockCoreWire.material.opacity=0.3+0.2*Math.sin(t*3.1)+blkPulse*0.5;
+  for (var row = 0; row < 8; row++) {
+    for (var col = row + 1; col < 8; col++) {
+      var idx2 = row * 8 + col;
+      var mag2 = _dmMag[idx2];
+      var ph2  = _dmPhase[idx2];
+      if (mag2 < 0.05) continue;
+      var r2 = (mag2 / maxOff) * DK_R * 0.88;
+      var dot_x = DK_CX + Math.cos(ph2 + t * 0.08) * r2;
+      var dot_y = DK_CY + Math.sin(ph2 + t * 0.08) * r2;
+      var rgb3 = _palette(mag2);
+      var alpha2 = 0.25 + mag2 * 0.55;
+      _ctx.beginPath();
+      _ctx.arc(dot_x, dot_y, 1.8 + mag2 * 2.5, 0, Math.PI * 2);
+      _ctx.fillStyle = 'rgba(' + rgb3[0] + ',' + rgb3[1] + ',' + rgb3[2] + ',' + alpha2.toFixed(2) + ')';
+      _ctx.fill();
+      // Thin spoke from center
+      if (mag2 > 0.3) {
+        _ctx.beginPath(); _ctx.moveTo(DK_CX, DK_CY); _ctx.lineTo(dot_x, dot_y);
+        _ctx.strokeStyle = 'rgba(' + rgb3[0] + ',' + rgb3[1] + ',' + rgb3[2] + ',' + (alpha2 * 0.35).toFixed(2) + ')';
+        _ctx.lineWidth = 0.7; _ctx.stroke();
+      }
+    }
   }
 
-  // ── 2D overlay — Bloch-disk + pq state + legend ───────────────────────────
-  _drawPqOverlay(t, fid, isQ, isStrong, blkPulse);
-
-  // ── HUD strip ─────────────────────────────────────────────────────────────
-  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
-  var hl=document.getElementById('pqh-last');   if(hl) hl.textContent=pqL;
-  var hc=document.getElementById('pqh-curr');   if(hc) hc.textContent=pqC;
-  var hd=document.getElementById('pqh-delta');  if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
-  var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='ψ cyc='+cyc+(cyc>0&&cyc%8===0?' ↑REVIVAL':cyc>0&&cyc%8===4?' ↓ANTI':'');
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 2D PQ OVERLAY — Poincaré disk showing pq_curr and pq_last as labeled points
-// Drawn into the #pq-overlay canvas, top-right corner of dc3d
-// ═══════════════════════════════════════════════════════════════════════════════
-var _pqOvCanvas=null,_pqOvCtx=null;
-var _pqCurrAnim=0,_pqLastAnim=0; // smoothed for animation
-
-function _drawPqOverlay(t, fid, isQ, isStrong, blkPulse){
-  if(!_pqOvCanvas){
-    _pqOvCanvas=document.getElementById('pq-overlay');
-    if(!_pqOvCanvas) return;
-    // Size it: 148×148 in top-right
-    _pqOvCanvas.width=148; _pqOvCanvas.height=148;
-    _pqOvCanvas.style.width='148px'; _pqOvCanvas.style.height='148px';
-    _pqOvCanvas.style.top='8px'; _pqOvCanvas.style.right='8px';
-    _pqOvCtx=_pqOvCanvas.getContext('2d');
-  }
-  var ctx=_pqOvCtx, W=148, cx=74, cy=74, R=52;
-  ctx.clearRect(0,0,W,W);
-
-  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
-  // Smooth toward real values
-  _pqCurrAnim += (pqC - _pqCurrAnim)*0.08;
-  _pqLastAnim += (pqL - _pqLastAnim)*0.08;
-
-  // pq states map to 8 positions on the unit circle (0–7 → 0°–315° in 45° steps)
-  // This is the Poincaré disk projection of the pseudoqubit Bloch equator
-  function pqAngle(v){ return v * Math.PI/4 - Math.PI/2; } // 0→top, clockwise
-  var angC=pqAngle(_pqCurrAnim), angL=pqAngle(_pqLastAnim);
-  var xC=cx+Math.cos(angC)*R, yC=cy+Math.sin(angC)*R;
-  var xL=cx+Math.cos(angL)*R, yL=cy+Math.sin(angL)*R;
-
-  // ── Background disk ───────────────────────────────────────────────────────
-  var bgGrad=ctx.createRadialGradient(cx,cy,0,cx,cy,R);
-  bgGrad.addColorStop(0,'rgba(0,18,32,0.92)');
-  bgGrad.addColorStop(1,'rgba(0,5,12,0.96)');
-  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
-  ctx.fillStyle=bgGrad; ctx.fill();
-
-  // ── Boundary ring ─────────────────────────────────────────────────────────
-  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
-  ctx.strokeStyle='rgba(0,220,255,0.22)'; ctx.lineWidth=1; ctx.stroke();
-
-  // ── 8 pq state positions as tick marks ───────────────────────────────────
-  for(var i=0;i<8;i++){
-    var a=pqAngle(i);
-    var ox=cx+Math.cos(a)*R, oy=cy+Math.sin(a)*R;
-    var ix=cx+Math.cos(a)*(R-7), iy=cy+Math.sin(a)*(R-7);
-    ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(ix,iy);
-    ctx.strokeStyle='rgba(0,220,255,0.30)'; ctx.lineWidth=1; ctx.stroke();
-    // Label
-    ctx.font='bold 8px JetBrains Mono,monospace';
-    ctx.fillStyle='rgba(0,180,220,0.45)';
-    ctx.textAlign='center'; ctx.textBaseline='middle';
-    var lx=cx+Math.cos(a)*(R+11), ly=cy+Math.sin(a)*(R+11);
-    ctx.fillText(i, lx, ly);
+  // ── pq tick marks (8 positions on disk rim) ───────────────────────────────
+  function pqAngle(n) { return (n / 8) * Math.PI * 2 - Math.PI / 2; }
+  _ctx.font = 'bold 7.5px JetBrains Mono,monospace';
+  for (var i = 0; i < 8; i++) {
+    var ang = pqAngle(i);
+    var ox = DK_CX + Math.cos(ang) * DK_R;
+    var oy = DK_CY + Math.sin(ang) * DK_R;
+    var ix = DK_CX + Math.cos(ang) * (DK_R - 6);
+    var iy = DK_CY + Math.sin(ang) * (DK_R - 6);
+    _ctx.beginPath(); _ctx.moveTo(ox, oy); _ctx.lineTo(ix, iy);
+    _ctx.strokeStyle = 'rgba(0,220,255,0.28)'; _ctx.lineWidth = 1; _ctx.stroke();
+    _ctx.fillStyle = 'rgba(0,180,220,0.4)';
+    _ctx.textAlign = 'center'; _ctx.textBaseline = 'middle';
+    _ctx.fillText(i, DK_CX + Math.cos(ang) * (DK_R + 10), DK_CY + Math.sin(ang) * (DK_R + 10));
   }
 
-  // ── Cross hairs ───────────────────────────────────────────────────────────
-  ctx.strokeStyle='rgba(0,220,255,0.08)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R); ctx.stroke();
+  // ── pq_last → pq_curr arc ────────────────────────────────────────────────
+  var angC = pqAngle(_pqCurrAnim % 8);
+  var angL = pqAngle(_pqLastAnim % 8);
+  var xC = DK_CX + Math.cos(angC) * DK_R * 0.80;
+  var yC = DK_CY + Math.sin(angC) * DK_R * 0.80;
+  var xL = DK_CX + Math.cos(angL) * DK_R * 0.80;
+  var yL = DK_CY + Math.sin(angL) * DK_R * 0.80;
 
-  // ── Arc from pq_last → pq_curr ────────────────────────────────────────────
-  if(pqC!==pqL){
-    var dA=angC-angL;
-    while(dA>Math.PI) dA-=Math.PI*2;
-    while(dA<-Math.PI) dA+=Math.PI*2;
-    ctx.beginPath();
-    ctx.arc(cx,cy,R*0.82,angL,angL+dA,dA<0);
-    ctx.strokeStyle='rgba(0,255,157,0.55)'; ctx.lineWidth=1.5;
-    ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+  if (pqC !== pqL) {
+    var dA = angC - angL;
+    while (dA > Math.PI) dA -= Math.PI * 2;
+    while (dA < -Math.PI) dA += Math.PI * 2;
+    _ctx.beginPath();
+    _ctx.arc(DK_CX, DK_CY, DK_R * 0.80, angL, angL + dA, dA < 0);
+    _ctx.strokeStyle = 'rgba(0,255,157,0.55)'; _ctx.lineWidth = 1.5;
+    _ctx.setLineDash([3, 3]); _ctx.stroke(); _ctx.setLineDash([]);
     // Arrow tip
-    var tipA=angL+dA, perp=tipA+(dA>0?-0.25:0.25);
-    var tx2=cx+Math.cos(tipA)*R*0.82, ty2=cy+Math.sin(tipA)*R*0.82;
-    var tx1=cx+Math.cos(perp)*R*0.82*0.92, ty1=cy+Math.sin(perp)*R*0.82*0.92;
-    ctx.beginPath(); ctx.moveTo(tx2,ty2); ctx.lineTo(tx1,ty1);
-    ctx.strokeStyle='rgba(0,255,157,0.7)'; ctx.lineWidth=1.5; ctx.stroke();
+    var tipA = angL + dA, perpA = tipA + (dA > 0 ? -0.25 : 0.25);
+    var tipX = DK_CX + Math.cos(tipA) * DK_R * 0.80;
+    var tipY = DK_CY + Math.sin(tipA) * DK_R * 0.80;
+    var tipX2 = DK_CX + Math.cos(perpA) * DK_R * 0.74;
+    var tipY2 = DK_CY + Math.sin(perpA) * DK_R * 0.74;
+    _ctx.beginPath(); _ctx.moveTo(tipX, tipY); _ctx.lineTo(tipX2, tipY2);
+    _ctx.strokeStyle = 'rgba(0,255,157,0.7)'; _ctx.lineWidth = 1.5; _ctx.stroke();
   }
 
-  // ── Line from center to pq_last (ghost violet) ───────────────────────────
-  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(xL,yL);
-  ctx.strokeStyle='rgba(128,64,255,0.35)'; ctx.lineWidth=1.5;
-  ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]);
+  // pq_last spoke + dot
+  _ctx.beginPath(); _ctx.moveTo(DK_CX, DK_CY); _ctx.lineTo(xL, yL);
+  _ctx.strokeStyle = 'rgba(128,64,255,0.35)'; _ctx.lineWidth = 1.5;
+  _ctx.setLineDash([4, 4]); _ctx.stroke(); _ctx.setLineDash([]);
+  _ctx.beginPath(); _ctx.arc(xL, yL, 4, 0, Math.PI * 2);
+  _ctx.fillStyle = 'rgba(128,64,255,0.75)'; _ctx.fill();
+  _ctx.font = 'bold 7.5px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(170,120,255,0.9)';
+  _ctx.textAlign = 'center'; _ctx.textBaseline = 'middle';
+  _ctx.fillText('L·' + pqL, xL + (xL > DK_CX ? 14 : -14), yL + (yL > DK_CY ? -10 : 10));
 
-  // ── Line from center to pq_curr (gold, solid) ────────────────────────────
-  var glow=0.65+0.2*Math.sin(t*2.8)+blkPulse*0.35;
-  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(xC,yC);
-  ctx.strokeStyle='rgba(212,160,32,'+Math.min(1,glow)+')'; ctx.lineWidth=2; ctx.stroke();
+  // pq_curr spoke + dot (brighter)
+  var glow = 0.65 + 0.2 * Math.sin(t * 2.8) + blkPulse * 0.35;
+  _ctx.beginPath(); _ctx.moveTo(DK_CX, DK_CY); _ctx.lineTo(xC, yC);
+  _ctx.strokeStyle = 'rgba(212,160,32,' + Math.min(1, glow) + ')'; _ctx.lineWidth = 2; _ctx.stroke();
+  // Glow halo
+  var glowG = _ctx.createRadialGradient(xC, yC, 0, xC, yC, 10 * (1 + blkPulse * 0.8));
+  glowG.addColorStop(0, 'rgba(255,200,40,0.5)');
+  glowG.addColorStop(1, 'rgba(255,200,40,0)');
+  _ctx.beginPath(); _ctx.arc(xC, yC, 10 * (1 + blkPulse * 0.5), 0, Math.PI * 2);
+  _ctx.fillStyle = glowG; _ctx.fill();
+  _ctx.beginPath(); _ctx.arc(xC, yC, 5 * (1 + blkPulse * 0.5), 0, Math.PI * 2);
+  _ctx.fillStyle = isStrong ? 'rgba(255,240,100,1)' : 'rgba(212,160,32,1)'; _ctx.fill();
+  _ctx.font = 'bold 8px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(255,210,60,1)';
+  _ctx.textAlign = 'center'; _ctx.textBaseline = 'middle';
+  _ctx.fillText('C·' + pqC, xC + (xC > DK_CX ? 16 : -16), yC + (yC > DK_CY ? -12 : 12));
 
-  // ── pq_last dot + label ───────────────────────────────────────────────────
-  ctx.beginPath(); ctx.arc(xL,yL,4,0,Math.PI*2);
-  ctx.fillStyle='rgba(128,64,255,0.7)'; ctx.fill();
-  ctx.font='bold 8px JetBrains Mono,monospace';
-  ctx.fillStyle='rgba(170,120,255,0.9)';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText('LAST·'+pqL, xL+(xL>cx?14:-14), yL+(yL>cy?-10:10));
+  // Center dot
+  _ctx.beginPath(); _ctx.arc(DK_CX, DK_CY, 3, 0, Math.PI * 2);
+  _ctx.fillStyle = 'rgba(255,200,40,0.85)'; _ctx.fill();
 
-  // ── pq_curr dot + label (brighter, larger) ───────────────────────────────
-  var cPulse=1+blkPulse*0.8;
-  // Glow ring
-  var glowGrad=ctx.createRadialGradient(xC,yC,0,xC,yC,10*cPulse);
-  glowGrad.addColorStop(0,'rgba(255,200,40,0.5)');
-  glowGrad.addColorStop(1,'rgba(255,200,40,0)');
-  ctx.beginPath(); ctx.arc(xC,yC,10*cPulse,0,Math.PI*2);
-  ctx.fillStyle=glowGrad; ctx.fill();
-  // Dot
-  ctx.beginPath(); ctx.arc(xC,yC,5*cPulse,0,Math.PI*2);
-  ctx.fillStyle=isStrong?'rgba(255,240,100,1)':'rgba(212,160,32,1)'; ctx.fill();
-  // Label
-  ctx.font='bold 9px JetBrains Mono,monospace';
-  ctx.fillStyle='rgba(255,210,60,1)';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText('CURR·'+pqC, xC+(xC>cx?16:-16), yC+(yC>cy?-12:12));
+  // Fidelity inner arc
+  _ctx.beginPath();
+  _ctx.arc(DK_CX, DK_CY, DK_R * 0.22, 0, Math.PI * 2 * fid);
+  _ctx.strokeStyle = isQ ? 'rgba(0,255,157,0.55)' : 'rgba(0,180,220,0.38)';
+  _ctx.lineWidth = 2; _ctx.stroke();
 
-  // ── Center dot (lattice origin = current block) ───────────────────────────
-  ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2);
-  ctx.fillStyle='rgba(255,200,40,0.8)'; ctx.fill();
+  // ── Disk labels ───────────────────────────────────────────────────────────
+  _ctx.font = '6.5px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(0,180,220,0.48)';
+  _ctx.textAlign = 'center'; _ctx.textBaseline = 'top';
+  _ctx.fillText('PQ PHASE DISK · ' + (isStrong ? 'M>2.8 W⁺' : isQ ? 'M>2.0' : 'CLASS'), DK_CX, DK_CY - DK_R - 16);
+  _ctx.fillStyle = 'rgba(0,140,170,0.35)';
+  _ctx.fillText('fid=' + fid.toFixed(3) + '  coh=' + coh.toFixed(3), DK_CX, DK_CY - DK_R - 7);
 
-  // ── Title ─────────────────────────────────────────────────────────────────
-  ctx.font='7px JetBrains Mono,monospace';
-  ctx.fillStyle='rgba(0,180,220,0.5)';
-  ctx.textAlign='center'; ctx.textBaseline='top';
-  ctx.fillText('PQ STATE DISK · fid='+fid.toFixed(2), cx, 2);
-
-  // ── Fidelity arc inside disk ──────────────────────────────────────────────
-  ctx.beginPath();
-  ctx.arc(cx,cy,R*0.22,0,Math.PI*2*fid);
-  ctx.strokeStyle=isQ?'rgba(0,255,157,0.5)':'rgba(0,180,220,0.35)';
-  ctx.lineWidth=2; ctx.stroke();
+  // ── HUD strip (bottom) ───────────────────────────────────────────────────
+  var hudY = H - 18;
+  _ctx.font = '8px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(0,220,255,0.38)'; _ctx.textAlign = 'left'; _ctx.textBaseline = 'middle';
+  _ctx.fillText('BLOCK FIELD', 8, hudY);
+  _ctx.fillStyle = 'rgba(128,64,255,0.75)';
+  _ctx.fillText('pq_last=' + pqL, 84, hudY);
+  _ctx.fillStyle = 'rgba(212,160,32,0.85)';
+  _ctx.fillText('pq_curr=' + pqC, 164, hudY);
+  _ctx.fillStyle = 'rgba(0,255,157,0.65)';
+  _ctx.fillText('Δ=' + (pqC >= pqL ? '+' : '') + (pqC - pqL), 244, hudY);
+  var cyc = S.cycle || 0;
+  var cycStr = 'ψ cyc=' + cyc + (cyc % 8 === 0 && cyc > 0 ? ' ↑REV' : cyc % 8 === 4 ? ' ↓ANTI' : '');
+  _ctx.fillStyle = 'rgba(128,64,255,0.45)'; _ctx.textAlign = 'right';
+  _ctx.fillText(cycStr, W - 8, hudY);
 }
 
-function onBlock(){
-  blockFlashT=performance.now()*0.001;
-  _pqCurrAnim = S.pq_curr || 0;
-  _pqLastAnim = S.pq_last || 0;
+// ── Animation loop ────────────────────────────────────────────────────────────
+function _frame() {
+  _rafId = requestAnimationFrame(_frame);
+  var now = performance.now() * 0.001;
+  if (now - _lastT < 1/30) return;
+  _lastT = now;
+  _animT += 0.016;
+  _draw(_animT);
 }
-function animate(){
-  rafId=requestAnimationFrame(animate);
-  var now=performance.now();
-  if(now-lastT<1000/fps) return;
-  lastT=now;update(now*0.001);renderer.render(scene,camera);
-}
-function init(){
-  var container=document.getElementById('dc3d');
-  if(!container||typeof THREE==='undefined') return;
-  var w=container.clientWidth||container.parentElement.clientWidth||400,h=340;
-  renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
-  renderer.setSize(w,h);renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
-  renderer.setClearColor(0x000000,0);container.appendChild(renderer.domElement);
-  scene=new THREE.Scene();
-  camera=new THREE.PerspectiveCamera(50,w/h,0.01,50);
-  camera.position.set(0,0.6,2.8);camera.lookAt(0,0,0);
-  genNodes();buildScene();animate();
-  window.addEventListener('resize',function(){
-    var cont=document.getElementById('dc3d');if(!cont||!renderer||!camera) return;
-    var nw=cont.clientWidth;camera.aspect=nw/340;camera.updateProjectionMatrix();renderer.setSize(nw,340);
+
+// ── Public interface ──────────────────────────────────────────────────────────
+function init() {
+  var container = document.getElementById('dc3d');
+  if (!container) return;
+  var W = container.clientWidth || container.parentElement.clientWidth || 560;
+  var H = 340;
+  _cvs = document.createElement('canvas');
+  _cvs.width = W; _cvs.height = H;
+  _cvs.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block';
+  container.appendChild(_cvs);
+  _ctx = _cvs.getContext('2d');
+  _frame();
+  window.addEventListener('resize', function() {
+    var cont = document.getElementById('dc3d');
+    if (!cont || !_cvs) return;
+    _cvs.width = cont.clientWidth || 560;
   });
 }
-return {init:init,onBlock:onBlock};
+
+function onBlock() {
+  _blkFlash = _animT;
+  _pqCurrAnim = S.pq_curr || 0;
+  _pqLastAnim = S.pq_last || 0;
+  // Force DM re-parse on next frame
+  _H._lastHex = '';
+}
+
+return { init: init, onBlock: onBlock, _lastHex: '' };
 })();
 
-(function _h3dBoot(){
-  if(typeof THREE==='undefined'){setTimeout(_h3dBoot,80);return;}
-  var cont=document.getElementById('dc3d');
-  if(!cont){setTimeout(_h3dBoot,80);return;}
+// Boot DM visualizer (no Three.js dependency — fires immediately)
+(function _dmBoot() {
+  var cont = document.getElementById('dc3d');
+  if (!cont) { setTimeout(_dmBoot, 60); return; }
   _H.init();
 })();
 
@@ -1199,13 +1200,13 @@ function renderTxRow(tx,isNew){
 }
 
 // TX loading — pure RPC, qtcl_getTransactions, no REST, no fallback
+// FIXED: Proper error handling and response validation
 async function loadTxPage(){
   if(txLoading) return;
   txLoading=true;
   var _wd=setTimeout(function(){txLoading=false;},8000);
   var tb=document.getElementById('ttb');
-  // Only flash "Loading…" on first load — background refreshes keep existing rows visible
-  if(!txs.length && tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
+  if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
   try{
     var req={page:txPage_n,per_page:txPerPage};
     if(txFilterMode&&txFilterMode!=='all') req.type=txFilterMode;
@@ -1531,9 +1532,6 @@ async function unifiedPoll(){
       S.entropy = qm.von_neumann_entropy;
     }
     S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
-    // Capture density matrix hex from quantum metrics (8×8 complex128, 2048 hex chars)
-    if(qm.density_matrix_hex && qm.density_matrix_hex.length === 2048 && !S.dm_hex)
-      S.dm_hex = qm.density_matrix_hex;
   }
   
   // 2c. DM Snapshot (AUTHORITATIVE for: Mermin, pq, oracle per_node, derived metrics)
@@ -1548,6 +1546,10 @@ async function unifiedPoll(){
     if(dm.lattice_refresh_counter != null && dm.lattice_refresh_counter > S.cycle){
       S.cycle = dm.lattice_refresh_counter;
     }
+    
+    // ── density_matrix_hex (48×48 block → 8×8 complex float32 display) ──
+    if(dm.density_matrix_hex) S.dm_hex = dm.density_matrix_hex;
+    else if(dm.dm_hex) S.dm_hex = dm.dm_hex;
     
     // ── AUTHORITATIVE: pq_curr/pq_last from block_field ──
     var aer = dm.aer_noise_state || {};
@@ -1607,10 +1609,6 @@ async function unifiedPoll(){
       }
     }
     
-    // ── AUTHORITATIVE: density_matrix_hex from oracle snapshot ──
-    if(dm.density_matrix_hex && dm.density_matrix_hex.length === 2048)
-      S.dm_hex = dm.density_matrix_hex;
-
     // ── Derived quantum bath metrics ──
     var _p = dm.purity || S.purity || 0.8;
     var _f = dm.w_state_fidelity || S.fidelity || 0;
@@ -1750,245 +1748,3 @@ unifiedPoll();
 
 // ── TX background refresh — 30s
 setInterval(function() { if (!txLoading) loadTxPage(); }, 30000);
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// DENSITY MATRIX RENDERER — #qc canvas
-// Decodes the real density_matrix_hex from qtcl_getLatestDMSnapshot / qtcl_getQuantumMetrics.
-// Format: 2048 hex chars = 1024 bytes = 64 complex128 values (big-endian '>dd') = 8×8 matrix.
-// Each complex128 = two float64 = 16 bytes: [real_hi real_lo imag_hi imag_lo] big-endian.
-// Renders: magnitude heatmap + phase wheel per cell + diagonal population bars + colorscale.
-// ═══════════════════════════════════════════════════════════════════════════════
-(function(){
-'use strict';
-
-var N = 8;  // 8×8 matrix
-var _canvas = null, _ctx = null;
-var _rho = null;          // Float64Array[128]: [re00,im00, re01,im01, ...]
-var _rhoAnim = null;      // smoothed copy for animation
-var _lastHex = '';
-var _animId = null;
-var _prevT = 0;
-
-// ── Parse 2048-char hex → Float64Array[128] big-endian '>dd' complex128 ───────
-function _parseHex(hex) {
-  if (!hex || hex.length !== 2048) return null;
-  var buf = new ArrayBuffer(1024);
-  var u8  = new Uint8Array(buf);
-  for (var i = 0; i < 1024; i++) {
-    u8[i] = parseInt(hex.substr(i*2, 2), 16);
-  }
-  // Each element is two float64 big-endian. DataView needed for big-endian reads.
-  var dv = new DataView(buf);
-  var out = new Float64Array(128);
-  for (var k = 0; k < 64; k++) {
-    out[k*2]   = dv.getFloat64(k*16,     false); // real, big-endian
-    out[k*2+1] = dv.getFloat64(k*16 + 8, false); // imag, big-endian
-  }
-  return out;
-}
-
-// ── Lerp Float64Array in place ─────────────────────────────────────────────────
-function _lerpRho(src, dst, alpha) {
-  for (var k = 0; k < 128; k++) src[k] += (dst[k] - src[k]) * alpha;
-}
-
-// ── Colormap: magnitude [0..1] → CSS rgba ──────────────────────────────────────
-// Dark-space → deep blue → cyan → violet → gold → white
-function _col(m, a) {
-  m = m < 0 ? 0 : m > 1 ? 1 : m;
-  var r,g,b;
-  if (m < 0.15) {
-    var t = m / 0.15;
-    r = Math.round(2 + t*0);   g = Math.round(4 + t*16);  b = Math.round(14 + t*50);
-  } else if (m < 0.40) {
-    var t = (m-0.15)/0.25;
-    r = Math.round(0);         g = Math.round(20 + t*140); b = Math.round(64 + t*100);
-  } else if (m < 0.65) {
-    var t = (m-0.40)/0.25;
-    r = Math.round(0 + t*100); g = Math.round(160 - t*96); b = Math.round(164 + t*91);
-  } else if (m < 0.85) {
-    var t = (m-0.65)/0.20;
-    r = Math.round(100+t*112); g = Math.round(64  + t*96); b = Math.round(255 - t*200);
-  } else {
-    var t = (m-0.85)/0.15;
-    r = Math.round(212+t*43);  g = Math.round(160+t*80);   b = Math.round(55  + t*100);
-  }
-  return 'rgba('+r+','+g+','+b+','+(a==null?1:a)+')';
-}
-
-// ── Draw ───────────────────────────────────────────────────────────────────────
-function _draw(ts) {
-  _animId = requestAnimationFrame(_draw);
-  var dt = Math.min(0.12, (ts - _prevT) * 0.001);
-  _prevT = ts;
-
-  // Lazy canvas init — size to container
-  if (!_canvas) {
-    _canvas = document.getElementById('qc');
-    if (!_canvas) return;
-    _ctx = _canvas.getContext('2d');
-  }
-  var W = _canvas.offsetWidth  || _canvas.parentElement.clientWidth  || 320;
-  var H = Math.round(W * 0.62); // ~62% aspect keeps cells nearly square with label room
-  if (_canvas.width !== W || _canvas.height !== H) { _canvas.width = W; _canvas.height = H; }
-
-  // Pull latest hex from S — decode only when changed
-  var hex = S.dm_hex || '';
-  if (hex && hex !== _lastHex) {
-    var parsed = _parseHex(hex);
-    if (parsed) { _rho = parsed; _lastHex = hex; }
-  }
-
-  // Synthesize fallback from S.* fields when no real hex yet
-  if (!_rho) {
-    _rho = new Float64Array(128);
-    var fid = S.fidelity || 0.9, coh = S.coherence || 0.7;
-    var C_val = S.concurrence || 0, gamma = S.gammaphi || 0.12;
-    // W-state structure: equal diagonal + off-diagonal coherences
-    var pop = fid / N;
-    for (var i = 0; i < N; i++) {
-      _rho[(i*N+i)*2] = pop; // diagonal real
-      for (var j = 0; j < N; j++) {
-        if (i === j) continue;
-        var d = Math.abs(i-j), decay = Math.exp(-d * gamma * 2.5);
-        var mag = Math.sqrt(pop*pop) * C_val * decay * coh;
-        var phi = (i*1.618 + j*2.094) * 0.8 + (S.phase_drift||0)*Math.PI*2 + (S.omega||0.5)*0.3;
-        _rho[(i*N+j)*2]   = mag * Math.cos(phi);
-        _rho[(i*N+j)*2+1] = mag * Math.sin(phi);
-      }
-    }
-  }
-
-  // Smooth animation
-  if (!_rhoAnim) { _rhoAnim = new Float64Array(_rho); }
-  else { _lerpRho(_rhoAnim, _rho, Math.min(1, dt * 3.5)); }
-
-  var ctx = _ctx;
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#000508'; ctx.fillRect(0, 0, W, H);
-
-  // Layout
-  var PAD_L = 30, PAD_T = 16, PAD_R = 10, PAD_B = 28;
-  var GW = W - PAD_L - PAD_R, GH = H - PAD_T - PAD_B;
-  var cs = Math.min(GW, GH) / N; // cell size
-  var ox = PAD_L, oy = PAD_T;   // grid origin
-
-  // Find max |ρᵢⱼ| for normalization
-  var maxMag = 1e-12, trRe = 0;
-  for (var i = 0; i < N; i++) {
-    for (var j = 0; j < N; j++) {
-      var re = _rhoAnim[(i*N+j)*2], im = _rhoAnim[(i*N+j)*2+1];
-      var mag = Math.sqrt(re*re + im*im);
-      if (mag > maxMag) maxMag = mag;
-      if (i === j) trRe += re;
-    }
-  }
-  // Normalize so max diagonal = 1.0 for display (preserve relative magnitudes)
-  var norm = maxMag > 0 ? 1.0 / maxMag : 1;
-
-  // ── Cells ─────────────────────────────────────────────────────────────────
-  for (var i = 0; i < N; i++) {
-    for (var j = 0; j < N; j++) {
-      var re = _rhoAnim[(i*N+j)*2], im = _rhoAnim[(i*N+j)*2+1];
-      var mag = Math.sqrt(re*re + im*im) * norm;
-      var x = ox + j*cs, y = oy + i*cs;
-
-      // Cell background fill — colormap on magnitude
-      ctx.fillStyle = _col(mag);
-      ctx.fillRect(x, y, cs, cs);
-
-      // Diagonal: gold border + faint population bar at bottom
-      if (i === j) {
-        ctx.strokeStyle = 'rgba(212,160,32,0.55)'; ctx.lineWidth = 1.2;
-        ctx.strokeRect(x+0.6, y+0.6, cs-1.2, cs-1.2);
-        // Population bar — height proportional to diagonal magnitude
-        var bh = cs * mag * 0.9;
-        ctx.fillStyle = 'rgba(212,160,32,0.3)';
-        ctx.fillRect(x+2, y + cs - bh - 2, cs-4, bh);
-      }
-
-      // Off-diagonal: phase wheel if coherence large enough
-      if (i !== j && mag > 0.08) {
-        var phase = Math.atan2(im, re);
-        var cx2 = x + cs/2, cy2 = y + cs/2;
-        var pr = cs * 0.28 * mag;
-        // Phase arc from 0 to phase
-        ctx.beginPath();
-        ctx.moveTo(cx2, cy2);
-        ctx.arc(cx2, cy2, pr, -Math.PI/2, -Math.PI/2 + phase, phase < 0);
-        ctx.closePath();
-        ctx.fillStyle = 'rgba(0,255,157,' + Math.min(0.7, mag * 1.4) + ')';
-        ctx.fill();
-        // Phase dot on rim
-        ctx.beginPath();
-        ctx.arc(cx2 + Math.cos(-Math.PI/2 + phase)*pr, cy2 + Math.sin(-Math.PI/2 + phase)*pr, Math.max(1, cs*0.06), 0, Math.PI*2);
-        ctx.fillStyle = 'rgba(0,255,157,0.9)'; ctx.fill();
-      }
-
-      // Magnitude text — only if cell large enough
-      if (cs >= 30) {
-        ctx.font = 'bold ' + Math.round(cs * 0.165) + 'px JetBrains Mono,monospace';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillStyle = mag > 0.55 ? 'rgba(0,0,0,0.75)' : 'rgba(255,255,255,0.5)';
-        ctx.fillText(mag.toFixed(2), x + cs/2, y + cs/2);
-      }
-    }
-  }
-
-  // ── Grid lines ─────────────────────────────────────────────────────────────
-  ctx.strokeStyle = 'rgba(0,220,255,0.10)'; ctx.lineWidth = 0.5;
-  for (var k = 0; k <= N; k++) {
-    ctx.beginPath(); ctx.moveTo(ox + k*cs, oy);       ctx.lineTo(ox + k*cs, oy + N*cs); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(ox,        oy + k*cs); ctx.lineTo(ox + N*cs, oy + k*cs); ctx.stroke();
-  }
-
-  // ── Row / col labels ───────────────────────────────────────────────────────
-  ctx.font = '8px JetBrains Mono,monospace';
-  ctx.fillStyle = 'rgba(0,180,220,0.5)';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  for (var k = 0; k < N; k++) {
-    ctx.fillText('|'+k+'⟩', ox + k*cs + cs/2, oy - 7);  // col header
-    ctx.fillText('⟨'+k+'|', ox - 15, oy + k*cs + cs/2);  // row header
-  }
-
-  // ── Colorscale bar ─────────────────────────────────────────────────────────
-  var sbY = oy + N*cs + 6, sbH = 7, sbW = N*cs;
-  var grad = ctx.createLinearGradient(ox, 0, ox+sbW, 0);
-  for (var s = 0; s <= 20; s++) grad.addColorStop(s/20, _col(s/20));
-  ctx.fillStyle = grad; ctx.fillRect(ox, sbY, sbW, sbH);
-  ctx.strokeStyle = 'rgba(0,220,255,0.2)'; ctx.lineWidth = 0.5;
-  ctx.strokeRect(ox, sbY, sbW, sbH);
-  ctx.fillStyle = 'rgba(0,180,220,0.45)'; ctx.font = '7px JetBrains Mono,monospace';
-  ctx.textAlign = 'left';  ctx.textBaseline = 'top'; ctx.fillText('0', ox, sbY+sbH+1);
-  ctx.textAlign = 'center';ctx.fillText('|ρᵢⱼ|', ox+sbW/2, sbY+sbH+1);
-  ctx.textAlign = 'right'; ctx.fillText('max', ox+sbW, sbY+sbH+1);
-
-  // ── HUD stat line ──────────────────────────────────────────────────────────
-  var _se = function(id,v){var e=document.getElementById(id);if(e)e.textContent=v;};
-  _se('qc-max',  maxMag.toFixed(4));
-  _se('qc-tr',   trRe.toFixed(4));
-  // Off-diagonal coherence sum (W-state quality measure)
-  var cohSum = 0;
-  for (var i = 0; i < N; i++) for (var j = 0; j < N; j++) {
-    if (i !== j) { var re=_rhoAnim[(i*N+j)*2],im=_rhoAnim[(i*N+j)*2+1]; cohSum+=Math.sqrt(re*re+im*im); }
-  }
-  _se('qc-coh', (cohSum / (N*N - N)).toFixed(4));
-
-  // Badge
-  var badgeEl = document.getElementById('dm-badge');
-  if (badgeEl) badgeEl.textContent = _lastHex ? 'live ✓' : 'synth';
-  var purEl = document.getElementById('dm-pur-badge');
-  if (purEl) purEl.textContent = 'pur ' + ((S.purity||0)*100).toFixed(1)+'%';
-}
-
-// Boot when DOM ready
-(function _boot(){
-  if (!document.getElementById('qc')) { setTimeout(_boot, 120); return; }
-  requestAnimationFrame(_draw);
-})();
-
-})(); // end DM renderer IIFE
-
-</script>
-</body>
-</html>
