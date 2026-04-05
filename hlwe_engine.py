@@ -81,11 +81,64 @@ class HyperbolicGeometry:
             return cls._instance
     
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or os.getenv('QTCL_DB_PATH', './qtcl_blockchain.db')
+        # Server (Koyeb) → Supabase via POOLER_* env vars
+        # Client → local SQLite DB
+        self._use_supabase = bool(os.getenv('POOLER_HOST'))
+        self._supabase_conn = None
+        self.db_path = None  # only for SQLite mode
+        
+        if self._use_supabase:
+            logger.info("[HyperbolicGeometry] Server mode: using Supabase (POOLER_*)")
+        else:
+            self.db_path = db_path or os.getenv('QTCL_DB_PATH', './qtcl_blockchain.db')
+            if not Path(self.db_path).exists():
+                for candidate in ['/data/qtcl_blockchain.db', './data/qtcl_blockchain.db']:
+                    if Path(candidate).exists():
+                        self.db_path = candidate
+                        break
+            logger.info(f"[HyperbolicGeometry] Client mode: SQLite at {self.db_path}")
+        
         self._geometry_hash_cache = None
         self._cache_timestamp = 0.0
         self._lock = threading.Lock()
-        logger.info(f"[HyperbolicGeometry] Initialized with DB: {self.db_path}")
+    
+    def _get_connection(self):
+        """Get DB connection — Supabase on server, SQLite on client."""
+        if self._use_supabase:
+            return self._get_supabase_connection()
+        else:
+            return self._get_sqlite_connection()
+    
+    def _get_supabase_connection(self):
+        """Get or create Supabase connection using POOLER_* env vars."""
+        if self._supabase_conn is not None:
+            try:
+                cur = self._supabase_conn.cursor()
+                cur.execute('SELECT 1')
+                cur.close()
+                return self._supabase_conn
+            except Exception:
+                self._supabase_conn = None
+        
+        import psycopg2
+        host = os.getenv('POOLER_HOST', '')
+        port = os.getenv('POOLER_PORT', '5432')
+        dbname = os.getenv('POOLER_DATABASE', '')
+        user = os.getenv('POOLER_USER', '')
+        password = os.getenv('POOLER_PASSWORD', '')
+        self._supabase_conn = psycopg2.connect(
+            host=host, port=port, dbname=dbname, user=user, password=password
+        )
+        logger.info("[HyperbolicGeometry] ✅ Supabase connection established")
+        return self._supabase_conn
+    
+    def _get_sqlite_connection(self) -> sqlite3.Connection:
+        """Return a connection to the SQLite database."""
+        if not self.db_path or not Path(self.db_path).exists():
+            raise FileNotFoundError(f"Hyperbolic geometry database not found: {self.db_path}")
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+        conn.row_factory = sqlite3.Row
+        return conn
     
     def _get_connection(self) -> sqlite3.Connection:
         """Return a connection to the SQLite database."""
@@ -99,29 +152,54 @@ class HyperbolicGeometry:
         """Fetch hyperbolic triangles up to max_depth."""
         try:
             conn = self._get_connection()
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT triangle_id, depth, parent_id,
-                       v0_x, v0_y,
-                       v1_x, v1_y,
-                       v2_x, v2_y
-                FROM hyperbolic_triangles
-                WHERE depth <= ?
-                ORDER BY triangle_id
-            """, (max_depth,))
-            rows = cur.fetchall()
-            triangles = []
-            for row in rows:
-                tri = {
-                    'id': row['triangle_id'],
-                    'depth': row['depth'],
-                    'parent_id': row['parent_id'],
-                    'v0': (float(row['v0_x']), float(row['v0_y'])),
-                    'v1': (float(row['v1_x']), float(row['v1_y'])),
-                    'v2': (float(row['v2_x']), float(row['v2_y'])),
-                }
-                triangles.append(tri)
-            conn.close()
+            if self._use_supabase:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT triangle_id, depth, parent_id,
+                           v0_x, v0_y,
+                           v1_x, v1_y,
+                           v2_x, v2_y
+                    FROM hyperbolic_triangles
+                    WHERE depth <= %s
+                    ORDER BY triangle_id
+                """, (max_depth,))
+                rows = cur.fetchall()
+                triangles = []
+                for row in rows:
+                    tri = {
+                        'id': row[0],
+                        'depth': row[1],
+                        'parent_id': row[2],
+                        'v0': (float(row[3]), float(row[4])),
+                        'v1': (float(row[5]), float(row[6])),
+                        'v2': (float(row[7]), float(row[8])),
+                    }
+                    triangles.append(tri)
+                cur.close()
+            else:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT triangle_id, depth, parent_id,
+                           v0_x, v0_y,
+                           v1_x, v1_y,
+                           v2_x, v2_y
+                    FROM hyperbolic_triangles
+                    WHERE depth <= ?
+                    ORDER BY triangle_id
+                """, (max_depth,))
+                rows = cur.fetchall()
+                triangles = []
+                for row in rows:
+                    tri = {
+                        'id': row['triangle_id'],
+                        'depth': row['depth'],
+                        'parent_id': row['parent_id'],
+                        'v0': (float(row['v0_x']), float(row['v0_y'])),
+                        'v1': (float(row['v1_x']), float(row['v1_y'])),
+                        'v2': (float(row['v2_x']), float(row['v2_y'])),
+                    }
+                    triangles.append(tri)
+                conn.close()
             return triangles
         except Exception as e:
             logger.error(f"[HyperbolicGeometry] Failed to fetch triangles: {e}")

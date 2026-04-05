@@ -887,24 +887,19 @@ class HLWESigner:
         if w_entropy is None:
             try: w_entropy = get_block_field_entropy()
             except: w_entropy = secrets.token_bytes(32)
-            
-        # Re-derive HLWE secret vector from 32-byte private key to bridge systems
-        # Use private key + w_entropy as seed for canonical HLWE vector derivation
+        
         msg_hash_bytes = bytes.fromhex(msg_hash)
         
         if self._engine:
-            # For museum-grade consistency, we sign using the engine
-            # We seed the engine's secret vector from our 32-byte private key
-            # to keep the identity binding consistent.
-            s_vector = self._engine._derive_secret_vector(kp.private_key, 256)
-            priv_hex = self._engine._encode_vector_to_hex(s_vector)
+            # kp.private_key is 32 bytes → hex is 64 chars (the seed)
+            priv_hex = kp.private_key.hex()
             sig_result = self._engine.sign_hash(msg_hash_bytes, priv_hex)
             
             return HLWESignature(
-                signature=sig_result['signature'],
-                auth_tag=sig_result['auth_tag'],
-                timestamp=sig_result['timestamp'],
-                public_key_hex=kp.public_key.hex(),
+                signature=sig_result.get('z', ''),
+                auth_tag=sig_result.get('c_hash', ''),
+                timestamp=sig_result.get('timestamp', ''),
+                public_key_hex=sig_result.get('public_key', kp.public_key.hex()),
                 w_entropy_hash=hashlib.sha3_256(w_entropy).digest().hex(),
                 derivation_path=kp.path,
                 timestamp_ns=time.time_ns()
