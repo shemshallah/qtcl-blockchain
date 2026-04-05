@@ -1468,17 +1468,20 @@ var _lastBlockHeight = 0;
 async function unifiedPoll(){
   // ── STEP 1: Batch fetch ALL data in single round-trip
   var fromH = Math.max(0, S.height - 20);
-  var results = await rpcBatch([
+  var batchPromise = rpcBatch([
     ['qtcl_getBlockHeight', []],
     ['qtcl_getQuantumMetrics', []],
-    ['qtcl_getLatestDMSnapshot', []],
     ['qtcl_getMempoolStats', []],
     ['qtcl_getPeers', []],
     ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
     ['qtcl_getBlockRange', [fromH, S.height]],
   ]);
-  
-  var [hr, qm, dm, mp, peers, events, blockRange] = results;
+  var oraclePromise = fetch('/rpc/oracle/snapshots?limit=1')
+    .then(r => r.json())
+    .then(data => data.result && data.result.snapshots && data.result.snapshots[0] ? data.result.snapshots[0] : null)
+    .catch(() => null);
+  var [results, oracleSnap] = await Promise.all([batchPromise, oraclePromise]);
+  var [hr, qm, mp, peers, events, blockRange] = results;
   
   // ── STEP 2: Process each metric ONCE with clear priority
   // Priority: DM Snapshot > Quantum Metrics > Block Data > Fallback
@@ -1542,24 +1545,24 @@ async function unifiedPoll(){
   }
   
   // 2c. DM Snapshot (AUTHORITATIVE for: Mermin, pq, oracle per_node, derived metrics)
-  if(dm){
+  if(oracleSnap){
     // Consensus-level fields
-    if(dm.w_state_fidelity != null) S.fidelity = dm.w_state_fidelity;
-    if(dm.purity != null) S.purity = dm.purity;
-    if(dm.coherence_l1 != null) S.coherence = dm.coherence_l1;
-    if(dm.von_neumann_entropy != null) S.entropy = dm.von_neumann_entropy;
+    if(oracleSnap.w_state_fidelity != null) S.fidelity = oracleSnap.w_state_fidelity;
+    if(oracleSnap.purity != null) S.purity = oracleSnap.purity;
+    if(oracleSnap.coherence_l1 != null) S.coherence = oracleSnap.coherence_l1;
+    if(oracleSnap.von_neumann_entropy != null) S.entropy = oracleSnap.von_neumann_entropy;
     
     // Cycle count
-    if(dm.lattice_refresh_counter != null && dm.lattice_refresh_counter > S.cycle){
-      S.cycle = dm.lattice_refresh_counter;
+    if(oracleSnap.lattice_refresh_counter != null && oracleSnap.lattice_refresh_counter > S.cycle){
+      S.cycle = oracleSnap.lattice_refresh_counter;
     }
     
     // ── density_matrix_hex (48×48 block → 8×8 complex float32 display) ──
-    if(dm.density_matrix_hex) S.dm_hex = dm.density_matrix_hex;
-    else if(dm.dm_hex) S.dm_hex = dm.dm_hex;
+    if(oracleSnap.density_matrix_hex) S.dm_hex = oracleSnap.density_matrix_hex;
+    else if(oracleSnap.dm_hex) S.dm_hex = oracleSnap.dm_hex;
     
     // ── AUTHORITATIVE: pq_curr/pq_last from block_field ──
-    var aer = dm.aer_noise_state || {};
+    var aer = oracleSnap.aer_noise_state || {};
     var bf = aer.block_field || {};
     if(bf.pq_curr != null){
       S.pq_curr = bf.pq_curr;
@@ -1588,11 +1591,11 @@ async function unifiedPoll(){
       S.oracle_consensus_reached = consensusCount >= 3;
       S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
       S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
-    }else if(dm.w_state_fidelity != null && dm.w_state_fidelity > 0){
+    }else if(oracleSnap.w_state_fidelity != null && oracleSnap.w_state_fidelity > 0){
       // Fallback: use consensus values for all 5 oracles when per_node not available
-      var cf = dm.w_state_fidelity;
-      var cc = dm.coherence_l1;
-      var ce = dm.von_neumann_entropy;
+      var cf = oracleSnap.w_state_fidelity;
+      var cc = oracleSnap.coherence_l1;
+      var ce = oracleSnap.von_neumann_entropy;
       for(var oi=1; oi<=5; oi++){
         var ok = 'oracle_' + oi;
         if(!S.oracle_data[ok]) S.oracle_data[ok] = {};
@@ -1617,8 +1620,8 @@ async function unifiedPoll(){
     }
     
     // ── Derived quantum bath metrics ──
-    var _p = dm.purity || S.purity || 0.8;
-    var _f = dm.w_state_fidelity || S.fidelity || 0;
+    var _p = oracleSnap.purity || S.purity || 0.8;
+    var _f = oracleSnap.w_state_fidelity || S.fidelity || 0;
     S.negativity = Math.max(0, (_p - 0.5) * 0.8);
     S.concurrence = Math.max(0, (_p - 0.333) * 1.2);
     S.entanglement = Math.max(0, _f * 0.9);
@@ -1627,8 +1630,8 @@ async function unifiedPoll(){
     S.tele_fidelity = Math.max(0, _f * 0.95);
     
     // ── Mermin (authoritative) ──
-    if(dm.mermin_test) S.mermin = dm.mermin_test;
-    else if(dm.mermin) S.mermin = dm.mermin;
+    if(oracleSnap.mermin_test) S.mermin = oracleSnap.mermin_test;
+    else if(oracleSnap.mermin) S.mermin = oracleSnap.mermin;
   }
   
   // 2d. Mempool
