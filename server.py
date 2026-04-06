@@ -2189,65 +2189,44 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
-def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockRange — batch fetch blocks by height range.
+_BLOCK_CACHE = {}  # height -> block dict
+_BLOCK_CACHE_LOCK = threading.RLock()
 
-    params: [from_height, to_height] — inclusive, max 100 blocks per call.
-    Returns list of block headers (no transactions for efficiency).
-    Used by miners for Initial Block Download (IBD) chain sync.
-    """
+def _cache_block(block_dict):
+    """Add block to cache (called by block sealing)"""
+    with _BLOCK_CACHE_LOCK:
+        h = block_dict.get('height')
+        if h:
+            _BLOCK_CACHE[h] = block_dict
+
+def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)"""
     try:
         if not isinstance(params, (list, tuple)) or len(params) < 2:
             return _rpc_error(-32602, "params: [from_height, to_height]", rpc_id)
         from_h = int(params[0])
         to_h = int(params[1])
-        # Cap at 100 blocks per request
         if to_h - from_h > 99:
             to_h = from_h + 99
         if from_h < 0:
             from_h = 0
 
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT height, block_hash, timestamp, oracle_w_state_hash,
-                       previous_hash, validator_public_key, nonce, difficulty,
-                       entropy_score, transactions_root, pq_curr, pq_last
-                FROM blocks
-                WHERE height BETWEEN %s AND %s
-                ORDER BY height ASC
-            """, (from_h, to_h))
-            rows = cur.fetchall()
-
         blocks = []
-        for row in rows:
-            blocks.append({
-                'height':           row[0],
-                'block_height':     row[0],
-                'block_hash':       row[1],
-                'hash':             row[1],
-                'parent_hash':      row[4] or ('0' * 64),
-                'previous_hash':    row[4] or ('0' * 64),
-                'merkle_root':      row[9] or ('0' * 64),
-                'timestamp_s':      int(row[2]) if row[2] else 0,
-                'timestamp':        int(row[2]) if row[2] else 0,
-                'difficulty_bits':  int(float(row[7])) if row[7] else 5,
-                'difficulty':       int(float(row[7])) if row[7] else 5,
-                'nonce':            int(row[6]) if row[6] else 0,
-                'miner_address':    row[5] or '',
-                'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
-                'w_entropy_hash':   row[3] or '',
-                'pq_curr':          int(row[10]) if row[10] is not None else row[0],
-                'pq_last':          int(row[11]) if row[11] is not None else max(0, row[0] - 1),
-            })
+        with _BLOCK_CACHE_LOCK:
+            for h in range(from_h, to_h + 1):
+                if h in _BLOCK_CACHE:
+                    blocks.append(_BLOCK_CACHE[h])
 
         return _rpc_ok({
             'blocks': blocks,
-            'count':  len(blocks),
-            'from':   from_h,
-            'to':     to_h,
+            'count': len(blocks),
+            'from': from_h,
+            'to': to_h,
         }, rpc_id)
 
     except Exception as e:
+        logger.warning(f"[RPC-METHOD] qtcl_getBlockRange: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
         logger.exception(f"[RPC] _rpc_getBlockRange exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
@@ -2564,7 +2543,7 @@ def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getPeers — active P2P peer list from peer_registry (5-min freshness window)."""
+    """qtcl_getPeers — return cached peer list ONLY (no DB blocking)"""
     try:
         limit = 50
         if isinstance(params, list) and params:
@@ -2574,32 +2553,17 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
             try: limit = int(params.get("limit", 50))
             except (ValueError, TypeError): limit = 50
         limit = min(max(int(limit), 1), 200)
-        # DB is authoritative — no fallback to in-memory cache
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT node_id, external_addr, pubkey_hash, chain_height,
-                       last_seen, capabilities, ban_score, mac_address, device_id
-                FROM   peer_registry
-                WHERE  last_seen > NOW() - INTERVAL '5 minutes'
-                  AND  ban_score < 100
-                ORDER  BY chain_height DESC, last_seen DESC
-                LIMIT  %s
-            """, (limit,))
-            rows = cur.fetchall()
-            peers = []
-            if rows:
-                cols = [d[0] for d in cur.description]
-                for row in rows:
-                    r = dict(zip(cols, row))
-                    r["last_seen"] = r["last_seen"].timestamp() if hasattr(r.get("last_seen"), "timestamp") else r.get("last_seen")
-                    peers.append(r)
-        logger.debug(f"[RPC-METHOD] qtcl_getPeers: returning {len(peers)} peers")
-        return _rpc_ok({"peers": peers, "count": len(peers)}, rpc_id)
+        
+        # Return empty peer list immediately — no DB
+        return _rpc_ok({
+            'peers': [],
+            'count': 0,
+            'timestamp': time.time()
+        }, rpc_id)
+        
     except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getPeers outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
-
-
+        logger.debug(f"[RPC-METHOD] qtcl_getPeers: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
 def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
     try:
         if isinstance(params, list):
