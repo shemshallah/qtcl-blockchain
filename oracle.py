@@ -512,7 +512,8 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-MEASUREMENT_TIMEOUT          = 2    # 2s hard cap — 5 nodes parallel, 500ms budget
+MEASUREMENT_TIMEOUT          = 5    # 5s cap — 5 nodes parallel, sufficient headroom for QRNG contention
+
 W_STATE_STREAM_INTERVAL_MS   = 10
 LATTICE_REFRESH_INTERVAL_MS  = 50
 AER_NOISE_KAPPA              = 0.005

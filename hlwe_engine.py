@@ -1489,6 +1489,107 @@ class HLWEEngine:
                 return False
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# BIP39 MNEMONIC MANAGER
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class MnemonicStrength(Enum):
+    """BIP39 entropy strength levels."""
+    STANDARD = 128      # 12 words
+    HIGH     = 256      # 24 words
+
+
+class BIP39Mnemonics:
+    """BIP39 mnemonic seed phrase generation and derivation."""
+    
+    def __init__(self):
+        self.wordlist = BIP39_WORDLIST
+    
+    def generate_mnemonic(self, strength=None):
+        """Generate random mnemonic from entropy."""
+        if strength is None:
+            strength = MnemonicStrength.STANDARD
+        if isinstance(strength, MnemonicStrength):
+            entropy_bits = strength.value
+        else:
+            entropy_bits = 128
+        
+        entropy_bytes = entropy_bits // 8
+        entropy = secrets.token_bytes(entropy_bytes)
+        return self._entropy_to_mnemonic(entropy)
+    
+    def _entropy_to_mnemonic(self, entropy: bytes) -> str:
+        """Convert entropy to BIP39 mnemonic words."""
+        hash_obj = hashlib.sha256(entropy).digest()
+        checksum_bits_len = len(entropy) * 8 // 32
+        checksum_bits = bin(int.from_bytes(hash_obj[:1], 'big'))[2:].zfill(8)[:checksum_bits_len]
+        
+        entropy_bits = bin(int.from_bytes(entropy, 'big'))[2:].zfill(len(entropy) * 8)
+        combined = entropy_bits + checksum_bits
+        
+        mnemonic = []
+        for i in range(0, len(combined), 11):
+            idx = int(combined[i:i+11], 2)
+            mnemonic.append(self.wordlist[idx])
+        
+        return ' '.join(mnemonic)
+    
+    def mnemonic_to_seed(self, mnemonic: str, passphrase: str = '') -> bytes:
+        """PBKDF2-HMAC-SHA512 of mnemonic + passphrase (BIP39 standard)."""
+        mnemonic_bytes = mnemonic.encode('utf-8')
+        salt = b'mnemonic' + passphrase.encode('utf-8')
+        
+        # PBKDF2 with 2048 iterations (BIP39 standard)
+        seed = hashlib.pbkdf2_hmac(
+            'sha512',
+            mnemonic_bytes,
+            salt,
+            2048
+        )
+        return seed
+    
+    def validate_mnemonic(self, mnemonic: str) -> bool:
+        """Validate checksum of mnemonic."""
+        words = mnemonic.split()
+        if len(words) not in [12, 15, 18, 21, 24]:
+            return False
+        
+        try:
+            indices = [self.wordlist.index(w) for w in words]
+            bits = ''.join(f'{i:011b}' for i in indices)
+            
+            entropy_len = len(bits) * 32 // 33
+            entropy_bits = bits[:entropy_len]
+            checksum_bits = bits[entropy_len:]
+            
+            entropy = int(entropy_bits, 2).to_bytes(entropy_len // 8, 'big')
+            hash_obj = hashlib.sha256(entropy).digest()
+            expected_checksum = bin(int.from_bytes(hash_obj[:1], 'big'))[2:].zfill(8)
+            
+            checksum_len = len(entropy) * 8 // 32
+            return checksum_bits == expected_checksum[:checksum_len]
+        except (ValueError, IndexError):
+            return False
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# STUB HELPER CLASSES (Placeholder - not actively used)
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class BIP38Encryption:
+    """BIP38 password-protected private key encryption (stub)."""
+    def encrypt_private_key(self, private_key_hex: str, passphrase: str) -> Dict[str, str]:
+        """Stub - returns unencrypted for now."""
+        return {'encrypted': private_key_hex, 'method': 'stub'}
+
+
+class SupabaseAPI:
+    """Supabase integration stub."""
+    def save_wallet(self, metadata):
+        """Stub - does nothing."""
+        pass
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # COMPLETE WALLET MANAGER (Integration Layer)
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
