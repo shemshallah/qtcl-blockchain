@@ -32,39 +32,7 @@
 
 import os
 import sys
-# ── JSON serialisation: orjson (5-8× faster, zero-copy bytes output) ──────────
-# orjson.dumps() returns bytes (not str). orjson.loads() accepts bytes/str/memoryview.
-# API is a strict superset of stdlib json for the patterns used here:
-#   json.dumps(x)          → orjson.dumps(x).decode()   [or use bytes directly]
-#   json.loads(b)          → orjson.loads(b)             [bytes accepted natively]
-#   json.dumps(x, default) → orjson.dumps(x, default=f) [same kwarg name]
-# The compatibility shim below makes all existing json.* call sites work unchanged.
-try:
-    import orjson as _orjson
-    class _JsonShim:
-        """Drop-in stdlib json replacement backed by orjson."""
-        @staticmethod
-        def dumps(obj, *, default=None, sort_keys=False, indent=None, **_kw):
-            option = 0
-            if sort_keys:
-                option |= _orjson.OPT_SORT_KEYS
-            if indent:
-                option |= _orjson.OPT_INDENT_2
-            try:
-                return _orjson.dumps(obj, default=default, option=option or None).decode('utf-8')
-            except TypeError:
-                # orjson rejects unknown types without a default — fall back to stdlib
-                import json as _stdlib_json
-                return _stdlib_json.dumps(obj, default=default, sort_keys=sort_keys, indent=indent)
-        @staticmethod
-        def loads(s):
-            return _orjson.loads(s)
-        JSONDecodeError = _orjson.JSONDecodeError
-    json = _JsonShim()
-    logger_pre = __import__('logging').getLogger(__name__)
-    logger_pre.info("[SERVER] orjson active — 5-8× faster JSON serialisation")
-except ImportError:
-    import json  # stdlib fallback — install orjson>=3.9.0 for production
+import json
 import time
 _SERVER_START_TIME = time.time()   # set once at module import — never drifts
 import socket
@@ -194,7 +162,7 @@ def _dispatch(body_bytes: bytes) -> Tuple[dict, int]:
     return _dispatch_single(body), 200
 
 def _dispatch_single(req: dict) -> Optional[dict]:
-    """Dispatch single JSON-RPC 2.0 request."""
+    """Dispatch single JSON-RPC 2.0 request with per-method timeout."""
     if not isinstance(req, dict):
         return _rpc_error(-32600, "Invalid Request: not an object", None)
     
@@ -208,7 +176,33 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
     
     try:
-        return _RPC_METHODS[method](params, rpc_id)
+        # Per-method timeout: 3s for most, 5s for expensive queries
+        timeout_map = {
+            'qtcl_getBlockRange': 5.0,
+            'qtcl_getQuantumMetrics': 5.0,
+            'qtcl_getLatestDMSnapshot': 2.0,
+            'qtcl_getTransactions': 5.0,
+            'qtcl_getPeers': 2.0,
+        }
+        timeout_sec = timeout_map.get(method, 3.0)
+        
+        import signal
+        def timeout_handler(signum, frame):
+            raise TimeoutError(f"RPC method {method} exceeded {timeout_sec}s timeout")
+        
+        # Only use signal timeout on Unix
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(int(timeout_sec) + 1)
+        try:
+            result = _RPC_METHODS[method](params, rpc_id)
+            signal.alarm(0)
+            return result
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    except TimeoutError as te:
+        logger.warning(f"[RPC] {method} TIMEOUT: {te}")
+        return _rpc_error(-32000, f"RPC timeout: {str(te)}", rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] {method} raised: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
@@ -240,22 +234,21 @@ def _init_qrng_ensemble():
             raise RuntimeError(f"[INIT-QRNG] Cannot initialize Quantum RNG. Error: {e}")
 
 def _init_hlwe_engine():
-    """Lazy init HLWE_ENGINE on first demand. Non-blocking, no circular imports."""
+    """Lazy init HLWE_ENGINE on first demand."""
     global HLWE_ENGINE
     if HLWE_ENGINE is not None:
         return HLWE_ENGINE
     with _HLWE_INIT_LOCK:
-        if HLWE_ENGINE is not None:
+        if HLWE_ENGINE is not None:  # double-check
             return HLWE_ENGINE
         try:
             from hlwe_engine import HLWEEngine
             HLWE_ENGINE = HLWEEngine()
-            logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized")
+            logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized on first use")
             return HLWE_ENGINE
         except Exception as e:
-            logger.warning(f"[INIT-HLWE] ⚠️  HLWE init failed (non-fatal): {e}")
-            HLWE_ENGINE = None
-            return None
+            logger.critical(f"[INIT-HLWE] ❌ FATAL: Cannot initialize HLWE_ENGINE: {e}")
+            raise RuntimeError(f"[INIT-HLWE] Cannot initialize HLWE cryptography. Error: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
@@ -2383,33 +2376,17 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
             try:
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching W-state snapshot (timeout=5s)")
                 w_snap = _call_with_timeout(
-                    lambda: ORACLE_W_STATE_MANAGER.get_latest_density_matrix() if ORACLE_W_STATE_MANAGER else None,
+                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
                     timeout_sec=5.0
                 )
                 if w_snap:
                     result["w_state"] = {
-                        "purity":     w_snap.get("purity"),
-                        "entropy":    w_snap.get("von_neumann_entropy"),
-                        "coherence":  w_snap.get("coherence_l1"),
-                        "fidelity":   w_snap.get("w_state_fidelity"),
-                        "snapshot_id": None,
+                        "purity":     getattr(w_snap, "purity",     None),
+                        "entropy":    getattr(w_snap, "entropy",    None),
+                        "coherence":  getattr(w_snap, "coherence",  None),
+                        "fidelity":   getattr(w_snap, "fidelity",   None),
+                        "snapshot_id": getattr(w_snap, "snapshot_id", None),
                     }
-                    # ── Extract ALL oracle fields for frontend (NO FALLBACKS) ──
-                    result["w_state_fidelity"] = w_snap.get("w_state_fidelity")
-                    result["coherence_l1"] = w_snap.get("coherence_l1")
-                    result["von_neumann_entropy"] = w_snap.get("von_neumann_entropy")
-                    result["purity"] = w_snap.get("purity")
-                    # Mermin from oracle snapshot (authoritative source)
-                    result["mermin_test"] = w_snap.get("mermin_test") or w_snap.get("bell_test")
-                    result["bell_test"] = w_snap.get("bell_test")
-                    # Density matrix hex
-                    if w_snap.get("density_matrix_hex"):
-                        result["density_matrix_hex"] = w_snap.get("density_matrix_hex")
-                    # Broadcast to ring buffer for /rpc/oracle/snapshots
-                    try:
-                        _broadcast_snapshot_to_database(w_snap)
-                    except Exception as _bd_err:
-                        logger.debug(f"[RPC-METHOD] broadcast skip: {_bd_err}")
                     logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained")
                 else:
                     logger.warning(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot is None")
@@ -2459,65 +2436,28 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
                 result["lattice_error"] = str(le)
 
-
-        # ── MERMIN FROM DB (when oracle hasn't computed it yet) ──
-        if "mermin_test" not in result or result.get("mermin_test") is None:
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute("SELECT mermin_violation, mermin_angles FROM oracle_measurements ORDER BY id DESC LIMIT 1")
-                    row = cur.fetchone()
-                    if row and row[0] is not None:
-                        import json
-                        m_val = float(row[0])
-                        result["mermin_test"] = {
-                            'M_value': m_val, 'M': m_val, 'is_quantum': m_val > 2.0,
-                            'angles': json.loads(row[1]) if row[1] else []
-                        }
-            except Exception as e:
-                logger.debug(f"Mermin fallback error: {e}")
-
         # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
-        # Already fetched in oracle block above - use that result if available
-        # If not available, use lattice DM and broadcast to ring buffer
-        if "density_matrix_hex" not in result or not result.get("density_matrix_hex"):
-            try:
-                if LATTICE is not None:
-                    cdm = getattr(LATTICE, 'current_density_matrix', None)
-                    if cdm is not None and hasattr(cdm, 'shape') and cdm.shape == (256, 256):
-                        dm_8x8 = cdm[::32, ::32]
-                        import struct as _ds
-                        dm_hex = b''.join(
-                            _ds.pack('>dd', float(np.real(dm_8x8[i,j])), float(np.imag(dm_8x8[i,j])))
-                            for i in range(8) for j in range(8)
-                        ).hex()
+        # Extract DM from oracle snapshot if available
+        try:
+            if ORACLE_W_STATE_MANAGER is not None:
+                w_snap = _call_with_timeout(
+                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
+                    timeout_sec=2.0
+                )
+                if w_snap and hasattr(w_snap, 'density_matrix_hex'):
+                    dm_hex = getattr(w_snap, 'density_matrix_hex', '')
+                    if dm_hex:
                         result["density_matrix_hex"] = dm_hex
-                        # Set oracle-like fields from lattice
-                        result["w_state_fidelity"] = getattr(LATTICE, 'fidelity', 0.0)
-                        result["coherence_l1"] = getattr(LATTICE, 'coherence', 0.0)
-                        result["purity"] = float(np.real(np.trace(cdm)))
-                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex from lattice ({len(dm_hex)} chars)")
-            except Exception as dme:
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice DM extraction (non-fatal): {dme}")
-        
-        # ── ALWAYS BROADCAST TO RING BUFFER (for /rpc/oracle/snapshots) ────────
-        # This ensures the frontend can poll snapshots regardless of oracle state
-        dm_to_broadcast = result.get("density_matrix_hex")
-        if dm_to_broadcast and len(dm_to_broadcast) >= 1024:
-            try:
-                _broadcast_snapshot_to_database({
-                    'timestamp_ns': int(time.time() * 1e9),
-                    'oracle_id': 0,
-                    'density_matrix_hex': dm_to_broadcast,
-                    'purity': result.get("purity"),
-                    'w_state_fidelity': result.get("w_state_fidelity"),
-                    'von_neumann_entropy': result.get("von_neumann_entropy"),
-                    'coherence_l1': result.get("coherence_l1"),
-                    'aer_noise_state': {},
-                    'mermin_test': result.get("mermin_test"),
-                    'lattice_refresh_counter': result.get("lattice",{}).get("cycle",0),
-                })
-            except Exception as _bd_err:
-                logger.debug(f"[RPC-METHOD] broadcast skip: {_bd_err}")
+                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex from oracle ({len(dm_hex)} chars)")
+                elif w_snap and hasattr(w_snap, 'density_matrix'):
+                    # Extract DM as hex if it's raw bytes
+                    dm = getattr(w_snap, 'density_matrix', b'')
+                    if dm:
+                        dm_hex = dm.hex() if isinstance(dm, bytes) else str(dm)
+                        result["density_matrix_hex"] = dm_hex
+                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extracted ({len(dm_hex)} chars)")
+        except Exception as dme:
+            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extraction (non-fatal): {dme}")
 
         # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
         # No fallback — DB is authoritative
@@ -2539,28 +2479,6 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                     ).hex()
         except Exception as _ce:
             logger.debug(f"[RPC-METHOD] client pool inject: {_ce}")
-
-        # ── HLWE SIGN THE SNAPSHOT (non-blocking, never breaks RPC) ─────────
-        try:
-            _hlwe_engine = _init_hlwe_engine()
-            if _hlwe_engine is not None:
-                _snap_for_signing = {k: v for k, v in result.items() if k not in ('ts',)}
-                _snap_json = json.dumps(_snap_for_signing, sort_keys=True, default=str)
-                _snap_hash = hashlib.sha3_256(_snap_json.encode('utf-8')).digest()
-                _oracle_kp = _hlwe_engine.generate_keypair()
-                _hlwe_sig = _hlwe_engine.sign_hash(_snap_hash, _oracle_kp['private_key'])
-                result['hlwe_signature'] = _hlwe_sig
-                result['oracle_public_key'] = _oracle_kp['public_key']
-                result['oracle_address'] = _oracle_kp['address']
-                result['cycle'] = _bh
-                logger.debug(f"[RPC-METHOD] Oracle snapshot HLWE-signed: {_oracle_kp['address'][:16]}…")
-            else:
-                result['cycle'] = _bh
-        except Exception as _hlwe_err:
-            logger.debug(f"[RPC-METHOD] Oracle HLWE signing skipped: {_hlwe_err}")
-            result['cycle'] = _bh
-            result['cycle'] = _bh
-            result['cycle'] = _bh
 
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success  block_height={_bh}")
         return _rpc_ok(result, rpc_id)
@@ -2601,24 +2519,8 @@ def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
         try:
             logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: fetching snapshot for symbols={symbols}")
             snap = po.get_snapshot(symbols)
-            snap_dict = snap.to_dict()
-            # HLWE sign the Pyth snapshot
-            try:
-                _hlwe_engine = _init_hlwe_engine()
-                if _hlwe_engine is not None:
-                    _snap_json = json.dumps(snap_dict, sort_keys=True, default=str)
-                    _snap_hash = hashlib.sha3_256(_snap_json.encode('utf-8')).digest()
-                    _oracle_kp = _hlwe_engine.generate_keypair()
-                    _hlwe_sig = _hlwe_engine.sign_hash(_snap_hash, _oracle_kp['private_key'])
-                    snap_dict['hlwe_sig'] = _hlwe_sig.get('auth_tag', '')
-                    snap_dict['hlwe_signature'] = _hlwe_sig
-                    snap_dict['oracle_public_key'] = _oracle_kp['public_key']
-                    snap_dict['oracle_address'] = _oracle_kp['address']
-                    logger.debug(f"[RPC-METHOD] qtcl_getPythPrice HLWE-signed: {_oracle_kp['address'][:16]}…")
-            except Exception as _hlwe_err:
-                logger.debug(f"[RPC-METHOD] qtcl_getPythPrice HLWE signing skipped: {_hlwe_err}")
             logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: snapshot obtained successfully")
-            return _rpc_ok(snap_dict, rpc_id)
+            return _rpc_ok(snap.to_dict(), rpc_id)
         except Exception as pe:
             logger.exception(f"[RPC-METHOD] qtcl_getPythPrice: Pyth fetch error: {pe}")
             return _rpc_error(-32002, f"Pyth fetch failed: {str(pe)}", rpc_id, {"exception": str(pe).__class__.__name__})
@@ -3543,30 +3445,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             if not block_hash.startswith('0' * difficulty_bits):
                 return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
 
-        # ── HLWE BLOCK SIGNATURE VERIFICATION ────────────────────────────────
-        hlwe_sig = hdr.get("hlwe_signature")
-        hlwe_pubkey = hdr.get("hlwe_public_key", "")
-        if hlwe_sig and hlwe_pubkey:
-            try:
-                from hlwe_engine import HLWEBlockHash
-                _hlwe_engine = _init_hlwe_engine()
-                _block_hash = HLWEBlockHash.compute_block_hash(
-                    height=height,
-                    parent_hash=parent_hash,
-                    merkle_root=merkle_root,
-                    timestamp=timestamp_s,
-                    nonce=nonce,
-                    difficulty=difficulty_bits,
-                )
-                _block_hash_bytes = bytes.fromhex(_block_hash)
-                _sig_valid = _hlwe_engine.verify_signature(_block_hash_bytes, hlwe_sig, hlwe_pubkey)
-                if not _sig_valid:
-                    logger.error(f"[RPC-submitBlock] ❌ HLWE signature verification FAILED h={height}")
-                    return _rpc_error(-32004, "HLWE block signature verification failed", rpc_id)
-                logger.info(f"[RPC-submitBlock] ✅ HLWE signature verified h={height}")
-            except Exception as hlwe_err:
-                logger.warning(f"[RPC-submitBlock] HLWE verify error (non-fatal): {hlwe_err}")
-
         # ── Persist block + transactions (transaction 1 — no wallet writes) ──
         _block_rowcount = 0
         try:
@@ -3912,23 +3790,6 @@ def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
             if not _DM_SNAPSHOT_RING:
                 return _rpc_error(-32000, "No DM snapshots available yet", rpc_id)
             latest = list(_DM_SNAPSHOT_RING)[-1]
-        
-        # ── MERMIN FALLBACK ──
-        if latest and "mermin_test" not in latest:
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute("SELECT mermin_violation, mermin_angles FROM oracle_measurements ORDER BY id DESC LIMIT 1")
-                    row = cur.fetchone()
-                    if row and row[0] is not None:
-                        import json
-                        m_val = float(row[0])
-                        latest["mermin_test"] = {
-                            'M_value': m_val, 'M': m_val, 'is_quantum': m_val > 2.0,
-                            'angles': json.loads(row[1]) if row[1] else []
-                        }
-            except Exception as e:
-                pass
-
         logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: returned snapshot ts={latest.get('timestamp_ns')}")
         return _rpc_ok(latest, rpc_id)
     except Exception as e:
@@ -4888,13 +4749,11 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
         _cache_snapshot(snapshot)
         
         # 2. Queue into DM snapshot ring buffer for streaming
-        dm_hex = snapshot.get('density_matrix_hex')
-        logger.debug(f"[RPC-BROADCAST] received snapshot with dm_hex={type(dm_hex)}, len={len(dm_hex) if dm_hex else 0}")
-        if dm_hex and len(dm_hex) > 0:
+        if 'density_matrix_hex' in snapshot:
             dm_snap = {
                 'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
                 'oracle_id': snapshot.get('oracle_id'),
-                'density_matrix_hex': dm_hex,
+                'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
                 'purity': snapshot.get('purity'),
                 'w_state_fidelity': snapshot.get('w_state_fidelity'),
                 'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
@@ -4911,15 +4770,13 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
                 'oracle_address': snapshot.get('oracle_address'),
                 'aer_noise_state': snapshot.get('aer_noise_state', {}),
                 'measurement_counts': snapshot.get('measurement_counts', {}),
-                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),
-                'bell_test': snapshot.get('bell_test'),
+                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),  # Client expects mermin_test
+                'bell_test': snapshot.get('bell_test'),  # Backward compatibility
                 'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
             }
             with _DM_SNAPSHOT_LOCK:
                 _DM_SNAPSHOT_RING.append(dm_snap)
             logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
-        else:
-            logger.debug(f"[RPC-BROADCAST] ❌ skipped - no dm_hex in snapshot, keys={list(snapshot.keys())}")
         
         # 3. Persist to SQLite asynchronously (P2P replication)
         def async_sqlite():
