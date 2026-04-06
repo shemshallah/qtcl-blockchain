@@ -512,7 +512,7 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-MEASUREMENT_TIMEOUT          = 10   # 10s cap — 5 nodes parallel, increased from 5s for resilience
+MEASUREMENT_TIMEOUT          = 15   # 15s cap — increased from 10s for better reliability with AER simulations
 
 W_STATE_STREAM_INTERVAL_MS   = 10
 LATTICE_REFRESH_INTERVAL_MS  = 50
@@ -1258,15 +1258,26 @@ class OracleNode:
             # ── AER circuit: id gates so the Kraus noise model fires ──────────
             # Each oracle node has distinct κ/T1/T2 from _init_aer (QRNG-seeded).
             # The per-oracle seed below further differentiates the noise realisation.
+            aer_start = time.time_ns()
             qc = QuantumCircuit(8)
             qc.set_density_matrix(DensityMatrix(lattice_dm))
             for _q in range(8):
                 qc.id(_q)   # phase_damping + depolarizing attached to "id" in _init_aer
             qc.save_density_matrix()
-
+            circuit_ms = (time.time_ns() - aer_start) / 1e6
+            
             seed = (int.from_bytes(_oracle_qrng_bytes(4), 'big') % (2**31)
                     + int(self.sigma_offset * 1000)) % (2**31)
+            seed_start = time.time_ns()
             res = self.aer.run(qc, shots=1, seed_simulator=seed).result()
+            aer_ms = (time.time_ns() - seed_start) / 1e6
+            total_ms = circuit_ms + aer_ms
+            
+            # Log timing breakdown for debugging
+            if total_ms > 8000:  # Log if total takes >8s (leaving buffer for other ops)
+                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] AER slow: circuit={circuit_ms:.1f}ms + aer={aer_ms:.1f}ms = {total_ms:.1f}ms")
+            if aer_ms > 5000:  # Log if AER takes >5s
+                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] AER took {aer_ms:.1f}ms (>5s threshold)")
             _d   = res.data(0)
             _raw = _d['density_matrix'] if isinstance(_d, dict) and 'density_matrix' in _d else _d
             evolved = np.array(DensityMatrix(_raw).data, dtype=complex)
