@@ -793,11 +793,12 @@ function renderDMHeatmap(){
   ctx.fillText('C=' + (S.coherence||0).toFixed(4), W - pad.r - 4, pad.t + gH - 26);
 }
 
-// Boot heatmap on load — no Three.js dependency
+// Boot heatmap on load + independent 50ms render loop
 (function _dmBoot(){
   var cont = document.getElementById('dm-panel');
   if(!cont){ setTimeout(_dmBoot, 80); return; }
   renderDMHeatmap();
+  setInterval(renderDMHeatmap, 50);
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1301,7 +1302,9 @@ async function _workerDM(){
   if(_w2Running) return; _w2Running = true;
   try {
     var r = await fetch(BASE + '/rpc/oracle/snapshot', {
-      method: 'GET',
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
       signal: AbortSignal.timeout(4000)
     });
     if(!r.ok) return;
