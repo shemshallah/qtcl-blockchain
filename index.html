@@ -603,53 +603,64 @@ setInterval(tick, 1000); tick();
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// DENSITY MATRIX — 64×64 complex128, SSE-fed, rAF-rendered
+// DENSITY MATRIX — 64×64 complex128, SSE-fed, rAF-rendered with Hermitian mirroring
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── Web Worker: hex → Float64Arrays, transferable, zero-copy ─────────────────
+// ── Inline Web Worker for parsing hex to Float64Arrays and mirroring quadrants ───────
 var _dmWorker = null;
 var _dmWorkerPending = false;
-
 (function _spawnDMWorker(){
   try {
-    var src = [
-      '"use strict";',
-      'self.onmessage = function(e){',
-      '  var hex = e.data;',
-      '  if(!hex || hex.length < 131072){ self.postMessage(null); return; }',
-      '  var N = 4096, bytes = N*8;',
-      '  var reBuf=new ArrayBuffer(bytes),imBuf=new ArrayBuffer(bytes),',
-      '      magBuf=new ArrayBuffer(bytes),phBuf=new ArrayBuffer(bytes);',
-      '  var re=new Float64Array(reBuf),im=new Float64Array(imBuf),',
-      '      mag=new Float64Array(magBuf),ph=new Float64Array(phBuf);',
-      '  var dv=new DataView(new ArrayBuffer(8));',
-      '  for(var i=0;i<N;i++){',
-      '    var off=i*32;',
-      '    for(var b=0;b<8;b++) dv.setUint8(b,parseInt(hex.substr(off+b*2,2),16));',
-      '    re[i]=dv.getFloat64(0,true);',
-      '    for(var b=0;b<8;b++) dv.setUint8(b,parseInt(hex.substr(off+16+b*2,2),16));',
-      '    im[i]=dv.getFloat64(0,true);',
-      '    mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);',
-      '    ph[i]=Math.atan2(im[i],re[i]);',
-      '  }',
-      '  self.postMessage({reBuf:reBuf,imBuf:imBuf,magBuf:magBuf,phBuf:phBuf},[reBuf,imBuf,magBuf,phBuf]);',
-      '};'
-    ].join('\n');
-    var blob = new Blob([src], {type:'application/javascript'});
+    const src = `"use strict";
+self.onmessage = function(e){
+  const hex = e.data;
+  if(!hex || hex.length < 131072){ self.postMessage(null); return; }
+  const N = 4096, bytes = N*8;
+  const reBuf = new ArrayBuffer(bytes), imBuf = new ArrayBuffer(bytes),
+        magBuf = new ArrayBuffer(bytes), phBuf = new ArrayBuffer(bytes);
+  const re = new Float64Array(reBuf), im = new Float64Array(imBuf),
+        mag = new Float64Array(magBuf), ph = new Float64Array(phBuf);
+  const dv = new DataView(new ArrayBuffer(8));
+  for(let i=0;i<N;i++){
+    const off = i*32;
+    for(let b=0;b<8;b++) dv.setUint8(b, parseInt(hex.substr(off+b*2,2),16));
+    re[i] = dv.getFloat64(0,true);
+    for(let b=0;b<8;b++) dv.setUint8(b, parseInt(hex.substr(off+16+b*2,2),16));
+    im[i] = dv.getFloat64(0,true);
+    mag[i] = Math.hypot(re[i], im[i]);
+    ph[i] = Math.atan2(im[i], re[i]);
+  }
+  // Hermitian mirroring: copy lower‑triangle into upper‑triangle (Q2‑Q4)
+  // Matrix is stored row‑major; each row has 64 complex entries (real+imag)
+  // We mirror only the real/imag arrays separately.
+  for(let r=0;r<64;r++){
+    for(let c=r+1;c<64;c++){
+      const idx = r*64 + c;
+      const mirrorIdx = c*64 + r;
+      // Conjugate symmetry: re stays same, im negated
+      re[mirrorIdx] = re[idx];
+      im[mirrorIdx] = -im[idx];
+      mag[mirrorIdx] = mag[idx];
+      ph[mirrorIdx] = -ph[idx];
+    }
+  }
+  self.postMessage({reBuf, imBuf, magBuf, phBuf}, [reBuf, imBuf, magBuf, phBuf]);
+};`;
+    const blob = new Blob([src], {type:'application/javascript'});
     _dmWorker = new Worker(URL.createObjectURL(blob));
     _dmWorker.onmessage = function(e){
       _dmWorkerPending = false;
       if(!e.data) return;
-      var d = e.data;
+      const d = e.data;
       _dmFullParsed = {
-        re:    new Float64Array(d.reBuf),
-        im:    new Float64Array(d.imBuf),
-        mag:   new Float64Array(d.magBuf),
+        re: new Float64Array(d.reBuf),
+        im: new Float64Array(d.imBuf),
+        mag: new Float64Array(d.magBuf),
         phase: new Float64Array(d.phBuf)
       };
     };
     _dmWorker.onerror = function(err){
-      console.warn('[DM-WORKER]', err.message);
+      console.warn('[DM‑WORKER]', err.message);
       _dmWorker = null; _dmWorkerPending = false;
     };
   } catch(e){ _dmWorker = null; }
@@ -1229,61 +1240,78 @@ function stamp() {
 var _lastEventTs = Date.now()/1000 - 60;
 var _lastBlockHeight = 0;
 
-// ── WORKER 1: Metrics (block height + quantum metrics) ── 3s ──────────────
+// ── WORKER 1: Metrics (block height + quantum metrics) – Inline Blob ──
 var _w1Running = false;
-async function _workerMetrics(){
-  if(_w1Running) return; _w1Running = true;
+(async function _initMetricsWorker(){
   try {
-    var results = await rpcBatch([
+    const src = `"use strict";
+self.onmessage = async function(e){
+  if(e.data && e.data.cmd==='start'){
+    const BASE = e.data.base;
+    const rpc = async (method, params)=>{
+      try{
+        const r = await fetch(BASE + '/rpc', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:params||[]}),signal:AbortSignal.timeout(6000)});
+        if(!r.ok) return null; const j = await r.json(); return j.result;
+      }catch{return null;}
+    };
+    const rpcBatch = async (calls)=>{
+      try{
+        const base=1; const batch=calls.map((c,i)=>({jsonrpc:'2.0',id:base+i,method:c[0],params:c[1]||[]}));
+        const r = await fetch(BASE + '/rpc', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(batch),signal:AbortSignal.timeout(3000)});
+        if(!r.ok) return calls.map(()=>null);
+        const arr = await r.json();
+        return calls.map((_,i)=>{const res=arr.find(a=>a && a.id===base+i); return res && !res.error ? res.result : null;});
+      }catch{return calls.map(()=>null);}
+    };
+    const [hr, qm] = await rpcBatch([
       ['qtcl_getBlockHeight', []],
-      ['qtcl_getQuantumMetrics', []],
+      ['qtcl_getQuantumMetrics', []]
     ]);
-    var hr = results[0], qm = results[1];
-
-    // Block height (authoritative)
-    if(hr && hr.height != null){
-      var newHeight = parseInt(hr.height);
-      if(newHeight > S.height){
-        _lastBlockHeight = S.height;
-        S.height = newHeight;
-        S.tip_hash = hr.tip_hash || S.tip_hash;
-        applyRewards(S.height);
+    self.postMessage({type:'metrics', hr, qm});
+  }
+};`;
+    const blob = new Blob([src], {type:'application/javascript'});
+    const worker = new Worker(URL.createObjectURL(blob));
+    worker.onmessage = function(ev){
+      const {hr, qm} = ev.data;
+      // Block height handling
+      if(hr && hr.height!=null){
+        const newHeight = parseInt(hr.height);
+        if(newHeight > S.height){
+          _lastBlockHeight = S.height;
+          S.height = newHeight;
+          S.tip_hash = hr.tip_hash || S.tip_hash;
+          applyRewards(S.height);
+        }
       }
-    }
-
-    // Quantum metrics
-    if(qm){
-      var ws = qm.w_state || {};
-      if(ws.fidelity != null) S.fidelity = ws.fidelity;
-      if(ws.coherence != null) S.coherence = ws.coherence;
-      if(ws.purity != null) S.purity = ws.purity;
-      if(ws.entropy != null) S.entropy = ws.entropy;
-
-      var la = qm.lattice || {};
-      if(la.fidelity != null) S.lattice_fidelity = la.fidelity;
-      if(la.coherence != null) S.lattice_coherence = la.coherence;
-      if(la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
-      if(la.cycle != null && la.cycle > S.cycle) S.cycle = la.cycle;
-
-      if(qm.oracle_available != null) S.oracle_consensus_reached = qm.oracle_available;
-      if(qm.mermin_test) S.mermin = qm.mermin_test;
-      else if(qm.bell_test) S.mermin = qm.bell_test;
-
-      var oid1 = 'oracle_1';
-      if(!S.oracle_data[oid1]) S.oracle_data[oid1] = {};
-      if(qm.w_state_fidelity != null){ S.oracle_data[oid1].w_state_fidelity = qm.w_state_fidelity; S.fidelity = qm.w_state_fidelity; }
-      if(qm.coherence_l1 != null){ S.oracle_data[oid1].coherence = qm.coherence_l1; S.coherence = qm.coherence_l1; }
-      if(qm.purity != null){ S.oracle_data[oid1].purity = qm.purity; S.purity = qm.purity; }
-      if(qm.von_neumann_entropy != null){ S.oracle_data[oid1].entropy = qm.von_neumann_entropy; S.entropy = qm.von_neumann_entropy; }
-      S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
-    }
-
-    updateDOM();
-    setOnline(true);
-    stamp();
-  } catch(e){ console.warn('[W1-METRICS]', e.message); }
-  finally { _w1Running = false; }
-}
+      // Quantum metrics handling (same as original)
+      if(qm){
+        const ws = qm.w_state||{};
+        if(ws.fidelity!=null) S.fidelity = ws.fidelity;
+        if(ws.coherence!=null) S.coherence = ws.coherence;
+        if(ws.purity!=null) S.purity = ws.purity;
+        if(ws.entropy!=null) S.entropy = ws.entropy;
+        const la = qm.lattice||{};
+        if(la.fidelity!=null) S.lattice_fidelity = la.fidelity;
+        if(la.coherence!=null) S.lattice_coherence = la.coherence;
+        if(la.w_state_strength!=null) S.w_state_strength = la.w_state_strength;
+        if(la.cycle!=null && la.cycle>S.cycle) S.cycle = la.cycle;
+        if(qm.oracle_available!=null) S.oracle_consensus_reached = qm.oracle_available;
+        if(qm.mermin_test) S.mermin = qm.mermin_test; else if(qm.bell_test) S.mermin = qm.bell_test;
+        const oid1='oracle_1'; if(!S.oracle_data[oid1]) S.oracle_data[oid1]={};
+        if(qm.w_state_fidelity!=null){ S.oracle_data[oid1].w_state_fidelity=qm.w_state_fidelity; S.fidelity=qm.w_state_fidelity; }
+        if(qm.coherence_l1!=null){ S.oracle_data[oid1].coherence=qm.coherence_l1; S.coherence=qm.coherence_l1; }
+        if(qm.purity!=null){ S.oracle_data[oid1].purity=qm.purity; S.purity=qm.purity; }
+        if(qm.von_neumann_entropy!=null){ S.oracle_data[oid1].entropy=qm.von_neumann_entropy; S.entropy=qm.von_neumann_entropy; }
+        S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity||0)>0.5;
+      }
+      updateDOM(); setOnline(true); stamp();
+    };
+    // Kick off first fetch and then schedule
+    worker.postMessage({cmd:'start', base:BASE});
+    setInterval(()=>worker.postMessage({cmd:'start', base:BASE}), 1500);
+  } catch(e){ console.error('Metrics worker init failed', e); }
+})();
 
 // ── SSE: Oracle stream — replaces polling WORKER 2 ───────────────────────
 function _applyOracleFrame(dm){
@@ -1413,146 +1441,179 @@ function _initSSE(){
   };
 }
 
-// ── WORKER 3: Blocks + Events ── 3s ──────────────────────────────────────
+// ── WORKER 3: Blocks + Events – Inline Blob ──
 var _w3Running = false;
-async function _workerBlocks(){
-  if(_w3Running) return; _w3Running = true;
+(async function _initBlockWorker(){
   try {
-    var fromH = Math.max(0, S.height - 20);
-    var results = await rpcBatch([
-      ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
-      ['qtcl_getBlockRange', [fromH, S.height]],
+    const src = `"use strict";
+self.onmessage = async function(e){
+  if(e.data && e.data.cmd==='start'){
+    const BASE = e.data.base;
+    const rpc = async (method, params)=>{
+      try{
+        const r = await fetch(BASE + '/rpc', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:params||[]}),signal:AbortSignal.timeout(6000)});
+        if(!r.ok) return null; const j = await r.json(); return j.result;
+      }catch{return null;}
+    };
+    const rpcBatch = async (calls)=>{
+      try{
+        const base=1; const batch=calls.map((c,i)=>({jsonrpc:'2.0',id:base+i,method:c[0],params:c[1]||[]}));
+        const r = await fetch(BASE + '/rpc', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(batch),signal:AbortSignal.timeout(3000)});
+        if(!r.ok) return calls.map(()=>null);
+        const arr = await r.json();
+        return calls.map((_,i)=>{const res=arr.find(a=>a && a.id===base+i); return res && !res.error ? res.result : null;});
+      }catch{return calls.map(()=>null);}
+    };
+    const fromH = Math.max(0, e.data.height - 20);
+    const [events, blockRange] = await rpcBatch([
+      ['qtcl_getEvents', [{since:e.data.lastEventTs, types:'new_block', limit:10}]],
+      ['qtcl_getBlockRange', [fromH, e.data.height]]
     ]);
-    var events = results[0], blockRange = results[1];
-
-    // Events (new blocks)
-    if(events && Array.isArray(events.events) && events.events.length){
-      events.events.forEach(function(ev){
-        if(ev.ts > _lastEventTs) _lastEventTs = ev.ts;
-        if(ev.type === 'new_block'){
-          var h = parseInt(ev.height || ev.block_height || 0);
-          if(h > 0 && h > S.height){
-            S.height = h;
-            applyRewards(h);
-            if(!_blocksById[h]){
-              var nb = {
-                height: h,
-                block_hash: ev.block_hash || '',
-                hash: ev.block_hash || '',
-                tx_count: ev.tx_count || 0,
-                w_state_fidelity: ev.w_state_fidelity || S.fidelity,
-                difficulty_bits: ev.difficulty_bits || S.difficulty_bits,
-                _fr: true
-              };
-              if(ev.pq_curr != null){ nb.pq_curr = ev.pq_curr; S.pq_curr = nb.pq_curr; }
-              if(ev.pq_last != null){ nb.pq_last = ev.pq_last; S.pq_last = nb.pq_last; }
-              _blocksById[h] = nb;
-              blocks.push(nb);
-              blocks.sort(function(a,b){ return a.height - b.height; });
-              renderChain();
+    self.postMessage({type:'blocks', events, blockRange});
+  }
+};`;
+    const blob = new Blob([src], {type:'application/javascript'});
+    const worker = new Worker(URL.createObjectURL(blob));
+    worker.onmessage = function(ev){
+      const {events, blockRange} = ev.data;
+      // Events handling (same logic as original)
+      if(events && Array.isArray(events.events) && events.events.length){
+        events.events.forEach(function(ev){
+          if(ev.ts > _lastEventTs) _lastEventTs = ev.ts;
+          if(ev.type === 'new_block'){
+            const h = parseInt(ev.height || ev.block_height || 0);
+            if(h > 0 && h > S.height){
+              S.height = h; applyRewards(h);
+              if(!_blocksById[h]){
+                const nb = {
+                  height: h,
+                  block_hash: ev.block_hash || '',
+                  hash: ev.block_hash || '',
+                  tx_count: ev.tx_count || 0,
+                  w_state_fidelity: ev.w_state_fidelity || S.fidelity,
+                  difficulty_bits: ev.difficulty_bits || S.difficulty_bits,
+                  _fr: true
+                };
+                if(ev.pq_curr != null){ nb.pq_curr = ev.pq_curr; S.pq_curr = nb.pq_curr; }
+                if(ev.pq_last != null){ nb.pq_last = ev.pq_last; S.pq_last = nb.pq_last; }
+                _blocksById[h] = nb; blocks.push(nb); blocks.sort((a,b)=>a.height-b.height); renderChain();
+              }
+              _lastBlockHeight = h;
+              if(!txLoading) setTimeout(loadTxPage,400);
             }
-            _lastBlockHeight = h;
-            if(!txLoading) setTimeout(loadTxPage, 400);
           }
-        }
-      });
-    }
-
-    // Block range
-    if(blockRange && Array.isArray(blockRange.blocks) && blockRange.blocks.length){
-      blockRange.blocks.forEach(function(b){
-        var bh = parseInt(b.height || 0);
-        if(bh > 0 && !_blocksById[bh]){
-          var nb = {
-            height: bh,
-            block_hash: b.block_hash || b.hash || '',
-            hash: b.block_hash || b.hash || '',
-            tx_count: b.tx_count || b.transaction_count || 0,
-            w_state_fidelity: b.w_state_fidelity || S.fidelity,
-            difficulty_bits: b.difficulty || b.difficulty_bits || S.difficulty_bits,
-            _fr: false
-          };
-          nb.pq_curr = b.pq_curr || bh;
-          nb.pq_last = b.pq_last || (bh - 1);
-          _blocksById[bh] = nb;
-          blocks.push(nb);
-        }
-      });
-      if(blocks.length > 0){
-        blocks.sort(function(a,b){ return a.height - b.height; });
-        if(blocks.length > 30) blocks = blocks.slice(-30);
-        renderChain();
+        });
       }
-    }
-  } catch(e){ console.warn('[W3-BLOCKS]', e.message); }
-  finally { _w3Running = false; }
-}
+      // Block range handling
+      if(blockRange && Array.isArray(blockRange.blocks) && blockRange.blocks.length){
+        blockRange.blocks.forEach(function(b){
+          const bh = parseInt(b.height||0);
+          if(bh>0 && !_blocksById[bh]){
+            const nb = {
+              height: bh,
+              block_hash: b.block_hash||b.hash||'',
+              hash: b.block_hash||b.hash||'',
+              tx_count: b.tx_count||b.transaction_count||0,
+              w_state_fidelity: b.w_state_fidelity||S.fidelity,
+              difficulty_bits: b.difficulty||b.difficulty_bits||S.difficulty_bits,
+              _fr: false
+            };
+            nb.pq_curr = b.pq_curr||bh;
+            nb.pq_last = b.pq_last||(bh-1);
+            _blocksById[bh]=nb; blocks.push(nb);
+          }
+        });
+        if(blocks.length){
+          blocks.sort((a,b)=>a.height-b.height);
+          if(blocks.length>30) blocks = blocks.slice(-30);
+          renderChain();
+        }
+      }
+    };
+    // initial kick and interval
+    const kick = ()=>worker.postMessage({cmd:'start', base:BASE, height:S.height, lastEventTs:_lastEventTs});
+    kick();
+    setInterval(kick, 3000);
+  } catch(e){ console.error('Block worker init failed', e); }
+})();
 
-// ── WORKER 4: Mempool ── 5s ──────────────────────────────────────────────
-var _w4Running = false;
-async function _workerMempool(){
-  if(_w4Running) return; _w4Running = true;
+// ── WORKER 4: Mempool – Inline Blob ──
+(async function _initMempoolWorker(){
   try {
-    var mp = await rpc('qtcl_getMempoolStats', []);
-    if(mp){
-      S.mempool_size = mp.depth != null ? mp.depth : (mp.pending != null ? mp.pending : S.mempool_size);
-      st('hm', S.mempool_size + ' tx');
-    }
-  } catch(e){ console.warn('[W4-MEMPOOL]', e.message); }
-  finally { _w4Running = false; }
-}
+    const src = `"use strict";
+self.onmessage = async function(e){
+  if(e.data && e.data.cmd==='start'){
+    const BASE = e.data.base;
+    const rpc = async (method, params)=>{
+      try{ const r = await fetch(BASE + '/rpc', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:params||[]}),signal:AbortSignal.timeout(6000)}); if(!r.ok) return null; const j = await r.json(); return j.result; }catch{return null;}
+    };
+    const mp = await rpc('qtcl_getMempoolStats', []);
+    self.postMessage({type:'mempool', mp});
+  }
+};`;
+    const blob = new Blob([src], {type:'application/javascript'});
+    const worker = new Worker(URL.createObjectURL(blob));
+    worker.onmessage = function(ev){
+      const {mp} = ev.data;
+      if(mp){
+        S.mempool_size = mp.depth != null ? mp.depth : (mp.pending != null ? mp.pending : S.mempool_size);
+        st('hm', S.mempool_size + ' tx');
+      }
+    };
+    const kick=()=>worker.postMessage({cmd:'start', base:BASE});
+    kick();
+    setInterval(kick, 5000);
+  } catch(e){ console.error('Mempool worker init failed', e); }
+})();
 
-// ── WORKER 5: Peers ── 10s ───────────────────────────────────────────────
+// ── WORKER 5: Peers – Inline Blob ──
 var _w5Running = false;
-async function _workerPeers(){
-  if(_w5Running) return; _w5Running = true;
+(async function _initPeerWorker(){
   try {
-    var peers = await rpc('qtcl_getPeers', []);
-    if(peers){
-      var rawPeers = Array.isArray(peers.peers) ? peers.peers : [];
+    const src = `"use strict";
+self.onmessage = async function(e){
+  if(e.data && e.data.cmd==='start'){
+    const BASE = e.data.base;
+    const rpc = async (method, params)=>{
+      try{ const r = await fetch(BASE + '/rpc', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:params||[]}),signal:AbortSignal.timeout(6000)}); if(!r.ok) return null; const j = await r.json(); return j.result; }catch{return null;}
+    };
+    const peers = await rpc('qtcl_getPeers', []);
+    self.postMessage({type:'peers', peers});
+  }
+};`;
+    const blob = new Blob([src], {type:'application/javascript'});
+    const worker = new Worker(URL.createObjectURL(blob));
+    worker.onmessage = function(ev){
+      const {peers} = ev.data;
+      if(!peers) return;
+      const rawPeers = Array.isArray(peers.peers)?peers.peers:[];
       S.n_peers = peers.count || rawPeers.length;
-      var staleThresh = 300;
-      var miners = rawPeers.map(function(p){
-        var addr = p.miner_address || p.address || p.node_id || p.peer_id || '';
-        var ls = p.last_seen ? new Date(p.last_seen).getTime()/1000 : 0;
-        var age = ls > 0 ? Math.round(Date.now()/1000 - ls) : 999999;
-        return {
-          miner_address: addr,
-          peer_id: p.peer_id || p.node_id || '',
-          gossip_url: p.gossip_url || '',
-          block_count: p.block_count || 0,
-          last_height: p.block_height || p.last_height || 0,
-          total_earned_qtcl: p.total_earned_qtcl || 0,
-          last_seen_age_s: age,
-          status: age < staleThresh ? 'live' : (age < 86400 ? 'seen' : 'historic'),
-          ip_address: p.ip_address || '',
-        };
-      }).filter(function(m){ return m.miner_address; });
-
-      if(miners.length){
-        renderMiners(miners);
-      } else if(S.n_peers > 0){
-        var el = document.getElementById('pl');
-        if(el) el.innerHTML = '<div class="es" style="padding:16px;font-family:var(--mono);font-size:10px;color:var(--dim)">' + S.n_peers + ' peer(s) connected — no registry entries yet</div>';
-      }
-    }
-  } catch(e){ console.warn('[W5-PEERS]', e.message); }
-  finally { _w5Running = false; }
-}
+      const staleThresh = 300;
+      const miners = rawPeers.map(p=>{
+        const addr = p.miner_address||p.address||p.node_id||p.peer_id||'';
+        const ls = p.last_seen ? new Date(p.last_seen).getTime()/1000 : 0;
+        const age = ls>0?Math.round(Date.now()/1000 - ls):999999;
+        return {miner_address:addr, peer_id:p.peer_id||p.node_id||'', gossip_url:p.gossip_url||'', block_count:p.block_count||0, last_height:p.block_height||p.last_height||0, total_earned_qtcl:p.total_earned_qtcl||0, last_seen_age_s:age, status: age<staleThresh?'live':(age<86400?'seen':'historic'), ip_address:p.ip_address||''};
+      }).filter(m=>m.miner_address);
+      if(miners.length) renderMiners(miners);
+      else if(S.n_peers>0){ const el=document.getElementById('pl'); if(el) el.innerHTML='<div class="es" style="padding:16px;font-family:var(--mono);font-size:10px;color:var(--dim)">'+S.n_peers+' peer(s) connected — no registry entries yet</div>'; }
+    };
+    const kick=()=>worker.postMessage({cmd:'start', base:BASE});
+    kick();
+    setInterval(kick,10000);
+  } catch(e){ console.error('Peer worker init failed', e); }
+})();
 
 // ── WORKER 6: Transactions ── 30s ────────────────────────────────────────
 // (loadTxPage already exists as a self-contained async function)
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// BOOT — Launch all independent workers on their own intervals
+// BOOT — launch inline workers (metrics, blocks, peers, mempool schedule themselves)
 // ═══════════════════════════════════════════════════════════════════════════════
-_workerMetrics(); _initSSE(); _workerBlocks(); _workerMempool(); _workerPeers();
+// All workers (metrics, blocks, peers, mempool) were instantiated earlier and already set their own intervals.
+_initSSE(); // SSE for density matrix & oracle stream
 if(!txLoading) loadTxPage();
-
-setInterval(_workerMetrics,  1500);
-setInterval(_workerBlocks,   3000);
-setInterval(_workerMempool,  5000);
-setInterval(_workerPeers,   10000);
+// Periodic transaction refresh
 setInterval(function(){ if(!txLoading) loadTxPage(); }, 30000);
 </script>
 </body>
