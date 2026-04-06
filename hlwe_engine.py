@@ -848,11 +848,9 @@ class HLWEEngine:
                         return False
                 
                 return True
-            return False
-        
-        except Exception as e:
-            logger.error(f"[Supabase] Save wallet failed: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"[HLWE] Signature verification error: {e}")
+                return False
     
     def save_address(self, address: StoredAddress) -> bool:
         """Save wallet address to Supabase"""
