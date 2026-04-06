@@ -896,7 +896,7 @@ function busSubscribe(fn) { _busListeners.push(fn); }
 async function _pollOracle() {
   try {
     var r = await fetch(BASE+'/rpc/oracle/snapshots?limit=1', {
-      signal:AbortSignal.timeout(6000)
+      signal:AbortSignal.timeout(5000)
     });
     if(!r.ok) { setOnline(false); return; }
     var j = await r.json();
@@ -904,7 +904,6 @@ async function _pollOracle() {
     var snaps = result.snapshots || [];
     var snap = snaps.length ? snaps[snaps.length-1] : null;
     if(!snap) {
-      // Fallback to /rpc/oracle/snapshot (singular)
       var r2 = await fetch(BASE+'/rpc/oracle/snapshot',{signal:AbortSignal.timeout(5000)});
       if(r2.ok){var j2=await r2.json(); snap=j2.result||null;}
     }
@@ -912,7 +911,6 @@ async function _pollOracle() {
       S._snap = snap;
       S._snapTs = Date.now();
       setOnline(true);
-      // 48×48 SUPPORT: Prefer expanded format if present
       if(snap.density_matrix_48x48_hex) {
         parseDMHex(snap.density_matrix_48x48_hex);
       } else if(snap.density_matrix_hex) {
@@ -1151,28 +1149,20 @@ function parseDMHex(hex) {
   } catch(e){console.warn('[DM]',e);}
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// WORKER 2: DENSITY MATRIX CANVAS — 32×32 Kronecker-expanded
-// Upscales 8×8 → 32×32 using Kronecker product with 4×4 identity
-// Rendered at 512×512 (16px per DM element)
-// ═══════════════════════════════════════════════════════════════════════
 var _dmCtx=null, _dmLastHash='';
+
 function _workerDM() {
+  var canvas=document.getElementById('dm-canvas');
+  if(!canvas) return;
+  if(!_dmCtx) _dmCtx=canvas.getContext('2d');
   if(!S.dm_re||!S.dm_im) return;
-  // Cheap change detection: check sum of diagonals
   var chk='';
   for(var i=0;i<8;i++) chk+=(S.dm_re[i*8+i]).toFixed(4);
   if(chk===_dmLastHash) return;
   _dmLastHash=chk;
 
-  var canvas=document.getElementById('dm-canvas');
-  if(!canvas) return;
-  if(!_dmCtx) _dmCtx=canvas.getContext('2d');
   var ctx=_dmCtx;
   
-  // ═══════════════════════════════════════════════════════════════════════════
-  // 48×48 SUPPORT: Use expanded format if available, else fall back to 32×32
-  // ═══════════════════════════════════════════════════════════════════════════
   var use48=S.dm_48_re && S.dm_48_im;
   var N=use48?48:32, cellW=canvas.width/N, cellH=canvas.height/N;
   ctx.clearRect(0,0,canvas.width,canvas.height);
@@ -1833,19 +1823,26 @@ setInterval(function(){
   (function fr(){
     ctx.clearRect(0,0,38,38);
     var cx=19,cy=19,r=14;
-    ctx.strokeStyle='rgba(0,212,255,.15)';ctx.lineWidth=1;
+    ctx.strokeStyle='rgba(0,212,255,.12)';ctx.lineWidth=1;
     ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
-    for(var i=0;i<3;i++){
-      var a=i*Math.PI*2/3+t;
+    ctx.strokeStyle='rgba(0,212,255,.06)';ctx.lineWidth=0.5;
+    ctx.beginPath();ctx.arc(cx,cy,r*0.6,0,Math.PI*2);ctx.stroke();
+    for(var i=0;i<4;i++){
+      var a=i*Math.PI/2-t;
       var x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
-      ctx.strokeStyle='rgba(0,212,255,'+(0.4+0.3*Math.sin(t*2+i))+')';ctx.lineWidth=1;
+      ctx.strokeStyle='rgba(0,212,255,'+(0.3+0.2*Math.sin(t*2.5+i))+')';ctx.lineWidth=1.5;
       ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();
-      ctx.fillStyle='rgba(0,212,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
-      ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='rgba(0,212,255,'+(0.6+0.3*Math.sin(t*3+i))+')';
+      ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
+      var ox=cx+(r*0.6)*Math.cos(a),oy=cy+(r*0.6)*Math.sin(a);
+      ctx.fillStyle='rgba(155,109,255,'+(0.5+0.3*Math.sin(t*2.8+i*0.7))+')';
+      ctx.beginPath();ctx.arc(ox,oy,1.2,0,Math.PI*2);ctx.fill();
     }
+    ctx.strokeStyle='rgba(232,184,75,.9)';ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.arc(cx,cy,4,0,Math.PI*2);ctx.stroke();
     ctx.fillStyle='rgba(232,184,75,.95)';
-    ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
-    t+=0.022;requestAnimationFrame(fr);
+    ctx.beginPath();ctx.arc(cx,cy,2,0,Math.PI*2);ctx.fill();
+    t+=0.025;requestAnimationFrame(fr);
   })();
 })();
 
