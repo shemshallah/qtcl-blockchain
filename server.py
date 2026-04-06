@@ -161,93 +161,43 @@ def _dispatch(body_bytes: bytes) -> Tuple[dict, int]:
     
     return _dispatch_single(body), 200
 
-# ═══ PRE-WARMED RPC THREAD POOL — shared across all dispatch calls ═══════════
-# Single 8-thread pool eliminates per-call ThreadPoolExecutor create/destroy churn.
-# Fast (cache-read) methods run INLINE — never touch the pool.
-# Slow (DB/oracle) methods submit to pool with hard timeout.
-import concurrent.futures as _cf
-_RPC_THREAD_POOL = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix='rpc_worker')
-
-# Methods that run directly in the request thread — all are lock-free cache reads
-# taking < 1ms. Wrapping them in a thread pool adds 5–20ms overhead for zero gain.
-_RPC_INLINE_METHODS: frozenset = frozenset({
-    'qtcl_getBlockHeight',
-    'qtcl_getQuantumMetrics',
-    'qtcl_getLatestDMSnapshot',
-    'qtcl_getLatestDMSnapshots',
-    'qtcl_getMempoolStats',
-    'qtcl_getHealth',
-    'qtcl_getPeers',
-    'qtcl_getPeersByNatGroup',
-    'qtcl_getMyAddr',
-    'qtcl_getDHTTable',
-    'qtcl_getTreasuryAddress',
-    'qtcl_listMeasurementSubscribers',
-    'qtcl_getEvents',
-    'qtcl_peerHeartbeat',
-})
-
-# Slow methods (DB round-trips, crypto ops) — get pool + timeout protection
-_RPC_TIMEOUT_MAP: dict = {
-    'qtcl_getBlockRange':     5.0,
-    'qtcl_getTransactions':   8.0,
-    'qtcl_getBlock':          5.0,
-    'qtcl_getBalance':        4.0,
-    'qtcl_getTransaction':    4.0,
-    'qtcl_submitBlock':       8.0,
-    'qtcl_submitTransaction': 6.0,
-    'qtcl_submitOracleReg':   6.0,
-    'qtcl_getOracleRegistry': 5.0,
-    'qtcl_getOracleRecord':   4.0,
-    'qtcl_pushOracleDM':      4.0,
-    'qtcl_getPythPrice':      5.0,
-    'qtcl_registerPeer':      4.0,
-    'qtcl_receiveDHTTable':   3.0,
-    'qtcl_registerMeasurementSubscriber':   3.0,
-    'qtcl_unregisterMeasurementSubscriber': 3.0,
-    'qtcl_getDeviceChain':    4.0,
-}
-
 def _dispatch_single(req: dict) -> Optional[dict]:
-    """Dispatch single JSON-RPC 2.0 request.
-
-    Fast path: inline execution in current gthread (lock-free cache reads).
-    Slow path: submitted to _RPC_THREAD_POOL with per-method hard timeout.
-    No per-call ThreadPoolExecutor creation — eliminates thread churn under GIL.
-    """
+    """Dispatch single JSON-RPC 2.0 request with per-method timeout."""
     if not isinstance(req, dict):
         return _rpc_error(-32600, "Invalid Request: not an object", None)
-
-    jsonrpc = req.get("jsonrpc")
-    method  = req.get("method")
-    params  = req.get("params", [])
-    rpc_id  = req.get("id")
-
+    
+    jsonrpc, method, params, rpc_id = req.get("jsonrpc"), req.get("method"), req.get("params", []), req.get("id")
+    
     if jsonrpc != _JSONRPC_VERSION:
         return _rpc_error(-32600, f"Invalid jsonrpc: {jsonrpc}", rpc_id)
     if not isinstance(method, str):
         return _rpc_error(-32600, "Invalid Request: method not a string", rpc_id)
     if method not in _RPC_METHODS:
         return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
-
-    handler = _RPC_METHODS[method]
-
-    # ── FAST PATH: inline, zero thread overhead ───────────────────────────────
-    if method in _RPC_INLINE_METHODS:
-        try:
-            return handler(params, rpc_id)
-        except Exception as e:
-            logger.exception(f"[RPC] {method} inline error: {e}")
-            return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
-
-    # ── SLOW PATH: pool submit with timeout ───────────────────────────────────
-    timeout_sec = _RPC_TIMEOUT_MAP.get(method, 5.0)
+    
     try:
-        future = _RPC_THREAD_POOL.submit(handler, params, rpc_id)
-        return future.result(timeout=timeout_sec)
-    except _cf.TimeoutError:
+        # Per-method timeout: 3s for most, 5s for expensive queries
+        timeout_map = {
+            'qtcl_getBlockRange': 5.0,
+            'qtcl_getQuantumMetrics': 5.0,
+            'qtcl_getLatestDMSnapshot': 2.0,
+            'qtcl_getTransactions': 5.0,
+            'qtcl_getPeers': 2.0,
+        }
+        timeout_sec = timeout_map.get(method, 3.0)
+        
+        # Thread-safe timeout via concurrent.futures (signal.alarm only works on main thread)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_RPC_METHODS[method], params, rpc_id)
+            result = future.result(timeout=timeout_sec)
+            return result
+    except concurrent.futures.TimeoutError:
         logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
         return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
+    except TimeoutError as te:
+        logger.warning(f"[RPC] {method} TIMEOUT: {te}")
+        return _rpc_error(-32000, f"RPC timeout: {str(te)}", rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] {method} raised: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
@@ -1786,90 +1736,103 @@ def get_dht_manager() -> DHTManager:
 # RPC SNAPSHOT DISTRIBUTION (JSON polling — no SSE)
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
-# ═══ LOCK-FREE ATOMIC SNAPSHOT CACHE ════════════════════════════════════════
-# Uses a single pointer swap — readers never block writers, writers never block
-# readers. _latest_snapshot is an immutable dict reference; Python's GIL makes
-# dict reference assignment atomic. Pre-serialized JSON avoids re-serializing
-# on every /rpc/oracle/snapshot poll (which fires up to 20×/s from clients).
-# ─────────────────────────────────────────────────────────────────────────────
-_rpc_event_log: Deque = deque(maxlen=1000)           # Ring buffer of recent RPC events
+# RPC snapshot cache + event log (no SSE infrastructure)
+_rpc_event_log: Deque = Deque(maxlen=1000)           # Ring buffer of recent RPC events
 _rpc_event_lock = threading.RLock()                  # Guards _rpc_event_log writes
-_latest_snapshot: Optional[dict] = None              # Atomic pointer — GIL-safe swap
-_latest_snapshot_ts: float = 0.0                     # Epoch of last snapshot write
-_latest_snapshot_json: Optional[bytes] = None        # Pre-serialized JSON bytes for zero-copy serving
-_latest_snapshot_etag: str = ''                      # ETag for HTTP 304 Not Modified
-_snapshot_lock = threading.RLock()                   # Write-side lock ONLY — reads are lock-free
-# ─── Per-oracle metrics cache (updated by oracle background thread, read lock-free) ───
-_oracle_metrics_cache: dict = {
-    "oracle_available": False, "ts": 0.0,
-    "w_state": {}, "lattice": {}, "density_matrix_hex": "",
-    "w_state_fidelity": 0.0, "coherence_l1": 0.0, "purity": 0.0,
-    "von_neumann_entropy": 0.0, "block_height": 0, "height": 0,
-    "client_fused_fidelity": 0.0, "client_oracle_count": 0,
-}
-_oracle_metrics_lock = threading.RLock()             # Write-side only
+_latest_snapshot: Optional[dict] = None              # Last cached snapshot (poll endpoint)
+_latest_snapshot_ts: int = 0                         # Timestamp of latest snapshot
+_snapshot_lock = threading.RLock()                   # Guards _latest_snapshot updates
+
+# ── SSE subscriber registry ──────────────────────────────────────────────────
+# Each connected EventSource client gets a Queue(maxsize=4).
+# _cache_snapshot pushes the slim DM frame; the gthread holding that
+# client's streaming Response drains it.  Queues are capped at 4 so a
+# slow mobile client never accumulates unbounded backlog — oldest frame
+# is dropped when the queue is full (non-blocking put).
+import queue as _queue_mod
+_SSE_SUBSCRIBERS: Dict[str, "_queue_mod.Queue"] = {}
+_SSE_LOCK = threading.RLock()
+
+def _sse_subscribe(client_id: str) -> "_queue_mod.Queue":
+    q: "_queue_mod.Queue" = _queue_mod.Queue(maxsize=4)
+    with _SSE_LOCK:
+        _SSE_SUBSCRIBERS[client_id] = q
+    return q
+
+def _sse_unsubscribe(client_id: str) -> None:
+    with _SSE_LOCK:
+        _SSE_SUBSCRIBERS.pop(client_id, None)
 
 def _cache_snapshot(snapshot: dict) -> None:
-    """Atomic snapshot cache write — pre-serialize JSON for zero-copy serving.
-    
-    Write path: _snapshot_lock guards consistency between _latest_snapshot,
-    _latest_snapshot_json, and _latest_snapshot_etag.
-    Read path: callers read _latest_snapshot / _latest_snapshot_json directly
-    without any lock — GIL guarantees reference read atomicity in CPython.
-    """
-    global _latest_snapshot, _latest_snapshot_ts, _latest_snapshot_json, _latest_snapshot_etag
-    snap_copy = dict(snapshot)  # immutable copy — swap in
-    try:
-        snap_json = json.dumps(
-            {"jsonrpc": "2.0", "result": snap_copy, "id": 1},
-            separators=(',', ':'), default=str
-        ).encode('utf-8')
-        etag = f'"{hashlib.md5(snap_json).hexdigest()[:16]}"'
-    except Exception:
-        snap_json = None
-        etag = ''
-    with _snapshot_lock:
-        _latest_snapshot = snap_copy            # atomic pointer swap
-        _latest_snapshot_ts = time.time()
-        _latest_snapshot_json = snap_json
-        _latest_snapshot_etag = etag
+    """Cache snapshot for polling AND push frame to all SSE subscribers."""
+    global _latest_snapshot
 
-def _update_oracle_metrics_cache(snapshot: dict) -> None:
-    """Refresh the oracle metrics cache from a fresh snapshot dict.
-    Called by the oracle background thread — never from a request handler.
-    """
-    global _oracle_metrics_cache
+    # ── Attach 64×64 downsample of the live 256×256 lattice DM ──────────────
+    # Block-average every non-overlapping 4×4 cell → 64×64 complex128 matrix.
+    # Serialized as 64*64*16 = 65536 bytes = 131072 hex chars, little-endian.
+    # This gives the frontend a true high-resolution view of the full pseudoqubit
+    # manifold rather than the 8×8 W3 consensus subspace alone.
     try:
-        ws = snapshot.get('w_state', {})
-        lat = snapshot.get('lattice', {})
-        # Flatten all the fields the frontend needs into one flat dict
-        new_cache = {
-            "oracle_available":    True,
-            "ts":                  time.time(),
-            "w_state":             ws,
-            "lattice":             lat,
-            "density_matrix_hex":  snapshot.get('density_matrix_hex', ''),
-            "w_state_fidelity":    snapshot.get('w_state_fidelity', ws.get('fidelity', 0.0)),
-            "coherence_l1":        snapshot.get('coherence_l1', ws.get('coherence', 0.0)),
-            "purity":              snapshot.get('purity', ws.get('purity', 0.0)),
-            "von_neumann_entropy": snapshot.get('von_neumann_entropy', ws.get('entropy', 0.0)),
-            "mermin_test":         snapshot.get('mermin_test') or snapshot.get('bell_test'),
-            "bell_test":           snapshot.get('bell_test'),
-            "aer_noise_state":     snapshot.get('aer_noise_state', {}),
-            "per_node":            snapshot.get('per_node', []),
-            "lattice_refresh_counter": snapshot.get('lattice_refresh_counter', 0),
-            "phase_drift":         snapshot.get('phase_drift', 0.0),
-            "phase_coherence":     snapshot.get('phase_coherence', 0.0),
-            "qrng_health":         snapshot.get('qrng_health', 1.0),
-            "client_fused_fidelity": snapshot.get('client_fused_fidelity', 0.0),
-            "client_oracle_count": snapshot.get('client_oracle_count', 0),
-            "block_height":        snapshot.get('block_height', 0),
-            "height":              snapshot.get('height', 0),
+        from globals import get_lattice as _glf
+        _lat = _glf()
+        if _lat is not None:
+            _cdm = getattr(_lat, 'current_density_matrix', None)
+            if _cdm is not None and hasattr(_cdm, 'shape') and _cdm.shape == (256, 256):
+                # Block-average 4×4 → 64×64
+                _d = _cdm.reshape(64, 4, 64, 4).mean(axis=(1, 3))
+                # Normalise trace to 1
+                _tr = float(np.real(np.trace(_d)))
+                if _tr > 1e-12:
+                    _d = _d / _tr
+                # Serialize: row-major, each element = 16 bytes (re float64 LE + im float64 LE)
+                _buf = np.empty(64 * 64 * 2, dtype=np.float64)
+                _buf[0::2] = np.real(_d).ravel()
+                _buf[1::2] = np.imag(_d).ravel()
+                snapshot = dict(snapshot)   # shallow copy — do not mutate original
+                snapshot['dm_full_hex'] = _buf.tobytes().hex()
+    except Exception as _de:
+        logger.debug(f"[SSE] dm_full_hex build error (non-fatal): {_de}")
+
+    with _snapshot_lock:
+        _latest_snapshot = snapshot
+
+    # Build SSE payload and push to all connected clients
+    try:
+        aer  = snapshot.get("aer_noise_state") or {}
+        mt   = snapshot.get("mermin_test") or snapshot.get("mermin") or {}
+        frame = {
+            "density_matrix_hex":      snapshot.get("density_matrix_hex", ""),
+            "dm_full_hex":             snapshot.get("dm_full_hex", ""),
+            "w_state_fidelity":        snapshot.get("w_state_fidelity", 0.0),
+            "coherence_l1":            snapshot.get("coherence_l1", 0.0),
+            "purity":                  snapshot.get("purity", 0.0),
+            "von_neumann_entropy":     snapshot.get("von_neumann_entropy", 0.0),
+            "phase_drift":             snapshot.get("phase_drift", 0.0),
+            "lattice_refresh_counter": snapshot.get("lattice_refresh_counter", 0),
+            "mermin_M": float(mt.get("M_value") or mt.get("M") or mt.get("mermin_value") or 0.0),
+            "aer_noise_state": {
+                "gamma1":      aer.get("gamma1", 0.0),
+                "gammaphi":    aer.get("gammaphi", 0.0),
+                "omega":       aer.get("omega", 0.5),
+                "ou_mem":      aer.get("ou_mem", 0.0),
+                "sector_occ":  aer.get("sector_occ", 0.0),
+                "block_field": aer.get("block_field", {}),
+            },
         }
-        with _oracle_metrics_lock:
-            _oracle_metrics_cache = new_cache
-    except Exception as _e:
-        logger.debug(f"[METRICS-CACHE] update error: {_e}")
+        payload = "data: " + json.dumps(frame) + "\n\n"
+        with _SSE_LOCK:
+            subs = list(_SSE_SUBSCRIBERS.items())
+        for cid, q in subs:
+            try:
+                q.put_nowait(payload)
+            except _queue_mod.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except Exception:
+                    pass
+    except Exception as _se:
+        logger.debug(f"[SSE] frame push error (non-fatal): {_se}")
 
 def _log_rpc_event(event_type: str, data: Any) -> None:
     """Log event for /api/events RPC polling endpoint."""
@@ -2110,44 +2073,24 @@ def _get_canonical_node() -> Optional[dict]:
         return None
 
 
-# ─── Chain tip height cache — updated by _rpc_submitBlock on every accepted block ───
-# In-memory, zero DB cost, GIL-atomic int reads. Falls back to DB on cold start.
-_chain_tip_height: int = 0
-_chain_tip_hash:   str = '0' * 64
-
-def _update_chain_tip(height: int, tip_hash: str) -> None:
-    """Update the in-memory chain tip. Called from submitBlock on accept."""
-    global _chain_tip_height, _chain_tip_hash
-    if height >= _chain_tip_height:
-        _chain_tip_height = height
-        _chain_tip_hash   = tip_hash
-
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
-
-    HOT PATH: reads _chain_tip_height (in-memory int, GIL-atomic) — zero DB cost.
-    Falls back to _oracle_metrics_cache.block_height or DB on cold start only.
-    This method is in _RPC_INLINE_METHODS → dispatched without thread pool overhead.
+    
+    DB-AUTHORITATIVE: reads from PostgreSQL blocks table via query_latest_block().
+    No fallbacks — DB is the single source of truth.
     """
     try:
-        # Fast path: in-memory tip (set by submitBlock, refreshed by metrics cache)
-        h = _chain_tip_height
-        th = _chain_tip_hash
-        if h == 0:
-            # Cold start: try metrics cache first, then DB
-            _cache = _oracle_metrics_cache
-            h_cache = int(_cache.get('block_height', 0))
-            if h_cache > 0:
-                h = h_cache
-                th = _chain_tip_hash
-            else:
-                db_tip = query_latest_block()
-                if db_tip:
-                    h  = int(db_tip['height'])
-                    th = str(db_tip.get('block_hash', db_tip.get('hash', '0'*64)))
-                    _update_chain_tip(h, th)
-        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight: h={h}")
-        return _rpc_ok({"height": h, "tip_hash": th, "ts": time.time()}, rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight called with params={params}, id={rpc_id}")
+        
+        db_tip = query_latest_block()
+        if db_tip is None:
+            # No blocks yet — return genesis state (height=0) which is the actual state
+            return _rpc_ok({"height": 0, "tip_hash": "0" * 64, "ts": time.time()}, rpc_id)
+        
+        height   = int(db_tip['height'])
+        tip_hash = str(db_tip.get('hash', ''))
+        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight success: height={height}")
+        return _rpc_ok({"height": height, "tip_hash": tip_hash, "ts": time.time()}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
         return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
@@ -2479,80 +2422,128 @@ def _call_with_timeout(func, timeout_sec=_RPC_TIMEOUT_SEC, default=None):
 
 
 def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics (lock-free cache read).
-
-    Reads from _oracle_metrics_cache — a plain dict reference swap, GIL-safe in CPython.
-    Never calls ORACLE or LATTICE methods inline; those block for 2–5 s each.
-    The oracle background thread populates the cache via _update_oracle_metrics_cache()
-    on every snapshot broadcast (_broadcast_snapshot_to_database).
-    Response latency on warm cache: < 1 ms (no locks, no threads, no DB).
-
-    Falls back to non-blocking LATTICE attribute reads if cache is cold (first ~10s).
+    """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics + density matrix snapshot.
+    
+    All reads protected with 5s timeouts to prevent RPC hangs.
     """
     try:
-        # ── Lock-free cache read (GIL guarantees dict reference atomicity in CPython) ──
-        cache = _oracle_metrics_cache   # single ptr read — never None, initialized at module level
-
-        # ── WARM PATH (> 99% of calls after first oracle cycle) ────────────────────────
-        if cache.get('ts', 0.0) > 0.0:
-            result = dict(cache)   # shallow copy — all values are immutable scalars or sub-dicts
-
-            # Block height: try in-memory block cache first (zero DB round-trip)
-            _bh = 0
-            try:
-                with _BLOCK_CACHE_LOCK:
-                    if _BLOCK_CACHE:
-                        _bh = int(_BLOCK_CACHE[max(_BLOCK_CACHE.keys())].get('height', 0))
-            except Exception:
-                pass
-            if _bh == 0:
-                _bh = int(cache.get('block_height', 0))
-            result['block_height'] = _bh
-            result['height']       = _bh
-
-            # Refresh live scalar fields (int/float GIL-atomic reads)
-            result['oracle_available']      = ORACLE_AVAILABLE
-            result['client_fused_fidelity'] = round(_client_consensus_fid, 6)
-            result['client_oracle_count']   = _client_pool_count
-
-            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics cache-hit bh={_bh}")
-            return _rpc_ok(result, rpc_id)
-
-        # ── COLD PATH: cache not yet populated (startup grace period ~5-15s) ──────────
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}")
         result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}")
 
-        # Non-blocking LATTICE attribute reads (attributes set by background thread)
+        if ORACLE_AVAILABLE and ORACLE is not None:
+            try:
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching W-state snapshot (timeout=5s)")
+                w_snap = _call_with_timeout(
+                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
+                    timeout_sec=5.0
+                )
+                if w_snap:
+                    result["w_state"] = {
+                        "purity":     getattr(w_snap, "purity",     None),
+                        "entropy":    getattr(w_snap, "entropy",    None),
+                        "coherence":  getattr(w_snap, "coherence",  None),
+                        "fidelity":   getattr(w_snap, "fidelity",   None),
+                        "snapshot_id": getattr(w_snap, "snapshot_id", None),
+                    }
+                    logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained")
+                else:
+                    logger.warning(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot is None")
+            except Exception as we:
+                logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state error: {we}")
+                result["w_state_error"] = str(we)
+
         if LATTICE is not None:
             try:
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching lattice state (timeout=5s)")
+                # Safe access to LATTICE methods with fallback
+                lm = _call_with_timeout(
+                    lambda: LATTICE.get_metrics() if hasattr(LATTICE, 'get_metrics') and callable(LATTICE.get_metrics) else {},
+                    timeout_sec=5.0,
+                    default={}
+                ) or {}
+                ls = _call_with_timeout(
+                    lambda: LATTICE.get_stats() if hasattr(LATTICE, 'get_stats') and callable(LATTICE.get_stats) else {},
+                    timeout_sec=5.0,
+                    default={}
+                ) or {}
+                
+                # Fallback: use LATTICE attributes directly
+                if not lm:
+                    lm = {
+                        "avg_fidelity_100": getattr(LATTICE, 'avg_fidelity_100', 0.0),
+                        "avg_coherence_100": getattr(LATTICE, 'avg_coherence_100', 0.0),
+                    }
+                if not ls:
+                    ls = {
+                        "fidelity": getattr(LATTICE, 'fidelity', 0.0),
+                        "coherence": getattr(LATTICE, 'coherence', 0.0),
+                        "w_state_strength": getattr(LATTICE, 'w_state_strength', 0.0),
+                        "cycle": getattr(LATTICE, 'cycle', 0),
+                    }
+                
                 result["lattice"] = {
-                    "fidelity":          getattr(LATTICE, 'fidelity',          0.0),
-                    "coherence":         getattr(LATTICE, 'coherence',         0.0),
-                    "w_state_strength":  getattr(LATTICE, 'w_state_strength',  0.0),
-                    "cycle":             getattr(LATTICE, 'cycle',             0),
-                    "avg_fidelity_100":  getattr(LATTICE, 'avg_fidelity_100',  0.0),
-                    "avg_coherence_100": getattr(LATTICE, 'avg_coherence_100', 0.0),
+                    "fidelity":         lm.get("avg_fidelity_100", ls.get("fidelity", 0.0)),
+                    "coherence":        lm.get("avg_coherence_100", ls.get("coherence", 0.0)),
+                    "w_state_strength": ls.get("w_state_strength", 0.0),
+                    "cycle":            ls.get("cycle", 0),
+                    "avg_fidelity_100": lm.get("avg_fidelity_100", 0.0),
+                    "avg_coherence_100": lm.get("avg_coherence_100", 0.0),
                 }
-            except Exception:
-                pass
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice metrics obtained")
+            except Exception as le:
+                logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
+                result["lattice_error"] = str(le)
 
-        # DB block height only on cold path (1 query, not 3+)
+        # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
+        # Extract DM from oracle snapshot if available
         try:
-            _db_tip = query_latest_block()
-            _bh = int(_db_tip['height']) if _db_tip else 0
-        except Exception:
-            _bh = 0
+            if ORACLE_W_STATE_MANAGER is not None:
+                w_snap = _call_with_timeout(
+                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
+                    timeout_sec=2.0
+                )
+                if w_snap and hasattr(w_snap, 'density_matrix_hex'):
+                    dm_hex = getattr(w_snap, 'density_matrix_hex', '')
+                    if dm_hex:
+                        result["density_matrix_hex"] = dm_hex
+                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex from oracle ({len(dm_hex)} chars)")
+                elif w_snap and hasattr(w_snap, 'density_matrix'):
+                    # Extract DM as hex if it's raw bytes
+                    dm = getattr(w_snap, 'density_matrix', b'')
+                    if dm:
+                        dm_hex = dm.hex() if isinstance(dm, bytes) else str(dm)
+                        result["density_matrix_hex"] = dm_hex
+                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extracted ({len(dm_hex)} chars)")
+        except Exception as dme:
+            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extraction (non-fatal): {dme}")
+
+        # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
+        # No fallback — DB is authoritative
+        _db_tip = query_latest_block()
+        _bh = int(_db_tip['height']) if _db_tip else 0
         result['block_height'] = _bh
         result['height']       = _bh
-        result['client_fused_fidelity'] = round(_client_consensus_fid, 6)
-        result['client_oracle_count']   = _client_pool_count
 
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics cold-path bh={_bh}")
+        # ── Inject client tripartite pool consensus fields ─────────────────
+        try:
+            with _CLIENT_DM_POOL_LOCK:
+                result['client_fused_fidelity'] = round(_client_consensus_fid, 6)
+                result['client_oracle_count']   = _client_pool_count
+                if _client_pool_count > 0 and any(v != 0.0 for v in _client_consensus_dm_re):
+                    import struct as _qms
+                    result['client_consensus_dm_hex'] = b''.join(
+                        _qms.pack('>dd', _client_consensus_dm_re[i], _client_consensus_dm_im[i])
+                        for i in range(64)
+                    ).hex()
+        except Exception as _ce:
+            logger.debug(f"[RPC-METHOD] client pool inject: {_ce}")
+
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success  block_height={_bh}")
         return _rpc_ok(result, rpc_id)
-
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics outer exception: {e}")
-        return _rpc_error(-32603, f"Quantum metrics failed: {str(e)}", rpc_id,
-                          {"exception": str(e).__class__.__name__})
+        return _rpc_error(-32603, f"Quantum metrics failed: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
@@ -3679,7 +3670,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         if _block_rowcount == 0:
             logger.info(f"[RPC-submitBlock] 🔁 DUPLICATE h={height} hash={block_hash[:16]}…")
             return _rpc_ok({"status":"duplicate","height":height,"block_hash":block_hash}, rpc_id)
-        _update_chain_tip(height, block_hash)   # keep in-memory tip hot — getBlockHeight is lock-free
         logger.info(f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… miner={miner_address[:16]}… reward={_resp_reward} QTCL")
         return _rpc_ok({"status":"accepted","height":height,"block_hash":block_hash,"difficulty_bits":difficulty_bits,"miner_reward_qtcl":_resp_reward}, rpc_id)
 
@@ -4716,90 +4706,48 @@ def pyth_oracle_stats():
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
-    """GET/POST /rpc/oracle/snapshot — Zero-copy lock-free latest W-state snapshot.
-
-    Hot path: serves pre-serialized JSON bytes directly from _latest_snapshot_json
-    with ETag / If-None-Match support for 304 Not Modified (eliminates JSON
-    re-serialization on every 500ms client poll).  Falls back to jsonify only
-    when the pre-built cache is cold or client pool data must be fused live.
-
-    URL preserved: /rpc/oracle/snapshot  (identity maintained per architecture rule)
-    """
+    """GET/POST /rpc/oracle/snapshot — Latest W-state snapshot fused with client tripartite pool."""
     if request.method == "OPTIONS":
-        resp = app.make_response(("", 204))
-        resp.headers['Access-Control-Allow-Origin'] = '*'
-        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        return resp
-
+        return "", 204
     try:
-        # ── 1. Lock-free read of atomic snapshot reference ─────────────────
-        snap_json: Optional[bytes] = _latest_snapshot_json   # single ptr read, GIL-safe
-        snap_etag: str             = _latest_snapshot_etag
-        snap:      Optional[dict]  = _latest_snapshot
+        with _snapshot_lock:
+            if _latest_snapshot is None:
+                # No server snapshot yet — but we may still have client pool data
+                _base = {}
+            else:
+                _base = dict(_latest_snapshot)
 
-        # ── 2. Check If-None-Match for 304 shortcut ─────────────────────────
-        client_etag = request.headers.get('If-None-Match', '')
-        if snap_etag and client_etag == snap_etag and snap is not None:
-            return app.make_response(("", 304))
-
-        # ── 3. Check if client pool needs live fusion (rare: only when pool is fresh) ─
-        # Read pool count lock-free (int reads are atomic in CPython)
-        _c_cnt = _client_pool_count
-        needs_live_fusion = (_c_cnt > 0 and snap is not None
-                             and not snap.get('client_fused_fidelity'))
-
-        if not needs_live_fusion and snap_json is not None:
-            # ── HOT PATH: return pre-serialized bytes, zero JSON overhead ──
-            resp = app.make_response(snap_json)
-            resp.content_type = 'application/json; charset=utf-8'
-            if snap_etag:
-                resp.headers['ETag'] = snap_etag
-                resp.headers['Cache-Control'] = 'no-cache'
-            resp.headers['Access-Control-Allow-Origin'] = '*'
-            return resp, 200
-
-        # ── 4. COLD / FUSION PATH ──────────────────────────────────────────
-        if snap is None:
-            # No server snapshot — check if client pool can cover
-            with _CLIENT_DM_POOL_LOCK:
-                _c_re   = list(_client_consensus_dm_re)
-                _c_im   = list(_client_consensus_dm_im)
-                _c_fid  = _client_consensus_fid
-                _c_cnt2 = _client_pool_count
-            if _c_cnt2 > 0 and any(v != 0.0 for v in _c_re):
-                dm_hex = b''.join(
-                    struct.pack('>dd', _c_re[i], _c_im[i]) for i in range(64)
-                ).hex()
-                _base = {
-                    'density_matrix_hex': dm_hex,
-                    'w_state_fidelity':   _c_fid,
-                    'fidelity':           _c_fid,
-                    'client_fused_fidelity': round(_c_fid, 6),
-                    'client_oracle_count': _c_cnt2,
-                    'source': 'client_tripartite_only',
-                    'ready': True,
-                }
-                return jsonify({"jsonrpc": "2.0", "result": _base, "id": request.args.get('id', 1)}), 200
-            return jsonify({"jsonrpc": "2.0",
-                            "error": {"code": -32000, "message": "No snapshot yet"},
-                            "id": None}), 202
-
-        # Snapshot exists, needs client pool fusion annotation
-        _base = dict(snap)
+        # ── Enrich with client tripartite pool consensus ───────────────────
         with _CLIENT_DM_POOL_LOCK:
-            _c_fid = _client_consensus_fid
-            _c_cnt = _client_pool_count
-        _base['client_fused_fidelity'] = round(_c_fid, 6)
-        _base['client_oracle_count']   = _c_cnt
-        return jsonify({"jsonrpc": "2.0", "result": _base,
-                        "id": request.args.get('id', 1)}), 200
+            _c_re   = list(_client_consensus_dm_re)
+            _c_im   = list(_client_consensus_dm_im)
+            _c_fid  = _client_consensus_fid
+            _c_cnt  = _client_pool_count
 
+        if _c_cnt > 0 and any(v != 0.0 for v in _c_re):
+            _base['client_fused_fidelity'] = round(_c_fid, 6)
+            _base['client_oracle_count']   = _c_cnt
+            # If server has no DM yet, surface the client consensus DM
+            if not _base.get('density_matrix_hex'):
+                import struct as _ss
+                _base['density_matrix_hex'] = b''.join(
+                    _ss.pack('>dd', _c_re[i], _c_im[i]) for i in range(64)
+                ).hex()
+                _base['w_state_fidelity'] = _c_fid
+                _base['fidelity']         = _c_fid
+                _base['source']           = 'client_tripartite_only'
+                _base['ready']            = True
+        else:
+            _base['client_fused_fidelity'] = 0.0
+            _base['client_oracle_count']   = 0
+
+        if not _base:
+            return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":None}), 202
+
+        return jsonify({"jsonrpc":"2.0","result":_base,"id":request.args.get('id',1)}), 200
     except Exception as e:
         logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshot error: {e}", exc_info=False)
-        return jsonify({"jsonrpc": "2.0",
-                        "error": {"code": -32603, "message": str(e)},
-                        "id": None}), 500
+        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
 
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():
@@ -4824,8 +4772,81 @@ def rpc_oracle_snapshots():
         logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
         return jsonify({"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}), 500
 
+@app.route("/rpc/oracle/stream", methods=["GET", "OPTIONS"])
+def rpc_oracle_stream():
+    """GET /rpc/oracle/stream — SSE stream, one frame per oracle cycle (~3 s).
+
+    Frame fields:
+      density_matrix_hex   — 8×8 consensus DM (2048 hex chars, little-endian float64 pairs)
+      dm_full_hex          — 64×64 block-averaged downsample of lattice 256×256 DM
+                             (8192 hex chars: 4096 complex128 elements, little-endian)
+      w_state_fidelity, coherence_l1, purity, von_neumann_entropy,
+      phase_drift, lattice_refresh_counter, mermin_M, aer_noise_state
+
+    The gthread holds this Response open indefinitely (gunicorn timeout=0).
+    A keep-alive comment ": ka" is sent every 25 s to prevent Koyeb's 60 s TCP idle reset.
+    On client disconnect GeneratorExit fires → _sse_unsubscribe cleans up the queue.
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+
+    import uuid as _uuid
+    client_id = _uuid.uuid4().hex
+
+    def _build_frame(snap: dict) -> str:
+        aer = snap.get("aer_noise_state") or {}
+        mt  = snap.get("mermin_test") or snap.get("mermin") or {}
+        frame = {
+            "density_matrix_hex":      snap.get("density_matrix_hex", ""),
+            "dm_full_hex":             snap.get("dm_full_hex", ""),
+            "w_state_fidelity":        snap.get("w_state_fidelity", 0.0),
+            "coherence_l1":            snap.get("coherence_l1", 0.0),
+            "purity":                  snap.get("purity", 0.0),
+            "von_neumann_entropy":     snap.get("von_neumann_entropy", 0.0),
+            "phase_drift":             snap.get("phase_drift", 0.0),
+            "lattice_refresh_counter": snap.get("lattice_refresh_counter", 0),
+            "mermin_M": float(mt.get("M_value") or mt.get("M") or mt.get("mermin_value") or 0.0),
+            "aer_noise_state": {
+                "gamma1":      aer.get("gamma1", 0.0),
+                "gammaphi":    aer.get("gammaphi", 0.0),
+                "omega":       aer.get("omega", 0.5),
+                "ou_mem":      aer.get("ou_mem", 0.0),
+                "sector_occ":  aer.get("sector_occ", 0.0),
+                "block_field": aer.get("block_field", {}),
+            },
+        }
+        return "data: " + json.dumps(frame) + "\n\n"
+
+    def generate():
+        q = _sse_subscribe(client_id)
+        try:
+            # Flush current snapshot immediately — client gets live data on connect
+            with _snapshot_lock:
+                snap = _latest_snapshot
+            if snap:
+                yield _build_frame(snap)
+
+            _KA_INTERVAL = 25.0   # keep-alive cadence — below Koyeb 60 s TCP idle reset
+            while True:
+                try:
+                    payload = q.get(timeout=_KA_INTERVAL)
+                    yield payload
+                except _queue_mod.Empty:
+                    yield ": ka\n\n"   # invisible SSE comment — keeps TCP alive
+        except GeneratorExit:
+            pass
+        finally:
+            _sse_unsubscribe(client_id)
+            logger.debug(f"[SSE] client {client_id[:8]} disconnected ({len(_SSE_SUBSCRIBERS)} remaining)")
+
+    resp = Response(generate(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"]     = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"    # disable nginx/Koyeb proxy buffering
+    resp.headers["Connection"]        = "keep-alive"
+    return resp
+
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
-logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots}")
+logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots,stream}")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
 
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
@@ -4841,13 +4862,8 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     - Dual persistence: Supabase (cloud) + SQLite (local mesh)
     """
     try:
-        # 1. Update in-memory RPC cache (atomic pointer swap + oracle metrics cache)
+        # 1. Update in-memory RPC cache
         _cache_snapshot(snapshot)
-        _update_oracle_metrics_cache(snapshot)
-        # Keep chain tip hot for lock-free getBlockHeight
-        _snap_bh = int(snapshot.get('block_height') or snapshot.get('height') or 0)
-        if _snap_bh > 0:
-            _update_chain_tip(_snap_bh, snapshot.get('block_hash', _chain_tip_hash))
         
         # 2. Queue into DM snapshot ring buffer for streaming
         if 'density_matrix_hex' in snapshot:

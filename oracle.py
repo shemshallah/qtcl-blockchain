@@ -512,7 +512,7 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-MEASUREMENT_TIMEOUT          = 30
+MEASUREMENT_TIMEOUT          = 2    # 2s hard cap — 5 nodes parallel, 500ms budget
 W_STATE_STREAM_INTERVAL_MS   = 10
 LATTICE_REFRESH_INTERVAL_MS  = 50
 AER_NOISE_KAPPA              = 0.005
@@ -1579,7 +1579,7 @@ class OracleWStateManager:
         else:                  verdict = "No violation — classical or separable (F too low)"
 
         emoji = "🔔" if M > 2.0 else "📉"
-        logger.info(
+        logger.debug(
             f"{emoji} [MERMIN] M={M:.4f} ({M_pct:.1f}% W-max, {ghz_pct:.1f}% GHZ-max) | "
             f"{verdict} | F={avg_fidelity:.4f} | iters={iters}"
         )
@@ -1908,7 +1908,7 @@ class OracleWStateManager:
                 logger.warning(f"[ORACLE CLUSTER] Snapshot signing failed: {exc}")
 
         total_ms = (time.time_ns() - measurement_start_ns) / 1e6
-        logger.info(
+        logger.debug(
             f"[ORACLE CLUSTER] ✅ Cycle #{current_cycle} | "
             f"Readings={len(readings)}/5 accepted={len(accepted)} | "
             f"F={cons_fidelity:.4f} C={cons_coherence:.6f} | "
@@ -1940,12 +1940,11 @@ class OracleWStateManager:
                     try:
                         broadcaster = get_oracle_measurement_broadcaster()
                         bcast_result = broadcaster.broadcast_oracle_snapshot(snapshot)
-                        # Log every broadcast (even if no subscribers) at INFO level
                         subs_count = bcast_result.get('broadcast_count', 0)
                         db_queued = bcast_result.get('queued_for_db', False)
                         elapsed_ms = bcast_result.get('elapsed_ms', 0)
                         failed_count = len(bcast_result.get('failed_clients', []))
-                        logger.info(
+                        logger.debug(
                             f"[ORACLE CLUSTER] 📡 RPC broadcast @ cycle {snapshot.lattice_refresh_counter}: "
                             f"subscribers={subs_count} | failed={failed_count} | DB_queued={db_queued} | "
                             f"elapsed={elapsed_ms:.2f}ms"
@@ -1966,7 +1965,7 @@ class OracleWStateManager:
                         node_f = " | ".join(f"{n.get('fidelity',0):.4f}" for n in per)
                         node_c = " | ".join(f"{n.get('coherence',0):.4f}" for n in per)
                         sep = "=" * 72
-                        logger.info(
+                        logger.debug(
                             "\n" + sep + "\n"
                             "[ORACLE-SNAPSHOT] cycle=" + str(snapshot.lattice_refresh_counter) +
                             " ts=" + str(snapshot.timestamp_ns) + "\n"
