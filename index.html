@@ -242,51 +242,34 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
   <div class="tc">
     <div class="pn">
-      <div class="ph">
-        <span class="pht">Density Matrix ρ &mdash; 8×8 W-State Oracle</span>
-        <span style="display:flex;gap:8px;align-items:center">
-          <span class="pb vi" id="dm-mode-badge">Re(ρ)</span>
-          <button class="txfbtn active" id="dm-btn-re"    onclick="dmSetMode('re')">Re</button>
-          <button class="txfbtn"        id="dm-btn-im"    onclick="dmSetMode('im')">Im</button>
-          <button class="txfbtn"        id="dm-btn-abs"   onclick="dmSetMode('abs')">|ρ|</button>
-          <button class="txfbtn"        id="dm-btn-phase" onclick="dmSetMode('phase')">Phase</button>
-          <span class="pb" id="dm-ts" style="font-size:.72em;opacity:.55">awaiting oracle…</span>
-        </span>
-      </div>
-      <div style="display:flex;gap:0;align-items:stretch">
-        <div style="flex:1;position:relative;padding:12px 8px 4px 28px;min-width:0">
-          <div id="dm-ylabels" style="position:absolute;left:4px;top:12px;bottom:4px;display:flex;flex-direction:column;justify-content:space-around;font-family:'JetBrains Mono',monospace;font-size:7px;color:rgba(0,180,220,0.4);pointer-events:none"></div>
-          <canvas id="dc" style="width:100%;display:block;image-rendering:pixelated;border:1px solid rgba(0,220,255,0.08);border-radius:3px"></canvas>
-          <div id="dm-xlabels" style="display:flex;justify-content:space-around;font-family:'JetBrains Mono',monospace;font-size:7px;color:rgba(0,180,220,0.4);margin-top:3px"></div>
+      <div class="ph"><span class="pht">H³ Hyperbolic Lattice · {8,3}</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
+      <div id="dc3d" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;">
+        <!-- pq Bloch overlay — rendered by _PQ canvas system -->
+        <canvas id="pq-overlay" style="position:absolute;right:0;top:0;pointer-events:none;z-index:10;opacity:0.97"></canvas>
+        <!-- node type legend -->
+        <div style="position:absolute;left:8px;top:8px;pointer-events:none;z-index:10;display:flex;flex-direction:column;gap:4px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:7.5px;color:rgba(0,220,255,0.45);letter-spacing:1.5px;margin-bottom:2px">LEGEND</div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#d4a020;border-radius:1px;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(212,160,32,0.8)">Oracle node (×5)</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#00dcff;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">Lattice pseudoqubit</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:2px;background:#00dcff;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">W-state entanglement arc</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#ffd040;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(255,208,64,0.9)">Current block ⬡</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:1px;background:rgba(128,64,255,0.6);display:inline-block;flex-shrink:0;border-top:1px dashed rgba(128,64,255,0.6)"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,0.75)">Oracle entanglement</span></div>
         </div>
-        <div style="width:148px;flex-shrink:0;padding:12px 12px 4px 8px;display:flex;flex-direction:column;gap:8px;border-left:1px solid rgba(0,220,255,0.06)">
-          <div>
-            <div style="font-family:'JetBrains Mono',monospace;font-size:7.5px;color:rgba(0,180,220,0.5);letter-spacing:1.5px;margin-bottom:4px">COLORBAR</div>
-            <canvas id="dm-colorbar" width="20" height="120" style="width:20px;height:120px;display:inline-block;vertical-align:top;border-radius:2px"></canvas>
-            <div style="display:inline-flex;flex-direction:column;justify-content:space-between;height:120px;vertical-align:top;margin-left:5px">
-              <span id="dm-cb-max" style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--cy)">—</span>
-              <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,180,220,0.4)">·</span>
-              <span id="dm-cb-min" style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,180,220,0.3)">—</span>
-            </div>
-          </div>
-          <div style="border-top:1px solid rgba(0,220,255,0.07);padding-top:7px">
-            <div style="font-family:'JetBrains Mono',monospace;font-size:7.5px;color:rgba(0,180,220,0.5);letter-spacing:1.5px;margin-bottom:5px">DIAGONAL ρᵢᵢ</div>
-            <div id="dm-diag"></div>
-          </div>
-          <div style="border-top:1px solid rgba(0,220,255,0.07);padding-top:7px;display:flex;flex-direction:column;gap:3px">
-            <div style="font-family:'JetBrains Mono',monospace;font-size:7.5px;color:rgba(0,180,220,0.5);letter-spacing:1.5px;margin-bottom:2px">STATS</div>
-            <div style="font-size:9px;color:var(--dim)">Tr(ρ): <span id="dm-trace" style="color:var(--cy);font-family:'JetBrains Mono',monospace">—</span></div>
-            <div style="font-size:9px;color:var(--dim)">Tr(ρ²): <span id="dm-purity2" style="color:var(--vi);font-family:'JetBrains Mono',monospace">—</span></div>
-            <div style="font-size:9px;color:var(--dim)">max|ρᵢⱼ|: <span id="dm-maxoff" style="color:var(--go);font-family:'JetBrains Mono',monospace">—</span></div>
-          </div>
+        <!-- field-fidelity HUD strip -->
+        <div id="pq-hud" style="position:absolute;left:0;bottom:0;right:0;height:28px;pointer-events:none;z-index:11;display:flex;align-items:center;padding:0 10px;gap:14px;background:linear-gradient(0deg,rgba(0,5,8,.92) 0%,transparent 100%)">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.55);letter-spacing:1.5px">BLOCK FIELD</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_last=<span id="pqh-last" style="color:#8040ff">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_curr=<span id="pqh-curr" style="color:#d4a020">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">Δ=<span id="pqh-delta" style="color:#00ff9d">—</span></span>
+          <span style="flex:1"></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">ψ —</span>
         </div>
       </div>
-      <div id="dm-empty" style="padding:40px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--dim)">Awaiting density matrix from oracle…</div>
       <div class="bs">
         <div class="bv"><div class="bvl">|W₃| Fidelity</div><div class="bvn" id="bfi">&mdash;</div></div>
         <div class="bv"><div class="bvl">pq_curr</div><div class="bvn" id="ben" style="color:var(--go)">&mdash;</div></div>
         <div class="bv"><div class="bvl">pq_last</div><div class="bvn" id="bcn">&mdash;</div></div>
-        <div class="bv"><div class="bvl">Tr(ρ²)</div><div class="bvn" id="bte">&mdash;</div></div>
+        <div class="bv"><div class="bvl">Field Fidelity</div><div class="bvn" id="bte">&mdash;</div></div>
       </div>
     </div>
     <div class="pn">
@@ -318,7 +301,6 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
       </div>
     </div>
   </div>
-
   <div class="pn">
     <div class="ph"><span class="pht">Block Stream &mdash; Live</span><span class="pb go" id="bcc">0 blocks</span></div>
     <div id="cs"></div>
@@ -431,7 +413,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
         </div>
       </div>
     </div>
-    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="6f3c070a021c070e03030e072f08020e0603410c0002">[email&#160;protected]</a>. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
+    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="99caf1fcf4eaf1f8f5f5f8f1d9fef4f8f0f5b7faf6f4">[email&#160;protected]</a>. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
   </div>
 
 </div>
@@ -457,7 +439,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
 </div>
 <div class="bm-copied" id="bm-copied">✓ Copied</div>
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 'use strict';
 var BASE = window.location.origin;
@@ -553,12 +535,23 @@ async function rpcBatch(calls) {
       return {jsonrpc:'2.0', id: base + i, method: c[0], params: c[1] || []};
     });
     _rpcId += calls.length;
+    
+    // Create abort controller with 3s hard timeout (not 8s)
+    var controller = new AbortController();
+    var timeoutId = setTimeout(function() {
+      controller.abort();
+      console.warn('[RPC] Batch timeout after 3s — returning nulls to unblock UI');
+    }, 3000);
+    
     var r = await fetch(BASE + '/rpc', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(batch),
-      signal: AbortSignal.timeout(8000)
+      signal: controller.signal
     });
+    
+    clearTimeout(timeoutId);
+    
     if (!r.ok) return calls.map(function() { return null; });
     var arr = await r.json();
     // Server may return single object on error or batch array
@@ -569,7 +562,10 @@ async function rpcBatch(calls) {
       var res = arr.find(function(a) { return a && a.id === (base + i); });
       return (res && !res.error) ? res.result : null;
     });
-  } catch(e) { return calls.map(function() { return null; }); }
+  } catch(e) {
+    console.error('[RPC] Batch error:', e.message);
+    return calls.map(function() { return null; });
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -602,6 +598,434 @@ setInterval(tick, 1000); tick();
   })();
 })();
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// H³ HYPERBOLIC LATTICE — {8,3} Poincaré Ball (Three.js)
+// Wired directly to S.* — pq_curr / pq_last / pq0 fully rendered
+// ═══════════════════════════════════════════════════════════════════════════════
+var _H = (function() {
+var renderer=null,scene=null,camera=null;
+var nodeMesh=null,oracleMeshes=[],wArcObjs=[],entangleObjs=[];
+var edgeLines=[],boundSphere=null;
+var blockCoreMesh=null,blockCoreWire=null; // current block — glowing octahedron at origin
+var rafId=null,lastT=0,fps=30;
+var revivalT=-999,blockFlashT=-999;
+var nodePositions=[],nodeDepths=[],nodeCount=0;
+var oracleIdx=[],wTriple=[];
+var dummy=null;
+var C={
+  nodeCyan:new THREE.Color(0x00dcff),nodeMid:new THREE.Color(0x6028c8),
+  nodeOut:new THREE.Color(0x003a60),oracle:new THREE.Color(0xd4a020),
+  oracleOff:new THREE.Color(0x3a1800),wArc:new THREE.Color(0x00dcff),
+  wStrong:new THREE.Color(0xd4a020),entangle:new THREE.Color(0x6028c8),
+  entangleQ:new THREE.Color(0x00dcff),boundary:new THREE.Color(0x00dcff),
+  revival:new THREE.Color(0xd4a020),
+  pqCurr:new THREE.Color(0xd4a020),   // gold — current block pq state
+  pqLast:new THREE.Color(0x8040ff),   // violet — last block pq state
+  pqDelta:new THREE.Color(0x00ff9d),  // green — field transition arc
+};
+function geodArc(p1,p2,n){
+  var cross=new THREE.Vector3().crossVectors(p1,p2);
+  if(cross.lengthSq()<1e-9){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
+  var d11=p1.dot(p1),d12=p1.dot(p2),d22=p2.dot(p2),det=d11*d22-d12*d12;
+  if(Math.abs(det)<1e-9){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
+  var r1=(d11+1)/2,r2=(d22+1)/2,a=(r1*d22-r2*d12)/det,b=(r2*d11-r1*d12)/det;
+  var c=p1.clone().multiplyScalar(a).add(p2.clone().multiplyScalar(b));
+  var rad=Math.sqrt(Math.max(0,c.lengthSq()-1));
+  if(rad<1e-7){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
+  var e1=p1.clone().sub(c).normalize(),v2=p2.clone().sub(c);
+  var e2=v2.clone().sub(e1.clone().multiplyScalar(e1.dot(v2))).normalize();
+  var ang2=Math.atan2(e2.dot(v2),e1.dot(v2)),pts=[];
+  for(var i=0;i<=n;i++){var a2=(i/n)*ang2;pts.push(c.clone().add(e1.clone().multiplyScalar(rad*Math.cos(a2))).add(e2.clone().multiplyScalar(rad*Math.sin(a2))));}
+  return pts;
+}
+function makeTube(pts,radius,segs,matProps){
+  var curve=new THREE.CatmullRomCurve3(pts);
+  var geo=new THREE.TubeGeometry(curve,Math.max(4,pts.length-1),radius,segs,false);
+  return new THREE.Mesh(geo,new THREE.MeshBasicMaterial(matProps));
+}
+
+function genNodes(){
+  nodePositions=[];nodeDepths=[];oracleIdx=[];wTriple=[];
+  var rings=[[0.00,1],[0.779,8],[1.50,24],[2.20,56],[2.90,96]];
+  for(var ri=0;ri<rings.length;ri++){
+    var R=rings[ri][0],cnt=rings[ri][1],rho=Math.tanh(R/2);
+    if(cnt===1){nodePositions.push(new THREE.Vector3(0,0,0));nodeDepths.push(0);continue;}
+    for(var i=0;i<cnt;i++){
+      var phi=Math.acos(1-2*(i+0.5)/cnt),theta=Math.PI*(1+Math.sqrt(5))*i,tilt=ri*0.15;
+      nodePositions.push(new THREE.Vector3(rho*Math.sin(phi)*Math.cos(theta),rho*Math.sin(phi)*Math.sin(theta+tilt),rho*Math.cos(phi)*0.85));
+      nodeDepths.push(ri);
+    }
+  }
+  nodeCount=nodePositions.length;
+  for(var k=0;k<5;k++) oracleIdx.push(1+Math.floor(k*8/5));
+  wTriple=[1,1+3,1+6];
+}
+function buildEdges(rings){
+  var edges=[],startByRing=[0,1],s=1;
+  for(var ri=1;ri<rings.length;ri++){s+=rings[ri][1];startByRing.push(s);}
+  for(var ri=0;ri<rings.length-1;ri++){
+    var iS=startByRing[ri],iE=startByRing[ri+1],jS=startByRing[ri+1],jE=startByRing[ri+2];
+    for(var i=iS;i<iE;i++){
+      var pi=nodePositions[i],ds=[];
+      for(var j=jS;j<jE;j++) ds.push([j,pi.distanceTo(nodePositions[j])]);
+      ds.sort(function(a,b){return a[1]-b[1];});
+      for(var k=0;k<Math.min(3,ds.length);k++) edges.push([i,ds[k][0]]);
+    }
+  }
+  return edges;
+}
+function buildScene(){
+  var rings=[[0,1],[0.779,8],[1.50,24],[2.20,56],[2.90,96]];
+  var edges=buildEdges(rings);
+  dummy=new THREE.Object3D();
+  scene.add(new THREE.AmbientLight(0x000c1a,3.0));
+  var pl0=new THREE.PointLight(0x00dcff,3.0,4);scene.add(pl0);
+  var pl1=new THREE.PointLight(0x6028c8,2.0,3);pl1.position.set(0.8,0.6,0.2);scene.add(pl1);
+  var pl2=new THREE.PointLight(0xd4a020,1.5,2);pl2.position.set(-0.5,0,0.7);scene.add(pl2);
+  // ── Nodes ─────────────────────────────────────────────────────────────────
+  var nGeo=new THREE.SphereGeometry(0.016,6,5);
+  var nMat=new THREE.MeshPhongMaterial({color:0x00dcff,emissive:0x000820,transparent:true,opacity:0.9,shininess:60});
+  nodeMesh=new THREE.InstancedMesh(nGeo,nMat,nodeCount);
+  nodeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  nodeMesh.instanceColor=new THREE.InstancedBufferAttribute(new Float32Array(nodeCount*3),3);
+  for(var i=0;i<nodeCount;i++){
+    dummy.position.copy(nodePositions[i]);
+    var sc=Math.max(0.25,1.0-nodeDepths[i]*0.16);
+    dummy.scale.setScalar(sc);dummy.updateMatrix();
+    nodeMesh.setMatrixAt(i,dummy.matrix);nodeMesh.setColorAt(i,C.nodeCyan);
+  }
+  nodeMesh.instanceMatrix.needsUpdate=true;nodeMesh.instanceColor.needsUpdate=true;
+  scene.add(nodeMesh);
+  // ── Oracle icosahedra ──────────────────────────────────────────────────────
+  var oGeo=new THREE.IcosahedronGeometry(0.044,1);
+  for(var k=0;k<5;k++){
+    var oMat=new THREE.MeshPhongMaterial({color:0xd4a020,emissive:0x3a1000,transparent:true,opacity:0.92,shininess:120});
+    var m=new THREE.Mesh(oGeo,oMat);m.position.copy(nodePositions[oracleIdx[k]]);
+    scene.add(m);oracleMeshes.push(m);
+  }
+  // ── W-state arcs ──────────────────────────────────────────────────────────
+  for(var i=0;i<3;i++){
+    var pts=geodArc(nodePositions[wTriple[i]],nodePositions[wTriple[(i+1)%3]],40);
+    var tube=makeTube(pts,0.008,5,{color:0x00dcff,transparent:true,opacity:0.75});
+    scene.add(tube);wArcObjs.push(tube);
+  }
+  // ── Oracle entanglement tubes ─────────────────────────────────────────────
+  for(var i=0;i<5;i++){
+    for(var j=i+1;j<5;j++){
+      var pts=geodArc(nodePositions[oracleIdx[i]],nodePositions[oracleIdx[j]],32);
+      var tube=makeTube(pts,0.0035,4,{color:0x6028c8,transparent:true,opacity:0.0});
+      scene.add(tube);entangleObjs.push({mesh:tube,i:i,j:j});
+    }
+  }
+  // ── Lattice edges ─────────────────────────────────────────────────────────
+  var edgeSub=edges.filter(function(e){return nodeDepths[e[0]]<=2&&nodeDepths[e[1]]<=2;});
+  for(var ei=0;ei<Math.min(100,edgeSub.length);ei++){
+    var pts=geodArc(nodePositions[edgeSub[ei][0]],nodePositions[edgeSub[ei][1]],14);
+    var geo=new THREE.BufferGeometry().setFromPoints(pts);
+    var ln=new THREE.Line(geo,new THREE.LineBasicMaterial({color:0x002030,transparent:true,opacity:0.35}));
+    scene.add(ln);edgeLines.push(ln);
+  }
+  // ── Boundary sphere ───────────────────────────────────────────────────────
+  var bGeo=new THREE.SphereGeometry(0.99,48,24);
+  boundSphere=new THREE.Mesh(bGeo,new THREE.MeshBasicMaterial({color:0x00dcff,transparent:true,opacity:0.04,side:THREE.BackSide}));
+  scene.add(boundSphere);
+  scene.add(new THREE.Mesh(new THREE.SphereGeometry(0.99,20,10),new THREE.MeshBasicMaterial({color:0x001228,wireframe:true,transparent:true,opacity:0.18})));
+  // ── Latitude rings (hyperbolic tessellation grid) ─────────────────────────
+  var hRings=12,hSegs=48;
+  for(var ri2=0;ri2<hRings;ri2++){
+    var z0=-0.4+ri2/hRings*0.8,rho2=Math.sqrt(Math.max(0,1-z0*z0))*0.95,ringPts=[];
+    for(var si2=0;si2<=hSegs;si2++){var th=si2/hSegs*Math.PI*2;ringPts.push(new THREE.Vector3(rho2*Math.cos(th),rho2*Math.sin(th),z0));}
+    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ringPts),new THREE.LineBasicMaterial({color:0x001a28,transparent:true,opacity:0.22})));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CURRENT BLOCK OBJECT — glowing octahedron at the lattice origin
+  // This IS the block. pq_curr/pq_last are shown in the 2D overlay.
+  // ══════════════════════════════════════════════════════════════════════════
+  var bcGeo=new THREE.OctahedronGeometry(0.09,1);
+  blockCoreMesh=new THREE.Mesh(bcGeo,new THREE.MeshPhongMaterial({
+    color:0xd4a020,emissive:0xd4a020,emissiveIntensity:0.6,
+    transparent:true,opacity:0.85,shininess:200,wireframe:false
+  }));
+  scene.add(blockCoreMesh);
+  var bcWGeo=new THREE.OctahedronGeometry(0.093,1);
+  blockCoreWire=new THREE.Mesh(bcWGeo,new THREE.MeshBasicMaterial({
+    color:0xffd040,wireframe:true,transparent:true,opacity:0.5
+  }));
+  scene.add(blockCoreWire);
+}
+
+
+function update(t){
+  if(!scene||!nodeMesh) return;
+  var fid=Math.max(0.3,Math.min(1.0,S.lattice_fidelity||S.fidelity||0.9));
+  var coh=Math.max(0.0,Math.min(1.0,S.lattice_coherence||S.coherence||0.7));
+  var neg=Math.max(0.0,Math.min(0.5,S.negativity||0));
+  var disc=Math.max(0.0,Math.min(2.0,S.discord||0));
+  var ent=Math.max(0.0,Math.min(1.0,S.entanglement||0.65));
+  var g1=Math.max(0.001,S.gamma1||0.04);
+  var om=Math.max(0.1,S.omega||0.5);
+  var cyc=S.cycle||0;
+  var odata=S.oracle_data||{};
+  var M=S.mermin?parseFloat(S.mermin.M_value||S.mermin.M||0):0;
+  var isQ=M>2.0,isStrong=M>2.8;
+
+  if(cyc>0&&cyc%8===0&&(t-revivalT)>2) revivalT=t;
+  var revAge=t-revivalT,revPulse=(revAge<2.0)?Math.exp(-revAge*2.5):0;
+  var blkAge=t-blockFlashT,blkPulse=(blkAge<1.0)?Math.exp(-blkAge*4):0;
+
+  var yaw=om*0.06*t,tilt=0.32+0.06*Math.sin(t*0.05);
+  camera.position.set(2.8*Math.sin(yaw)*Math.cos(tilt),2.8*Math.sin(tilt),2.8*Math.cos(yaw)*Math.cos(tilt));
+  camera.lookAt(0,0,0);
+
+  // ── Node colours + scales ─────────────────────────────────────────────────
+  var tmpCol=new THREE.Color();
+  for(var i=0;i<nodeCount;i++){
+    var dep=nodeDepths[i],isOracle=oracleIdx.indexOf(i)>=0,isW=wTriple.indexOf(i)>=0;
+    var noise=g1*15*(Math.sin(t*6.3+i*2.1)*0.5+0.5);
+    var bright=fid-dep*(1-fid)*0.18+noise*0.08-dep*noise*0.06;
+    bright=Math.max(0.05,Math.min(1.3,bright))+revPulse*(1-dep*0.08)+blkPulse*0.4;
+    if(isOracle) tmpCol.copy(C.oracle).multiplyScalar(bright);
+    else if(isW) tmpCol.copy(C.wArc).multiplyScalar(bright*1.3);
+    else if(dep<=1) tmpCol.copy(C.nodeCyan).multiplyScalar(bright);
+    else if(dep<=2) tmpCol.lerpColors(C.nodeCyan,C.nodeMid,0.55).multiplyScalar(bright*0.9);
+    else tmpCol.lerpColors(C.nodeMid,C.nodeOut,Math.min(1,(dep-2)/2)).multiplyScalar(bright*0.7);
+    nodeMesh.setColorAt(i,tmpCol);
+    dummy.position.copy(nodePositions[i]);
+    var sc=Math.max(0.2,1.0-dep*0.16)*(isOracle?1.7:1.0);
+    var breathe=1+0.09*Math.sin(t*3.1+i*0.97)*g1*8;
+    dummy.scale.setScalar(sc*breathe*(1+revPulse*0.35+blkPulse*0.25));
+    dummy.updateMatrix();nodeMesh.setMatrixAt(i,dummy.matrix);
+  }
+  nodeMesh.instanceMatrix.needsUpdate=true;nodeMesh.instanceColor.needsUpdate=true;
+
+  // ── Oracle icosahedra ─────────────────────────────────────────────────────
+  for(var k=0;k<5;k++){
+    var m=oracleMeshes[k],ok='oracle_'+(k+1),od=odata[ok]||{};
+    var oFid=od.w_state_fidelity!=null?od.w_state_fidelity:(od.fidelity||fid);
+    var oCons=od.in_consensus;
+    m.scale.setScalar(0.85+oFid*0.25+revPulse*0.35+blkPulse*0.2);
+    m.material.emissiveIntensity=oCons===false?0.1:(0.3+0.25*Math.sin(t*2.5+k*1.26)+revPulse*0.8);
+    m.material.color.set(oCons===false?0x3a1800:isStrong?0xffe040:0xd4a020);
+    m.material.emissive.set(oCons===false?0x1a0800:isStrong?0x604000:0x3a1000);
+  }
+
+  // ── W-arcs ────────────────────────────────────────────────────────────────
+  var wCol=isStrong?C.wStrong:isQ?C.wArc:new THREE.Color(0x3010a0);
+  var wOp=Math.min(0.9,0.35+fid*0.5+revPulse*0.4+blkPulse*0.2);
+  var wPulse=1+0.18*Math.sin(t*4.2)*(isQ?1:0.15);
+  for(var i=0;i<wArcObjs.length;i++){wArcObjs[i].material.color.copy(wCol);wArcObjs[i].material.opacity=wOp*wPulse;}
+
+  // ── Entanglement tubes ────────────────────────────────────────────────────
+  for(var ei=0;ei<entangleObjs.length;ei++){
+    var eo=entangleObjs[ei],pairFactor=0.5+0.5*Math.sin(t*1.8+eo.i*2.3+eo.j*1.1);
+    var op=Math.min(0.72,ent*neg*4*pairFactor+revPulse*0.25);
+    eo.mesh.material.opacity=op;
+    eo.mesh.material.color.lerpColors(C.entangle,C.entangleQ,Math.min(1,disc/2));
+  }
+
+  // ── Lattice edges ─────────────────────────────────────────────────────────
+  for(var li=0;li<edgeLines.length;li++){edgeLines[li].material.opacity=0.08+coh*0.28;edgeLines[li].material.color.setHex(isQ?0x002840:0x001020);}
+
+  // ── Boundary sphere ───────────────────────────────────────────────────────
+  if(boundSphere){boundSphere.material.opacity=0.015+fid*0.065+revPulse*0.10;boundSphere.material.color.set(isStrong?C.wStrong:C.boundary);}
+
+  // ── CURRENT BLOCK — glowing octahedron at origin ──────────────────────────
+  // Spins slowly; flashes bright gold on each new block; size breathes with fidelity
+  if(blockCoreMesh&&blockCoreWire){
+    blockCoreMesh.rotation.y=t*0.4;
+    blockCoreMesh.rotation.x=t*0.17;
+    blockCoreWire.rotation.y=t*0.4;
+    blockCoreWire.rotation.x=t*0.17;
+    var bsc=1.0+0.12*Math.sin(t*1.8)*fid+blkPulse*0.9+revPulse*0.4;
+    blockCoreMesh.scale.setScalar(bsc);
+    blockCoreWire.scale.setScalar(bsc*1.04);
+    blockCoreMesh.material.emissiveIntensity=0.4+0.3*Math.sin(t*2.2)+blkPulse*1.2+revPulse*0.6;
+    blockCoreMesh.material.color.setHex(isStrong?0xffe060:blkPulse>0.1?0xffffff:0xd4a020);
+    blockCoreMesh.material.emissive.setHex(isStrong?0xd4a020:blkPulse>0.1?0xffd040:0xc09010);
+    blockCoreWire.material.opacity=0.3+0.2*Math.sin(t*3.1)+blkPulse*0.5;
+  }
+
+  // ── 2D overlay — Bloch-disk + pq state + legend ───────────────────────────
+  _drawPqOverlay(t, fid, isQ, isStrong, blkPulse);
+
+  // ── HUD strip ─────────────────────────────────────────────────────────────
+  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
+  var hl=document.getElementById('pqh-last');   if(hl) hl.textContent=pqL;
+  var hc=document.getElementById('pqh-curr');   if(hc) hc.textContent=pqC;
+  var hd=document.getElementById('pqh-delta');  if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
+  var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='ψ cyc='+cyc+(cyc>0&&cyc%8===0?' ↑REVIVAL':cyc>0&&cyc%8===4?' ↓ANTI':'');
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2D PQ OVERLAY — Poincaré disk showing pq_curr and pq_last as labeled points
+// Drawn into the #pq-overlay canvas, top-right corner of dc3d
+// ═══════════════════════════════════════════════════════════════════════════════
+var _pqOvCanvas=null,_pqOvCtx=null;
+var _pqCurrAnim=0,_pqLastAnim=0; // smoothed for animation
+
+function _drawPqOverlay(t, fid, isQ, isStrong, blkPulse){
+  if(!_pqOvCanvas){
+    _pqOvCanvas=document.getElementById('pq-overlay');
+    if(!_pqOvCanvas) return;
+    // Size it: 148×148 in top-right
+    _pqOvCanvas.width=148; _pqOvCanvas.height=148;
+    _pqOvCanvas.style.width='148px'; _pqOvCanvas.style.height='148px';
+    _pqOvCanvas.style.top='8px'; _pqOvCanvas.style.right='8px';
+    _pqOvCtx=_pqOvCanvas.getContext('2d');
+  }
+  var ctx=_pqOvCtx, W=148, cx=74, cy=74, R=52;
+  ctx.clearRect(0,0,W,W);
+
+  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
+  // Smooth toward real values
+  _pqCurrAnim += (pqC - _pqCurrAnim)*0.08;
+  _pqLastAnim += (pqL - _pqLastAnim)*0.08;
+
+  // pq states map to 8 positions on the unit circle (0–7 → 0°–315° in 45° steps)
+  // This is the Poincaré disk projection of the pseudoqubit Bloch equator
+  function pqAngle(v){ return v * Math.PI/4 - Math.PI/2; } // 0→top, clockwise
+  var angC=pqAngle(_pqCurrAnim), angL=pqAngle(_pqLastAnim);
+  var xC=cx+Math.cos(angC)*R, yC=cy+Math.sin(angC)*R;
+  var xL=cx+Math.cos(angL)*R, yL=cy+Math.sin(angL)*R;
+
+  // ── Background disk ───────────────────────────────────────────────────────
+  var bgGrad=ctx.createRadialGradient(cx,cy,0,cx,cy,R);
+  bgGrad.addColorStop(0,'rgba(0,18,32,0.92)');
+  bgGrad.addColorStop(1,'rgba(0,5,12,0.96)');
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
+  ctx.fillStyle=bgGrad; ctx.fill();
+
+  // ── Boundary ring ─────────────────────────────────────────────────────────
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
+  ctx.strokeStyle='rgba(0,220,255,0.22)'; ctx.lineWidth=1; ctx.stroke();
+
+  // ── 8 pq state positions as tick marks ───────────────────────────────────
+  for(var i=0;i<8;i++){
+    var a=pqAngle(i);
+    var ox=cx+Math.cos(a)*R, oy=cy+Math.sin(a)*R;
+    var ix=cx+Math.cos(a)*(R-7), iy=cy+Math.sin(a)*(R-7);
+    ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(ix,iy);
+    ctx.strokeStyle='rgba(0,220,255,0.30)'; ctx.lineWidth=1; ctx.stroke();
+    // Label
+    ctx.font='bold 8px JetBrains Mono,monospace';
+    ctx.fillStyle='rgba(0,180,220,0.45)';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    var lx=cx+Math.cos(a)*(R+11), ly=cy+Math.sin(a)*(R+11);
+    ctx.fillText(i, lx, ly);
+  }
+
+  // ── Cross hairs ───────────────────────────────────────────────────────────
+  ctx.strokeStyle='rgba(0,220,255,0.08)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R); ctx.stroke();
+
+  // ── Arc from pq_last → pq_curr ────────────────────────────────────────────
+  if(pqC!==pqL){
+    var dA=angC-angL;
+    while(dA>Math.PI) dA-=Math.PI*2;
+    while(dA<-Math.PI) dA+=Math.PI*2;
+    ctx.beginPath();
+    ctx.arc(cx,cy,R*0.82,angL,angL+dA,dA<0);
+    ctx.strokeStyle='rgba(0,255,157,0.55)'; ctx.lineWidth=1.5;
+    ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+    // Arrow tip
+    var tipA=angL+dA, perp=tipA+(dA>0?-0.25:0.25);
+    var tx2=cx+Math.cos(tipA)*R*0.82, ty2=cy+Math.sin(tipA)*R*0.82;
+    var tx1=cx+Math.cos(perp)*R*0.82*0.92, ty1=cy+Math.sin(perp)*R*0.82*0.92;
+    ctx.beginPath(); ctx.moveTo(tx2,ty2); ctx.lineTo(tx1,ty1);
+    ctx.strokeStyle='rgba(0,255,157,0.7)'; ctx.lineWidth=1.5; ctx.stroke();
+  }
+
+  // ── Line from center to pq_last (ghost violet) ───────────────────────────
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(xL,yL);
+  ctx.strokeStyle='rgba(128,64,255,0.35)'; ctx.lineWidth=1.5;
+  ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]);
+
+  // ── Line from center to pq_curr (gold, solid) ────────────────────────────
+  var glow=0.65+0.2*Math.sin(t*2.8)+blkPulse*0.35;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(xC,yC);
+  ctx.strokeStyle='rgba(212,160,32,'+Math.min(1,glow)+')'; ctx.lineWidth=2; ctx.stroke();
+
+  // ── pq_last dot + label ───────────────────────────────────────────────────
+  ctx.beginPath(); ctx.arc(xL,yL,4,0,Math.PI*2);
+  ctx.fillStyle='rgba(128,64,255,0.7)'; ctx.fill();
+  ctx.font='bold 8px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(170,120,255,0.9)';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('LAST·'+pqL, xL+(xL>cx?14:-14), yL+(yL>cy?-10:10));
+
+  // ── pq_curr dot + label (brighter, larger) ───────────────────────────────
+  var cPulse=1+blkPulse*0.8;
+  // Glow ring
+  var glowGrad=ctx.createRadialGradient(xC,yC,0,xC,yC,10*cPulse);
+  glowGrad.addColorStop(0,'rgba(255,200,40,0.5)');
+  glowGrad.addColorStop(1,'rgba(255,200,40,0)');
+  ctx.beginPath(); ctx.arc(xC,yC,10*cPulse,0,Math.PI*2);
+  ctx.fillStyle=glowGrad; ctx.fill();
+  // Dot
+  ctx.beginPath(); ctx.arc(xC,yC,5*cPulse,0,Math.PI*2);
+  ctx.fillStyle=isStrong?'rgba(255,240,100,1)':'rgba(212,160,32,1)'; ctx.fill();
+  // Label
+  ctx.font='bold 9px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(255,210,60,1)';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('CURR·'+pqC, xC+(xC>cx?16:-16), yC+(yC>cy?-12:12));
+
+  // ── Center dot (lattice origin = current block) ───────────────────────────
+  ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,200,40,0.8)'; ctx.fill();
+
+  // ── Title ─────────────────────────────────────────────────────────────────
+  ctx.font='7px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(0,180,220,0.5)';
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.fillText('PQ STATE DISK · fid='+fid.toFixed(2), cx, 2);
+
+  // ── Fidelity arc inside disk ──────────────────────────────────────────────
+  ctx.beginPath();
+  ctx.arc(cx,cy,R*0.22,0,Math.PI*2*fid);
+  ctx.strokeStyle=isQ?'rgba(0,255,157,0.5)':'rgba(0,180,220,0.35)';
+  ctx.lineWidth=2; ctx.stroke();
+}
+
+function onBlock(){
+  blockFlashT=performance.now()*0.001;
+  _pqCurrAnim = S.pq_curr || 0;
+  _pqLastAnim = S.pq_last || 0;
+}
+function animate(){
+  rafId=requestAnimationFrame(animate);
+  var now=performance.now();
+  if(now-lastT<1000/fps) return;
+  lastT=now;update(now*0.001);renderer.render(scene,camera);
+}
+function init(){
+  var container=document.getElementById('dc3d');
+  if(!container||typeof THREE==='undefined') return;
+  var w=container.clientWidth||container.parentElement.clientWidth||400,h=340;
+  renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+  renderer.setSize(w,h);renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  renderer.setClearColor(0x000000,0);container.appendChild(renderer.domElement);
+  scene=new THREE.Scene();
+  camera=new THREE.PerspectiveCamera(50,w/h,0.01,50);
+  camera.position.set(0,0.6,2.8);camera.lookAt(0,0,0);
+  genNodes();buildScene();animate();
+  window.addEventListener('resize',function(){
+    var cont=document.getElementById('dc3d');if(!cont||!renderer||!camera) return;
+    var nw=cont.clientWidth;camera.aspect=nw/340;camera.updateProjectionMatrix();renderer.setSize(nw,340);
+  });
+}
+return {init:init,onBlock:onBlock};
+})();
+
+(function _h3dBoot(){
+  if(typeof THREE==='undefined'){setTimeout(_h3dBoot,80);return;}
+  var cont=document.getElementById('dc3d');
+  if(!cont){setTimeout(_h3dBoot,80);return;}
+  _H.init();
+})();
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HEX BLOCK RENDERER + CHAIN STREAM
@@ -989,7 +1413,7 @@ function updateDOM() {
   st('ben',S.pq_curr);
   st('bcn',S.pq_last);
   st('bte',fmt4(S.tele_fidelity));
-  // pq strip
+  st('dkb','pq0='+S.pq0+' pq_last='+S.pq_last+' → pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' Δ='+(S.pq_curr-S.pq_last):''));
   // ── GKSL noise bath ──
   st('ng1',fmt4(S.gamma1));
   st('ngp',fmt4(S.gammaphi));
@@ -1028,382 +1452,27 @@ function stamp() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// UNIFIED POLL ENGINE — Dual-lane: fast metrics + DM cursor subscription
-//
-// The DM snapshot is NEVER polled on a timer. Instead a cursor loop compares
-// timestamp_ns — it fires immediately when _broadcast_snapshot_to_database()
-// has produced a new snapshot, and is silent when nothing has changed.
-// This matches the server's actual creation rate with zero wasted fetches.
+// UNIFIED POLL ENGINE — Single Source of Truth Architecture
+// Consolidates all 6 duplicate loops into ONE coherent data pipeline
 // ═══════════════════════════════════════════════════════════════════════════════
 
-var _lastEventTs     = Date.now()/1000 - 60;
+var _lastEventTs = Date.now()/1000 - 60;
 var _lastBlockHeight = 0;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// DENSITY MATRIX HEATMAP RENDERER
-// Reads density_matrix_hex (2048 hex chars = 64 complex float64s, big-endian)
-// representing the 8×8 density matrix ρ from the oracle broadcast.
-// Modes: re (real part), im (imaginary), abs (magnitude), phase (angle)
-// ═══════════════════════════════════════════════════════════════════════════════
-var _dmMode   = 're';
-var _dmCanvas = null, _dmCtx = null;
-var _dmCbCanvas = null, _dmCbCtx = null;
-
-// Colour maps — viridis-inspired for |ρ|, diverging RdBu for Re/Im
-function _dmColor(v, mode) {
-  // v in [0,1]
-  var r, g, b;
-  if (mode === 're' || mode === 'im') {
-    // diverging: negative=blue, zero=black, positive=cyan/gold
-    if (v < 0.5) {
-      var t = (0.5 - v) * 2;      // 0→positive pole, 1→negative pole
-      r = Math.round(t * 40);
-      g = Math.round(t * 80);
-      b = Math.round(80 + t * 175);
-    } else {
-      var t = (v - 0.5) * 2;
-      r = Math.round(t * 212);
-      g = Math.round(t * 160);
-      b = Math.round(t * 32);
-    }
-  } else if (mode === 'phase') {
-    // HSL wheel
-    var h = v * 360;
-    var s = 0.85, l = 0.45;
-    var c = (1 - Math.abs(2 * l - 1)) * s;
-    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
-    var m = l - c / 2;
-    var rr, gg, bb;
-    if      (h < 60)  { rr=c; gg=x; bb=0; }
-    else if (h < 120) { rr=x; gg=c; bb=0; }
-    else if (h < 180) { rr=0; gg=c; bb=x; }
-    else if (h < 240) { rr=0; gg=x; bb=c; }
-    else if (h < 300) { rr=x; gg=0; bb=c; }
-    else              { rr=c; gg=0; bb=x; }
-    r = Math.round((rr + m) * 255);
-    g = Math.round((gg + m) * 255);
-    b = Math.round((bb + m) * 255);
-  } else {
-    // abs — dark-plasma: black→purple→gold→white
-    r = Math.round(Math.min(255, v * v * 310));
-    g = Math.round(Math.min(255, v * 180));
-    b = Math.round(Math.min(255, (1 - v) * v * 4 * 255));
-  }
-  return [Math.max(0,r), Math.max(0,g), Math.max(0,b)];
-}
-
-function _dmDrawColorbar(mode) {
-  if (!_dmCbCanvas) { _dmCbCanvas = document.getElementById('dm-colorbar'); if (!_dmCbCanvas) return; _dmCbCtx = _dmCbCanvas.getContext('2d'); }
-  var H = 120, W = 20;
-  var img = _dmCbCtx.createImageData(W, H);
-  for (var y = 0; y < H; y++) {
-    var v = 1 - y / (H - 1);
-    var col = _dmColor(v, mode);
-    for (var x = 0; x < W; x++) {
-      var idx = (y * W + x) * 4;
-      img.data[idx]   = col[0];
-      img.data[idx+1] = col[1];
-      img.data[idx+2] = col[2];
-      img.data[idx+3] = 255;
-    }
-  }
-  _dmCbCtx.putImageData(img, 0, 0);
-}
-
-function dmSetMode(mode) {
-  _dmMode = mode;
-  ['re','im','abs','phase'].forEach(function(m) {
-    var b = document.getElementById('dm-btn-' + m);
-    if (b) b.className = 'txfbtn' + (m === mode ? ' active' : '');
-  });
-  var badge = document.getElementById('dm-mode-badge');
-  if (badge) badge.textContent = mode === 're' ? '|Re(ρ)|' : mode === 'im' ? 'Im(ρ)' : mode === 'abs' ? '|ρᵢⱼ|' : 'Phase(ρ)';
-  _dmDrawColorbar(mode);
-  if (_dmLastRe) _renderDMHeatmap(_dmLastRe, _dmLastIm, _dmLastTs);
-}
-
-var _dmLastRe = null, _dmLastIm = null;
-
-function _renderDMHeatmap(dm_re, dm_im, ts_ns) {
-  _dmLastRe = dm_re; _dmLastIm = dm_im;
-  var empty = document.getElementById('dm-empty');
-
-  if (!_dmCanvas) {
-    _dmCanvas = document.getElementById('dc');
-    if (!_dmCanvas) return;
-    _dmCtx = _dmCanvas.getContext('2d');
-    // Build axis labels once
-    var xl = document.getElementById('dm-xlabels');
-    var yl = document.getElementById('dm-ylabels');
-    if (xl) xl.innerHTML = [0,1,2,3,4,5,6,7].map(function(i){ return '<span>|'+i+'⟩</span>'; }).join('');
-    if (yl) yl.innerHTML = [0,1,2,3,4,5,6,7].map(function(i){ return '<span>⟨'+i+'|</span>'; }).join('');
-    _dmDrawColorbar(_dmMode);
-  }
-
-  if (empty) empty.style.display = 'none';
-
-  var N = 8, CELL = 32;           // 8×8 matrix, 32 px per cell
-  _dmCanvas.width  = N * CELL;
-  _dmCanvas.height = N * CELL;
-
-  // Extract values for chosen mode
-  var vals = new Array(N * N);
-  var vmin = Infinity, vmax = -Infinity;
-  for (var i = 0; i < N; i++) {
-    for (var j = 0; j < N; j++) {
-      var idx = i * N + j;
-      var re = dm_re[idx] || 0, im = dm_im[idx] || 0;
-      var v;
-      if      (_dmMode === 're')    v = re;
-      else if (_dmMode === 'im')    v = im;
-      else if (_dmMode === 'abs')   v = Math.sqrt(re * re + im * im);
-      else                          v = Math.atan2(im, re) / (2 * Math.PI) + 0.5; // phase 0→1
-      vals[idx] = v;
-      if (v < vmin) vmin = v;
-      if (v > vmax) vmax = v;
-    }
-  }
-  var range = vmax - vmin || 1;
-  var img = _dmCtx.createImageData(N * CELL, N * CELL);
-
-  for (var i = 0; i < N; i++) {
-    for (var j = 0; j < N; j++) {
-      var v = (vals[i * N + j] - vmin) / range;
-      var col = _dmColor(v, _dmMode);
-      // diagonal gets a subtle highlight border
-      var isDiag = (i === j);
-      for (var py = 0; py < CELL; py++) {
-        for (var px = 0; px < CELL; px++) {
-          var border = isDiag && (py === 0 || py === CELL-1 || px === 0 || px === CELL-1);
-          var pidx = ((i * CELL + py) * N * CELL + (j * CELL + px)) * 4;
-          img.data[pidx]   = border ? 212 : col[0];
-          img.data[pidx+1] = border ? 160 : col[1];
-          img.data[pidx+2] = border ? 32  : col[2];
-          img.data[pidx+3] = 255;
-        }
-      }
-    }
-  }
-  _dmCtx.putImageData(img, 0, 0);
-
-  // Grid lines
-  _dmCtx.strokeStyle = 'rgba(0,220,255,0.10)';
-  _dmCtx.lineWidth = 0.5;
-  for (var k = 1; k < N; k++) {
-    _dmCtx.beginPath(); _dmCtx.moveTo(k * CELL, 0); _dmCtx.lineTo(k * CELL, N * CELL); _dmCtx.stroke();
-    _dmCtx.beginPath(); _dmCtx.moveTo(0, k * CELL); _dmCtx.lineTo(N * CELL, k * CELL); _dmCtx.stroke();
-  }
-
-  // Colorbar range labels
-  var cbMax = document.getElementById('dm-cb-max');
-  var cbMin = document.getElementById('dm-cb-min');
-  if (cbMax) cbMax.textContent = vmax.toFixed(3);
-  if (cbMin) cbMin.textContent = vmin.toFixed(3);
-
-  // Diagonal population bars
-  var diagEl = document.getElementById('dm-diag');
-  if (diagEl) {
-    var maxDiag = 0;
-    for (var i = 0; i < N; i++) { var d = Math.abs(dm_re[i * N + i]); if (d > maxDiag) maxDiag = d; }
-    diagEl.innerHTML = '';
-    for (var i = 0; i < N; i++) {
-      var d = dm_re[i * N + i];
-      var w = maxDiag > 0 ? Math.abs(d) / maxDiag * 100 : 0;
-      var row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:4px;';
-      row.innerHTML = '<span style="font-family:\'JetBrains Mono\',monospace;font-size:7px;color:rgba(0,180,220,0.5);width:14px;flex-shrink:0">ρ'+i+i+'</span>'
-        + '<div style="flex:1;height:6px;background:rgba(0,220,255,0.07);border-radius:2px;overflow:hidden">'
-        +   '<div style="height:100%;width:'+w.toFixed(1)+'%;background:linear-gradient(90deg,rgba(0,220,255,0.7),rgba(128,64,255,0.6));border-radius:2px;transition:width .4s ease"></div>'
-        + '</div>'
-        + '<span style="font-family:\'JetBrains Mono\',monospace;font-size:7px;color:var(--cy);width:38px;text-align:right;flex-shrink:0">'+d.toFixed(3)+'</span>';
-      diagEl.appendChild(row);
-    }
-  }
-
-  // Matrix stats
-  var trace = 0, tr2 = 0, maxOff = 0;
-  for (var i = 0; i < N; i++) {
-    trace += dm_re[i * N + i];
-    for (var j = 0; j < N; j++) {
-      var re = dm_re[i * N + j], im2 = dm_im[i * N + j];
-      // tr(ρ²) += |ρ[i,j]|²
-      tr2 += re * re + im2 * im2;
-      if (i !== j) { var m = Math.sqrt(re*re + im2*im2); if (m > maxOff) maxOff = m; }
-    }
-  }
-  var trEl = document.getElementById('dm-trace');     if (trEl)  trEl.textContent  = trace.toFixed(4);
-  var p2El = document.getElementById('dm-purity2');   if (p2El)  p2El.textContent  = tr2.toFixed(4);
-  var moEl = document.getElementById('dm-maxoff');    if (moEl)  moEl.textContent  = maxOff.toFixed(4);
-
-  // Timestamp badge
-  var tsEl = document.getElementById('dm-ts');
-  if (tsEl && ts_ns) {
-    var age = Math.round((Date.now() - ts_ns / 1e6) / 1000);
-    tsEl.textContent = age < 5 ? 'just now' : age + 's ago';
-  }
-}
-
-// ── DM hex decoder ─────────────────────────────────────────────────────────────
-function _decodeDMHex(hex) {
-  // 2048 hex chars = 64 complex doubles (big-endian IEEE 754)
-  if (!hex || hex.length !== 2048) return null;
-  var bytes = new Uint8Array(hex.length / 2);
-  for (var i = 0; i < bytes.length; i++)
-    bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-  var view = new DataView(bytes.buffer);
-  var re = new Array(64), im = new Array(64);
-  for (var i = 0; i < 64; i++) {
-    re[i] = view.getFloat64(i * 16,     false);  // big-endian
-    im[i] = view.getFloat64(i * 16 + 8, false);
-  }
-  return { re: re, im: im };
-}
-
-// ── Hook into _processDMSnapshot ──────────────────────────────────────────────
-// Called after the function is defined below; we patch it there.
-
-
-// Tracks the timestamp_ns of the last DM snapshot we processed.
-// Only calls _processDMSnapshot when the server has a newer one.
-var _dmLastTs  = 0;    // timestamp_ns of last consumed snapshot
-var _dmLooping = false; // guard — only one loop in flight at a time
-
-async function _dmCursorLoop() {
-  if (_dmLooping) return;
-  _dmLooping = true;
-  try {
-    var r = await fetch(BASE + '/rpc', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({jsonrpc:'2.0', id: _rpcId++,
-                            method: 'qtcl_getLatestDMSnapshot', params: []}),
-      signal: AbortSignal.timeout(10000)
-    });
-    if (!r.ok) return;
-    var j = await r.json();
-    if (!j || j.error || !j.result) return;
-    var dm = j.result;
-    var ts = dm.timestamp_ns || 0;
-    if (ts <= _dmLastTs) return; // nothing new — server hasn't produced a new DM yet
-    _dmLastTs = ts;
-    _processDMSnapshot(dm);
-  } catch(e) {
-    // silent — network hiccup, retry on next tick
-  } finally {
-    _dmLooping = false;
-  }
-}
-
-// Poll the cursor at 2 s — matches typical AER oracle cycle.
-// This is just a lightweight HEAD-style check: if timestamp_ns hasn't moved
-// the body of _processDMSnapshot is never entered.
-setInterval(_dmCursorLoop, 2000);
-_dmCursorLoop();
-
-// ── DM snapshot processor ─────────────────────────────────────────────────────
-function _processDMSnapshot(dm) {
-  if (!dm) return;
-
-  if (dm.w_state_fidelity   != null) S.fidelity  = dm.w_state_fidelity;
-  if (dm.purity             != null) S.purity     = dm.purity;
-  if (dm.coherence_l1       != null) S.coherence  = dm.coherence_l1;
-  if (dm.von_neumann_entropy != null) S.entropy   = dm.von_neumann_entropy;
-
-  if (dm.lattice_refresh_counter != null && dm.lattice_refresh_counter > S.cycle)
-    S.cycle = dm.lattice_refresh_counter;
-
-  // pq_curr / pq_last
-  var aer = dm.aer_noise_state || {};
-  var bf  = aer.block_field   || {};
-  if (bf.pq_curr != null) {
-    S.pq_curr = bf.pq_curr;
-    S.pq_last = bf.pq_last != null ? bf.pq_last : (bf.pq_curr - 1);
-    S._pqAuthoritative = true;
-  }
-
-  // Per-node oracle data
-  var perNode = bf.per_node || [];
-  if (perNode.length > 0) {
-    perNode.forEach(function(n) {
-      var key = 'oracle_' + (n.oracle_id != null ? n.oracle_id : 1);
-      if (!S.oracle_data[key]) S.oracle_data[key] = {};
-      var od = S.oracle_data[key];
-      if (n.fidelity  != null) od.w_state_fidelity    = n.fidelity;
-      if (n.coherence != null) od.coherence            = n.coherence;
-      if (n.entropy   != null) od.entropy              = n.entropy;
-      if (n.pq0_oracle_fidelity != null) od.pq0_oracle_fidelity = n.pq0_oracle_fidelity;
-      if (n.pq0_IV_fidelity     != null) od.pq0_IV_fidelity     = n.pq0_IV_fidelity;
-      if (n.pq0_V_fidelity      != null) od.pq0_V_fidelity      = n.pq0_V_fidelity;
-      od.in_consensus = !!n.in_consensus;
-    });
-    var cc = perNode.filter(function(n){ return n.in_consensus; }).length;
-    S.oracle_consensus_reached  = cc >= 3;
-    S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
-    S.pq_validation_status      = S.oracle_consensus_reached ? 'HLWE_OK'   : 'PENDING';
-  } else if ((dm.w_state_fidelity || 0) > 0) {
-    for (var oi = 1; oi <= 5; oi++) {
-      var ok2 = 'oracle_' + oi;
-      if (!S.oracle_data[ok2]) S.oracle_data[ok2] = {};
-      S.oracle_data[ok2].w_state_fidelity = dm.w_state_fidelity;
-      S.oracle_data[ok2].coherence        = dm.coherence_l1;
-      S.oracle_data[ok2].entropy          = dm.von_neumann_entropy;
-      S.oracle_data[ok2].in_consensus     = dm.w_state_fidelity > 0.5;
-    }
-    S.oracle_consensus_reached  = dm.w_state_fidelity > 0.5;
-    S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
-    S.pq_validation_status      = S.oracle_consensus_reached ? 'HLWE_OK'   : 'PENDING';
-  }
-
-  if (aer.pq0_oracle_fidelity != null) {
-    if (!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
-    if (S.oracle_data['oracle_1'].pq0_oracle_fidelity == null) {
-      S.oracle_data['oracle_1'].pq0_oracle_fidelity = aer.pq0_oracle_fidelity;
-      S.oracle_data['oracle_1'].pq0_IV_fidelity     = aer.pq0_IV_fidelity;
-      S.oracle_data['oracle_1'].pq0_V_fidelity      = aer.pq0_V_fidelity;
-    }
-  }
-
-  // Derived bath metrics
-  var _p = dm.purity           || S.purity   || 0.8;
-  var _f = dm.w_state_fidelity || S.fidelity || 0;
-  S.negativity    = Math.max(0, (_p - 0.5)   * 0.8);
-  S.concurrence   = Math.max(0, (_p - 0.333) * 1.2);
-  S.entanglement  = Math.max(0, _f * 0.9);
-  S.qfi           = Math.max(0, _f * 8.0);
-  S.discord       = Math.max(0, (1 - _p) * 2.0);
-  S.tele_fidelity = Math.max(0, _f * 0.95);
-
-  if (dm.mermin_test) S.mermin = dm.mermin_test;
-  else if (dm.mermin) S.mermin = dm.mermin;
-
-  // ── Density matrix heatmap ──────────────────────────────────────────────
-  if (dm.density_matrix_hex) {
-    var _parsed = _decodeDMHex(dm.density_matrix_hex);
-    if (_parsed) _renderDMHeatmap(_parsed.re, _parsed.im, dm.timestamp_ns || 0);
-  }
-
-  // Refresh DM-sourced panels
-  renderOracles();
-  if (S.mermin) renderMermin(S.mermin);
-  updateDOM();
-}
-
-// ── Fast lane — no DM ─────────────────────────────────────────────────────────
-
 async function unifiedPoll(){
-  // ── STEP 1: Batch fetch fast-lane data — DM excluded
+  // ── STEP 1: Batch fetch ALL data in single round-trip
   var fromH = Math.max(0, S.height - 20);
   var results = await rpcBatch([
-    ['qtcl_getBlockHeight',  []],
+    ['qtcl_getBlockHeight', []],
     ['qtcl_getQuantumMetrics', []],
+    ['qtcl_getLatestDMSnapshot', []],
     ['qtcl_getMempoolStats', []],
-    ['qtcl_getPeers',        []],
-    ['qtcl_getEvents',       [{since: _lastEventTs, types: 'new_block', limit: 10}]],
-    ['qtcl_getBlockRange',   [fromH, S.height]],
+    ['qtcl_getPeers', []],
+    ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
+    ['qtcl_getBlockRange', [fromH, S.height]],
   ]);
-
-  var [hr, qm, mp, peers, events, blockRange] = results;
-  var dm = null; // DM handled by _dmCursorLoop — intentional
+  
+  var [hr, qm, dm, mp, peers, events, blockRange] = results;
   
   // ── STEP 2: Process each metric ONCE with clear priority
   // Priority: DM Snapshot > Quantum Metrics > Block Data > Fallback
@@ -1466,9 +1535,92 @@ async function unifiedPoll(){
     S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
   }
   
-  // 2c. DM Snapshot — handled by _dmCursorLoop() / _processDMSnapshot() above.
-  //     Fires only when timestamp_ns advances on the server ring buffer.
-
+  // 2c. DM Snapshot (AUTHORITATIVE for: Mermin, pq, oracle per_node, derived metrics)
+  if(dm){
+    // Consensus-level fields
+    if(dm.w_state_fidelity != null) S.fidelity = dm.w_state_fidelity;
+    if(dm.purity != null) S.purity = dm.purity;
+    if(dm.coherence_l1 != null) S.coherence = dm.coherence_l1;
+    if(dm.von_neumann_entropy != null) S.entropy = dm.von_neumann_entropy;
+    
+    // Cycle count
+    if(dm.lattice_refresh_counter != null && dm.lattice_refresh_counter > S.cycle){
+      S.cycle = dm.lattice_refresh_counter;
+    }
+    
+    // ── AUTHORITATIVE: pq_curr/pq_last from block_field ──
+    var aer = dm.aer_noise_state || {};
+    var bf = aer.block_field || {};
+    if(bf.pq_curr != null){
+      S.pq_curr = bf.pq_curr;
+      S.pq_last = bf.pq_last != null ? bf.pq_last : (bf.pq_curr - 1);
+      S._pqAuthoritative = true;
+    }
+    
+    // ── AUTHORITATIVE: per_node oracle data ──
+    var perNode = bf.per_node || [];
+    if(perNode.length > 0){
+      perNode.forEach(function(n){
+        var idx = n.oracle_id != null ? n.oracle_id : 1;
+        var key = 'oracle_' + idx;
+        if(!S.oracle_data[key]) S.oracle_data[key] = {};
+        var od = S.oracle_data[key];
+        if(n.fidelity != null) od.w_state_fidelity = n.fidelity;
+        if(n.coherence != null) od.coherence = n.coherence;
+        if(n.entropy != null) od.entropy = n.entropy;
+        if(n.pq0_oracle_fidelity != null) od.pq0_oracle_fidelity = n.pq0_oracle_fidelity;
+        if(n.pq0_IV_fidelity != null) od.pq0_IV_fidelity = n.pq0_IV_fidelity;
+        if(n.pq0_V_fidelity != null) od.pq0_V_fidelity = n.pq0_V_fidelity;
+        od.in_consensus = !!n.in_consensus;
+      });
+      // Recompute consensus
+      var consensusCount = perNode.filter(function(n){ return n.in_consensus; }).length;
+      S.oracle_consensus_reached = consensusCount >= 3;
+      S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
+      S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
+    }else if(dm.w_state_fidelity != null && dm.w_state_fidelity > 0){
+      // Fallback: use consensus values for all 5 oracles when per_node not available
+      var cf = dm.w_state_fidelity;
+      var cc = dm.coherence_l1;
+      var ce = dm.von_neumann_entropy;
+      for(var oi=1; oi<=5; oi++){
+        var ok = 'oracle_' + oi;
+        if(!S.oracle_data[ok]) S.oracle_data[ok] = {};
+        S.oracle_data[ok].w_state_fidelity = cf;
+        S.oracle_data[ok].coherence = cc;
+        S.oracle_data[ok].entropy = ce;
+        S.oracle_data[ok].in_consensus = (cf || 0) > 0.5;
+      }
+      S.oracle_consensus_reached = cf > 0.5;
+      S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
+      S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
+    }
+    
+    // ── PQ0 oracle fidelity ──
+    if(aer.pq0_oracle_fidelity != null){
+      if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
+      if(S.oracle_data['oracle_1'].pq0_oracle_fidelity == null){
+        S.oracle_data['oracle_1'].pq0_oracle_fidelity = aer.pq0_oracle_fidelity;
+        S.oracle_data['oracle_1'].pq0_IV_fidelity = aer.pq0_IV_fidelity;
+        S.oracle_data['oracle_1'].pq0_V_fidelity = aer.pq0_V_fidelity;
+      }
+    }
+    
+    // ── Derived quantum bath metrics ──
+    var _p = dm.purity || S.purity || 0.8;
+    var _f = dm.w_state_fidelity || S.fidelity || 0;
+    S.negativity = Math.max(0, (_p - 0.5) * 0.8);
+    S.concurrence = Math.max(0, (_p - 0.333) * 1.2);
+    S.entanglement = Math.max(0, _f * 0.9);
+    S.qfi = Math.max(0, _f * 8.0);
+    S.discord = Math.max(0, (1 - _p) * 2.0);
+    S.tele_fidelity = Math.max(0, _f * 0.95);
+    
+    // ── Mermin (authoritative) ──
+    if(dm.mermin_test) S.mermin = dm.mermin_test;
+    else if(dm.mermin) S.mermin = dm.mermin;
+  }
+  
   // 2d. Mempool
   if(mp){
     S.mempool_size = mp.depth != null ? mp.depth : (mp.pending != null ? mp.pending : S.mempool_size);
@@ -1574,7 +1726,7 @@ async function unifiedPoll(){
     }
   }
   
-  // ── STEP 3: DOM update (fast-lane fields only)
+  // ── STEP 3: Single DOM update
   updateDOM();
   renderOracles();
   if(S.mermin) renderMermin(S.mermin);
@@ -1582,15 +1734,13 @@ async function unifiedPoll(){
   stamp();
 }
 
-// Fast-lane timer (3 s, no DM)
+// Start unified poll (SINGLE source of truth - replaces all 6 legacy loops)
 setInterval(unifiedPoll, 3000);
 unifiedPoll();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ARCHITECTURE
-//   Fast lane  (3 s)  → unifiedPoll()      height / qm / mempool / peers / events
-//   DM cursor  (2 s)  → _dmCursorLoop()    fires _processDMSnapshot only on
-//                                           new timestamp_ns from ring buffer
+// CLEANUP COMPLETE — All legacy polling loops removed
+// The unifiedPoll() function above handles ALL data fetching
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── TX background refresh — 30s

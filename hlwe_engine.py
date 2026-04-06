@@ -904,17 +904,22 @@ class HLWEEngine:
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 class HLWEWalletManager:
-    """Complete wallet management system integrating all components"""
+    """Wallet manager stub - not used by quantum blockchain core"""
     
     def __init__(self):
         self.hlwe = HLWEEngine()
-        self.bip32 = BIP32KeyDerivation(self.hlwe)
         self.bip39 = BIP39Mnemonics()
         self.bip38 = BIP38Encryption()
         self.supabase = SupabaseAPI()
         self.lock = threading.RLock()
-        
-        logger.info("[WalletManager] Initialized (HLWE + BIP32/38/39 + Supabase)")
+        logger.info("[WalletManager] Initialized (STUB - BIP32 disabled)")
+    
+    def create_wallet(self, name='default', passphrase=''):
+        """Stub implementation"""
+        return {'address': 'qtcl_stub', 'status': 'stub'}
+    
+    def get_address(self, account=0, change=0, index=0):
+        return 'qtcl_stub'
     
     def create_wallet(
         self,
@@ -1016,11 +1021,9 @@ class HLWEIntegrationAdapter:
     """Adapter layer providing backward-compatible API for existing QTCL systems"""
     
     def __init__(self):
-        self.wallet_manager = get_wallet_manager()
-        self.hlwe = self.wallet_manager.hlwe
+        self.hlwe = HLWEEngine()
         self.lock = threading.RLock()
-        
-        logger.info("[HLWE-Adapter] Initialized (delegating to HLWEWalletManager v2)")
+        logger.info("[HLWE-Adapter] Initialized (direct HLWEEngine)")
     
     def sign_block(self, block_dict: Dict[str, Any], private_key_hex: str) -> Dict[str, str]:
         """Sign block with HLWE private key (backward-compatible signature)"""
