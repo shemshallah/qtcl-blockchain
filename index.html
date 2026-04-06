@@ -619,12 +619,12 @@ function _parseDMHex(hex){
   var buf = new ArrayBuffer(8), view = new DataView(buf);
   for(var i=0; i<64; i++){
     var off = i * 32;
-    // Parse real part (big-endian float64)
+    // Parse real part (little-endian float64 from python numpy tobytes)
     for(var b=0; b<8; b++) view.setUint8(b, parseInt(hex.substr(off + b*2, 2), 16));
-    re[i] = view.getFloat64(0, false);
+    re[i] = view.getFloat64(0, true);
     // Parse imaginary part
     for(var b=0; b<8; b++) view.setUint8(b, parseInt(hex.substr(off + 16 + b*2, 2), 16));
-    im[i] = view.getFloat64(0, false);
+    im[i] = view.getFloat64(0, true);
     mag[i] = Math.sqrt(re[i]*re[i] + im[i]*im[i]);
     phase[i] = Math.atan2(im[i], re[i]);
   }
@@ -632,12 +632,13 @@ function _parseDMHex(hex){
 }
 
 function _phaseToRGB(phase, mag, maxMag){
-  // HSL with phase → hue, magnitude → lightness
-  // phase ∈ [-π, π] → hue ∈ [0, 360]
-  var h = ((phase + Math.PI) / (2 * Math.PI)) * 360;
-  var l = Math.min(0.92, 0.08 + (mag / (maxMag || 1)) * 0.84);
-  var s = 0.85;
-  // HSL → RGB
+  // Map phase [-π, π] to Hue [160, 320] (Teal/Cyan -> Blue -> Magenta/Purple)
+  // This fits the QTCL site aesthetic much better than the full rainbow.
+  var normPhase = (phase + Math.PI) / (2 * Math.PI);
+  var h = 160 + normPhase * 160; 
+  var l = Math.min(0.9, 0.1 + (mag / (maxMag || 1)) * 0.8);
+  var s = 0.8;
+  
   var c = (1 - Math.abs(2*l - 1)) * s;
   var x = c * (1 - Math.abs((h/60) % 2 - 1));
   var m = l - c/2;
@@ -707,9 +708,9 @@ function renderDMHeatmap(){
       ctx.fillStyle = 'rgb('+rgb[0]+','+rgb[1]+','+rgb[2]+')';
       ctx.fillRect(x+0.5, y+0.5, cellW-1, cellH-1);
 
-      // Diagonal highlight — gold border
+      // Diagonal highlight — bright cyan border
       if(isDiag){
-        ctx.strokeStyle = 'rgba(212,160,32,0.9)';
+        ctx.strokeStyle = 'rgba(0,255,255,0.7)';
         ctx.lineWidth = 2;
         ctx.strokeRect(x+1, y+1, cellW-2, cellH-2);
       }
@@ -1549,8 +1550,8 @@ async function _workerPeers(){
 _workerMetrics(); _workerDM(); _workerBlocks(); _workerMempool(); _workerPeers();
 if(!txLoading) loadTxPage();
 
-setInterval(_workerMetrics,  3000);
-setInterval(_workerDM,       3000);
+setInterval(_workerMetrics,  1500);
+setInterval(_workerDM,       1000);
 setInterval(_workerBlocks,   3000);
 setInterval(_workerMempool,  5000);
 setInterval(_workerPeers,   10000);
