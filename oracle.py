@@ -633,12 +633,10 @@ class DensityMatrixSnapshot:
     oracle_address        : Optional[str]            = None
     signature_valid       : bool                     = False
     bell_test             : Optional[Dict[str, Any]] = None
-    density_matrix_48x48_hex : Optional[str]         = None
 
     def to_json(self) -> str:
         return json.dumps({
             "timestamp_ns": self.timestamp_ns, "density_matrix_hex": self.density_matrix_hex,
-            "density_matrix_48x48_hex": self.density_matrix_48x48_hex,
             "purity": self.purity, "von_neumann_entropy": self.von_neumann_entropy,
             "coherence_l1": self.coherence_l1, "coherence_renyi": self.coherence_renyi,
             "coherence_geometric": self.coherence_geometric, "quantum_discord": self.quantum_discord,
@@ -894,16 +892,14 @@ class HLWESigner:
             try: w_entropy = get_block_field_entropy()
             except: w_entropy = secrets.token_bytes(32)
             
-        # Re-derive HLWE secret vector from 32-byte private key to bridge systems
-        # Use private key + w_entropy as seed for canonical HLWE vector derivation
         msg_hash_bytes = bytes.fromhex(msg_hash)
         
         if self._engine:
-            # For museum-grade consistency, we sign using the engine
-            # We seed the engine's secret vector from our 32-byte private key
-            # to keep the identity binding consistent.
-            s_vector = self._engine._derive_secret_vector(kp.private_key, 256)
-            priv_hex = self._engine._encode_vector_to_hex(s_vector)
+            # NEW: Pass full 2048-bit key directly to HLWE.sign_hash()
+            # The engine now handles KDF internally (sha3_256(key || "QTCL_SIGN_DERIVE_v1"))
+            # This preserves full post-quantum key material while deriving canonical signing key
+            
+            priv_hex = kp.private_key.hex()  # Full key as hex (2048 chars for 1024 bytes)
             sig_result = self._engine.sign_hash(msg_hash_bytes, priv_hex)
             
             return HLWESignature(
@@ -1164,42 +1160,10 @@ class OracleNode:
                     dm_array, _, _ = _oracle_resurrect(dm_array, F2)
 
             QIM = QuantumInformationMetrics
-            # ═══════════════════════════════════════════════════════════════════════════════
-            # 48×48 DENSITY MATRIX EXPANSION — Cathedral-grade frontend support
-            # Expands 8×8 via 6×6 Kronecker kernel; encodes as 147KB hex for live visualization
-            # ═══════════════════════════════════════════════════════════════════════════════
-            dm_hex_48x48 = None
-            try:
-                dm_48 = np.zeros((48, 48), dtype=np.complex128)
-                # 6×6 Kronecker kernel: smooth expansion with edge falloff
-                K = np.array([
-                    [1.0, 0.85, 0.7, 0.5, 0.2, 0.0],
-                    [0.85, 0.85, 0.75, 0.55, 0.25, 0.0],
-                    [0.7, 0.75, 0.65, 0.5, 0.25, 0.0],
-                    [0.5, 0.55, 0.5, 0.4, 0.15, 0.0],
-                    [0.2, 0.25, 0.25, 0.15, 0.05, 0.0],
-                    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-                ], dtype=np.float64)
-                # Vectorized expansion: no loops, cache-efficient
-                for i in range(8):
-                    for j in range(8):
-                        dm_48[i*6:(i+1)*6, j*6:(j+1)*6] = dm_array[i, j] * K
-                # Binary frame: sync marker (4B) + flags (1B) + 2304 doubles * 2 (real/imag)
-                buf = bytearray(b'\xAA\x55\xAA\x55\x01')  # sync + flags
-                for val in dm_48.real.ravel():
-                    buf.extend(struct.pack('>d', val))  # big-endian float64
-                for val in dm_48.imag.ravel():
-                    buf.extend(struct.pack('>d', val))
-                dm_hex_48x48 = buf.hex()  # 147,466 hex chars
-            except Exception as e:
-                logger.debug(f"[DM-48×48] encode failed: {e}")
-                dm_hex_48x48 = None
-            # ═══════════════════════════════════════════════════════════════════════════════
             snap = DensityMatrixSnapshot(
                 timestamp_ns         = time.time_ns(),
                 density_matrix       = dm_array,
                 density_matrix_hex   = dm_array.tobytes().hex(),
-                density_matrix_48x48_hex = dm_hex_48x48,
                 purity               = QIM.purity(dm_array),
                 von_neumann_entropy  = QIM.von_neumann_entropy(dm_array),
                 coherence_l1         = QIM.coherence_l1_norm(dm_array),
