@@ -630,14 +630,19 @@ self.onmessage = function(e){
     mag[i] = Math.hypot(re[i], im[i]);
     ph[i] = Math.atan2(im[i], re[i]);
   }
-  // Hermitian mirroring: copy lower‑triangle into upper‑triangle (Q2‑Q4)
-  // Matrix is stored row‑major; each row has 64 complex entries (real+imag)
-  // We mirror only the real/imag arrays separately.
-  for(let r=0;r<64;r++){
-    for(let c=r+1;c<64;c++){
-      const idx = r*64 + c;
-      const mirrorIdx = c*64 + r;
-      // Conjugate symmetry: re stays same, im negated
+  // ========== HERMITIAN MIRRORING: All 4 quadrants ==========
+  // Original data is in lower-triangle (Q1: rows>cols), mirror to upper (Q2-Q4)
+  // Q1 (lower): rows > cols | Q2 (upper): rows < cols | Q3 (lower-left): rows > cols, left half | Q4 (lower-right)
+  // For 64x64 matrix: Q1 = rows 32-63, cols 0-31 | Q2 = rows 0-31, cols 32-63 | Q3 = rows 32-63, cols 0-31 | Q4 = rows 32-63, cols 32-63
+  const ROWS = 64, COLS = 64;
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      if(r === c) continue; // diagonal stays
+      const idx = r*COLS + c;
+      // Mirror position: swap row and col
+      const mr = c, mc = r;
+      const mirrorIdx = mr*COLS + mc;
+      // Hermitian: conjugate transpose (real unchanged, imag negated)
       re[mirrorIdx] = re[idx];
       im[mirrorIdx] = -im[idx];
       mag[mirrorIdx] = mag[idx];
@@ -1429,7 +1434,8 @@ function _initSSE(){
   _sseSource.onmessage = function(e){
     try {
       var j = JSON.parse(e.data);
-      var dm = j.result || j;
+      // Server sends raw frame directly (not JSON-RPC wrapped)
+      var dm = j;
       _applyOracleFrame(dm);
     } catch(err){ console.warn('[SSE]', err.message); }
   };
@@ -1612,9 +1618,122 @@ self.onmessage = async function(e){
 // ═══════════════════════════════════════════════════════════════════════════════
 // All workers (metrics, blocks, peers, mempool) were instantiated earlier and already set their own intervals.
 _initSSE(); // SSE for density matrix & oracle stream
-if(!txLoading) loadTxPage();
-// Periodic transaction refresh
-setInterval(function(){ if(!txLoading) loadTxPage(); }, 30000);
+
+// WORKER: Transactions — dedicated polling worker
+var _txWorker = null;
+(async function _initTxWorker(){
+  try {
+    const src = `"use strict";
+self.onmessage = async function(e){
+  if(e.data && e.data.cmd==='start'){
+    const BASE = e.data.base;
+    const txPage_n = e.data.page || 0;
+    const txPerPage = e.data.perPage || 50;
+    const txFilterMode = e.data.filter || 'all';
+    const txSearchQ = e.data.search || '';
+    const rpc = async (method, params)=>{
+      try{ 
+        const r = await fetch(BASE + '/rpc', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:params||[]}),signal:AbortSignal.timeout(8000)}); 
+        if(!r.ok) return null; const j = await r.json(); return j.result; 
+      }catch{return null;}
+    };
+    var req={page:txPage_n,per_page:txPerPage};
+    if(txFilterMode && txFilterMode!=='all') req.type=txFilterMode;
+    if(txSearchQ) req.address=txSearchQ;
+    const d = await rpc('qtcl_getTransactions',[req]);
+    self.postMessage({type:'tx', data:d, page:txPage_n});
+  }
+};`;
+    const blob = new Blob([src], {type:'application/javascript'});
+    _txWorker = new Worker(URL.createObjectURL(blob));
+    _txWorker.onmessage = function(ev){
+      const {data, page} = ev.data;
+      if(data && Array.isArray(data.transactions) && data.transactions.length){
+        txs = data.transactions;
+        txTotal = data.total||0;
+        txPages = data.pages||1;
+        txPage_n = data.page||page||0;
+        renderTxs();
+      }
+    };
+    _txWorker.onerror = function(err){
+      console.warn('[TX-WORKER]', err.message);
+      _txWorker = null;
+    };
+    // Expose function to call worker
+    window.txLoadViaWorker = function(page, perPage, filter, search){
+      if(_txWorker){
+        _txWorker.postMessage({cmd:'start', page:page, perPage:perPage, filter:filter, search:search});
+      }
+    };
+  } catch(e){ console.error('TX worker init failed', e); }
+})();
+
+// Fallback: Direct poll worker for density matrix when SSE oracle fails
+(async function _initDMPollingWorker(){
+  try {
+    const src = `"use strict";
+self.onmessage = async function(e){
+  if(e.data && e.data.cmd==='start'){
+    const BASE = e.data.base;
+    const rpc = async (method, params)=>{
+      try{ 
+        const r = await fetch(BASE + '/rpc', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:params||[]}),signal:AbortSignal.timeout(6000)}); 
+        if(!r.ok) return null; const j = await r.json(); return j.result; 
+      }catch{return null;}
+    };
+    // Poll quantum metrics which includes dm_full_hex
+    const qm = await rpc('qtcl_getQuantumMetrics', []);
+    self.postMessage({type:'qm', qm});
+  }
+};`;
+    const blob = new Blob([src], {type:'application/javascript'});
+    const worker = new Worker(URL.createObjectURL(blob));
+    worker.onmessage = function(ev){
+      const {qm} = ev.data;
+      if(qm){
+        // Extract dm_full_hex from quantum metrics
+        if(qm.dm_full_hex){
+          S.dm_full_hex = qm.dm_full_hex;
+        }
+        // Also capture other quantum metrics from fallback
+        const ws = qm.w_state || {};
+        if(ws.fidelity != null) S.fidelity = ws.fidelity;
+        if(ws.coherence != null) S.coherence = ws.coherence;
+        if(ws.purity != null) S.purity = ws.purity;
+        if(ws.entropy != null) S.entropy = ws.entropy;
+        const la = qm.lattice || {};
+        if(la.cycle != null) S.cycle = la.cycle;
+        // Trigger re-render
+        renderOracles();
+        updateDOM();
+        setOnline(true);
+        stamp();
+      }
+    };
+    const kick=()=>worker.postMessage({cmd:'start', base:BASE});
+    // Poll every 3s as fallback to SSE
+    kick();
+    setInterval(kick, 3000);
+  } catch(e){ console.error('DM polling worker init failed', e); }
+})();
+
+if(!txLoading){
+  // Prefer worker-based loading for reliability; fallback to direct RPC
+  if(window.txLoadViaWorker){
+    window.txLoadViaWorker(txPage_n, txPerPage, txFilterMode, txSearchQ);
+  } else {
+    loadTxPage();
+  }
+}
+// Periodic transaction refresh using worker
+setInterval(function(){ 
+  if(window.txLoadViaWorker){
+    window.txLoadViaWorker(txPage_n, txPerPage, txFilterMode, txSearchQ);
+  } else if(!txLoading) {
+    loadTxPage();
+  }
+}, 30000);
 </script>
 </body>
 </html>

@@ -512,7 +512,7 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-MEASUREMENT_TIMEOUT          = 5    # 5s cap — 5 nodes parallel, sufficient headroom for QRNG contention
+MEASUREMENT_TIMEOUT          = 10   # 10s cap — 5 nodes parallel, increased from 5s for resilience
 
 W_STATE_STREAM_INTERVAL_MS   = 10
 LATTICE_REFRESH_INTERVAL_MS  = 50
@@ -1710,6 +1710,11 @@ class OracleWStateManager:
         except TimeoutError:
             unfinished = [f for f in bf_futures if not f.done()]
             logger.error(f"[ORACLE CLUSTER] Stream error: {len(unfinished)} (of 5) futures unfinished (timeout={MEASUREMENT_TIMEOUT}s)")
+            # Log which specific nodes timed out
+            for f in bf_futures:
+                if not f.done():
+                    node_idx = bf_futures[f].oracle_id + 1
+                    logger.warning(f"[ORACLE CLUSTER] Timeout on oracle_{node_idx}")
             # Attempt to cancel unfinished futures to free resources
             for f in unfinished:
                 f.cancel()
@@ -1719,7 +1724,29 @@ class OracleWStateManager:
         if len(readings) < 3:
             logger.warning(
                 f"[ORACLE CLUSTER] Only {len(readings)}/5 readings — need ≥3, skipping cycle")
-            return None
+            # Fallback: if we have at least 1 reading, use it with degraded consensus
+            if len(readings) >= 1:
+                logger.info(f"[ORACLE CLUSTER] Using degraded fallback with {len(readings)} reading(s)")
+                r = readings[0]
+                cons_fidelity = r.fidelity
+                cons_coherence = r.coherence
+                cons_entropy = r.entropy
+                cons_pq0_oracle = r.pq0_oracle_fidelity
+                cons_pq0_IV = r.pq0_IV_fidelity
+                cons_pq0_V = r.pq0_V_fidelity
+                oracle_dms = [r.oracle_dm] if r.oracle_dm is not None else []
+                if not oracle_dms:
+                    logger.error("[ORACLE CLUSTER] ❌ No valid oracle DM for fallback")
+                    return None
+                dm_mean = oracle_dms[0]
+                dm_mean = 0.5 * (dm_mean + dm_mean.conj().T)
+                tr = float(np.real(np.trace(dm_mean)))
+                if tr < 1e-12:
+                    logger.error("[ORACLE CLUSTER] ❌ Fallback DM has zero trace")
+                    return None
+                dm_mean /= tr
+            else:
+                return None
 
         # ── Step 5: Byzantine 3-of-5 consensus ───────────────────────────────
         readings_sorted = sorted(readings, key=lambda r: r.fidelity)
