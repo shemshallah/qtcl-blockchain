@@ -242,27 +242,17 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
   <div class="tc">
     <div class="pn">
-      <div class="ph"><span class="pht">H³ Hyperbolic Lattice · {8,3}</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
-      <div id="dc3d" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;">
-        <!-- pq Bloch overlay — rendered by _PQ canvas system -->
-        <canvas id="pq-overlay" style="position:absolute;right:0;top:0;pointer-events:none;z-index:10;opacity:0.97"></canvas>
-        <!-- node type legend -->
-        <div style="position:absolute;left:8px;top:8px;pointer-events:none;z-index:10;display:flex;flex-direction:column;gap:4px">
-          <div style="font-family:'JetBrains Mono',monospace;font-size:7.5px;color:rgba(0,220,255,0.45);letter-spacing:1.5px;margin-bottom:2px">LEGEND</div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#d4a020;border-radius:1px;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(212,160,32,0.8)">Oracle node (×5)</span></div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#00dcff;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">Lattice pseudoqubit</span></div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:2px;background:#00dcff;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">W-state entanglement arc</span></div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#ffd040;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(255,208,64,0.9)">Current block ⬡</span></div>
-          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:1px;background:rgba(128,64,255,0.6);display:inline-block;flex-shrink:0;border-top:1px dashed rgba(128,64,255,0.6)"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,0.75)">Oracle entanglement</span></div>
-        </div>
-        <!-- field-fidelity HUD strip -->
+      <div class="ph"><span class="pht">Density Matrix · 8×8 complex128</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
+      <div id="dm-panel" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;">
+        <canvas id="dm-canvas" width="640" height="340" style="width:100%;height:100%;display:block"></canvas>
+        <!-- pq HUD strip -->
         <div id="pq-hud" style="position:absolute;left:0;bottom:0;right:0;height:28px;pointer-events:none;z-index:11;display:flex;align-items:center;padding:0 10px;gap:14px;background:linear-gradient(0deg,rgba(0,5,8,.92) 0%,transparent 100%)">
           <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.55);letter-spacing:1.5px">BLOCK FIELD</span>
           <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_last=<span id="pqh-last" style="color:#8040ff">—</span></span>
           <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_curr=<span id="pqh-curr" style="color:#d4a020">—</span></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">Δ=<span id="pqh-delta" style="color:#00ff9d">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">&Delta;=<span id="pqh-delta" style="color:#00ff9d">—</span></span>
           <span style="flex:1"></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">ψ —</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">&psi; —</span>
         </div>
       </div>
       <div class="bs">
@@ -439,7 +429,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
 </div>
 <div class="bm-copied" id="bm-copied">✓ Copied</div>
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
 <script>
 'use strict';
 var BASE = window.location.origin;
@@ -457,6 +447,7 @@ var S = {
   lattice_fidelity: 0.9, lattice_coherence: 0.7, w_state_strength: 0,
   cycle: 0,
   // qtcl_getLatestDMSnapshot
+  density_matrix_hex: '', // 2048 hex chars = 8×8 complex128
   negativity: 0, concurrence: 0, entanglement: 0.65,
   qfi: 6.5, discord: 0, tele_fidelity: 0.6,
   phase_drift: 0.02, gamma1: 0.04, gammaphi: 0.12,
@@ -583,448 +574,229 @@ setInterval(tick, 1000); tick();
   if (!ctx) return;
   (function fr() {
     ctx.clearRect(0,0,36,36);
-    var cx=18,cy=18,r=13;
+    var cx=18,cy=18,r=13,ri=7;
+    // Outer ring
     ctx.strokeStyle='rgba(0,220,255,.2)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-    for (var i=0;i<3;i++) {
-      var a=i*Math.PI*2/3+t, x=cx+r*Math.cos(a), y=cy+r*Math.sin(a);
-      ctx.strokeStyle='rgba(0,220,255,'+(0.35+0.25*Math.sin(t*2+i))+')'; ctx.lineWidth=1;
+    // Inner ring
+    ctx.strokeStyle='rgba(128,64,255,.18)'; ctx.lineWidth=0.8;
+    ctx.beginPath(); ctx.arc(cx,cy,ri,0,Math.PI*2); ctx.stroke();
+    // 4 outer nodes — COUNTER-CLOCKWISE (negative t)
+    for (var i=0;i<4;i++) {
+      var a=i*Math.PI*2/4-t, x=cx+r*Math.cos(a), y=cy+r*Math.sin(a);
+      ctx.strokeStyle='rgba(0,220,255,'+(0.3+0.25*Math.sin(t*2+i))+')'; ctx.lineWidth=1;
       ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
       ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
-      ctx.beginPath(); ctx.arc(x,y,2.5,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x,y,2.2,0,Math.PI*2); ctx.fill();
+      // Inner node at same angle on inner ring
+      var ix=cx+ri*Math.cos(a), iy=cy+ri*Math.sin(a);
+      ctx.fillStyle='rgba(128,64,255,'+(0.5+0.3*Math.sin(t*2.5+i))+')';
+      ctx.beginPath(); ctx.arc(ix,iy,1.5,0,Math.PI*2); ctx.fill();
+      // Connect outer to inner
+      ctx.strokeStyle='rgba(0,220,255,.1)'; ctx.lineWidth=0.5;
+      ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(ix,iy); ctx.stroke();
     }
+    // Center gold core
     ctx.fillStyle='rgba(212,160,32,.95)'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
     t += 0.02; requestAnimationFrame(fr);
   })();
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// H³ HYPERBOLIC LATTICE — {8,3} Poincaré Ball (Three.js)
-// Wired directly to S.* — pq_curr / pq_last / pq0 fully rendered
+// DENSITY MATRIX HEATMAP — High-resolution phase-encoded 8×8 complex128 DM
+// Parses density_matrix_hex (2048 hex chars = 8×8 big-endian complex128)
+// Phase → hue, magnitude → brightness, diagonal highlighted
 // ═══════════════════════════════════════════════════════════════════════════════
-var _H = (function() {
-var renderer=null,scene=null,camera=null;
-var nodeMesh=null,oracleMeshes=[],wArcObjs=[],entangleObjs=[];
-var edgeLines=[],boundSphere=null;
-var blockCoreMesh=null,blockCoreWire=null; // current block — glowing octahedron at origin
-var rafId=null,lastT=0,fps=30;
-var revivalT=-999,blockFlashT=-999;
-var nodePositions=[],nodeDepths=[],nodeCount=0;
-var oracleIdx=[],wTriple=[];
-var dummy=null;
-var C={
-  nodeCyan:new THREE.Color(0x00dcff),nodeMid:new THREE.Color(0x6028c8),
-  nodeOut:new THREE.Color(0x003a60),oracle:new THREE.Color(0xd4a020),
-  oracleOff:new THREE.Color(0x3a1800),wArc:new THREE.Color(0x00dcff),
-  wStrong:new THREE.Color(0xd4a020),entangle:new THREE.Color(0x6028c8),
-  entangleQ:new THREE.Color(0x00dcff),boundary:new THREE.Color(0x00dcff),
-  revival:new THREE.Color(0xd4a020),
-  pqCurr:new THREE.Color(0xd4a020),   // gold — current block pq state
-  pqLast:new THREE.Color(0x8040ff),   // violet — last block pq state
-  pqDelta:new THREE.Color(0x00ff9d),  // green — field transition arc
-};
-function geodArc(p1,p2,n){
-  var cross=new THREE.Vector3().crossVectors(p1,p2);
-  if(cross.lengthSq()<1e-9){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
-  var d11=p1.dot(p1),d12=p1.dot(p2),d22=p2.dot(p2),det=d11*d22-d12*d12;
-  if(Math.abs(det)<1e-9){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
-  var r1=(d11+1)/2,r2=(d22+1)/2,a=(r1*d22-r2*d12)/det,b=(r2*d11-r1*d12)/det;
-  var c=p1.clone().multiplyScalar(a).add(p2.clone().multiplyScalar(b));
-  var rad=Math.sqrt(Math.max(0,c.lengthSq()-1));
-  if(rad<1e-7){var pts=[];for(var i=0;i<=n;i++)pts.push(p1.clone().lerp(p2,i/n));return pts;}
-  var e1=p1.clone().sub(c).normalize(),v2=p2.clone().sub(c);
-  var e2=v2.clone().sub(e1.clone().multiplyScalar(e1.dot(v2))).normalize();
-  var ang2=Math.atan2(e2.dot(v2),e1.dot(v2)),pts=[];
-  for(var i=0;i<=n;i++){var a2=(i/n)*ang2;pts.push(c.clone().add(e1.clone().multiplyScalar(rad*Math.cos(a2))).add(e2.clone().multiplyScalar(rad*Math.sin(a2))));}
-  return pts;
-}
-function makeTube(pts,radius,segs,matProps){
-  var curve=new THREE.CatmullRomCurve3(pts);
-  var geo=new THREE.TubeGeometry(curve,Math.max(4,pts.length-1),radius,segs,false);
-  return new THREE.Mesh(geo,new THREE.MeshBasicMaterial(matProps));
+var _dmCanvas = null, _dmCtx = null, _dmAnimId = null;
+var _dmParsed = null; // {re:Float64Array(64), im:Float64Array(64), mag:Float64Array(64), phase:Float64Array(64)}
+var _dmLastHex = '';
+
+function _parseDMHex(hex){
+  if(!hex || hex.length < 2048) return null;
+  var re = new Float64Array(64), im = new Float64Array(64);
+  var mag = new Float64Array(64), phase = new Float64Array(64);
+  // Each element = 16 bytes = 32 hex chars (big-endian double re, double im)
+  var buf = new ArrayBuffer(8), view = new DataView(buf);
+  for(var i=0; i<64; i++){
+    var off = i * 32;
+    // Parse real part (big-endian float64)
+    for(var b=0; b<8; b++) view.setUint8(b, parseInt(hex.substr(off + b*2, 2), 16));
+    re[i] = view.getFloat64(0, false);
+    // Parse imaginary part
+    for(var b=0; b<8; b++) view.setUint8(b, parseInt(hex.substr(off + 16 + b*2, 2), 16));
+    im[i] = view.getFloat64(0, false);
+    mag[i] = Math.sqrt(re[i]*re[i] + im[i]*im[i]);
+    phase[i] = Math.atan2(im[i], re[i]);
+  }
+  return {re:re, im:im, mag:mag, phase:phase};
 }
 
-function genNodes(){
-  nodePositions=[];nodeDepths=[];oracleIdx=[];wTriple=[];
-  var rings=[[0.00,1],[0.779,8],[1.50,24],[2.20,56],[2.90,96]];
-  for(var ri=0;ri<rings.length;ri++){
-    var R=rings[ri][0],cnt=rings[ri][1],rho=Math.tanh(R/2);
-    if(cnt===1){nodePositions.push(new THREE.Vector3(0,0,0));nodeDepths.push(0);continue;}
-    for(var i=0;i<cnt;i++){
-      var phi=Math.acos(1-2*(i+0.5)/cnt),theta=Math.PI*(1+Math.sqrt(5))*i,tilt=ri*0.15;
-      nodePositions.push(new THREE.Vector3(rho*Math.sin(phi)*Math.cos(theta),rho*Math.sin(phi)*Math.sin(theta+tilt),rho*Math.cos(phi)*0.85));
-      nodeDepths.push(ri);
+function _phaseToRGB(phase, mag, maxMag){
+  // HSL with phase → hue, magnitude → lightness
+  // phase ∈ [-π, π] → hue ∈ [0, 360]
+  var h = ((phase + Math.PI) / (2 * Math.PI)) * 360;
+  var l = Math.min(0.92, 0.08 + (mag / (maxMag || 1)) * 0.84);
+  var s = 0.85;
+  // HSL → RGB
+  var c = (1 - Math.abs(2*l - 1)) * s;
+  var x = c * (1 - Math.abs((h/60) % 2 - 1));
+  var m = l - c/2;
+  var r1,g1,b1;
+  if(h<60){r1=c;g1=x;b1=0;}
+  else if(h<120){r1=x;g1=c;b1=0;}
+  else if(h<180){r1=0;g1=c;b1=x;}
+  else if(h<240){r1=0;g1=x;b1=c;}
+  else if(h<300){r1=x;g1=0;b1=c;}
+  else{r1=c;g1=0;b1=x;}
+  return [Math.round((r1+m)*255), Math.round((g1+m)*255), Math.round((b1+m)*255)];
+}
+
+function renderDMHeatmap(){
+  if(!_dmCanvas){
+    _dmCanvas = document.getElementById('dm-canvas');
+    if(!_dmCanvas) return;
+    _dmCtx = _dmCanvas.getContext('2d');
+  }
+  var hex = S.density_matrix_hex || '';
+  if(hex && hex !== _dmLastHex){
+    _dmParsed = _parseDMHex(hex);
+    _dmLastHex = hex;
+  }
+
+  var ctx = _dmCtx;
+  var W = _dmCanvas.width, H = _dmCanvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  // Layout: leave room for labels
+  var pad = {l:38, t:28, r:12, b:36};
+  var gW = W - pad.l - pad.r, gH = H - pad.t - pad.b;
+  var cellW = gW / 8, cellH = gH / 8;
+
+  // Background
+  ctx.fillStyle = '#000508';
+  ctx.fillRect(0,0,W,H);
+
+  if(!_dmParsed){
+    // No data yet — draw placeholder grid
+    ctx.strokeStyle = 'rgba(0,220,255,0.08)';
+    ctx.lineWidth = 1;
+    for(var i=0; i<=8; i++){
+      ctx.beginPath(); ctx.moveTo(pad.l + i*cellW, pad.t); ctx.lineTo(pad.l + i*cellW, pad.t + gH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(pad.l, pad.t + i*cellH); ctx.lineTo(pad.l + gW, pad.t + i*cellH); ctx.stroke();
+    }
+    ctx.font = '10px JetBrains Mono, monospace';
+    ctx.fillStyle = 'rgba(0,220,255,0.25)';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('Awaiting density matrix...', W/2, H/2);
+    return;
+  }
+
+  var dm = _dmParsed;
+  var maxMag = 0;
+  for(var i=0; i<64; i++) if(dm.mag[i] > maxMag) maxMag = dm.mag[i];
+
+  // ── Draw cells ──
+  for(var row=0; row<8; row++){
+    for(var col=0; col<8; col++){
+      var idx = row*8 + col;
+      var x = pad.l + col*cellW, y = pad.t + row*cellH;
+      var rgb = _phaseToRGB(dm.phase[idx], dm.mag[idx], maxMag);
+      var isDiag = (row === col);
+
+      // Cell fill
+      ctx.fillStyle = 'rgb('+rgb[0]+','+rgb[1]+','+rgb[2]+')';
+      ctx.fillRect(x+0.5, y+0.5, cellW-1, cellH-1);
+
+      // Diagonal highlight — gold border
+      if(isDiag){
+        ctx.strokeStyle = 'rgba(212,160,32,0.9)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x+1, y+1, cellW-2, cellH-2);
+      }
+
+      // Magnitude text inside cell (if cells large enough)
+      if(cellW > 26 && cellH > 22){
+        ctx.font = 'bold 9px JetBrains Mono, monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        // Contrast: light text on dark cells, dark text on bright cells
+        var lum = (rgb[0]*0.299 + rgb[1]*0.587 + rgb[2]*0.114);
+        ctx.fillStyle = lum > 128 ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.85)';
+        ctx.fillText(dm.mag[idx].toFixed(2), x + cellW/2, y + cellH/2 - 5);
+        // Phase in degrees below magnitude
+        ctx.font = '7px JetBrains Mono, monospace';
+        ctx.fillStyle = lum > 128 ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.45)';
+        var deg = (dm.phase[idx] * 180 / Math.PI).toFixed(0);
+        ctx.fillText(deg + '\u00B0', x + cellW/2, y + cellH/2 + 7);
+      }
     }
   }
-  nodeCount=nodePositions.length;
-  for(var k=0;k<5;k++) oracleIdx.push(1+Math.floor(k*8/5));
-  wTriple=[1,1+3,1+6];
-}
-function buildEdges(rings){
-  var edges=[],startByRing=[0,1],s=1;
-  for(var ri=1;ri<rings.length;ri++){s+=rings[ri][1];startByRing.push(s);}
-  for(var ri=0;ri<rings.length-1;ri++){
-    var iS=startByRing[ri],iE=startByRing[ri+1],jS=startByRing[ri+1],jE=startByRing[ri+2];
-    for(var i=iS;i<iE;i++){
-      var pi=nodePositions[i],ds=[];
-      for(var j=jS;j<jE;j++) ds.push([j,pi.distanceTo(nodePositions[j])]);
-      ds.sort(function(a,b){return a[1]-b[1];});
-      for(var k=0;k<Math.min(3,ds.length);k++) edges.push([i,ds[k][0]]);
-    }
-  }
-  return edges;
-}
-function buildScene(){
-  var rings=[[0,1],[0.779,8],[1.50,24],[2.20,56],[2.90,96]];
-  var edges=buildEdges(rings);
-  dummy=new THREE.Object3D();
-  scene.add(new THREE.AmbientLight(0x000c1a,3.0));
-  var pl0=new THREE.PointLight(0x00dcff,3.0,4);scene.add(pl0);
-  var pl1=new THREE.PointLight(0x6028c8,2.0,3);pl1.position.set(0.8,0.6,0.2);scene.add(pl1);
-  var pl2=new THREE.PointLight(0xd4a020,1.5,2);pl2.position.set(-0.5,0,0.7);scene.add(pl2);
-  // ── Nodes ─────────────────────────────────────────────────────────────────
-  var nGeo=new THREE.SphereGeometry(0.016,6,5);
-  var nMat=new THREE.MeshPhongMaterial({color:0x00dcff,emissive:0x000820,transparent:true,opacity:0.9,shininess:60});
-  nodeMesh=new THREE.InstancedMesh(nGeo,nMat,nodeCount);
-  nodeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  nodeMesh.instanceColor=new THREE.InstancedBufferAttribute(new Float32Array(nodeCount*3),3);
-  for(var i=0;i<nodeCount;i++){
-    dummy.position.copy(nodePositions[i]);
-    var sc=Math.max(0.25,1.0-nodeDepths[i]*0.16);
-    dummy.scale.setScalar(sc);dummy.updateMatrix();
-    nodeMesh.setMatrixAt(i,dummy.matrix);nodeMesh.setColorAt(i,C.nodeCyan);
-  }
-  nodeMesh.instanceMatrix.needsUpdate=true;nodeMesh.instanceColor.needsUpdate=true;
-  scene.add(nodeMesh);
-  // ── Oracle icosahedra ──────────────────────────────────────────────────────
-  var oGeo=new THREE.IcosahedronGeometry(0.044,1);
-  for(var k=0;k<5;k++){
-    var oMat=new THREE.MeshPhongMaterial({color:0xd4a020,emissive:0x3a1000,transparent:true,opacity:0.92,shininess:120});
-    var m=new THREE.Mesh(oGeo,oMat);m.position.copy(nodePositions[oracleIdx[k]]);
-    scene.add(m);oracleMeshes.push(m);
-  }
-  // ── W-state arcs ──────────────────────────────────────────────────────────
-  for(var i=0;i<3;i++){
-    var pts=geodArc(nodePositions[wTriple[i]],nodePositions[wTriple[(i+1)%3]],40);
-    var tube=makeTube(pts,0.008,5,{color:0x00dcff,transparent:true,opacity:0.75});
-    scene.add(tube);wArcObjs.push(tube);
-  }
-  // ── Oracle entanglement tubes ─────────────────────────────────────────────
-  for(var i=0;i<5;i++){
-    for(var j=i+1;j<5;j++){
-      var pts=geodArc(nodePositions[oracleIdx[i]],nodePositions[oracleIdx[j]],32);
-      var tube=makeTube(pts,0.0035,4,{color:0x6028c8,transparent:true,opacity:0.0});
-      scene.add(tube);entangleObjs.push({mesh:tube,i:i,j:j});
-    }
-  }
-  // ── Lattice edges ─────────────────────────────────────────────────────────
-  var edgeSub=edges.filter(function(e){return nodeDepths[e[0]]<=2&&nodeDepths[e[1]]<=2;});
-  for(var ei=0;ei<Math.min(100,edgeSub.length);ei++){
-    var pts=geodArc(nodePositions[edgeSub[ei][0]],nodePositions[edgeSub[ei][1]],14);
-    var geo=new THREE.BufferGeometry().setFromPoints(pts);
-    var ln=new THREE.Line(geo,new THREE.LineBasicMaterial({color:0x002030,transparent:true,opacity:0.35}));
-    scene.add(ln);edgeLines.push(ln);
-  }
-  // ── Boundary sphere ───────────────────────────────────────────────────────
-  var bGeo=new THREE.SphereGeometry(0.99,48,24);
-  boundSphere=new THREE.Mesh(bGeo,new THREE.MeshBasicMaterial({color:0x00dcff,transparent:true,opacity:0.04,side:THREE.BackSide}));
-  scene.add(boundSphere);
-  scene.add(new THREE.Mesh(new THREE.SphereGeometry(0.99,20,10),new THREE.MeshBasicMaterial({color:0x001228,wireframe:true,transparent:true,opacity:0.18})));
-  // ── Latitude rings (hyperbolic tessellation grid) ─────────────────────────
-  var hRings=12,hSegs=48;
-  for(var ri2=0;ri2<hRings;ri2++){
-    var z0=-0.4+ri2/hRings*0.8,rho2=Math.sqrt(Math.max(0,1-z0*z0))*0.95,ringPts=[];
-    for(var si2=0;si2<=hSegs;si2++){var th=si2/hSegs*Math.PI*2;ringPts.push(new THREE.Vector3(rho2*Math.cos(th),rho2*Math.sin(th),z0));}
-    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ringPts),new THREE.LineBasicMaterial({color:0x001a28,transparent:true,opacity:0.22})));
+
+  // ── Grid lines ──
+  ctx.strokeStyle = 'rgba(0,220,255,0.12)';
+  ctx.lineWidth = 1;
+  for(var i=0; i<=8; i++){
+    ctx.beginPath(); ctx.moveTo(pad.l + i*cellW, pad.t); ctx.lineTo(pad.l + i*cellW, pad.t + gH); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pad.l, pad.t + i*cellH); ctx.lineTo(pad.l + gW, pad.t + i*cellH); ctx.stroke();
   }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // CURRENT BLOCK OBJECT — glowing octahedron at the lattice origin
-  // This IS the block. pq_curr/pq_last are shown in the 2D overlay.
-  // ══════════════════════════════════════════════════════════════════════════
-  var bcGeo=new THREE.OctahedronGeometry(0.09,1);
-  blockCoreMesh=new THREE.Mesh(bcGeo,new THREE.MeshPhongMaterial({
-    color:0xd4a020,emissive:0xd4a020,emissiveIntensity:0.6,
-    transparent:true,opacity:0.85,shininess:200,wireframe:false
-  }));
-  scene.add(blockCoreMesh);
-  var bcWGeo=new THREE.OctahedronGeometry(0.093,1);
-  blockCoreWire=new THREE.Mesh(bcWGeo,new THREE.MeshBasicMaterial({
-    color:0xffd040,wireframe:true,transparent:true,opacity:0.5
-  }));
-  scene.add(blockCoreWire);
+  // ── Row/Col labels ──
+  ctx.font = '9px JetBrains Mono, monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var basisLabels = ['|000\u27E9','|001\u27E9','|010\u27E9','|011\u27E9','|100\u27E9','|101\u27E9','|110\u27E9','|111\u27E9'];
+  for(var i=0; i<8; i++){
+    // Column labels (top)
+    ctx.fillStyle = 'rgba(0,220,255,0.5)';
+    ctx.fillText(basisLabels[i], pad.l + i*cellW + cellW/2, pad.t - 10);
+    // Row labels (left)
+    ctx.fillStyle = 'rgba(0,220,255,0.5)';
+    ctx.save();
+    ctx.translate(pad.l - 6, pad.t + i*cellH + cellH/2);
+    ctx.rotate(-Math.PI/2);
+    ctx.fillText(basisLabels[i], 0, 0);
+    ctx.restore();
+  }
+
+  // ── Title ──
+  ctx.font = '8px JetBrains Mono, monospace';
+  ctx.fillStyle = 'rgba(0,220,255,0.4)';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('\u03C1 DENSITY MATRIX · 8\u00D78 complex128', pad.l, 2);
+
+  // ── Phase colorbar at bottom ──
+  var cbY = H - 14, cbH = 8, cbX = pad.l, cbW = gW;
+  for(var px=0; px<cbW; px++){
+    var ph = -Math.PI + (px/cbW) * 2 * Math.PI;
+    var crgb = _phaseToRGB(ph, maxMag * 0.7, maxMag);
+    ctx.fillStyle = 'rgb('+crgb[0]+','+crgb[1]+','+crgb[2]+')';
+    ctx.fillRect(cbX + px, cbY, 1, cbH);
+  }
+  ctx.font = '7px JetBrains Mono, monospace';
+  ctx.fillStyle = 'rgba(0,220,255,0.45)';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('-\u03C0', cbX, cbY + cbH + 1);
+  ctx.textAlign = 'center';
+  ctx.fillText('0', cbX + cbW/2, cbY + cbH + 1);
+  ctx.textAlign = 'right';
+  ctx.fillText('+\u03C0', cbX + cbW, cbY + cbH + 1);
+  ctx.textAlign = 'center';
+  ctx.fillText('PHASE', cbX + cbW/2, cbY - 8);
+
+  // ── Fidelity / Purity / Coherence HUD strip (bottom-left) ──
+  ctx.font = '9px JetBrains Mono, monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(212,160,32,0.7)';
+  ctx.fillText('Tr(\u03C1\u00B2)=' + (S.purity||0).toFixed(4), W - pad.r - 4, pad.t + gH - 2);
+  ctx.fillStyle = 'rgba(0,220,255,0.6)';
+  ctx.fillText('F=' + (S.fidelity||0).toFixed(4), W - pad.r - 4, pad.t + gH - 14);
+  ctx.fillStyle = 'rgba(128,64,255,0.6)';
+  ctx.fillText('C=' + (S.coherence||0).toFixed(4), W - pad.r - 4, pad.t + gH - 26);
 }
 
-
-function update(t){
-  if(!scene||!nodeMesh) return;
-  var fid=Math.max(0.3,Math.min(1.0,S.lattice_fidelity||S.fidelity||0.9));
-  var coh=Math.max(0.0,Math.min(1.0,S.lattice_coherence||S.coherence||0.7));
-  var neg=Math.max(0.0,Math.min(0.5,S.negativity||0));
-  var disc=Math.max(0.0,Math.min(2.0,S.discord||0));
-  var ent=Math.max(0.0,Math.min(1.0,S.entanglement||0.65));
-  var g1=Math.max(0.001,S.gamma1||0.04);
-  var om=Math.max(0.1,S.omega||0.5);
-  var cyc=S.cycle||0;
-  var odata=S.oracle_data||{};
-  var M=S.mermin?parseFloat(S.mermin.M_value||S.mermin.M||0):0;
-  var isQ=M>2.0,isStrong=M>2.8;
-
-  if(cyc>0&&cyc%8===0&&(t-revivalT)>2) revivalT=t;
-  var revAge=t-revivalT,revPulse=(revAge<2.0)?Math.exp(-revAge*2.5):0;
-  var blkAge=t-blockFlashT,blkPulse=(blkAge<1.0)?Math.exp(-blkAge*4):0;
-
-  var yaw=om*0.06*t,tilt=0.32+0.06*Math.sin(t*0.05);
-  camera.position.set(2.8*Math.sin(yaw)*Math.cos(tilt),2.8*Math.sin(tilt),2.8*Math.cos(yaw)*Math.cos(tilt));
-  camera.lookAt(0,0,0);
-
-  // ── Node colours + scales ─────────────────────────────────────────────────
-  var tmpCol=new THREE.Color();
-  for(var i=0;i<nodeCount;i++){
-    var dep=nodeDepths[i],isOracle=oracleIdx.indexOf(i)>=0,isW=wTriple.indexOf(i)>=0;
-    var noise=g1*15*(Math.sin(t*6.3+i*2.1)*0.5+0.5);
-    var bright=fid-dep*(1-fid)*0.18+noise*0.08-dep*noise*0.06;
-    bright=Math.max(0.05,Math.min(1.3,bright))+revPulse*(1-dep*0.08)+blkPulse*0.4;
-    if(isOracle) tmpCol.copy(C.oracle).multiplyScalar(bright);
-    else if(isW) tmpCol.copy(C.wArc).multiplyScalar(bright*1.3);
-    else if(dep<=1) tmpCol.copy(C.nodeCyan).multiplyScalar(bright);
-    else if(dep<=2) tmpCol.lerpColors(C.nodeCyan,C.nodeMid,0.55).multiplyScalar(bright*0.9);
-    else tmpCol.lerpColors(C.nodeMid,C.nodeOut,Math.min(1,(dep-2)/2)).multiplyScalar(bright*0.7);
-    nodeMesh.setColorAt(i,tmpCol);
-    dummy.position.copy(nodePositions[i]);
-    var sc=Math.max(0.2,1.0-dep*0.16)*(isOracle?1.7:1.0);
-    var breathe=1+0.09*Math.sin(t*3.1+i*0.97)*g1*8;
-    dummy.scale.setScalar(sc*breathe*(1+revPulse*0.35+blkPulse*0.25));
-    dummy.updateMatrix();nodeMesh.setMatrixAt(i,dummy.matrix);
-  }
-  nodeMesh.instanceMatrix.needsUpdate=true;nodeMesh.instanceColor.needsUpdate=true;
-
-  // ── Oracle icosahedra ─────────────────────────────────────────────────────
-  for(var k=0;k<5;k++){
-    var m=oracleMeshes[k],ok='oracle_'+(k+1),od=odata[ok]||{};
-    var oFid=od.w_state_fidelity!=null?od.w_state_fidelity:(od.fidelity||fid);
-    var oCons=od.in_consensus;
-    m.scale.setScalar(0.85+oFid*0.25+revPulse*0.35+blkPulse*0.2);
-    m.material.emissiveIntensity=oCons===false?0.1:(0.3+0.25*Math.sin(t*2.5+k*1.26)+revPulse*0.8);
-    m.material.color.set(oCons===false?0x3a1800:isStrong?0xffe040:0xd4a020);
-    m.material.emissive.set(oCons===false?0x1a0800:isStrong?0x604000:0x3a1000);
-  }
-
-  // ── W-arcs ────────────────────────────────────────────────────────────────
-  var wCol=isStrong?C.wStrong:isQ?C.wArc:new THREE.Color(0x3010a0);
-  var wOp=Math.min(0.9,0.35+fid*0.5+revPulse*0.4+blkPulse*0.2);
-  var wPulse=1+0.18*Math.sin(t*4.2)*(isQ?1:0.15);
-  for(var i=0;i<wArcObjs.length;i++){wArcObjs[i].material.color.copy(wCol);wArcObjs[i].material.opacity=wOp*wPulse;}
-
-  // ── Entanglement tubes ────────────────────────────────────────────────────
-  for(var ei=0;ei<entangleObjs.length;ei++){
-    var eo=entangleObjs[ei],pairFactor=0.5+0.5*Math.sin(t*1.8+eo.i*2.3+eo.j*1.1);
-    var op=Math.min(0.72,ent*neg*4*pairFactor+revPulse*0.25);
-    eo.mesh.material.opacity=op;
-    eo.mesh.material.color.lerpColors(C.entangle,C.entangleQ,Math.min(1,disc/2));
-  }
-
-  // ── Lattice edges ─────────────────────────────────────────────────────────
-  for(var li=0;li<edgeLines.length;li++){edgeLines[li].material.opacity=0.08+coh*0.28;edgeLines[li].material.color.setHex(isQ?0x002840:0x001020);}
-
-  // ── Boundary sphere ───────────────────────────────────────────────────────
-  if(boundSphere){boundSphere.material.opacity=0.015+fid*0.065+revPulse*0.10;boundSphere.material.color.set(isStrong?C.wStrong:C.boundary);}
-
-  // ── CURRENT BLOCK — glowing octahedron at origin ──────────────────────────
-  // Spins slowly; flashes bright gold on each new block; size breathes with fidelity
-  if(blockCoreMesh&&blockCoreWire){
-    blockCoreMesh.rotation.y=t*0.4;
-    blockCoreMesh.rotation.x=t*0.17;
-    blockCoreWire.rotation.y=t*0.4;
-    blockCoreWire.rotation.x=t*0.17;
-    var bsc=1.0+0.12*Math.sin(t*1.8)*fid+blkPulse*0.9+revPulse*0.4;
-    blockCoreMesh.scale.setScalar(bsc);
-    blockCoreWire.scale.setScalar(bsc*1.04);
-    blockCoreMesh.material.emissiveIntensity=0.4+0.3*Math.sin(t*2.2)+blkPulse*1.2+revPulse*0.6;
-    blockCoreMesh.material.color.setHex(isStrong?0xffe060:blkPulse>0.1?0xffffff:0xd4a020);
-    blockCoreMesh.material.emissive.setHex(isStrong?0xd4a020:blkPulse>0.1?0xffd040:0xc09010);
-    blockCoreWire.material.opacity=0.3+0.2*Math.sin(t*3.1)+blkPulse*0.5;
-  }
-
-  // ── 2D overlay — Bloch-disk + pq state + legend ───────────────────────────
-  _drawPqOverlay(t, fid, isQ, isStrong, blkPulse);
-
-  // ── HUD strip ─────────────────────────────────────────────────────────────
-  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
-  var hl=document.getElementById('pqh-last');   if(hl) hl.textContent=pqL;
-  var hc=document.getElementById('pqh-curr');   if(hc) hc.textContent=pqC;
-  var hd=document.getElementById('pqh-delta');  if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
-  var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='ψ cyc='+cyc+(cyc>0&&cyc%8===0?' ↑REVIVAL':cyc>0&&cyc%8===4?' ↓ANTI':'');
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 2D PQ OVERLAY — Poincaré disk showing pq_curr and pq_last as labeled points
-// Drawn into the #pq-overlay canvas, top-right corner of dc3d
-// ═══════════════════════════════════════════════════════════════════════════════
-var _pqOvCanvas=null,_pqOvCtx=null;
-var _pqCurrAnim=0,_pqLastAnim=0; // smoothed for animation
-
-function _drawPqOverlay(t, fid, isQ, isStrong, blkPulse){
-  if(!_pqOvCanvas){
-    _pqOvCanvas=document.getElementById('pq-overlay');
-    if(!_pqOvCanvas) return;
-    // Size it: 148×148 in top-right
-    _pqOvCanvas.width=148; _pqOvCanvas.height=148;
-    _pqOvCanvas.style.width='148px'; _pqOvCanvas.style.height='148px';
-    _pqOvCanvas.style.top='8px'; _pqOvCanvas.style.right='8px';
-    _pqOvCtx=_pqOvCanvas.getContext('2d');
-  }
-  var ctx=_pqOvCtx, W=148, cx=74, cy=74, R=52;
-  ctx.clearRect(0,0,W,W);
-
-  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
-  // Smooth toward real values
-  _pqCurrAnim += (pqC - _pqCurrAnim)*0.08;
-  _pqLastAnim += (pqL - _pqLastAnim)*0.08;
-
-  // pq states map to 8 positions on the unit circle (0–7 → 0°–315° in 45° steps)
-  // This is the Poincaré disk projection of the pseudoqubit Bloch equator
-  function pqAngle(v){ return v * Math.PI/4 - Math.PI/2; } // 0→top, clockwise
-  var angC=pqAngle(_pqCurrAnim), angL=pqAngle(_pqLastAnim);
-  var xC=cx+Math.cos(angC)*R, yC=cy+Math.sin(angC)*R;
-  var xL=cx+Math.cos(angL)*R, yL=cy+Math.sin(angL)*R;
-
-  // ── Background disk ───────────────────────────────────────────────────────
-  var bgGrad=ctx.createRadialGradient(cx,cy,0,cx,cy,R);
-  bgGrad.addColorStop(0,'rgba(0,18,32,0.92)');
-  bgGrad.addColorStop(1,'rgba(0,5,12,0.96)');
-  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
-  ctx.fillStyle=bgGrad; ctx.fill();
-
-  // ── Boundary ring ─────────────────────────────────────────────────────────
-  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
-  ctx.strokeStyle='rgba(0,220,255,0.22)'; ctx.lineWidth=1; ctx.stroke();
-
-  // ── 8 pq state positions as tick marks ───────────────────────────────────
-  for(var i=0;i<8;i++){
-    var a=pqAngle(i);
-    var ox=cx+Math.cos(a)*R, oy=cy+Math.sin(a)*R;
-    var ix=cx+Math.cos(a)*(R-7), iy=cy+Math.sin(a)*(R-7);
-    ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(ix,iy);
-    ctx.strokeStyle='rgba(0,220,255,0.30)'; ctx.lineWidth=1; ctx.stroke();
-    // Label
-    ctx.font='bold 8px JetBrains Mono,monospace';
-    ctx.fillStyle='rgba(0,180,220,0.45)';
-    ctx.textAlign='center'; ctx.textBaseline='middle';
-    var lx=cx+Math.cos(a)*(R+11), ly=cy+Math.sin(a)*(R+11);
-    ctx.fillText(i, lx, ly);
-  }
-
-  // ── Cross hairs ───────────────────────────────────────────────────────────
-  ctx.strokeStyle='rgba(0,220,255,0.08)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R); ctx.stroke();
-
-  // ── Arc from pq_last → pq_curr ────────────────────────────────────────────
-  if(pqC!==pqL){
-    var dA=angC-angL;
-    while(dA>Math.PI) dA-=Math.PI*2;
-    while(dA<-Math.PI) dA+=Math.PI*2;
-    ctx.beginPath();
-    ctx.arc(cx,cy,R*0.82,angL,angL+dA,dA<0);
-    ctx.strokeStyle='rgba(0,255,157,0.55)'; ctx.lineWidth=1.5;
-    ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
-    // Arrow tip
-    var tipA=angL+dA, perp=tipA+(dA>0?-0.25:0.25);
-    var tx2=cx+Math.cos(tipA)*R*0.82, ty2=cy+Math.sin(tipA)*R*0.82;
-    var tx1=cx+Math.cos(perp)*R*0.82*0.92, ty1=cy+Math.sin(perp)*R*0.82*0.92;
-    ctx.beginPath(); ctx.moveTo(tx2,ty2); ctx.lineTo(tx1,ty1);
-    ctx.strokeStyle='rgba(0,255,157,0.7)'; ctx.lineWidth=1.5; ctx.stroke();
-  }
-
-  // ── Line from center to pq_last (ghost violet) ───────────────────────────
-  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(xL,yL);
-  ctx.strokeStyle='rgba(128,64,255,0.35)'; ctx.lineWidth=1.5;
-  ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]);
-
-  // ── Line from center to pq_curr (gold, solid) ────────────────────────────
-  var glow=0.65+0.2*Math.sin(t*2.8)+blkPulse*0.35;
-  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(xC,yC);
-  ctx.strokeStyle='rgba(212,160,32,'+Math.min(1,glow)+')'; ctx.lineWidth=2; ctx.stroke();
-
-  // ── pq_last dot + label ───────────────────────────────────────────────────
-  ctx.beginPath(); ctx.arc(xL,yL,4,0,Math.PI*2);
-  ctx.fillStyle='rgba(128,64,255,0.7)'; ctx.fill();
-  ctx.font='bold 8px JetBrains Mono,monospace';
-  ctx.fillStyle='rgba(170,120,255,0.9)';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText('LAST·'+pqL, xL+(xL>cx?14:-14), yL+(yL>cy?-10:10));
-
-  // ── pq_curr dot + label (brighter, larger) ───────────────────────────────
-  var cPulse=1+blkPulse*0.8;
-  // Glow ring
-  var glowGrad=ctx.createRadialGradient(xC,yC,0,xC,yC,10*cPulse);
-  glowGrad.addColorStop(0,'rgba(255,200,40,0.5)');
-  glowGrad.addColorStop(1,'rgba(255,200,40,0)');
-  ctx.beginPath(); ctx.arc(xC,yC,10*cPulse,0,Math.PI*2);
-  ctx.fillStyle=glowGrad; ctx.fill();
-  // Dot
-  ctx.beginPath(); ctx.arc(xC,yC,5*cPulse,0,Math.PI*2);
-  ctx.fillStyle=isStrong?'rgba(255,240,100,1)':'rgba(212,160,32,1)'; ctx.fill();
-  // Label
-  ctx.font='bold 9px JetBrains Mono,monospace';
-  ctx.fillStyle='rgba(255,210,60,1)';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText('CURR·'+pqC, xC+(xC>cx?16:-16), yC+(yC>cy?-12:12));
-
-  // ── Center dot (lattice origin = current block) ───────────────────────────
-  ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2);
-  ctx.fillStyle='rgba(255,200,40,0.8)'; ctx.fill();
-
-  // ── Title ─────────────────────────────────────────────────────────────────
-  ctx.font='7px JetBrains Mono,monospace';
-  ctx.fillStyle='rgba(0,180,220,0.5)';
-  ctx.textAlign='center'; ctx.textBaseline='top';
-  ctx.fillText('PQ STATE DISK · fid='+fid.toFixed(2), cx, 2);
-
-  // ── Fidelity arc inside disk ──────────────────────────────────────────────
-  ctx.beginPath();
-  ctx.arc(cx,cy,R*0.22,0,Math.PI*2*fid);
-  ctx.strokeStyle=isQ?'rgba(0,255,157,0.5)':'rgba(0,180,220,0.35)';
-  ctx.lineWidth=2; ctx.stroke();
-}
-
-function onBlock(){
-  blockFlashT=performance.now()*0.001;
-  _pqCurrAnim = S.pq_curr || 0;
-  _pqLastAnim = S.pq_last || 0;
-}
-function animate(){
-  rafId=requestAnimationFrame(animate);
-  var now=performance.now();
-  if(now-lastT<1000/fps) return;
-  lastT=now;update(now*0.001);renderer.render(scene,camera);
-}
-function init(){
-  var container=document.getElementById('dc3d');
-  if(!container||typeof THREE==='undefined') return;
-  var w=container.clientWidth||container.parentElement.clientWidth||400,h=340;
-  renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
-  renderer.setSize(w,h);renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
-  renderer.setClearColor(0x000000,0);container.appendChild(renderer.domElement);
-  scene=new THREE.Scene();
-  camera=new THREE.PerspectiveCamera(50,w/h,0.01,50);
-  camera.position.set(0,0.6,2.8);camera.lookAt(0,0,0);
-  genNodes();buildScene();animate();
-  window.addEventListener('resize',function(){
-    var cont=document.getElementById('dc3d');if(!cont||!renderer||!camera) return;
-    var nw=cont.clientWidth;camera.aspect=nw/340;camera.updateProjectionMatrix();renderer.setSize(nw,340);
-  });
-}
-return {init:init,onBlock:onBlock};
-})();
-
-(function _h3dBoot(){
-  if(typeof THREE==='undefined'){setTimeout(_h3dBoot,80);return;}
-  var cont=document.getElementById('dc3d');
-  if(!cont){setTimeout(_h3dBoot,80);return;}
-  _H.init();
+// Boot heatmap on load — no Three.js dependency
+(function _dmBoot(){
+  var cont = document.getElementById('dm-panel');
+  if(!cont){ setTimeout(_dmBoot, 80); return; }
+  renderDMHeatmap();
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1432,6 +1204,12 @@ function updateDOM() {
   st('bbd',S.difficulty_bits);
   st('bbn',S.n_peers||'—');
   st('bbq',S.qrng_health.toFixed(3));
+  // ── PQ HUD strip (was in Three.js update(), now here) ──
+  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
+  var hl=document.getElementById('pqh-last');   if(hl) hl.textContent=pqL;
+  var hc=document.getElementById('pqh-curr');   if(hc) hc.textContent=pqC;
+  var hd=document.getElementById('pqh-delta');  if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
+  var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='\u03C8 cyc='+S.cycle+(S.cycle>0&&S.cycle%8===0?' \u2191REVIVAL':S.cycle>0&&S.cycle%8===4?' \u2193ANTI':'');
   // ── Oracle + Mermin ──
   renderOracles();
   if(S.mermin) renderMermin(S.mermin);
@@ -1452,112 +1230,121 @@ function stamp() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// UNIFIED POLL ENGINE — Single Source of Truth Architecture
-// Consolidates all 6 duplicate loops into ONE coherent data pipeline
+// INDEPENDENT NON-BLOCKING WORKER ARCHITECTURE
+// Each worker is a self-contained async thread: own fetch, own error handling,
+// own DOM update. No worker can block or crash another.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 var _lastEventTs = Date.now()/1000 - 60;
 var _lastBlockHeight = 0;
 
-async function unifiedPoll(){
-  // ── STEP 1: Batch fetch ALL data in single round-trip
-  var fromH = Math.max(0, S.height - 20);
-  var results = await rpcBatch([
-    ['qtcl_getBlockHeight', []],
-    ['qtcl_getQuantumMetrics', []],
-    ['qtcl_getLatestDMSnapshot', []],
-    ['qtcl_getMempoolStats', []],
-    ['qtcl_getPeers', []],
-    ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
-    ['qtcl_getBlockRange', [fromH, S.height]],
-  ]);
-  
-  var [hr, qm, dm, mp, peers, events, blockRange] = results;
-  
-  // ── STEP 2: Process each metric ONCE with clear priority
-  // Priority: DM Snapshot > Quantum Metrics > Block Data > Fallback
-  
-  // 2a. Block Height (authoritative)
-  if(hr && hr.height != null){
-    var newHeight = parseInt(hr.height);
-    if(newHeight > S.height){
-      var isNewBlock = newHeight > _lastBlockHeight;
-      _lastBlockHeight = S.height;
-      S.height = newHeight;
-      S.tip_hash = hr.tip_hash || S.tip_hash;
-      applyRewards(S.height);
-      if(isNewBlock && typeof _H !== 'undefined') _H.onBlock();
+// ── WORKER 1: Metrics (block height + quantum metrics) ── 3s ──────────────
+var _w1Running = false;
+async function _workerMetrics(){
+  if(_w1Running) return; _w1Running = true;
+  try {
+    var results = await rpcBatch([
+      ['qtcl_getBlockHeight', []],
+      ['qtcl_getQuantumMetrics', []],
+    ]);
+    var hr = results[0], qm = results[1];
+
+    // Block height (authoritative)
+    if(hr && hr.height != null){
+      var newHeight = parseInt(hr.height);
+      if(newHeight > S.height){
+        _lastBlockHeight = S.height;
+        S.height = newHeight;
+        S.tip_hash = hr.tip_hash || S.tip_hash;
+        applyRewards(S.height);
+      }
     }
-  }
-  
-  // 2b. Quantum Metrics (primary source for most metrics)
-  if(qm){
-    // W-state layer
-    var ws = qm.w_state || {};
-    if(ws.fidelity != null) S.fidelity = ws.fidelity;
-    if(ws.coherence != null) S.coherence = ws.coherence;
-    if(ws.purity != null) S.purity = ws.purity;
-    if(ws.entropy != null) S.entropy = ws.entropy;
-    
-    // Lattice layer
-    var la = qm.lattice || {};
-    if(la.fidelity != null) S.lattice_fidelity = la.fidelity;
-    if(la.coherence != null) S.lattice_coherence = la.coherence;
-    if(la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
-    if(la.cycle != null && la.cycle > S.cycle) S.cycle = la.cycle;
-    
-    // Oracle consensus
-    if(qm.oracle_available != null) S.oracle_consensus_reached = qm.oracle_available;
-    
-    // Mermin from quantum metrics
-    if(qm.mermin_test) S.mermin = qm.mermin_test;
-    else if(qm.bell_test) S.mermin = qm.bell_test;
-    
-    // Oracle data (flat fields)
-    var oid1 = 'oracle_1';
-    if(!S.oracle_data[oid1]) S.oracle_data[oid1] = {};
-    if(qm.w_state_fidelity != null){
-      S.oracle_data[oid1].w_state_fidelity = qm.w_state_fidelity;
-      S.fidelity = qm.w_state_fidelity;
+
+    // Quantum metrics
+    if(qm){
+      var ws = qm.w_state || {};
+      if(ws.fidelity != null) S.fidelity = ws.fidelity;
+      if(ws.coherence != null) S.coherence = ws.coherence;
+      if(ws.purity != null) S.purity = ws.purity;
+      if(ws.entropy != null) S.entropy = ws.entropy;
+
+      var la = qm.lattice || {};
+      if(la.fidelity != null) S.lattice_fidelity = la.fidelity;
+      if(la.coherence != null) S.lattice_coherence = la.coherence;
+      if(la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
+      if(la.cycle != null && la.cycle > S.cycle) S.cycle = la.cycle;
+
+      if(qm.oracle_available != null) S.oracle_consensus_reached = qm.oracle_available;
+      if(qm.mermin_test) S.mermin = qm.mermin_test;
+      else if(qm.bell_test) S.mermin = qm.bell_test;
+
+      var oid1 = 'oracle_1';
+      if(!S.oracle_data[oid1]) S.oracle_data[oid1] = {};
+      if(qm.w_state_fidelity != null){ S.oracle_data[oid1].w_state_fidelity = qm.w_state_fidelity; S.fidelity = qm.w_state_fidelity; }
+      if(qm.coherence_l1 != null){ S.oracle_data[oid1].coherence = qm.coherence_l1; S.coherence = qm.coherence_l1; }
+      if(qm.purity != null){ S.oracle_data[oid1].purity = qm.purity; S.purity = qm.purity; }
+      if(qm.von_neumann_entropy != null){ S.oracle_data[oid1].entropy = qm.von_neumann_entropy; S.entropy = qm.von_neumann_entropy; }
+      S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
     }
-    if(qm.coherence_l1 != null){
-      S.oracle_data[oid1].coherence = qm.coherence_l1;
-      S.coherence = qm.coherence_l1;
-    }
-    if(qm.purity != null){
-      S.oracle_data[oid1].purity = qm.purity;
-      S.purity = qm.purity;
-    }
-    if(qm.von_neumann_entropy != null){
-      S.oracle_data[oid1].entropy = qm.von_neumann_entropy;
-      S.entropy = qm.von_neumann_entropy;
-    }
-    S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
-  }
-  
-  // 2c. DM Snapshot (AUTHORITATIVE for: Mermin, pq, oracle per_node, derived metrics)
-  if(dm){
-    // Consensus-level fields
+
+    updateDOM();
+    setOnline(true);
+    stamp();
+  } catch(e){ console.warn('[W1-METRICS]', e.message); }
+  finally { _w1Running = false; }
+}
+
+// ── WORKER 2: Oracle/DM (REST /rpc/oracle/snapshot) ── 3s ─────────────────
+var _w2Running = false;
+async function _workerDM(){
+  if(_w2Running) return; _w2Running = true;
+  try {
+    var r = await fetch(BASE + '/rpc/oracle/snapshot', {
+      method: 'GET',
+      signal: AbortSignal.timeout(4000)
+    });
+    if(!r.ok) return;
+    var j = await r.json();
+    var dm = j.result;
+    if(!dm) return;
+
+    // Consensus-level fields (AUTHORITATIVE — overrides Worker 1)
     if(dm.w_state_fidelity != null) S.fidelity = dm.w_state_fidelity;
     if(dm.purity != null) S.purity = dm.purity;
     if(dm.coherence_l1 != null) S.coherence = dm.coherence_l1;
     if(dm.von_neumann_entropy != null) S.entropy = dm.von_neumann_entropy;
-    
+
+    // Density matrix hex (for heatmap)
+    if(dm.density_matrix_hex) S.density_matrix_hex = dm.density_matrix_hex;
+
     // Cycle count
     if(dm.lattice_refresh_counter != null && dm.lattice_refresh_counter > S.cycle){
       S.cycle = dm.lattice_refresh_counter;
     }
-    
-    // ── AUTHORITATIVE: pq_curr/pq_last from block_field ──
+
+    // GKSL noise bath from aer_noise_state
     var aer = dm.aer_noise_state || {};
+    if(aer.gamma1 != null) S.gamma1 = aer.gamma1;
+    if(aer.gammaphi != null) S.gammaphi = aer.gammaphi;
+    if(aer.omega != null) S.omega = aer.omega;
+    if(aer.ou_mem != null) S.ou_mem = aer.ou_mem;
+    if(aer.sector_occ != null) S.sector_occ = aer.sector_occ;
+
+    // Phase drift / coherence
+    if(dm.phase_drift != null) S.phase_drift = dm.phase_drift;
+    if(dm.phase_coherence != null) S.phase_coherence = dm.phase_coherence;
+    if(dm.qrng_health != null) S.qrng_health = dm.qrng_health;
+
+    // pq_curr / pq_last from block_field (AUTHORITATIVE)
     var bf = aer.block_field || {};
     if(bf.pq_curr != null){
       S.pq_curr = bf.pq_curr;
       S.pq_last = bf.pq_last != null ? bf.pq_last : (bf.pq_curr - 1);
+      S.pq0 = bf.pq0 != null ? bf.pq0 : S.pq0;
       S._pqAuthoritative = true;
     }
-    
-    // ── AUTHORITATIVE: per_node oracle data ──
+
+    // per_node oracle data (AUTHORITATIVE)
     var perNode = bf.per_node || [];
     if(perNode.length > 0){
       perNode.forEach(function(n){
@@ -1573,30 +1360,25 @@ async function unifiedPoll(){
         if(n.pq0_V_fidelity != null) od.pq0_V_fidelity = n.pq0_V_fidelity;
         od.in_consensus = !!n.in_consensus;
       });
-      // Recompute consensus
       var consensusCount = perNode.filter(function(n){ return n.in_consensus; }).length;
       S.oracle_consensus_reached = consensusCount >= 3;
       S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
       S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
-    }else if(dm.w_state_fidelity != null && dm.w_state_fidelity > 0){
-      // Fallback: use consensus values for all 5 oracles when per_node not available
-      var cf = dm.w_state_fidelity;
-      var cc = dm.coherence_l1;
-      var ce = dm.von_neumann_entropy;
+    } else if(dm.w_state_fidelity != null && dm.w_state_fidelity > 0){
       for(var oi=1; oi<=5; oi++){
-        var ok = 'oracle_' + oi;
-        if(!S.oracle_data[ok]) S.oracle_data[ok] = {};
-        S.oracle_data[ok].w_state_fidelity = cf;
-        S.oracle_data[ok].coherence = cc;
-        S.oracle_data[ok].entropy = ce;
-        S.oracle_data[ok].in_consensus = (cf || 0) > 0.5;
+        var ok2 = 'oracle_' + oi;
+        if(!S.oracle_data[ok2]) S.oracle_data[ok2] = {};
+        S.oracle_data[ok2].w_state_fidelity = dm.w_state_fidelity;
+        S.oracle_data[ok2].coherence = dm.coherence_l1;
+        S.oracle_data[ok2].entropy = dm.von_neumann_entropy;
+        S.oracle_data[ok2].in_consensus = (dm.w_state_fidelity || 0) > 0.5;
       }
-      S.oracle_consensus_reached = cf > 0.5;
+      S.oracle_consensus_reached = dm.w_state_fidelity > 0.5;
       S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
       S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
     }
-    
-    // ── PQ0 oracle fidelity ──
+
+    // PQ0 oracle fidelity
     if(aer.pq0_oracle_fidelity != null){
       if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
       if(S.oracle_data['oracle_1'].pq0_oracle_fidelity == null){
@@ -1605,8 +1387,8 @@ async function unifiedPoll(){
         S.oracle_data['oracle_1'].pq0_V_fidelity = aer.pq0_V_fidelity;
       }
     }
-    
-    // ── Derived quantum bath metrics ──
+
+    // Derived quantum bath metrics
     var _p = dm.purity || S.purity || 0.8;
     var _f = dm.w_state_fidelity || S.fidelity || 0;
     S.negativity = Math.max(0, (_p - 0.5) * 0.8);
@@ -1615,133 +1397,164 @@ async function unifiedPoll(){
     S.qfi = Math.max(0, _f * 8.0);
     S.discord = Math.max(0, (1 - _p) * 2.0);
     S.tele_fidelity = Math.max(0, _f * 0.95);
-    
-    // ── Mermin (authoritative) ──
+
+    // Mermin (authoritative)
     if(dm.mermin_test) S.mermin = dm.mermin_test;
     else if(dm.mermin) S.mermin = dm.mermin;
-  }
-  
-  // 2d. Mempool
-  if(mp){
-    S.mempool_size = mp.depth != null ? mp.depth : (mp.pending != null ? mp.pending : S.mempool_size);
-  }
-  
-  // 2e. Peers/Miners
-  if(peers){
-    var rawPeers = Array.isArray(peers.peers) ? peers.peers : [];
-    S.n_peers = peers.count || rawPeers.length;
-    var staleThresh = 300;
-    var miners = rawPeers.map(function(p){
-      var addr = p.miner_address || p.address || p.node_id || p.peer_id || '';
-      var ls = p.last_seen ? new Date(p.last_seen).getTime()/1000 : 0;
-      var age = ls > 0 ? Math.round(Date.now()/1000 - ls) : 999999;
-      return {
-        miner_address: addr,
-        peer_id: p.peer_id || p.node_id || '',
-        gossip_url: p.gossip_url || '',
-        block_count: p.block_count || 0,
-        last_height: p.block_height || p.last_height || 0,
-        total_earned_qtcl: p.total_earned_qtcl || 0,
-        last_seen_age_s: age,
-        status: age < staleThresh ? 'live' : (age < 86400 ? 'seen' : 'historic'),
-        ip_address: p.ip_address || '',
-      };
-    }).filter(function(m){ return m.miner_address; });
-    
-    if(miners.length){
-      renderMiners(miners);
-    }else if(S.n_peers > 0){
-      var el = document.getElementById('pl');
-      if(el) el.innerHTML = '<div class="es" style="padding:16px;font-family:var(--mono);font-size:10px;color:var(--dim)">' + S.n_peers + ' peer(s) connected — no registry entries yet</div>';
-    }
-  }
-  
-  // 2f. Events (new blocks)
-  if(events && Array.isArray(events.events) && events.events.length){
-    events.events.forEach(function(ev){
-      if(ev.ts > _lastEventTs) _lastEventTs = ev.ts;
-      if(ev.type === 'new_block'){
-        var h = parseInt(ev.height || ev.block_height || 0);
-        if(h > 0 && h > S.height){
-          S.height = h;
-          applyRewards(h);
-          if(!_blocksById[h]){
-            var nb = {
-              height: h,
-              block_hash: ev.block_hash || '',
-              hash: ev.block_hash || '',
-              tx_count: ev.tx_count || 0,
-              w_state_fidelity: ev.w_state_fidelity || S.fidelity,
-              difficulty_bits: ev.difficulty_bits || S.difficulty_bits,
-              _fr: true
-            };
-            if(ev.pq_curr != null){
-              nb.pq_curr = ev.pq_curr;
-              S.pq_curr = nb.pq_curr;
-            }
-            if(ev.pq_last != null){
-              nb.pq_last = ev.pq_last;
-              S.pq_last = nb.pq_last;
-            }
-            _blocksById[h] = nb;
-            blocks.push(nb);
-            blocks.sort(function(a,b){ return a.height - b.height; });
-            renderChain();
-          }
-          if(typeof _H !== 'undefined') _H.onBlock();
-          _lastBlockHeight = h;
-          if(!txLoading) setTimeout(loadTxPage, 400);
-        }
-      }
-    });
-  }
-  
-  // 2g. Block Range (fetch recent blocks if events didn't populate enough)
-  if(blockRange && Array.isArray(blockRange.blocks) && blockRange.blocks.length){
-    blockRange.blocks.forEach(function(b){
-      var bh = parseInt(b.height || 0);
-      if(bh > 0 && !_blocksById[bh]){
-        var nb = {
-          height: bh,
-          block_hash: b.block_hash || b.hash || '',
-          hash: b.block_hash || b.hash || '',
-          tx_count: b.tx_count || b.transaction_count || 0,
-          w_state_fidelity: b.w_state_fidelity || S.fidelity,
-          difficulty_bits: b.difficulty || b.difficulty_bits || S.difficulty_bits,
-          _fr: false
-        };
-        nb.pq_curr = b.pq_curr || bh;
-        nb.pq_last = b.pq_last || (bh - 1);
-        _blocksById[bh] = nb;
-        blocks.push(nb);
-      }
-    });
-    if(blocks.length > 0){
-      blocks.sort(function(a,b){ return a.height - b.height; });
-      // Keep only last 30 blocks
-      if(blocks.length > 30){
-        blocks = blocks.slice(-30);
-      }
-      renderChain();
-    }
-  }
-  
-  // ── STEP 3: Single DOM update
-  updateDOM();
-  renderOracles();
-  if(S.mermin) renderMermin(S.mermin);
-  setOnline(true);
-  stamp();
+
+    // DOM updates for oracle-specific panels
+    renderOracles();
+    if(S.mermin) renderMermin(S.mermin);
+    renderDMHeatmap();
+    updateDOM();
+    setOnline(true);
+    stamp();
+  } catch(e){ console.warn('[W2-DM]', e.message); }
+  finally { _w2Running = false; }
 }
 
-// Start unified poll (SINGLE source of truth - replaces all 6 legacy loops)
-setInterval(unifiedPoll, 3000);
-unifiedPoll();
+// ── WORKER 3: Blocks + Events ── 3s ──────────────────────────────────────
+var _w3Running = false;
+async function _workerBlocks(){
+  if(_w3Running) return; _w3Running = true;
+  try {
+    var fromH = Math.max(0, S.height - 20);
+    var results = await rpcBatch([
+      ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
+      ['qtcl_getBlockRange', [fromH, S.height]],
+    ]);
+    var events = results[0], blockRange = results[1];
+
+    // Events (new blocks)
+    if(events && Array.isArray(events.events) && events.events.length){
+      events.events.forEach(function(ev){
+        if(ev.ts > _lastEventTs) _lastEventTs = ev.ts;
+        if(ev.type === 'new_block'){
+          var h = parseInt(ev.height || ev.block_height || 0);
+          if(h > 0 && h > S.height){
+            S.height = h;
+            applyRewards(h);
+            if(!_blocksById[h]){
+              var nb = {
+                height: h,
+                block_hash: ev.block_hash || '',
+                hash: ev.block_hash || '',
+                tx_count: ev.tx_count || 0,
+                w_state_fidelity: ev.w_state_fidelity || S.fidelity,
+                difficulty_bits: ev.difficulty_bits || S.difficulty_bits,
+                _fr: true
+              };
+              if(ev.pq_curr != null){ nb.pq_curr = ev.pq_curr; S.pq_curr = nb.pq_curr; }
+              if(ev.pq_last != null){ nb.pq_last = ev.pq_last; S.pq_last = nb.pq_last; }
+              _blocksById[h] = nb;
+              blocks.push(nb);
+              blocks.sort(function(a,b){ return a.height - b.height; });
+              renderChain();
+            }
+            _lastBlockHeight = h;
+            if(!txLoading) setTimeout(loadTxPage, 400);
+          }
+        }
+      });
+    }
+
+    // Block range
+    if(blockRange && Array.isArray(blockRange.blocks) && blockRange.blocks.length){
+      blockRange.blocks.forEach(function(b){
+        var bh = parseInt(b.height || 0);
+        if(bh > 0 && !_blocksById[bh]){
+          var nb = {
+            height: bh,
+            block_hash: b.block_hash || b.hash || '',
+            hash: b.block_hash || b.hash || '',
+            tx_count: b.tx_count || b.transaction_count || 0,
+            w_state_fidelity: b.w_state_fidelity || S.fidelity,
+            difficulty_bits: b.difficulty || b.difficulty_bits || S.difficulty_bits,
+            _fr: false
+          };
+          nb.pq_curr = b.pq_curr || bh;
+          nb.pq_last = b.pq_last || (bh - 1);
+          _blocksById[bh] = nb;
+          blocks.push(nb);
+        }
+      });
+      if(blocks.length > 0){
+        blocks.sort(function(a,b){ return a.height - b.height; });
+        if(blocks.length > 30) blocks = blocks.slice(-30);
+        renderChain();
+      }
+    }
+  } catch(e){ console.warn('[W3-BLOCKS]', e.message); }
+  finally { _w3Running = false; }
+}
+
+// ── WORKER 4: Mempool ── 5s ──────────────────────────────────────────────
+var _w4Running = false;
+async function _workerMempool(){
+  if(_w4Running) return; _w4Running = true;
+  try {
+    var mp = await rpc('qtcl_getMempoolStats', []);
+    if(mp){
+      S.mempool_size = mp.depth != null ? mp.depth : (mp.pending != null ? mp.pending : S.mempool_size);
+      st('hm', S.mempool_size + ' tx');
+    }
+  } catch(e){ console.warn('[W4-MEMPOOL]', e.message); }
+  finally { _w4Running = false; }
+}
+
+// ── WORKER 5: Peers ── 10s ───────────────────────────────────────────────
+var _w5Running = false;
+async function _workerPeers(){
+  if(_w5Running) return; _w5Running = true;
+  try {
+    var peers = await rpc('qtcl_getPeers', []);
+    if(peers){
+      var rawPeers = Array.isArray(peers.peers) ? peers.peers : [];
+      S.n_peers = peers.count || rawPeers.length;
+      var staleThresh = 300;
+      var miners = rawPeers.map(function(p){
+        var addr = p.miner_address || p.address || p.node_id || p.peer_id || '';
+        var ls = p.last_seen ? new Date(p.last_seen).getTime()/1000 : 0;
+        var age = ls > 0 ? Math.round(Date.now()/1000 - ls) : 999999;
+        return {
+          miner_address: addr,
+          peer_id: p.peer_id || p.node_id || '',
+          gossip_url: p.gossip_url || '',
+          block_count: p.block_count || 0,
+          last_height: p.block_height || p.last_height || 0,
+          total_earned_qtcl: p.total_earned_qtcl || 0,
+          last_seen_age_s: age,
+          status: age < staleThresh ? 'live' : (age < 86400 ? 'seen' : 'historic'),
+          ip_address: p.ip_address || '',
+        };
+      }).filter(function(m){ return m.miner_address; });
+
+      if(miners.length){
+        renderMiners(miners);
+      } else if(S.n_peers > 0){
+        var el = document.getElementById('pl');
+        if(el) el.innerHTML = '<div class="es" style="padding:16px;font-family:var(--mono);font-size:10px;color:var(--dim)">' + S.n_peers + ' peer(s) connected — no registry entries yet</div>';
+      }
+    }
+  } catch(e){ console.warn('[W5-PEERS]', e.message); }
+  finally { _w5Running = false; }
+}
+
+// ── WORKER 6: Transactions ── 30s ────────────────────────────────────────
+// (loadTxPage already exists as a self-contained async function)
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CLEANUP COMPLETE — All legacy polling loops removed
-// The unifiedPoll() function above handles ALL data fetching
+// BOOT — Launch all independent workers on their own intervals
 // ═══════════════════════════════════════════════════════════════════════════════
+_workerMetrics(); _workerDM(); _workerBlocks(); _workerMempool(); _workerPeers();
+if(!txLoading) loadTxPage();
 
-// ── TX background refresh — 30s
-setInterval(function() { if (!txLoading) loadTxPage(); }, 30
+setInterval(_workerMetrics,  3000);
+setInterval(_workerDM,       3000);
+setInterval(_workerBlocks,   3000);
+setInterval(_workerMempool,  5000);
+setInterval(_workerPeers,   10000);
+setInterval(function(){ if(!txLoading) loadTxPage(); }, 30000);
+</script>
+</body>
+</html>

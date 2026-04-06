@@ -566,10 +566,12 @@ class OracleKeyPair:
 
 @dataclass
 class HLWESignature:
-    signature       : str           # Hex-encoded HLWE signature vector
-    auth_tag        : str           # HMAC-SHA256 authentication tag
+    z               : str           # Fiat-Shamir response vector (hex)
+    c_hash          : str           # Challenge commitment hash (hex)
+    w               : str           # Commitment vector A·y mod q (hex)
     timestamp       : str           # ISO format timestamp
-    public_key_hex  : str = ""      # Public key used for signing
+    public_key_hex  : str = ""      # Public key used for signing (2048 hex = 256×4 bytes)
+    address         : str = ""      # Double-SHA3-256 derived address (64 hex)
     w_entropy_hash  : str = ""      # Quantum entropy commitment
     derivation_path : str = "m/0/0/0"
     timestamp_ns    : int = 0
@@ -578,33 +580,37 @@ class HLWESignature:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "HLWESignature":
-        # Handle backward compatibility with commitment/witness/proof format
-        if "commitment" in d and "signature" not in d:
-            # Map old fields to new ones for advisory verification
-            d["signature"] = d.get("witness", "")
-            d["auth_tag"] = d.get("proof", "")
-            if "timestamp" not in d:
-                import time as _t
-                from datetime import datetime, timezone
-                d["timestamp"] = datetime.now(timezone.utc).isoformat()
-        
+        # ── Backward compatibility: map old format → new ──
+        # Old format had: {signature, auth_tag, nonce, timestamp}
+        # New Fiat-Shamir format: {z, c_hash, w, public_key, address, timestamp}
+        if "commitment" in d and "z" not in d:
+            # Legacy commitment/witness/proof format → advisory only
+            d["z"] = d.get("witness", "")
+            d["c_hash"] = d.get("proof", "")
+            d["w"] = d.get("commitment", "")
+        elif "signature" in d and "z" not in d:
+            # Old HMAC format → map to z/c_hash/w for structural compatibility
+            d["z"] = d.get("signature", "")
+            d["c_hash"] = d.get("auth_tag", "")
+            d["w"] = ""
+
         # Map various public key field aliases to public_key_hex
         if "public_key" in d and not d.get("public_key_hex"):
             d["public_key_hex"] = d["public_key"]
-        
+
         # Ensure all required fields for dataclass are present
-        # Use a list to avoid "dictionary changed size during iteration" if needed, 
-        # but here we are creating a new dict.
-        fields = ["signature", "auth_tag", "timestamp", "public_key_hex", "w_entropy_hash", "derivation_path", "timestamp_ns"]
+        fields = ["z", "c_hash", "w", "timestamp", "public_key_hex", "address",
+                  "w_entropy_hash", "derivation_path", "timestamp_ns"]
         filtered_d = {k: v for k, v in d.items() if k in fields}
-        
+
         # Add defaults for missing fields
-        if "signature" not in filtered_d: filtered_d["signature"] = ""
-        if "auth_tag" not in filtered_d: filtered_d["auth_tag"] = ""
-        if "timestamp" not in filtered_d: 
+        if "z" not in filtered_d: filtered_d["z"] = ""
+        if "c_hash" not in filtered_d: filtered_d["c_hash"] = ""
+        if "w" not in filtered_d: filtered_d["w"] = ""
+        if "timestamp" not in filtered_d:
             from datetime import datetime, timezone
             filtered_d["timestamp"] = datetime.now(timezone.utc).isoformat()
-            
+
         return HLWESignature(**filtered_d)
 
 
@@ -895,31 +901,36 @@ class HLWESigner:
         msg_hash_bytes = bytes.fromhex(msg_hash)
         
         if self._engine:
-            # NEW: Pass full 2048-bit key directly to HLWE.sign_hash()
-            # The engine now handles KDF internally (sha3_256(key || "QTCL_SIGN_DERIVE_v1"))
-            # This preserves full post-quantum key material while deriving canonical signing key
-            
-            priv_hex = kp.private_key.hex()  # Full key as hex (2048 chars for 1024 bytes)
+            # Private key is 32-byte HD seed → 64 hex chars.
+            # Engine internally derives full HLWE lattice keypair (256-dim) from seed.
+            priv_hex = kp.private_key.hex()  # 32 bytes = 64 hex chars
             sig_result = self._engine.sign_hash(msg_hash_bytes, priv_hex)
-            
+
             return HLWESignature(
-                signature=sig_result['signature'],
-                auth_tag=sig_result['auth_tag'],
+                z=sig_result['z'],
+                c_hash=sig_result['c_hash'],
+                w=sig_result['w'],
                 timestamp=sig_result['timestamp'],
-                public_key_hex=kp.public_key.hex(),
+                public_key_hex=sig_result['public_key'],
+                address=sig_result['address'],
                 w_entropy_hash=hashlib.sha3_256(w_entropy).digest().hex(),
                 derivation_path=kp.path,
-                timestamp_ns=time.time_ns()
+                timestamp_ns=time.time_ns(),
             )
         else:
-            # Fallback for missing engine (should not happen in production)
+            # Fallback: produce structurally compatible output (advisory only).
+            # This path should never run in production — HLWEEngine is always available.
             commitment = hashlib.sha3_256(kp.private_key + w_entropy + msg_hash_bytes).digest()
             witness    = hashlib.shake_256(commitment + kp.private_key).digest(64)
             proof      = hmac.new(kp.private_key, witness + msg_hash_bytes, digestmod=hashlib.sha3_256).digest()
             return HLWESignature(
-                signature=witness.hex(), auth_tag=proof.hex(),
+                z=witness.hex(),
+                c_hash=proof.hex(),
+                w=commitment.hex(),
                 timestamp=datetime.now(timezone.utc).isoformat(),
-                public_key_hex=kp.public_key.hex(), derivation_path=kp.path,
+                public_key_hex=kp.public_key.hex(),
+                address=kp.address() if hasattr(kp, 'address') else "",
+                derivation_path=kp.path,
                 timestamp_ns=time.time_ns(),
             )
 
@@ -941,29 +952,34 @@ class HLWEVerifier:
                 
             pubkey_bytes = bytes.fromhex(pubkey_hex)
             
-            # 1. Address check
+            # 1. Address check — support all three derivation formats
             if expected_address:
-                derived = ADDRESS_PREFIX + hashlib.sha3_256(pubkey_bytes).digest()[:20].hex()
-                if derived != expected_address:
-                    # Try legacy hlwe_ prefix
-                    legacy = "hlwe_" + hashlib.sha256(pubkey_bytes).hexdigest()[:40]
-                    if legacy != expected_address:
-                        return False, f"address_mismatch: derived={derived[:12]} expected={expected_address[:12]}"
-            
-            # 2. Cryptographic signature check
+                # Engine-native: double-SHA3-256 of packed pubkey → 64 hex chars
+                engine_addr = hashlib.sha3_256(hashlib.sha3_256(pubkey_bytes).digest()).hexdigest()
+                # Oracle-native: qtcl1 + truncated SHA3-256
+                oracle_addr = ADDRESS_PREFIX + hashlib.sha3_256(pubkey_bytes).digest()[:20].hex()
+                # Legacy: hlwe_ + truncated SHA-256
+                legacy_addr = "hlwe_" + hashlib.sha256(pubkey_bytes).hexdigest()[:40]
+                # Also check sig.address if populated (signer sets it from engine)
+                sig_addr = sig.address or ""
+
+                if expected_address not in (engine_addr, oracle_addr, legacy_addr, sig_addr):
+                    return False, (
+                        f"address_mismatch: engine={engine_addr[:12]} "
+                        f"oracle={oracle_addr[:12]} expected={expected_address[:12]}"
+                    )
+
+            # 2. Cryptographic Fiat-Shamir lattice signature check
             if not self._engine:
                 return True, "valid_advisory(no_engine)"
 
             msg_hash_bytes = bytes.fromhex(msg_hash)
             sig_dict = {
-                'signature': sig.signature,
-                'auth_tag': sig.auth_tag
+                'z': sig.z,
+                'c_hash': sig.c_hash,
+                'w': sig.w,
             }
-            
-            # For HLWE verification, we use the engine's verify_signature method.
-            # In the current (BUG-COMPATIBILITY) mode, the signing_key is derived
-            # from the public_key_hex (which the client sends as the private key).
-            # This bypasses the extremely slow lattice matrix derivation.
+
             is_valid = self._engine.verify_signature(msg_hash_bytes, sig_dict, pubkey_hex)
             if is_valid:
                 return True, "valid"
