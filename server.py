@@ -161,43 +161,93 @@ def _dispatch(body_bytes: bytes) -> Tuple[dict, int]:
     
     return _dispatch_single(body), 200
 
+# ═══ PRE-WARMED RPC THREAD POOL — shared across all dispatch calls ═══════════
+# Single 8-thread pool eliminates per-call ThreadPoolExecutor create/destroy churn.
+# Fast (cache-read) methods run INLINE — never touch the pool.
+# Slow (DB/oracle) methods submit to pool with hard timeout.
+import concurrent.futures as _cf
+_RPC_THREAD_POOL = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix='rpc_worker')
+
+# Methods that run directly in the request thread — all are lock-free cache reads
+# taking < 1ms. Wrapping them in a thread pool adds 5–20ms overhead for zero gain.
+_RPC_INLINE_METHODS: frozenset = frozenset({
+    'qtcl_getBlockHeight',
+    'qtcl_getQuantumMetrics',
+    'qtcl_getLatestDMSnapshot',
+    'qtcl_getLatestDMSnapshots',
+    'qtcl_getMempoolStats',
+    'qtcl_getHealth',
+    'qtcl_getPeers',
+    'qtcl_getPeersByNatGroup',
+    'qtcl_getMyAddr',
+    'qtcl_getDHTTable',
+    'qtcl_getTreasuryAddress',
+    'qtcl_listMeasurementSubscribers',
+    'qtcl_getEvents',
+    'qtcl_peerHeartbeat',
+})
+
+# Slow methods (DB round-trips, crypto ops) — get pool + timeout protection
+_RPC_TIMEOUT_MAP: dict = {
+    'qtcl_getBlockRange':     5.0,
+    'qtcl_getTransactions':   8.0,
+    'qtcl_getBlock':          5.0,
+    'qtcl_getBalance':        4.0,
+    'qtcl_getTransaction':    4.0,
+    'qtcl_submitBlock':       8.0,
+    'qtcl_submitTransaction': 6.0,
+    'qtcl_submitOracleReg':   6.0,
+    'qtcl_getOracleRegistry': 5.0,
+    'qtcl_getOracleRecord':   4.0,
+    'qtcl_pushOracleDM':      4.0,
+    'qtcl_getPythPrice':      5.0,
+    'qtcl_registerPeer':      4.0,
+    'qtcl_receiveDHTTable':   3.0,
+    'qtcl_registerMeasurementSubscriber':   3.0,
+    'qtcl_unregisterMeasurementSubscriber': 3.0,
+    'qtcl_getDeviceChain':    4.0,
+}
+
 def _dispatch_single(req: dict) -> Optional[dict]:
-    """Dispatch single JSON-RPC 2.0 request with per-method timeout."""
+    """Dispatch single JSON-RPC 2.0 request.
+
+    Fast path: inline execution in current gthread (lock-free cache reads).
+    Slow path: submitted to _RPC_THREAD_POOL with per-method hard timeout.
+    No per-call ThreadPoolExecutor creation — eliminates thread churn under GIL.
+    """
     if not isinstance(req, dict):
         return _rpc_error(-32600, "Invalid Request: not an object", None)
-    
-    jsonrpc, method, params, rpc_id = req.get("jsonrpc"), req.get("method"), req.get("params", []), req.get("id")
-    
+
+    jsonrpc = req.get("jsonrpc")
+    method  = req.get("method")
+    params  = req.get("params", [])
+    rpc_id  = req.get("id")
+
     if jsonrpc != _JSONRPC_VERSION:
         return _rpc_error(-32600, f"Invalid jsonrpc: {jsonrpc}", rpc_id)
     if not isinstance(method, str):
         return _rpc_error(-32600, "Invalid Request: method not a string", rpc_id)
     if method not in _RPC_METHODS:
         return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
-    
+
+    handler = _RPC_METHODS[method]
+
+    # ── FAST PATH: inline, zero thread overhead ───────────────────────────────
+    if method in _RPC_INLINE_METHODS:
+        try:
+            return handler(params, rpc_id)
+        except Exception as e:
+            logger.exception(f"[RPC] {method} inline error: {e}")
+            return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+    # ── SLOW PATH: pool submit with timeout ───────────────────────────────────
+    timeout_sec = _RPC_TIMEOUT_MAP.get(method, 5.0)
     try:
-        # Per-method timeout: 3s for most, 5s for expensive queries
-        timeout_map = {
-            'qtcl_getBlockRange': 5.0,
-            'qtcl_getQuantumMetrics': 5.0,
-            'qtcl_getLatestDMSnapshot': 2.0,
-            'qtcl_getTransactions': 5.0,
-            'qtcl_getPeers': 2.0,
-        }
-        timeout_sec = timeout_map.get(method, 3.0)
-        
-        # Thread-safe timeout via concurrent.futures (signal.alarm only works on main thread)
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_RPC_METHODS[method], params, rpc_id)
-            result = future.result(timeout=timeout_sec)
-            return result
-    except concurrent.futures.TimeoutError:
+        future = _RPC_THREAD_POOL.submit(handler, params, rpc_id)
+        return future.result(timeout=timeout_sec)
+    except _cf.TimeoutError:
         logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
         return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
-    except TimeoutError as te:
-        logger.warning(f"[RPC] {method} TIMEOUT: {te}")
-        return _rpc_error(-32000, f"RPC timeout: {str(te)}", rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] {method} raised: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
@@ -2060,24 +2110,44 @@ def _get_canonical_node() -> Optional[dict]:
         return None
 
 
+# ─── Chain tip height cache — updated by _rpc_submitBlock on every accepted block ───
+# In-memory, zero DB cost, GIL-atomic int reads. Falls back to DB on cold start.
+_chain_tip_height: int = 0
+_chain_tip_hash:   str = '0' * 64
+
+def _update_chain_tip(height: int, tip_hash: str) -> None:
+    """Update the in-memory chain tip. Called from submitBlock on accept."""
+    global _chain_tip_height, _chain_tip_hash
+    if height >= _chain_tip_height:
+        _chain_tip_height = height
+        _chain_tip_hash   = tip_hash
+
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
-    
-    DB-AUTHORITATIVE: reads from PostgreSQL blocks table via query_latest_block().
-    No fallbacks — DB is the single source of truth.
+
+    HOT PATH: reads _chain_tip_height (in-memory int, GIL-atomic) — zero DB cost.
+    Falls back to _oracle_metrics_cache.block_height or DB on cold start only.
+    This method is in _RPC_INLINE_METHODS → dispatched without thread pool overhead.
     """
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight called with params={params}, id={rpc_id}")
-        
-        db_tip = query_latest_block()
-        if db_tip is None:
-            # No blocks yet — return genesis state (height=0) which is the actual state
-            return _rpc_ok({"height": 0, "tip_hash": "0" * 64, "ts": time.time()}, rpc_id)
-        
-        height   = int(db_tip['height'])
-        tip_hash = str(db_tip.get('hash', ''))
-        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight success: height={height}")
-        return _rpc_ok({"height": height, "tip_hash": tip_hash, "ts": time.time()}, rpc_id)
+        # Fast path: in-memory tip (set by submitBlock, refreshed by metrics cache)
+        h = _chain_tip_height
+        th = _chain_tip_hash
+        if h == 0:
+            # Cold start: try metrics cache first, then DB
+            _cache = _oracle_metrics_cache
+            h_cache = int(_cache.get('block_height', 0))
+            if h_cache > 0:
+                h = h_cache
+                th = _chain_tip_hash
+            else:
+                db_tip = query_latest_block()
+                if db_tip:
+                    h  = int(db_tip['height'])
+                    th = str(db_tip.get('block_hash', db_tip.get('hash', '0'*64)))
+                    _update_chain_tip(h, th)
+        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight: h={h}")
+        return _rpc_ok({"height": h, "tip_hash": th, "ts": time.time()}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
         return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
@@ -3609,6 +3679,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         if _block_rowcount == 0:
             logger.info(f"[RPC-submitBlock] 🔁 DUPLICATE h={height} hash={block_hash[:16]}…")
             return _rpc_ok({"status":"duplicate","height":height,"block_hash":block_hash}, rpc_id)
+        _update_chain_tip(height, block_hash)   # keep in-memory tip hot — getBlockHeight is lock-free
         logger.info(f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… miner={miner_address[:16]}… reward={_resp_reward} QTCL")
         return _rpc_ok({"status":"accepted","height":height,"block_hash":block_hash,"difficulty_bits":difficulty_bits,"miner_reward_qtcl":_resp_reward}, rpc_id)
 
@@ -4773,6 +4844,10 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
         # 1. Update in-memory RPC cache (atomic pointer swap + oracle metrics cache)
         _cache_snapshot(snapshot)
         _update_oracle_metrics_cache(snapshot)
+        # Keep chain tip hot for lock-free getBlockHeight
+        _snap_bh = int(snapshot.get('block_height') or snapshot.get('height') or 0)
+        if _snap_bh > 0:
+            _update_chain_tip(_snap_bh, snapshot.get('block_hash', _chain_tip_hash))
         
         # 2. Queue into DM snapshot ring buffer for streaming
         if 'density_matrix_hex' in snapshot:
