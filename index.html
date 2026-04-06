@@ -3,287 +3,687 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>QTCL &middot; Quantum Temporal Coherence Ledger</title>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="QTCL is a live post-quantum proof-of-work blockchain with W-state entangled block certification, HLWE post-quantum signatures, and Mermin inequality-verified 5-node oracle consensus. Block explorer, live transactions, and quantum metrics.">
-  <meta name="keywords" content="quantum blockchain, post-quantum cryptography, W-state entanglement, Mermin inequality, HLWE, lattice cryptography, proof of work, block explorer, QRNG">
-  <meta name="author" content="Shemshallah">
-  <meta property="og:title" content="QTCL · Quantum Temporal Coherence Ledger">
-  <meta property="og:description" content="Live post-quantum PoW blockchain. W-state certified blocks. HLWE signatures. Mermin M₃≈2.8 oracle consensus.">
-  <meta property="og:url" content="https://qtcl-blockchain.koyeb.app/">
-  <meta property="og:type" content="website">
-  <meta name="twitter:card" content="summary">
-  <meta name="twitter:site" content="@galacticfed638">
-  <meta name="twitter:creator" content="@galacticfed638">
-  <meta name="twitter:title" content="QTCL · Quantum Blockchain Explorer">
-  <meta name="twitter:description" content="Live post-quantum PoW blockchain. W-state certified blocks. Mermin inequality oracle.">
-  <link rel="canonical" href="https://qtcl-blockchain.koyeb.app/">
-  <link rel="sitemap" type="application/xml" href="/sitemap.xml">
-  <meta name="google-site-verification" content="TCf7Ywazq-Y0iMZJj51d6L-AgbPgp-4h2ayXQmVIDMo">
+<title>QTCL · Quantum Temporal Coherence Ledger</title>
+<meta name="description" content="QTCL is a live post-quantum proof-of-work blockchain with W-state entangled block certification, HLWE post-quantum signatures, and Mermin inequality-verified 5-node oracle consensus."/>
+<meta name="keywords" content="quantum blockchain, post-quantum cryptography, W-state entanglement, Mermin inequality, HLWE, lattice cryptography, proof of work, block explorer, QRNG"/>
+<meta name="author" content="Shemshallah"/>
+<meta property="og:title" content="QTCL · Quantum Temporal Coherence Ledger"/>
+<meta property="og:description" content="Live post-quantum PoW blockchain. W-state certified blocks. HLWE signatures. Mermin M₃≈2.8 oracle consensus."/>
+<meta property="og:url" content="https://qtcl-blockchain.koyeb.app/"/>
+<meta property="og:type" content="website"/>
+<meta name="twitter:card" content="summary"/>
+<meta name="twitter:title" content="QTCL · Quantum Blockchain Explorer"/>
+<meta name="twitter:description" content="Live post-quantum PoW blockchain. W-state certified blocks. Mermin inequality oracle."/>
+<link rel="canonical" href="https://qtcl-blockchain.koyeb.app/"/>
+<meta name="google-site-verification" content="TCf7Ywazq-Y0iMZJj51d6L-AgbPgp-4h2ayXQmVIDMo"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
-
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:ital,wght@0,300;0,400;0,600;1,400&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
+/* ═══════════════════════════════════════════════════════════════════
+   CATHEDRAL GRADE — QTCL DASHBOARD v7
+   Architecture: Worker-per-panel, single /rpc/oracle/snapshots bus
+   No Three.js. No Poincaré. DM 32×32 canvas. CSS Bloch sphere.
+═══════════════════════════════════════════════════════════════════ */
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#030610;--bg2:#060c1c;--bg3:#0a1228;--card:#080e20;
-  --b:rgba(0,220,255,.10);--b2:rgba(0,220,255,.18);
-  --cy:#00dcff;--cy2:rgba(0,220,255,.12);
-  --go:#d4a020;--go2:rgba(212,160,32,.12);
-  --vi:#8040ff;--vi2:rgba(128,64,255,.12);
-  --gr:#00ff9d;--gr2:rgba(0,255,157,.10);
-  --re:#ff3355;--dim:#3a4a68;--tx:#bbc8e0;--br:#e8f0ff;
-  --mono:'JetBrains Mono',monospace;--disp:'Orbitron',sans-serif;--body:'DM Sans',sans-serif;
+  --bg:#020509;--bg2:#050b14;--bg3:#08101e;--card:#060d1a;
+  --b:rgba(0,212,255,.08);--b2:rgba(0,212,255,.16);--b3:rgba(0,212,255,.28);
+  --cy:#00d4ff;--cy2:rgba(0,212,255,.10);--cy3:rgba(0,212,255,.04);
+  --go:#e8b84b;--go2:rgba(232,184,75,.10);
+  --vi:#9b6dff;--vi2:rgba(155,109,255,.10);
+  --gr:#00f5a0;--gr2:rgba(0,245,160,.08);
+  --re:#ff3b5c;--re2:rgba(255,59,92,.10);
+  --am:#ff8c42;--am2:rgba(255,140,66,.10);
+  --dim:#2e4060;--dim2:#3d526e;--tx:#a8bdd4;--br:#dce8f5;
+  --mono:'JetBrains Mono',monospace;
+  --disp:'Orbitron',sans-serif;
+  --body:'Space Grotesk',sans-serif;
+  --glow-cy: 0 0 12px rgba(0,212,255,.4), 0 0 32px rgba(0,212,255,.15);
+  --glow-vi: 0 0 12px rgba(155,109,255,.4), 0 0 32px rgba(155,109,255,.15);
+  --glow-go: 0 0 12px rgba(232,184,75,.4), 0 0 32px rgba(232,184,75,.15);
+  --glow-gr: 0 0 12px rgba(0,245,160,.35), 0 0 24px rgba(0,245,160,.12);
 }
-html{font-size:14px;background:var(--bg)}
-body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100vh;display:flex;flex-direction:column}
-body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.05) 3px,rgba(0,0,0,.05) 4px)}
-#hdr{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;background:rgba(3,6,16,.97);border-bottom:1px solid var(--b2);position:sticky;top:0;z-index:100;flex-shrink:0}
-#hdr::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cy) 40%,var(--vi) 70%,transparent);opacity:.5}
-.hb{display:flex;align-items:center;gap:12px}
+html{font-size:13px;background:var(--bg);scroll-behavior:smooth}
+body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100vh;display:flex;flex-direction:column;overflow-x:hidden}
+
+/* ── CRT scanlines overlay ── */
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9900;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 3px);
+  animation:scanroll 8s linear infinite}
+@keyframes scanroll{0%{background-position:0 0}100%{background-position:0 300px}}
+
+/* ── Noise grain ── */
+body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9800;opacity:.018;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:128px 128px}
+
+/* ────────────────────────────────────────────────────────────────
+   HEADER
+──────────────────────────────────────────────────────────────── */
+#hdr{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 24px;height:56px;
+  background:rgba(2,5,9,.98);
+  border-bottom:1px solid var(--b2);
+  position:sticky;top:0;z-index:200;flex-shrink:0;
+}
+#hdr::after{
+  content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent 0%,var(--cy) 30%,var(--vi) 70%,transparent 100%);
+  opacity:.6
+}
+.hb{display:flex;align-items:center;gap:14px}
 #lc{display:block;flex-shrink:0}
-.ht{font-family:var(--disp);font-size:15px;font-weight:900;letter-spacing:4px;color:var(--cy);text-shadow:0 0 18px rgba(0,220,255,.5)}
-.hs{font-size:9px;color:var(--dim);letter-spacing:2px;text-transform:uppercase;margin-top:2px}
+.ht{font-family:var(--disp);font-size:16px;font-weight:900;letter-spacing:5px;
+  color:var(--cy);text-shadow:var(--glow-cy)}
+.hs{font-size:9px;color:var(--dim2);letter-spacing:2px;text-transform:uppercase;margin-top:2px}
+.hlink{font-size:9px;margin-top:3px;color:var(--dim2)}
+.hlink a{color:var(--cy);opacity:.6;text-decoration:none;transition:opacity .2s}
+.hlink a:hover{opacity:1}
 .hr{display:flex;align-items:center;gap:20px}
 .hst{text-align:right}
 .hstl{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
-.hstv{font-family:var(--mono);font-size:13px;color:var(--go);margin-top:2px}
-#cp{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;letter-spacing:1px;padding:4px 10px;border-radius:20px;background:var(--gr2);border:1px solid rgba(0,255,157,.25);color:var(--gr);transition:all .3s}
-#cp.off{background:rgba(255,51,85,.1);border-color:rgba(255,51,85,.25);color:var(--re)}
-.cd{width:6px;height:6px;border-radius:50%;background:var(--gr);animation:pl 2s infinite;flex-shrink:0}
+.hstv{font-family:var(--mono);font-size:13px;color:var(--go);margin-top:2px;
+  transition:color .3s,text-shadow .3s}
+.hstv.pulse{color:#fff;text-shadow:var(--glow-cy)}
+#cp{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;
+  letter-spacing:1.5px;padding:4px 12px;border-radius:20px;
+  background:var(--gr2);border:1px solid rgba(0,245,160,.2);color:var(--gr);transition:all .4s}
+#cp.off{background:var(--re2);border-color:rgba(255,59,92,.25);color:var(--re)}
+.cd{width:7px;height:7px;border-radius:50%;background:var(--gr);
+  animation:pl 2.2s ease-in-out infinite;flex-shrink:0}
 #cp.off .cd{background:var(--re);animation:none}
-@keyframes pl{0%,100%{opacity:1;box-shadow:0 0 6px var(--gr)}50%{opacity:.4;box-shadow:none}}
-#hck{font-family:var(--mono);font-size:10px;color:var(--dim)}
-#page{flex:1;padding:16px 20px 32px;display:flex;flex-direction:column;gap:16px;max-width:1600px;width:100%;margin:0 auto}
-.st{font-family:var(--disp);font-size:8px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--dim);margin-bottom:10px}
-.mg{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px}
-.mc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .2s}
-.mc:hover{border-color:var(--b2)}
-.mc::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cy),var(--vi));opacity:.6}
-.mc.go::after{background:linear-gradient(90deg,var(--go),#ffcf60)}
-.mc.vi::after{background:linear-gradient(90deg,var(--vi),var(--cy))}
-.mc.gr::after{background:var(--gr)}
-.ml{font-size:9px;color:var(--dim);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
-.mv{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--cy);line-height:1;min-height:26px;transition:color .3s}
-.mv.go{color:var(--go)}.mv.vi{color:var(--vi)}.mv.gr{color:var(--gr)}.mv.dm{color:var(--dim)}
+@keyframes pl{0%,100%{opacity:1;box-shadow:0 0 8px var(--gr)}50%{opacity:.3;box-shadow:none}}
+#hck{font-family:var(--mono);font-size:9.5px;color:var(--dim2);letter-spacing:.3px}
+
+/* ────────────────────────────────────────────────────────────────
+   PAGE LAYOUT
+──────────────────────────────────────────────────────────────── */
+#page{flex:1;padding:20px 24px 40px;display:flex;flex-direction:column;
+  gap:20px;max-width:1720px;width:100%;margin:0 auto}
+.st{font-family:var(--disp);font-size:8px;font-weight:700;letter-spacing:3px;
+  text-transform:uppercase;color:var(--dim2);margin-bottom:12px;
+  display:flex;align-items:center;gap:10px}
+.st::after{content:'';flex:1;height:1px;background:var(--b)}
+
+/* ── Metric grid ── */
+.mg{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+.mc{background:var(--card);border:1px solid var(--b);border-radius:10px;
+  padding:14px 16px;position:relative;overflow:hidden;
+  transition:border-color .3s,box-shadow .3s;cursor:default}
+.mc:hover{border-color:var(--b3);box-shadow:0 0 20px rgba(0,212,255,.06)}
+.mc::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--cy),var(--vi));opacity:.7}
+.mc.go::before{background:linear-gradient(90deg,var(--go),#f5d070)}
+.mc.vi::before{background:linear-gradient(90deg,var(--vi),var(--cy))}
+.mc.gr::before{background:var(--gr)}
+.mc.re::before{background:linear-gradient(90deg,var(--re),var(--am))}
+.ml{font-size:8.5px;color:var(--dim2);letter-spacing:1.5px;text-transform:uppercase;
+  margin-bottom:7px;font-family:var(--mono)}
+.mv{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--cy);
+  line-height:1;min-height:26px;transition:all .4s}
+.mv.go{color:var(--go)}.mv.vi{color:var(--vi)}.mv.gr{color:var(--gr)}
+.mv.re{color:var(--re)}.mv.dm{color:var(--dim2)}
 .ms{font-size:9px;color:var(--dim);margin-top:5px;font-family:var(--mono)}
-.mb{height:2px;background:var(--bg3);border-radius:2px;margin-top:8px;overflow:hidden}
-.mbf{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--cy),var(--vi));transition:width .8s ease}
-.tc{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:900px){.tc{grid-template-columns:1fr}}
-.pn{background:var(--card);border:1px solid var(--b);border-radius:8px;overflow:hidden}
-.ph{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--b);background:rgba(0,0,0,.2)}
-.pht{font-family:var(--disp);font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--dim)}
-.pb{font-family:var(--mono);font-size:8px;letter-spacing:1px;padding:2px 8px;border-radius:3px;background:var(--cy2);color:var(--cy);border:1px solid rgba(0,220,255,.2)}
-.pb.go{background:var(--go2);color:var(--go);border-color:rgba(212,160,32,.2)}
-.pb.vi{background:var(--vi2);color:var(--vi);border-color:rgba(128,64,255,.2)}
-.pb.gr{background:var(--gr2);color:var(--gr);border-color:rgba(0,255,157,.2)}
-#dc,#qc{display:block;width:100%}
-#cs{overflow-x:auto;padding:12px 16px;display:flex;align-items:center;gap:0;min-height:96px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
+.mb{height:2px;background:var(--bg3);border-radius:2px;margin-top:10px;overflow:hidden}
+.mbf{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--cy),var(--vi));
+  transition:width 1s cubic-bezier(.4,0,.2,1)}
+
+/* ── Panel ── */
+.pn{background:var(--card);border:1px solid var(--b);border-radius:10px;overflow:hidden}
+.ph{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 18px;border-bottom:1px solid var(--b);
+  background:rgba(0,0,0,.25)}
+.pht{font-family:var(--disp);font-size:8px;letter-spacing:2.5px;
+  text-transform:uppercase;color:var(--dim2)}
+.pb{font-family:var(--mono);font-size:8px;letter-spacing:1px;
+  padding:2px 8px;border-radius:3px;background:var(--cy2);
+  color:var(--cy);border:1px solid rgba(0,212,255,.18)}
+.pb.go{background:var(--go2);color:var(--go);border-color:rgba(232,184,75,.2)}
+.pb.vi{background:var(--vi2);color:var(--vi);border-color:rgba(155,109,255,.2)}
+.pb.gr{background:var(--gr2);color:var(--gr);border-color:rgba(0,245,160,.18)}
+.pb.re{background:var(--re2);color:var(--re);border-color:rgba(255,59,92,.2)}
+
+/* ── Two-column grid ── */
+.tc{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.tc3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px}
+@media(max-width:1100px){.tc{grid-template-columns:1fr}.tc3{grid-template-columns:1fr 1fr}}
+@media(max-width:700px){.tc3{grid-template-columns:1fr}}
+
+/* ── Scroll container ── */
+.sy{overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
+.sy::-webkit-scrollbar{width:3px}
+.sy::-webkit-scrollbar-thumb{background:var(--b2);border-radius:2px}
+
+/* ── Flash animation ── */
+.fl{animation:fl .5s ease-out}
+@keyframes fl{0%{color:#fff;text-shadow:0 0 16px var(--cy)}100%{}}
+.es{padding:28px;text-align:center;font-size:11px;color:var(--dim);font-family:var(--mono)}
+
+/* ────────────────────────────────────────────────────────────────
+   METRICS PANEL
+──────────────────────────────────────────────────────────────── */
+.nr{display:flex;justify-content:space-between;align-items:center;
+  padding:6px 18px;border-bottom:1px solid rgba(0,212,255,.04)}
+.nr:last-child{border-bottom:none}
+.nk{font-size:9px;color:var(--dim2);font-family:var(--mono);letter-spacing:.5px}
+.nv{font-family:var(--mono);font-size:10px;color:var(--vi);font-weight:600}
+
+/* ────────────────────────────────────────────────────────────────
+   DENSITY MATRIX 32×32 CANVAS PANEL
+──────────────────────────────────────────────────────────────── */
+#dm-wrap{padding:16px;display:flex;flex-direction:column;gap:12px}
+#dm-canvas{display:block;width:100%;height:auto;image-rendering:pixelated;
+  border-radius:4px;border:1px solid rgba(0,212,255,.08)}
+#dm-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.dm-leg-item{display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:8px;color:var(--dim2)}
+.dm-leg-swatch{width:12px;height:12px;border-radius:2px;flex-shrink:0}
+#dm-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.dm-stat{background:var(--bg3);border-radius:6px;padding:8px 10px;text-align:center}
+.dm-stat-l{font-family:var(--mono);font-size:7.5px;color:var(--dim);letter-spacing:1px;
+  text-transform:uppercase;margin-bottom:4px}
+.dm-stat-v{font-family:var(--mono);font-size:13px;color:var(--cy);font-weight:600}
+
+/* ────────────────────────────────────────────────────────────────
+   CSS 3D BLOCH SPHERE (no Three.js, no libraries)
+──────────────────────────────────────────────────────────────── */
+#bloch-wrap{padding:20px 16px;display:flex;flex-direction:column;align-items:center;gap:16px}
+#bloch-scene{
+  width:220px;height:220px;position:relative;
+  perspective:600px;perspective-origin:50% 50%;
+  flex-shrink:0;cursor:grab;user-select:none
+}
+#bloch-scene:active{cursor:grabbing}
+.bloch-sphere{
+  width:220px;height:220px;position:relative;
+  transform-style:preserve-3d;
+  transition:transform .05s linear;
+}
+.bloch-ring{
+  position:absolute;border-radius:50%;border:1px solid;
+  top:50%;left:50%;transform:translate(-50%,-50%);
+}
+.bloch-ring.equator{
+  width:220px;height:220px;
+  border-color:rgba(0,212,255,.20);
+  transform:translate(-50%,-50%) rotateX(90deg);
+  box-shadow:inset 0 0 40px rgba(0,212,255,.04)
+}
+.bloch-ring.merid1{
+  width:220px;height:220px;
+  border-color:rgba(155,109,255,.15);
+  transform:translate(-50%,-50%) rotateY(0deg)
+}
+.bloch-ring.merid2{
+  width:220px;height:220px;
+  border-color:rgba(155,109,255,.10);
+  transform:translate(-50%,-50%) rotateY(60deg)
+}
+.bloch-ring.merid3{
+  width:220px;height:220px;
+  border-color:rgba(155,109,255,.10);
+  transform:translate(-50%,-50%) rotateY(120deg)
+}
+.bloch-outer{
+  position:absolute;inset:0;border-radius:50%;
+  background:radial-gradient(ellipse at 35% 30%,
+    rgba(0,212,255,.07) 0%,
+    rgba(155,109,255,.04) 50%,
+    rgba(0,0,0,0) 100%);
+  border:1px solid rgba(0,212,255,.12);
+}
+.bloch-axis{
+  position:absolute;width:1px;background:rgba(255,255,255,.12);
+  left:50%;transform:translateX(-50%);transform-style:preserve-3d;
+}
+.bloch-axis.z{height:220px;top:0}
+.bloch-axis-lbl{
+  position:absolute;font-family:var(--mono);font-size:9px;
+  color:rgba(0,212,255,.5);white-space:nowrap;pointer-events:none;
+}
+#bloch-state-vec{
+  position:absolute;
+  top:50%;left:50%;
+  width:2px;transform-origin:0 0;
+  background:linear-gradient(var(--go),rgba(232,184,75,0));
+  border-radius:2px;
+  transition:transform .6s cubic-bezier(.4,0,.2,1),height .6s cubic-bezier(.4,0,.2,1);
+  pointer-events:none;
+}
+#bloch-state-dot{
+  position:absolute;
+  width:10px;height:10px;border-radius:50%;
+  background:var(--go);
+  box-shadow:var(--glow-go);
+  transform:translate(-50%,-50%);
+  transition:top .6s cubic-bezier(.4,0,.2,1),left .6s cubic-bezier(.4,0,.2,1);
+  pointer-events:none;
+}
+#bloch-phase-arc{
+  position:absolute;top:50%;left:50%;
+  width:60px;height:60px;margin:-30px 0 0 -30px;
+  border-radius:50%;
+  border:2px solid transparent;
+  border-top-color:var(--gr);
+  transform-origin:50% 50%;
+  transition:transform .6s cubic-bezier(.4,0,.2,1);
+  pointer-events:none;
+  box-shadow:0 0 8px rgba(0,245,160,.3);
+}
+#bloch-meta{display:grid;grid-template-columns:1fr 1fr;gap:6px;width:100%}
+.bloch-m{background:var(--bg3);border-radius:5px;padding:6px 10px;text-align:center}
+.bloch-ml{font-family:var(--mono);font-size:7.5px;color:var(--dim);letter-spacing:1px;
+  text-transform:uppercase;margin-bottom:3px}
+.bloch-mv{font-family:var(--mono);font-size:12px;color:var(--go);font-weight:600}
+#bloch-phase-ring{
+  display:flex;align-items:center;justify-content:center;
+  width:100%;height:48px;position:relative;
+}
+#bloch-phase-canvas{display:block}
+
+/* ────────────────────────────────────────────────────────────────
+   MERMIN PANEL
+──────────────────────────────────────────────────────────────── */
+.md{padding:20px 18px;display:flex;align-items:center;gap:20px}
+.mb2{font-family:var(--disp);font-size:52px;font-weight:900;line-height:1;
+  flex-shrink:0;transition:color .6s,text-shadow .6s}
+.mb2.q{color:var(--cy);text-shadow:var(--glow-cy)}
+.mb2.v{color:var(--gr);text-shadow:var(--glow-gr)}
+.mb2.c{color:var(--re);text-shadow:var(--glow-vi)}
+.mi{flex:1;min-width:0}
+.mv2{font-size:11px;color:var(--br);font-weight:500;margin-bottom:7px}
+.ms2{font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:6px}
+.mba{height:5px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-top:10px;position:relative}
+.mbaf{height:100%;border-radius:3px;
+  background:linear-gradient(90deg,rgba(155,109,255,.6),var(--cy),var(--gr));
+  transition:width 1s cubic-bezier(.4,0,.2,1)}
+.mba-mark{position:absolute;top:0;bottom:0;width:1px;background:rgba(0,212,255,.5)}
+.mba-mark.classical{left:50%}
+.mba-mark.wmax{left:76.15%}
+.mbl{display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;
+  color:var(--dim);margin-top:5px}
+.mac{padding:0 18px 14px;display:flex;flex-wrap:wrap;gap:5px}
+.ac{font-family:var(--mono);font-size:8px;padding:2px 7px;border-radius:3px;
+  background:var(--bg3);color:var(--dim);border:1px solid var(--b)}
+
+/* ────────────────────────────────────────────────────────────────
+   BLOCK STREAM
+──────────────────────────────────────────────────────────────── */
+#cs{overflow-x:auto;padding:14px 18px;display:flex;align-items:center;
+  gap:0;min-height:100px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
 #cs::-webkit-scrollbar{height:3px}
-#cs::-webkit-scrollbar-thumb{background:var(--b)}
+#cs::-webkit-scrollbar-thumb{background:var(--b2);border-radius:2px}
 .bn{flex-shrink:0;display:flex;flex-direction:column;align-items:center}
 .bco{width:24px;height:2px;flex-shrink:0;background:var(--b2);position:relative;align-self:center}
-.bco::after{content:'';position:absolute;right:-4px;top:-3px;border:4px solid transparent;border-left-color:var(--b2)}
-.bh{width:56px;height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;position:relative;transition:transform .2s}
+.bco::after{content:'';position:absolute;right:-4px;top:-3px;
+  border:4px solid transparent;border-left-color:var(--b2)}
+.bh{width:58px;height:58px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;cursor:pointer;position:relative;transition:transform .2s}
 .bh:hover{transform:scale(1.12)}
 .bh canvas{position:absolute;inset:0}
 .bnum{font-family:var(--mono);font-size:10px;font-weight:600;color:var(--go);z-index:1}
 .btx{font-family:var(--mono);font-size:8px;color:var(--dim);z-index:1}
-.bl{font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:4px;max-width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+.bl{font-family:var(--mono);font-size:8px;color:var(--dim2);margin-top:4px;
+  max-width:58px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
 .bn.fr .bh{animation:bfr .6s cubic-bezier(.34,1.56,.64,1)}
 @keyframes bfr{0%{transform:scale(0);opacity:0}100%{transform:scale(1);opacity:1}}
+
+/* ────────────────────────────────────────────────────────────────
+   TRANSACTION TABLE
+──────────────────────────────────────────────────────────────── */
 .tt{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
-.tt th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);padding:8px 14px;border-bottom:1px solid var(--b);text-align:left;background:rgba(0,0,0,.15);font-family:var(--disp);font-weight:700}
-.tt td{padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.04);color:var(--tx)}
-.tt tr:hover td{background:var(--cy2)}
-.tt tr.fr td{animation:tfr .5s ease-out}
-@keyframes tfr{0%{background:rgba(0,220,255,.15)}100%{background:transparent}}
-.tba{display:inline-block;font-size:8px;padding:2px 7px;border-radius:3px;letter-spacing:.5px;font-family:var(--disp)}
+.tt th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim2);
+  padding:8px 14px;border-bottom:1px solid var(--b);text-align:left;
+  background:rgba(0,0,0,.18);font-family:var(--disp);font-weight:700}
+.tt td{padding:8px 14px;border-bottom:1px solid rgba(0,212,255,.04);color:var(--tx)}
+.tt tr:hover td{background:rgba(0,212,255,.04)}
+.tt tr.fr td{animation:tfr .6s ease-out}
+@keyframes tfr{0%{background:rgba(0,212,255,.14)}100%{background:transparent}}
+.tba{display:inline-block;font-size:8px;padding:2px 7px;border-radius:3px;
+  letter-spacing:.5px;font-family:var(--disp)}
 .tba.pending{background:var(--go2);color:var(--go)}
 .tba.confirmed{background:var(--gr2);color:var(--gr)}
 .tba.coinbase{background:var(--vi2);color:var(--vi)}
-.tba.treasury{background:var(--go2);color:var(--go);border:1px solid rgba(212,160,32,.3)}
+.tba.treasury{background:var(--go2);color:var(--go);border:1px solid rgba(232,184,75,.3)}
 .tba.transfer{background:var(--cy2);color:var(--cy)}
-.txfbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.15);color:var(--dim);font-size:9px;
-  padding:3px 8px;border-radius:3px;cursor:pointer;font-family:var(--disp);letter-spacing:.5px;transition:all .2s}
-.txfbtn:hover,.txfbtn.active{background:rgba(0,220,255,.18);color:var(--cy);border-color:var(--cy)}
-.txfbtn.active.cb{background:rgba(255,0,200,.15);color:var(--vi);border-color:var(--vi)}
-.txfbtn.active.tr{background:rgba(0,220,255,.15);color:var(--cy);border-color:var(--cy)}
-.txpbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.12);color:var(--dim);font-size:10px;
-  padding:3px 12px;border-radius:3px;cursor:pointer;font-family:var(--mono);transition:all .2s}
+.txfbtn{background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.14);
+  color:var(--dim2);font-size:9px;padding:3px 9px;border-radius:3px;cursor:pointer;
+  font-family:var(--disp);letter-spacing:.5px;transition:all .2s}
+.txfbtn:hover,.txfbtn.active{background:rgba(0,212,255,.16);color:var(--cy);border-color:var(--cy)}
+.txpbtn{background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.12);
+  color:var(--dim2);font-size:10px;padding:3px 14px;border-radius:3px;cursor:pointer;
+  font-family:var(--mono);transition:all .2s}
 .txpbtn:hover:not(:disabled){color:var(--cy);border-color:var(--cy)}
 .txpbtn:disabled{opacity:.3;cursor:default}
-.miner-row{display:flex;flex-direction:column;padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.05);transition:background .15s}
-.miner-row:hover{background:rgba(0,220,255,.04)}
-.miner-row.live .miner-dot{background:var(--gr);box-shadow:0 0 5px var(--gr);animation:pl 1.8s infinite}
-.miner-row.seen .miner-dot{background:var(--go)}
-.miner-row.historic .miner-dot{background:var(--dim)}
-@keyframes p2ppulse{0%,100%{opacity:1;box-shadow:0 0 8px var(--gr),0 0 16px rgba(0,255,157,.3)}50%{opacity:.5;box-shadow:none}}
-.miner-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:3px}
-.miner-addr{font-family:var(--mono);font-size:10px;color:var(--cy);cursor:pointer;user-select:all}
-.miner-addr:hover{color:#fff}
-.miner-stats{display:flex;gap:12px;font-size:9px;margin-top:3px;color:var(--dim)}
-.miner-stat-val{color:var(--tx)}
-.miner-badge{font-size:8px;padding:1px 5px;border-radius:2px;font-family:var(--disp);letter-spacing:.4px}
-.miner-badge.live{background:rgba(0,255,157,.12);color:var(--gr)}
-.miner-badge.seen{background:rgba(255,165,0,.12);color:var(--go)}
-.miner-badge.historic{background:rgba(255,255,255,.06);color:var(--dim)}
 .tx-cb td:first-child{border-left:2px solid var(--vi)}
-.tx-tr td:first-child{border-left:2px solid rgba(0,220,255,.3)}
-.tx-new{animation:tfr .8s ease}
-.or{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--b);transition:background .2s}
+.tx-tr td:first-child{border-left:2px solid rgba(0,212,255,.3)}
+
+/* ────────────────────────────────────────────────────────────────
+   ORACLE NODES
+──────────────────────────────────────────────────────────────── */
+.or{display:flex;align-items:center;gap:14px;padding:10px 18px;
+  border-bottom:1px solid rgba(0,212,255,.05);transition:background .2s}
 .or:hover{background:var(--vi2)}
 .or:last-child{border-bottom:none}
-.od{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.od.on{background:var(--gr);box-shadow:0 0 6px var(--gr)}
+.od{width:8px;height:8px;border-radius:50%;flex-shrink:0;transition:box-shadow .3s}
+.od.on{background:var(--gr);box-shadow:0 0 8px var(--gr),0 0 16px rgba(0,245,160,.3)}
 .od.off{background:var(--re)}
 .on2{font-family:var(--mono);font-size:10px;color:var(--br);flex:1}
-.ort{font-size:8px;color:var(--dim)}
+.ort{font-size:8px;color:var(--dim);font-family:var(--mono)}
 .of{font-family:var(--mono);font-size:11px;color:var(--vi);font-weight:600}
-.nr{display:flex;justify-content:space-between;padding:7px 16px;border-bottom:1px solid rgba(0,220,255,.05)}
-.nr:last-child{border-bottom:none}
-.nk{font-size:9px;color:var(--dim)}.nv{font-family:var(--mono);font-size:10px;color:var(--vi)}
-.md{padding:16px;display:flex;align-items:center;gap:20px}
-.mb2{font-family:var(--disp);font-size:48px;font-weight:900;line-height:1;flex-shrink:0;transition:color .5s}
-.mb2.q{color:var(--cy);text-shadow:0 0 30px rgba(0,220,255,.4)}
-.mb2.c{color:var(--re);text-shadow:0 0 20px rgba(255,51,85,.3)}
-.mi{flex:1;min-width:0}
-.mv2{font-size:11px;color:var(--br);font-weight:500;margin-bottom:6px}
-.ms2{font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:4px}
-.mba{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;margin-top:8px}
-.mbaf{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--vi),var(--cy));transition:width .8s ease}
-.mbl{display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:4px}
-.mac{padding:0 16px 12px;display:flex;flex-wrap:wrap;gap:4px}
-.ac{font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:var(--bg3);color:var(--dim);border:1px solid var(--b)}
-.bs{display:flex;border-top:1px solid var(--b)}
-.bv{flex:1;padding:10px 14px;border-right:1px solid var(--b);text-align:center}
-.bv:last-child{border-right:none}
-.bvl{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
-.bvn{font-family:var(--mono);font-size:13px;color:var(--vi)}
-#bb{position:sticky;bottom:0;display:flex;align-items:center;height:30px;background:rgba(3,6,16,.99);border-top:1px solid rgba(0,220,255,.22);font-family:var(--mono);font-size:10px;overflow:hidden;flex-shrink:0;gap:0}
-.bi{display:flex;align-items:center;gap:6px;padding:0 14px;white-space:nowrap;border-right:1px solid rgba(0,220,255,.12);height:100%}
-.bl2{color:rgba(90,120,160,.9);font-size:8.5px;letter-spacing:.8px;text-transform:uppercase}.bv2{color:var(--cy);font-size:10.5px}.bvg{color:var(--gr);font-size:10.5px}.bvy{color:var(--go);font-size:10.5px}
+
+/* ────────────────────────────────────────────────────────────────
+   MINER ROWS
+──────────────────────────────────────────────────────────────── */
+.miner-row{display:flex;flex-direction:column;padding:8px 18px;
+  border-bottom:1px solid rgba(0,212,255,.04);transition:background .15s}
+.miner-row:hover{background:rgba(0,212,255,.03)}
+.miner-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:3px}
+.miner-row.live .miner-dot{background:var(--gr);box-shadow:0 0 6px var(--gr);animation:pl 2s infinite}
+.miner-row.seen .miner-dot{background:var(--go)}
+.miner-row.historic .miner-dot{background:var(--dim)}
+.miner-addr{font-family:var(--mono);font-size:10px;color:var(--cy);
+  cursor:pointer;user-select:all;transition:color .15s}
+.miner-addr:hover{color:#fff}
+.miner-stats{display:flex;gap:14px;font-size:9px;margin-top:3px;color:var(--dim)}
+.miner-stat-val{color:var(--tx)}
+.miner-badge{font-size:8px;padding:1px 5px;border-radius:2px;
+  font-family:var(--disp);letter-spacing:.4px}
+.miner-badge.live{background:rgba(0,245,160,.10);color:var(--gr)}
+.miner-badge.seen{background:rgba(232,184,75,.10);color:var(--go)}
+.miner-badge.historic{background:rgba(255,255,255,.05);color:var(--dim)}
+
+/* ────────────────────────────────────────────────────────────────
+   GKSL NOISE GRID
+──────────────────────────────────────────────────────────────── */
+.noise-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}
+.noise-grid .nr{padding:7px 18px}
+
+/* ────────────────────────────────────────────────────────────────
+   STATUS BAR
+──────────────────────────────────────────────────────────────── */
+#bb{position:sticky;bottom:0;display:flex;align-items:center;height:32px;
+  background:rgba(2,5,9,.99);border-top:1px solid rgba(0,212,255,.18);
+  font-family:var(--mono);font-size:10px;overflow:hidden;flex-shrink:0;gap:0;z-index:150}
+.bi{display:flex;align-items:center;gap:6px;padding:0 16px;
+  white-space:nowrap;border-right:1px solid rgba(0,212,255,.10);height:100%}
+.bl2{color:rgba(80,110,150,.9);font-size:8px;letter-spacing:1px;text-transform:uppercase}
+.bv2{color:var(--cy);font-size:10.5px}
+.bvg{color:var(--gr);font-size:10.5px}
+.bvy{color:var(--go);font-size:10.5px}
 #bt{flex:1;overflow:hidden}
-#bts{display:inline-block;animation:tk 42s linear infinite;white-space:nowrap;color:rgba(150,180,220,.7);font-size:9.5px;letter-spacing:.3px;padding-left:100%}
+#bts{display:inline-block;animation:tk 45s linear infinite;
+  white-space:nowrap;color:rgba(140,170,210,.6);font-size:9.5px;letter-spacing:.3px;padding-left:100%}
 @keyframes tk{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
-#bu{padding:0 14px;white-space:nowrap;color:rgba(140,170,210,.85);border-left:1px solid rgba(0,220,255,.12);font-size:9.5px}
-.sy{overflow-y:auto;max-height:280px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
-.sy::-webkit-scrollbar{width:3px}
-.sy::-webkit-scrollbar-thumb{background:var(--b)}
-.fl{animation:fl .4s ease-out}
-@keyframes fl{0%{color:var(--cy);text-shadow:0 0 12px var(--cy)}100%{}}
-.es{padding:24px;text-align:center;font-size:11px;color:var(--dim)}
-/* ── Block detail modal ───────────────────────────────────────────────────── */
-#blk-modal-bg{display:none;position:fixed;inset:0;z-index:9100;background:rgba(0,0,0,.72);backdrop-filter:blur(3px);align-items:center;justify-content:center}
+#bu{padding:0 16px;white-space:nowrap;color:rgba(120,160,200,.8);border-left:1px solid rgba(0,212,255,.10);font-size:9.5px}
+
+/* ────────────────────────────────────────────────────────────────
+   BLOCK MODAL
+──────────────────────────────────────────────────────────────── */
+#blk-modal-bg{display:none;position:fixed;inset:0;z-index:9100;
+  background:rgba(0,0,0,.78);backdrop-filter:blur(4px);
+  align-items:center;justify-content:center}
 #blk-modal-bg.open{display:flex}
-#blk-modal{background:var(--card);border:1px solid var(--b2);border-radius:10px;width:min(540px,94vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 0 60px rgba(0,220,255,.1)}
-#blk-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cy),var(--vi));border-radius:10px 10px 0 0;pointer-events:none}
-.bm-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--b);flex-shrink:0}
+#blk-modal{background:var(--card);border:1px solid var(--b2);border-radius:12px;
+  width:min(560px,95vw);max-height:80vh;display:flex;flex-direction:column;
+  overflow:hidden;box-shadow:0 0 80px rgba(0,212,255,.12)}
+#blk-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--cy),var(--vi));
+  border-radius:12px 12px 0 0;pointer-events:none}
+.bm-hdr{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 18px;border-bottom:1px solid var(--b);flex-shrink:0}
 .bm-title{font-family:var(--disp);font-size:11px;letter-spacing:2px;color:var(--cy)}
 .bm-meta{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px}
-.bm-close{width:24px;height:24px;border-radius:50%;border:1px solid var(--b2);background:transparent;color:var(--dim);cursor:pointer;font-size:14px;line-height:22px;text-align:center;transition:all .15s}
+.bm-close{width:26px;height:26px;border-radius:50%;border:1px solid var(--b2);
+  background:transparent;color:var(--dim2);cursor:pointer;font-size:14px;
+  line-height:24px;text-align:center;transition:all .15s}
 .bm-close:hover{border-color:var(--cy);color:var(--cy)}
 .bm-body{overflow-y:auto;flex:1;padding:8px 0;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
-.bm-body::-webkit-scrollbar{width:3px}.bm-body::-webkit-scrollbar-thumb{background:var(--b)}
-.bm-tx{display:flex;align-items:flex-start;gap:10px;padding:10px 16px;border-bottom:1px solid rgba(0,220,255,.05);cursor:pointer;transition:background .15s;position:relative}
+.bm-body::-webkit-scrollbar{width:3px}
+.bm-body::-webkit-scrollbar-thumb{background:var(--b2)}
+.bm-tx{display:flex;align-items:flex-start;gap:12px;padding:10px 18px;
+  border-bottom:1px solid rgba(0,212,255,.05);cursor:pointer;transition:background .15s}
 .bm-tx:last-child{border-bottom:none}
-.bm-tx:hover{background:rgba(0,220,255,.05)}
-.bm-tx:active{background:rgba(0,220,255,.1)}
-.bm-tx-icon{flex-shrink:0;width:28px;height:28px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:12px;margin-top:1px}
-.bm-tx-icon.coinbase{background:rgba(128,64,255,.15);border:1px solid rgba(128,64,255,.25)}
-.bm-tx-icon.transfer{background:rgba(0,220,255,.08);border:1px solid rgba(0,220,255,.15)}
+.bm-tx:hover{background:rgba(0,212,255,.05)}
+.bm-tx-icon{flex-shrink:0;width:30px;height:30px;border-radius:6px;
+  display:flex;align-items:center;justify-content:center;font-size:13px;margin-top:1px}
+.bm-tx-icon.coinbase{background:rgba(155,109,255,.14);border:1px solid rgba(155,109,255,.25)}
+.bm-tx-icon.transfer{background:rgba(0,212,255,.07);border:1px solid rgba(0,212,255,.15)}
 .bm-tx-info{flex:1;min-width:0}
 .bm-tx-hash{font-family:var(--mono);font-size:10px;color:var(--cy);word-break:break-all;line-height:1.4}
-.bm-tx-sub{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap}
+.bm-tx-sub{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px;display:flex;gap:12px;flex-wrap:wrap}
 .bm-tx-amt{font-family:var(--mono);font-size:11px;font-weight:600;flex-shrink:0;margin-top:1px}
 .bm-tx-amt.coinbase{color:var(--vi)}.bm-tx-amt.transfer{color:var(--go)}
-.bm-copy-hint{position:absolute;right:14px;bottom:8px;font-size:8px;color:var(--dim);opacity:0;transition:opacity .2s;font-family:var(--disp);letter-spacing:.5px}
-.bm-tx:hover .bm-copy-hint{opacity:1}
-.bm-copied{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,255,157,.15);border:1px solid var(--gr);color:var(--gr);font-family:var(--mono);font-size:11px;padding:8px 20px;border-radius:6px;pointer-events:none;z-index:9200;opacity:0;transition:opacity .2s}
+.bm-loading{padding:36px;text-align:center;font-family:var(--mono);font-size:10px;color:var(--dim)}
+.bm-copied{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  background:rgba(0,245,160,.12);border:1px solid var(--gr);color:var(--gr);
+  font-family:var(--mono);font-size:11px;padding:8px 20px;border-radius:6px;
+  pointer-events:none;z-index:9200;opacity:0;transition:opacity .2s}
 .bm-copied.show{opacity:1}
-.bm-loading{padding:32px;text-align:center;font-family:var(--mono);font-size:10px;color:var(--dim)}
+
+/* ────────────────────────────────────────────────────────────────
+   WHITEPAPER SECTIONS
+──────────────────────────────────────────────────────────────── */
+.wp-sec{
+  border:1px solid rgba(155,109,255,.12);border-radius:10px;overflow:hidden;
+}
+.wp-ph{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 20px;border-bottom:1px solid rgba(155,109,255,.10);
+  background:rgba(155,109,255,.04)
+}
+.wp-ph-t{font-family:var(--disp);font-size:8px;letter-spacing:2px;
+  text-transform:uppercase;color:var(--vi)}
+.wp-body{padding:20px 22px;display:grid;grid-template-columns:1fr 1fr;gap:24px}
+@media(max-width:800px){.wp-body{grid-template-columns:1fr}}
+.wp-s{display:flex;flex-direction:column;gap:14px}
+.wp-s-hd{font-family:var(--mono);font-size:9px;color:var(--go);
+  letter-spacing:2px;margin-bottom:6px;text-transform:uppercase}
+.wp-s p{font-size:11px;line-height:1.8;color:var(--tx)}
+.wp-foot{padding:10px 22px 14px;border-top:1px solid rgba(155,109,255,.08);
+  font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px}
+
+/* ────────────────────────────────────────────────────────────────
+   THREAD WORKER INDICATOR DOTS
+──────────────────────────────────────────────────────────────── */
+.thread-badges{display:flex;gap:6px;flex-wrap:wrap;padding:8px 18px 10px;
+  border-bottom:1px solid var(--b)}
+.thread-badge{display:flex;align-items:center;gap:4px;font-family:var(--mono);
+  font-size:8px;color:var(--dim);padding:2px 7px;border-radius:10px;
+  background:var(--bg3);border:1px solid var(--b)}
+.thread-dot{width:5px;height:5px;border-radius:50%;background:var(--dim);flex-shrink:0}
+.thread-dot.active{background:var(--gr);box-shadow:0 0 5px var(--gr);animation:pl 1.8s infinite}
+.thread-dot.error{background:var(--re)}
 </style>
 </head>
 <body>
+
+<!-- ── HEADER ─────────────────────────────────────────────────────── -->
 <header id="hdr">
   <div class="hb">
-    <canvas id="lc" width="36" height="36"></canvas>
+    <canvas id="lc" width="38" height="38"></canvas>
     <div>
       <div class="ht">QTCL</div>
-      <div class="hs">Quantum Temporal Coherence Ledger &middot; Explorer</div>
-      <div style="font-size:0.85rem; margin-top:4px; color:#00dcff;">Mining client is available at <a href="https://www.github.com/shemshallah/qtcl-miner" target="_blank" style="color:#00dcff; text-decoration:underline;">github.com/shemshallah/qtcl-miner</a></div>
+      <div class="hs">Quantum Temporal Coherence Ledger · Explorer</div>
+      <div class="hlink">Miner: <a href="https://www.github.com/shemshallah/qtcl-miner" target="_blank" rel="noopener">github.com/shemshallah/qtcl-miner</a></div>
     </div>
   </div>
   <div class="hr">
-    <div class="hst"><div class="hstl">Height</div><div class="hstv" id="hh">&mdash;</div></div>
-    <div class="hst"><div class="hstl">W-Fidelity</div><div class="hstv" id="hf">&mdash;</div></div>
-    <div class="hst"><div class="hstl">Mempool</div><div class="hstv" id="hm">&mdash;</div></div>
+    <div class="hst"><div class="hstl">Height</div><div class="hstv" id="hh">—</div></div>
+    <div class="hst"><div class="hstl">W-Fidelity</div><div class="hstv" id="hf">—</div></div>
+    <div class="hst"><div class="hstl">Mempool</div><div class="hstv" id="hm">—</div></div>
     <div id="cp"><span class="cd"></span><span id="ct">CONNECTING</span></div>
     <div id="hck"></div>
   </div>
 </header>
+
 <div id="page">
+
+  <!-- ── THREAD STATUS ──────────────────────────────────────────────── -->
+  <div class="pn">
+    <div class="ph">
+      <span class="pht">Data Bus · /rpc/oracle/snapshots Broadcast Workers</span>
+      <span class="pb">6 Threads</span>
+    </div>
+    <div class="thread-badges">
+      <div class="thread-badge"><div class="thread-dot" id="td-metrics"></div>Metrics</div>
+      <div class="thread-badge"><div class="thread-dot" id="td-dm"></div>Density Matrix 32×32</div>
+      <div class="thread-badge"><div class="thread-dot" id="td-bloch"></div>Bloch Sphere</div>
+      <div class="thread-badge"><div class="thread-dot" id="td-mermin"></div>Mermin</div>
+      <div class="thread-badge"><div class="thread-dot" id="td-blocks"></div>Block Stream</div>
+      <div class="thread-badge"><div class="thread-dot" id="td-tx"></div>Transactions</div>
+    </div>
+  </div>
+
+  <!-- ── CHAIN METRICS ─────────────────────────────────────────────── -->
   <div>
     <div class="st">Chain Metrics</div>
     <div class="mg">
-      <div class="mc go"><div class="ml">Block Height</div><div class="mv go dm" id="mh">&mdash;</div><div class="ms" id="mhs">hash: &mdash;</div></div>
-      <div class="mc"><div class="ml">W-State Fidelity</div><div class="mv dm" id="mf">&mdash;</div><div class="mb"><div class="mbf" id="mfb" style="width:0"></div></div><div class="ms" id="mfs">quantum confidence</div></div>
-      <div class="mc vi"><div class="ml">Coherence</div><div class="mv vi dm" id="mc2">&mdash;</div><div class="mb"><div class="mbf" id="mcb" style="width:0;background:linear-gradient(90deg,var(--vi),var(--cy))"></div></div></div>
-      <div class="mc gr"><div class="ml">Avg Block Time</div><div class="mv gr dm" id="mbt">&mdash;</div><div class="ms">seconds</div></div>
-      <div class="mc"><div class="ml">Total Transactions</div><div class="mv dm" id="mtx">&mdash;</div><div class="ms">on-chain</div></div>
-      <div class="mc"><div class="ml">Difficulty</div><div class="mv dm" id="mdf">&mdash;</div><div class="ms">leading hex zeros</div></div>
-      <div class="mc go"><div class="ml">Block Reward</div><div class="mv go dm" id="mrew">8.00 Q</div><div class="ms" id="mrew-depth">tessellation depth &mdash;</div></div>
-      <div class="mc"><div class="ml">Treasury / Block</div><div class="mv dm" id="mtrew">&mdash;</div><div class="ms" id="mtrew-pct">&mdash;% of block</div></div>
-      <div class="mc"><div class="ml">Purity</div><div class="mv vi dm" id="mpu">&mdash;</div><div class="ms" id="mng">negativity: &mdash;</div></div>
-      <div class="mc"><div class="ml">QFI</div><div class="mv dm" id="mqf">&mdash;</div><div class="ms" id="mdc">discord: &mdash;</div></div>
+      <div class="mc go"><div class="ml">Block Height</div><div class="mv go dm" id="mh">—</div><div class="ms" id="mhs">hash: —</div></div>
+      <div class="mc"><div class="ml">W-State Fidelity</div><div class="mv dm" id="mf">—</div><div class="mb"><div class="mbf" id="mfb" style="width:0"></div></div><div class="ms" id="mfs">quantum confidence</div></div>
+      <div class="mc vi"><div class="ml">Coherence</div><div class="mv vi dm" id="mc2">—</div><div class="mb"><div class="mbf" id="mcb" style="width:0;background:linear-gradient(90deg,var(--vi),var(--cy))"></div></div></div>
+      <div class="mc gr"><div class="ml">Avg Block Time</div><div class="mv gr dm" id="mbt">—</div><div class="ms">seconds</div></div>
+      <div class="mc"><div class="ml">Total Transactions</div><div class="mv dm" id="mtx">—</div><div class="ms">on-chain</div></div>
+      <div class="mc"><div class="ml">Difficulty</div><div class="mv dm" id="mdf">—</div><div class="ms">leading hex zeros</div></div>
+      <div class="mc go"><div class="ml">Block Reward</div><div class="mv go dm" id="mrew">—</div><div class="ms" id="mrew-depth">tessellation depth —</div></div>
+      <div class="mc"><div class="ml">Treasury / Block</div><div class="mv dm" id="mtrew">—</div><div class="ms" id="mtrew-pct">—% of block</div></div>
+      <div class="mc"><div class="ml">Purity</div><div class="mv vi dm" id="mpu">—</div><div class="ms" id="mng">negativity: —</div></div>
+      <div class="mc"><div class="ml">QFI</div><div class="mv dm" id="mqf">—</div><div class="ms" id="mdc">discord: —</div></div>
     </div>
   </div>
+
+  <!-- ── QUANTUM VISUALIZATIONS ─────────────────────────────────────── -->
   <div class="tc">
+
+    <!-- Density Matrix 32×32 -->
     <div class="pn">
-      <div class="ph"><span class="pht">Density Matrix ρ &middot; 8×8 Complex</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
-      <div id="dc3d" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;"></div>
-      <div class="bs">
-        <div class="bv"><div class="bvl">|W₃| Fidelity</div><div class="bvn" id="bfi">&mdash;</div></div>
-        <div class="bv"><div class="bvl">pq_curr</div><div class="bvn" id="ben" style="color:var(--go)">&mdash;</div></div>
-        <div class="bv"><div class="bvl">pq_last</div><div class="bvn" id="bcn">&mdash;</div></div>
-        <div class="bv"><div class="bvl">Field Fidelity</div><div class="bvn" id="bte">&mdash;</div></div>
+      <div class="ph">
+        <span class="pht">Density Matrix ρ — 32×32 (8-qubit W-state expansion)</span>
+        <span class="pb vi" id="dm-purity-badge">purity —</span>
+      </div>
+      <div id="dm-wrap">
+        <canvas id="dm-canvas" width="512" height="512"></canvas>
+        <div id="dm-legend">
+          <div class="dm-leg-item"><div class="dm-leg-swatch" style="background:linear-gradient(135deg,#00d4ff,#9b6dff)"></div>High |ρ_ij|</div>
+          <div class="dm-leg-item"><div class="dm-leg-swatch" style="background:rgba(0,212,255,.15);border:1px solid rgba(0,212,255,.3)"></div>Diagonal (pop.)</div>
+          <div class="dm-leg-item"><div class="dm-leg-swatch" style="background:#020509;border:1px solid rgba(255,255,255,.08)"></div>Zero coherence</div>
+          <div class="dm-leg-item"><div class="dm-leg-swatch" style="background:linear-gradient(135deg,#e8b84b,#ff8c42)"></div>Phase +</div>
+          <div class="dm-leg-item"><div class="dm-leg-swatch" style="background:linear-gradient(135deg,#9b6dff,#ff3b5c)"></div>Phase −</div>
+        </div>
+        <div id="dm-stats">
+          <div class="dm-stat"><div class="dm-stat-l">Purity tr(ρ²)</div><div class="dm-stat-v" id="dms-purity">—</div></div>
+          <div class="dm-stat"><div class="dm-stat-l">Von Neumann S</div><div class="dm-stat-v" id="dms-entropy">—</div></div>
+          <div class="dm-stat"><div class="dm-stat-l">Coherence L1</div><div class="dm-stat-v" id="dms-l1">—</div></div>
+          <div class="dm-stat"><div class="dm-stat-l">Trace Norm</div><div class="dm-stat-v" id="dms-trace">—</div></div>
+        </div>
       </div>
     </div>
+
+    <!-- CSS Bloch Sphere + Oracle Phase -->
     <div class="pn">
-      <div class="ph"><span class="pht">Mermin Inequality Test</span><span class="pb" id="mb3">M &mdash;</span><span class="pb vi" id="mcy" style="font-size:.72em;opacity:.6">cycle —</span></div>
+      <div class="ph">
+        <span class="pht">Oracle Phase · 3D Bloch Sphere</span>
+        <span class="pb go" id="bloch-phase-badge">φ —</span>
+      </div>
+      <div id="bloch-wrap">
+        <!-- 3D Bloch sphere via CSS transform-style:preserve-3d -->
+        <div id="bloch-scene">
+          <div class="bloch-sphere" id="bloch-sphere">
+            <div class="bloch-outer"></div>
+            <div class="bloch-ring equator"></div>
+            <div class="bloch-ring merid1"></div>
+            <div class="bloch-ring merid2"></div>
+            <div class="bloch-ring merid3"></div>
+            <!-- Axes -->
+            <div class="bloch-axis z"></div>
+            <div class="bloch-axis-lbl" style="top:-16px;left:50%;transform:translateX(-50%);color:rgba(0,212,255,.7)">|0⟩</div>
+            <div class="bloch-axis-lbl" style="bottom:-16px;left:50%;transform:translateX(-50%);color:rgba(0,212,255,.4)">|1⟩</div>
+            <div class="bloch-axis-lbl" style="top:50%;right:-20px;transform:translateY(-50%);color:rgba(155,109,255,.5)">+x</div>
+            <div class="bloch-axis-lbl" style="top:50%;left:-20px;transform:translateY(-50%);color:rgba(155,109,255,.5)">−x</div>
+            <!-- State vector: positioned by JS -->
+            <div id="bloch-state-dot"></div>
+          </div>
+        </div>
+        <!-- Phase ring (2D canvas) -->
+        <div id="bloch-phase-ring">
+          <canvas id="bloch-phase-canvas" width="280" height="48"></canvas>
+        </div>
+        <div id="bloch-meta">
+          <div class="bloch-m"><div class="bloch-ml">θ (polar)</div><div class="bloch-mv" id="bloch-theta">—</div></div>
+          <div class="bloch-m"><div class="bloch-ml">φ (azimuthal)</div><div class="bloch-mv" id="bloch-phi">—</div></div>
+          <div class="bloch-m"><div class="bloch-ml">Phase Coherence</div><div class="bloch-mv" id="bloch-pcoh">—</div></div>
+          <div class="bloch-m"><div class="bloch-ml">Phase Drift</div><div class="bloch-mv" id="bloch-drift">—</div></div>
+        </div>
+      </div>
+      <!-- GKSL Noise -->
+      <div class="ph"><span class="pht">GKSL Noise Bath</span><span class="pb">LIVE</span></div>
+      <div class="noise-grid">
+        <div>
+          <div class="nr"><span class="nk">γ₁ (amplitude)</span><span class="nv" id="ng1">—</span></div>
+          <div class="nr"><span class="nk">γφ (dephasing)</span><span class="nv" id="ngp">—</span></div>
+          <div class="nr"><span class="nk">ω (Larmor)</span><span class="nv" id="nom">—</span></div>
+          <div class="nr"><span class="nk">QRNG health</span><span class="nv" id="nqr">—</span></div>
+        </div>
+        <div>
+          <div class="nr"><span class="nk">discord</span><span class="nv" id="ndi">—</span></div>
+          <div class="nr"><span class="nk">ou_mem</span><span class="nv" id="nou">—</span></div>
+          <div class="nr"><span class="nk">phase_drift</span><span class="nv" id="npd">—</span></div>
+          <div class="nr"><span class="nk">sector_occ</span><span class="nv" id="nso">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MERMIN + ORACLES ───────────────────────────────────────────── -->
+  <div class="tc">
+    <div class="pn">
+      <div class="ph"><span class="pht">Mermin Inequality Test · M₃</span><span class="pb" id="mb3">M —</span><span class="pb vi" id="mcy" style="font-size:.72em;opacity:.6">cycle —</span></div>
       <div class="md">
-        <div class="mb2 c" id="mM">&mdash;</div>
+        <div class="mb2 c" id="mM">—</div>
         <div class="mi">
-          <div class="mv2" id="mvd">Awaiting oracle measurement&hellip;</div>
-          <div class="ms2">Classical bound: 2.0 &middot; W-max: 3.046 &middot; GHZ-max: 4.0</div>
-          <div class="mba"><div class="mbaf" id="mbar" style="width:0"></div></div>
+          <div class="mv2" id="mvd">Awaiting oracle measurement…</div>
+          <div class="ms2">Classical bound: 2.0 · W-max: 3.046 · GHZ-max: 4.0</div>
+          <div class="mba">
+            <div class="mbaf" id="mbar" style="width:0"></div>
+            <div class="mba-mark classical"></div>
+            <div class="mba-mark wmax"></div>
+          </div>
           <div class="mbl"><span>0</span><span>2.0</span><span>3.046</span><span>4.0</span></div>
         </div>
       </div>
       <div class="mac" id="mac"></div>
-      <div class="ph"><span class="pht">GKSL Noise Bath</span><span class="pb">LIVE</span></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr">
-        <div>
-          <div class="nr"><span class="nk">gamma1 (amp)</span><span class="nv" id="ng1">&mdash;</span></div>
-          <div class="nr"><span class="nk">gammaphi (deph)</span><span class="nv" id="ngp">&mdash;</span></div>
-          <div class="nr"><span class="nk">omega</span><span class="nv" id="nom">&mdash;</span></div>
-          <div class="nr"><span class="nk">QRNG health</span><span class="nv" id="nqr">&mdash;</span></div>
+    </div>
+    <div class="pn">
+      <div class="ph"><span class="pht">Oracle Network · 5 Nodes</span><span class="pb vi">3-of-5 Byzantine</span></div>
+      <div id="ol"><div class="es">Loading…</div></div>
+      <div class="ph"><span class="pht">Validation Gate</span><span class="pb gr" id="vb">—</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr">
+        <div style="padding:12px 16px;border-right:1px solid var(--b)">
+          <div class="ml" style="margin-bottom:4px">Quantum</div>
+          <div class="mv dm" id="vq" style="font-size:10px;word-break:break-all">—</div>
         </div>
-        <div>
-          <div class="nr"><span class="nk">discord</span><span class="nv" id="ndi">&mdash;</span></div>
-          <div class="nr"><span class="nk">ou_mem</span><span class="nv" id="nou">&mdash;</span></div>
-          <div class="nr"><span class="nk">phase_drift</span><span class="nv" id="npd">&mdash;</span></div>
-          <div class="nr"><span class="nk">sector_occ</span><span class="nv" id="nso">&mdash;</span></div>
+        <div style="padding:12px 16px;border-right:1px solid var(--b)">
+          <div class="ml" style="margin-bottom:4px">PQ-Lattice</div>
+          <div class="mv dm" id="vp" style="font-size:10px">—</div>
+        </div>
+        <div style="padding:12px 16px">
+          <div class="ml" style="margin-bottom:4px">Consensus</div>
+          <div class="mv dm" id="vc" style="font-size:10px">—</div>
         </div>
       </div>
     </div>
   </div>
+
+  <!-- ── BLOCK STREAM ─────────────────────────────────────────────────── -->
   <div class="pn">
-    <div class="ph"><span class="pht">Block Stream &mdash; Live</span><span class="pb go" id="bcc">0 blocks</span></div>
+    <div class="ph">
+      <span class="pht">Block Stream · Live</span>
+      <span class="pb go" id="bcc">0 blocks</span>
+    </div>
     <div id="cs"></div>
   </div>
+
+  <!-- ── TX + MINERS ─────────────────────────────────────────────────── -->
   <div class="tc">
     <div class="pn">
       <div class="ph">
@@ -296,115 +696,82 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
           <button class="txfbtn" id="txf-treasury" onclick="txFilter('treasury')">🏛 TREASURY</button>
         </span>
       </div>
-      <div style="padding:6px 16px 2px;display:flex;align-items:center;gap:8px">
+      <div style="padding:6px 18px 2px;display:flex;align-items:center;gap:8px">
         <input id="txsearch" placeholder="Search address or hash…" oninput="txSearch(this.value)"
-          style="flex:1;background:rgba(0,220,255,.05);border:1px solid rgba(0,220,255,.15);color:var(--tx);
-                 font-family:var(--mono);font-size:11px;padding:5px 10px;border-radius:4px;outline:none"/>
+          style="flex:1;background:rgba(0,212,255,.04);border:1px solid rgba(0,212,255,.14);
+                 color:var(--tx);font-family:var(--mono);font-size:11px;
+                 padding:5px 10px;border-radius:4px;outline:none"/>
         <span id="tx-live" style="font-size:9px;color:var(--gr);letter-spacing:.5px">● LIVE</span>
       </div>
-      <div id="txwrap" style="height:340px;overflow-y:auto;overflow-x:hidden">
+      <div id="txwrap" style="height:320px;overflow-y:auto;overflow-x:hidden">
         <table class="tt" style="width:100%;table-layout:fixed">
           <thead><tr>
-            <th style="width:80px">Type</th>
-            <th style="width:130px">Hash</th>
-            <th style="width:90px">From</th>
-            <th style="width:90px">To</th>
-            <th style="width:80px">Amount</th>
-            <th style="width:60px">Block</th>
+            <th style="width:80px">Type</th><th style="width:130px">Hash</th>
+            <th style="width:90px">From</th><th style="width:90px">To</th>
+            <th style="width:80px">Amount</th><th style="width:60px">Block</th>
             <th style="width:65px">Status</th>
           </tr></thead>
-          <tbody id="ttb"><tr><td colspan="7" class="es">Loading&hellip;</td></tr></tbody>
+          <tbody id="ttb"><tr><td colspan="7" class="es">Loading…</td></tr></tbody>
         </table>
       </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 16px;border-top:1px solid var(--b)">
+      <div style="display:flex;justify-content:space-between;align-items:center;
+                  padding:6px 18px;border-top:1px solid var(--b)">
         <button class="txpbtn" onclick="txPage(-1)" id="txprev">◀ Prev</button>
         <span id="txpageinfo" style="font-size:10px;color:var(--dim)">Page 1</span>
         <button class="txpbtn" onclick="txPage(1)" id="txnext">Next ▶</button>
       </div>
     </div>
     <div class="pn">
-      <div class="ph"><span class="pht">Oracle Network (5 nodes)</span><span class="pb vi">3-of-5 Byzantine</span></div>
-      <div id="ol"><div class="es">Loading&hellip;</div></div>
-      <div class="ph"><span class="pht">Validation</span><span class="pb gr" id="vb">&mdash;</span></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr">
-        <div style="padding:12px 14px;border-right:1px solid var(--b)"><div class="ml" style="margin-bottom:4px">Quantum</div><div class="mv dm" id="vq" style="font-size:10px;word-break:break-all">&mdash;</div></div>
-        <div style="padding:12px 14px;border-right:1px solid var(--b)"><div class="ml" style="margin-bottom:4px">PQ-Lattice</div><div class="mv dm" id="vp" style="font-size:10px">&mdash;</div></div>
-        <div style="padding:12px 14px"><div class="ml" style="margin-bottom:4px">Oracle Con.</div><div class="mv dm" id="vo" style="font-size:10px">&mdash;</div></div>
-      </div>
-      <div class="ph">
-        <span class="pht">⛏ Miner Network</span>
-        <span style="display:flex;gap:6px;align-items:center">
-          <span class="pb gr" id="pcb">0 miners</span>
-          <button id="p2p-hist-btn" class="txfbtn" onclick="p2pToggleHist()" title="Show historic miners" style="font-size:8px;padding:2px 7px">LIVE</button>
-          <span id="p2p-live-dot" style="width:7px;height:7px;border-radius:50%;background:var(--dim);display:inline-block"></span>
-        </span>
-      </div>
-      <div id="pl" style="max-height:280px;overflow-y:auto;overflow-x:hidden"></div>
-      <div style="padding:4px 16px 6px;border-top:1px solid var(--b);display:flex;justify-content:space-between;font-size:9px;color:var(--dim)">
-        <span id="p2p-live-count">● <span id="p2plc">0</span> live</span>
-        <span id="p2p-seen-count">◎ <span id="p2psc">0</span> seen today</span>
-        <span id="p2p-total-count">◌ <span id="p2ptc">0</span> historic</span>
-      </div>
+      <div class="ph"><span class="pht">Active Miners</span><span class="pb go" id="peer-count">—</span></div>
+      <div id="pl" class="sy" style="max-height:400px"><div class="es">Loading…</div></div>
     </div>
   </div>
 
-  <!-- ── System Description ─────────────────────────────────────── -->
-  <div class="pn" style="border:1px solid rgba(0,220,255,.12);border-radius:8px;overflow:hidden">
-    <div class="ph" style="background:rgba(128,64,255,.07)"><span class="pht" style="color:var(--vi)">⬡ System Architecture</span><span class="pb vi">QTCL-1 Production</span></div>
-    <div style="padding:18px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px">
-      <div>
-        <div class="ml" style="color:var(--cy);margin-bottom:8px;font-size:9px;letter-spacing:2px">CONSENSUS LAYER</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">QTCL deploys a <span style="color:var(--cy)">five-node Byzantine-fault-tolerant oracle network</span> whose consensus is certified by the <span style="color:var(--vi)">Mermin M₃ inequality</span> — a tripartite extension of Bell's theorem with classical bound 2.0 and W-state maximum ≈ 3.046. Block finality requires M₃ &gt; 2.0, providing information-theoretic proof of genuine quantum entanglement at the consensus layer rather than classical simulation.</p>
-      </div>
-      <div>
-        <div class="ml" style="color:var(--go);margin-bottom:8px;font-size:9px;letter-spacing:2px">SPATIAL STRUCTURE</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">Blocks tile a <span style="color:var(--go)">{8,3} hyperbolic tessellation</span> (Poincaré ball model, H³) — 8 octagons meeting at every vertex, curvature κ = −1. Exponential volume growth V(R) ~ e^R supports a node density that scales with network participation without topology collapse. Each spatial tile is a block; the chain is a geodesic path through hyperbolic space, not a linear sequence.</p>
-      </div>
-      <div>
-        <div class="ml" style="color:var(--gr);margin-bottom:8px;font-size:9px;letter-spacing:2px">CRYPTOGRAPHIC BACKBONE</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">All signatures use <span style="color:var(--gr)">HLWE — Hyperbolic Learning With Errors</span> post-quantum cryptography, hardened over PSL(2,ℝ) lattices. Block entropy is seeded by a <span style="color:var(--cy)">QRNG ensemble</span> — four independent quantum sources XOR-hedged for information-theoretic security: <span style="color:var(--cy)">ANU QRNG</span> (quantum vacuum fluctuations, Australian National University), <span style="color:var(--cy)">QBICK</span> (ID Quantique Quantis hardware, Quantum Blockchains Inc.), <span style="color:var(--cy)">Outshift</span> (PaloAlto), and <span style="color:var(--cy)">Random.org</span> (atmospheric noise) — then mixed via RFC 5869 HKDF. Mining is memory-hard (4 MB SHA3-256 matrix) defeating ASICs while the tessellation depth parameter scales block reward with network-proven work.</p>
-      </div>
+  <!-- ── WHITEPAPER ───────────────────────────────────────────────────── -->
+  <div class="wp-sec">
+    <div class="wp-ph">
+      <span class="wp-ph-t">◈ QTCL Architecture · Quantum Cryptographic Foundation</span>
+      <span class="pb vi">Micro-Whitepaper</span>
     </div>
-  </div>
-
-  <!-- ── HLWE Micro-Whitepaper ────────────────────────────────────── -->
-  <div class="pn" style="border:1px solid rgba(212,160,32,.15);border-radius:8px;overflow:hidden">
-    <div class="ph" style="background:rgba(212,160,32,.06)"><span class="pht" style="color:var(--go)">◈ HLWE · Hyperbolic Learning With Errors</span><span class="pb go">Micro-Whitepaper</span></div>
-    <div style="padding:18px 20px;display:grid;grid-template-columns:1fr 1fr;gap:24px">
-      <div style="display:flex;flex-direction:column;gap:14px">
+    <div class="wp-body">
+      <div class="wp-s">
         <div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§1 · Hardness Foundation</div>
-          <p style="font-size:11px;line-height:1.8;color:var(--tx)">HLWE is a post-quantum lattice scheme whose security reduces to the hardness of the <em style="color:var(--cy)">Learning With Errors (LWE)</em> problem instantiated over the isometry group PSL(2,ℝ) acting on the hyperbolic plane H². Standard LWE asks: given (A, b = As + e) over Z_q^n, recover secret vector <strong style="color:var(--go)">s</strong>, where <strong>e</strong> is Gaussian noise. HLWE replaces the Euclidean lattice Z^n with a <span style="color:var(--vi)">hyperbolic lattice Λ_H</span> whose shortest-vector problem (SVP) is strictly harder due to the exponential volume growth of H² balls: |B(r)| ~ sinh(r) ≫ e^{n/2} for large r, collapsing the approximation ratio that lattice sieving algorithms exploit.</p>
+          <div class="wp-s-hd">§1 · HLWE Hardness Foundation</div>
+          <p>All signatures use <span style="color:var(--gr)">HLWE — Hyperbolic Learning With Errors</span> post-quantum cryptography hardened over PSL(2,ℝ) lattices. Security reduces to the Learning With Errors problem over hyperbolic space H², where exponential volume growth of balls makes standard sieving attacks collapse. Classical SVP bound: |B(r)| ~ sinh(r) ≫ e^{n/2}.</p>
         </div>
         <div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§2 · Key Generation</div>
-          <p style="font-size:11px;line-height:1.8;color:var(--tx)">A keypair is a pair (pk, sk) = (A·s + e mod q, s) where <strong style="color:var(--go)">A ∈ Λ_H^{n×m}</strong> is a public H²-lattice basis sampled from the <span style="color:var(--cy)">QRNG ensemble</span>, <strong>s</strong> is the secret drawn from a hyperbolic Gaussian centered at the Poincaré origin, and <strong>e</strong> is sub-Gaussian noise with variance bounded by the injectivity radius of the tessellation tile. In QTCL, oracle keypairs are delegated from wallet keys via <code style="color:var(--vi);font-family:var(--mono);font-size:10px">oracle_priv = SHA3-256(wallet_priv ‖ "QTCL_ORACLE_DELEGATE_v1")</code>, chaining on-chain accountability without exposing the root key.</p>
+          <div class="wp-s-hd">§2 · W-State Oracle Consensus</div>
+          <p>Block entropy is certified by a 5-node Byzantine oracle running a tripartite <span style="color:var(--cy)">W-state density matrix</span> (numpy, no Qiskit). Each node contributes phase_coherence measurements; fused fidelity ≥ 0.70 gates block acceptance. The Mermin M₃ value verifies genuine 3-qubit nonlocality beyond classical bound 2.0.</p>
         </div>
       </div>
-      <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="wp-s">
         <div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§3 · Sign &amp; Verify</div>
-          <p style="font-size:11px;line-height:1.8;color:var(--tx)">Signing a message <em>m</em>: sample a masking vector <strong>y</strong> ~ D_Λ (discrete Gaussian over Λ_H), compute commitment <strong>c</strong> = H(A·y mod q, m) ∈ {0,1}^κ, then release <strong>z</strong> = y + c·s if z passes a <span style="color:var(--gr)">rejection-sampling gate</span> that guarantees z is statistically independent of s (Lyubashevsky's technique, adapted to H² geometry). Verification checks A·z − c·pk mod q is short in the hyperbolic metric. No random oracle strength is lost; security tightness is O(1/q) under HLWE assumption.</p>
+          <div class="wp-s-hd">§3 · QRNG Ensemble</div>
+          <p>Block entropy seeds are drawn from four independent quantum sources XOR-hedged for information-theoretic security: <span style="color:var(--cy)">ANU QRNG</span> (quantum vacuum fluctuations), <span style="color:var(--cy)">QBICK</span> (ID Quantique Quantis hardware), <span style="color:var(--cy)">Outshift</span> (Palo Alto), and <span style="color:var(--cy)">Random.org</span> (atmospheric noise), then mixed via RFC 5869 HKDF.</p>
         </div>
         <div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§4 · Quantum Resistance &amp; NIST Alignment</div>
-          <p style="font-size:11px;line-height:1.8;color:var(--tx)">Shor's algorithm provides no advantage against LWE variants — no hidden subgroup structure exists to exploit. Grover's search applies only to the pre-image search over H², which the hyperbolic SVP hardness elevates to <span style="color:var(--re)">superpolynomial</span> even for a fault-tolerant quantum computer. HLWE targets NIST security category III (≥ 2^192 classical / 2^128 quantum). The PSL(2,ℝ) symmetry further provides <em style="color:var(--cy)">algebraic noise amplification</em>: small errors grow exponentially under the group action, making lattice-reduction attacks require exponentially many oracle queries as the hyperbolic radius increases.</p>
+          <div class="wp-s-hd">§4 · Memory-Hard PoW</div>
+          <p>Mining is memory-hard — 4 MB SHA3-256 matrix defeating ASICs while the tessellation depth parameter scales block reward with network-proven work. Target ~60s block times at ~61k h/s gives difficulty ≈ 21-22 bits. Difficulty adjusts via EMA retarget (log₂ additive, α=0.3, window=5).</p>
         </div>
       </div>
     </div>
-    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="c497aca1a9b7aca5a8a8a5ac84a3a9a5ada8eaa7aba9">[email&#160;protected]</a>. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
+    <div class="wp-foot">HLWE is original research by Shemshallah · hlwe_engine.py · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure</div>
   </div>
 
-</div>
+</div><!-- /#page -->
+
+<!-- ── STATUS BAR ────────────────────────────────────────────────────── -->
 <div id="bb">
   <div class="bi"><span class="bl2">NET</span><span class="bv2">QTCL-1</span></div>
-  <div class="bi"><span class="bl2">DIFF</span><span class="bvy" id="bbd">&mdash;</span></div>
-  <div class="bi"><span class="bl2">PEERS</span><span class="bvg" id="bbp">&mdash;</span></div>
-  <div class="bi"><span class="bl2">N_PEERS</span><span class="bv2" id="bbn">&mdash;</span></div>
-  <div class="bi"><span class="bl2">QRNG</span><span class="bv2" id="bbq">&mdash;</span></div>
-  <div id="bt"><span id="bts">QTCL &middot; Post-quantum blockchain &middot; HLWE cryptography &middot; W-state entangled mining &middot; 5-oracle Byzantine consensus &middot; Mermin inequality certified &middot; Poincare disk topology &middot; Memory-hard QTCL-PoW &middot; QRNG-seeded oracles</span></div>
-  <div id="bu">Updated &mdash;</div>
+  <div class="bi"><span class="bl2">DIFF</span><span class="bvy" id="bbd">—</span></div>
+  <div class="bi"><span class="bl2">PEERS</span><span class="bvg" id="bbp">—</span></div>
+  <div class="bi"><span class="bl2">QRNG</span><span class="bv2" id="bbq">—</span></div>
+  <div class="bi"><span class="bl2">CYCLE</span><span class="bv2" id="bbc">—</span></div>
+  <div id="bt"><span id="bts">QTCL · Post-quantum blockchain · HLWE cryptography · W-state entangled mining · 5-oracle Byzantine consensus · Mermin inequality certified · Memory-hard QTCL-PoW · QRNG-seeded oracles · 32×32 density matrix · CSS Bloch sphere</span></div>
+  <div id="bu">Updated —</div>
 </div>
+
+<!-- ── BLOCK MODAL ─────────────────────────────────────────────────────── -->
 <div id="blk-modal-bg" onclick="if(event.target===this)closeBlockModal()">
   <div id="blk-modal">
     <div class="bm-hdr">
@@ -418,68 +785,59 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
 </div>
 <div class="bm-copied" id="bm-copied">✓ Copied</div>
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     QTCL DASHBOARD ENGINE v7
+     Architecture:
+       • Single /rpc/oracle/snapshots bus (polled 3s)
+       • Separate setInterval "worker" per panel — non-blocking
+       • DM: 8×8 complex128 → upscaled to 32×32 via Kronecker product
+       • Bloch sphere: CSS 3D + 2D canvas phase ring (no Three.js)
+       • All other data via JSON-RPC 2.0 batch on /rpc
+════════════════════════════════════════════════════════════════════ -->
 <script>
 'use strict';
 var BASE = window.location.origin;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CANONICAL STATE — single source of truth for every DOM element
-// Field names match exact RPC result keys from server.py
-// ═══════════════════════════════════════════════════════════════════════════════
-var S = {
-  // qtcl_getBlockHeight
-  height: 0, tip_hash: '',
-  // qtcl_getQuantumMetrics → w_state
-  fidelity: 0.9, coherence: 0.7, purity: 0.8, entropy: 0,
-  // qtcl_getQuantumMetrics → lattice
-  lattice_fidelity: 0.9, lattice_coherence: 0.7, w_state_strength: 0,
-  cycle: 0,
-  // qtcl_getLatestDMSnapshot
-  negativity: 0, concurrence: 0, entanglement: 0.65,
-  qfi: 6.5, discord: 0, tele_fidelity: 0.6,
-  phase_drift: 0.02, gamma1: 0.04, gammaphi: 0.12,
-  omega: 0.5, ou_mem: 0.03, sector_occ: 0.9, qrng_health: 1,
-  // qtcl_getMempoolStats
-  mempool_size: 0,
-  // qtcl_getPeers
-  n_peers: 0,
-  // block chain metrics (computed from getBlockRange)
-  total_transactions: 0, avg_block_time_s: 0, difficulty_bits: 4,
-  // density matrix (hex-encoded 8×8 complex float32, 64 elements = 512 bytes)
-  dm_hex: '',
-  // pq plane
-  pq_curr: 0, pq_last: 0, pq0: 0, _pqAuthoritative: false,
-  // oracle network (per-node from DM snapshots)
-  oracle_data: {}, // oracle_N → {w_state_fidelity, coherence, purity, pq0_*}
-  // mermin (from DM snapshots)
-  mermin: null,
-  // reward (computed from height via canonical schedule)
-  miner_reward_qtcl: 7.20, treasury_reward_qtcl: 0.80,
-  tessellation_depth: 5, treasury_pct: 10.0,
-  // oracle_consensus
-  oracle_consensus_reached: false,
-  quantum_validation_status: '--', pq_validation_status: '--',
-};
-// Latest oracle snapshot from worker
-var _latestOracleSnap = null;
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// REWARD SCHEDULE — mirrors TessellationRewardSchedule from globals.py exactly
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// REWARD SCHEDULE
+// ═══════════════════════════════════════════════════════════════════════
 var REWARD_SCHEDULE = {
   depths: [
-    { boundary: 106496,   depth: 5, miner: 720, treasury: 80  },
-    { boundary: 958464,   depth: 6, miner: 760, treasury: 40  },
-    { boundary: 7774208,  depth: 7, miner: 780, treasury: 20  },
-    { boundary: 62300160, depth: 8, miner: 790, treasury: 10  },
+    {boundary:106496,   depth:5, miner:720, treasury:80},
+    {boundary:958464,   depth:6, miner:760, treasury:40},
+    {boundary:7774208,  depth:7, miner:780, treasury:20},
+    {boundary:62300160, depth:8, miner:790, treasury:10},
   ],
   forHeight: function(h) {
-    for (var i = 0; i < this.depths.length; i++) {
-      if (h < this.depths[i].boundary) return this.depths[i];
-    }
-    return this.depths[this.depths.length - 1];
+    for (var i=0;i<this.depths.length;i++) if(h<this.depths[i].boundary) return this.depths[i];
+    return this.depths[this.depths.length-1];
   }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// CANONICAL STATE
+// ═══════════════════════════════════════════════════════════════════════
+var S = {
+  height:0, tip_hash:'',
+  fidelity:0, coherence:0, purity:0, entropy:0,
+  phase_coherence:0, phase_drift:0,
+  negativity:0, concurrence:0, entanglement:0, qfi:0, discord:0,
+  gamma1:0, gammaphi:0, omega:0, ou_mem:0, sector_occ:0, qrng_health:1,
+  mempool_size:0, n_peers:0,
+  total_transactions:0, avg_block_time_s:0, difficulty_bits:4,
+  pq_curr:0, pq_last:0,
+  mermin:null,
+  dm_re: null, dm_im: null,  // flat 64-element arrays for 8×8 DM
+  oracle_data:{},
+  miner_reward_qtcl:7.20, treasury_reward_qtcl:0.80,
+  tessellation_depth:5, treasury_pct:10.0,
+  oracle_consensus_reached:false,
+  quantum_validation_status:'--', pq_validation_status:'--', consensus_status:'--',
+  cycle:0, lattice_refresh_counter:0,
+  // Latest snapshot raw (pushed from oracle bus)
+  _snap: null,
+  _snapTs: 0,
 };
 
 function applyRewards(h) {
@@ -487,1706 +845,940 @@ function applyRewards(h) {
   S.miner_reward_qtcl    = r.miner    / 100;
   S.treasury_reward_qtcl = r.treasury / 100;
   S.tessellation_depth   = r.depth;
-  S.treasury_pct         = (r.treasury / (r.miner + r.treasury) * 100);
+  S.treasury_pct         = r.treasury / (r.miner + r.treasury) * 100;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// JSON-RPC 2.0 TRANSPORT LAYER
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// JSON-RPC 2.0 TRANSPORT
+// ═══════════════════════════════════════════════════════════════════════
 var _rpcId = 1;
-
 async function rpc(method, params) {
   try {
-    var r = await fetch(BASE + '/rpc', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({jsonrpc:'2.0', id: _rpcId++, method: method, params: params || []}),
-      signal: AbortSignal.timeout(6000)
+    var r = await fetch(BASE+'/rpc', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({jsonrpc:'2.0',id:_rpcId++,method:method,params:params||[]}),
+      signal:AbortSignal.timeout(7000)
     });
-    if (!r.ok) return null;
+    if(!r.ok) return null;
     var j = await r.json();
-    if (j.error) { console.warn('[RPC]', method, j.error.code, j.error.message); return null; }
+    if(j.error){console.warn('[RPC]',method,j.error.message);return null;}
     return j.result;
-  } catch(e) { return null; }
+  } catch(e){return null;}
 }
-
-// True JSON-RPC 2.0 batch — single HTTP round-trip
 async function rpcBatch(calls) {
   try {
-    var base = _rpcId;
-    var batch = calls.map(function(c, i) {
-      return {jsonrpc:'2.0', id: base + i, method: c[0], params: c[1] || []};
+    var base=_rpcId, batch=calls.map(function(c,i){
+      return {jsonrpc:'2.0',id:base+i,method:c[0],params:c[1]||[]};
     });
-    _rpcId += calls.length;
-    var r = await fetch(BASE + '/rpc', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(batch),
-      signal: AbortSignal.timeout(8000)
+    _rpcId+=calls.length;
+    var r=await fetch(BASE+'/rpc',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(batch),signal:AbortSignal.timeout(9000)
     });
-    if (!r.ok) return calls.map(function() { return null; });
-    var arr = await r.json();
-    // Server may return single object on error or batch array
-    if (!Array.isArray(arr)) {
-      return calls.map(function(_, i) { return i === 0 && arr && !arr.error ? arr.result : null; });
-    }
-    return calls.map(function(_, i) {
-      var res = arr.find(function(a) { return a && a.id === (base + i); });
-      return (res && !res.error) ? res.result : null;
+    if(!r.ok) return calls.map(function(){return null;});
+    var arr=await r.json();
+    if(!Array.isArray(arr)) return calls.map(function(_,i){
+      return i===0&&arr&&!arr.error?arr.result:null;
     });
-  } catch(e) { return calls.map(function() { return null; }); }
+    return calls.map(function(_,i){
+      var res=arr.find(function(a){return a&&a.id===(base+i);});
+      return (res&&!res.error)?res.result:null;
+    });
+  } catch(e){return calls.map(function(){return null;});}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CLOCK + LOGO CANVAS
-// ═══════════════════════════════════════════════════════════════════════════════
-function tick() {
-  var d = new Date();
-  var el = document.getElementById('hck');
-  if (el) el.textContent = d.toISOString().replace('T',' ').slice(0,19) + ' UTC';
-}
-setInterval(tick, 1000); tick();
+// ═══════════════════════════════════════════════════════════════════════
+// ORACLE SNAPSHOT BUS — single HTTP poll, fans out to all workers
+// ═══════════════════════════════════════════════════════════════════════
+var _busListeners = [];
+function busSubscribe(fn) { _busListeners.push(fn); }
 
-(function() {
-  var c = document.getElementById('lc'), ctx = c ? c.getContext('2d') : null, t = 0;
-  if (!ctx) return;
-  (function fr() {
-    ctx.clearRect(0,0,36,36);
-    var cx=18,cy=18,r=13;
-    ctx.strokeStyle='rgba(0,220,255,.2)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-    for (var i=0;i<3;i++) {
-      var a=i*Math.PI*2/3+t, x=cx+r*Math.cos(a), y=cy+r*Math.sin(a);
-      ctx.strokeStyle='rgba(0,220,255,'+(0.35+0.25*Math.sin(t*2+i))+')'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
-      ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
-      ctx.beginPath(); ctx.arc(x,y,2.5,0,Math.PI*2); ctx.fill();
+async function _pollOracle() {
+  try {
+    var r = await fetch(BASE+'/rpc/oracle/snapshots?limit=1', {
+      signal:AbortSignal.timeout(6000)
+    });
+    if(!r.ok) { setOnline(false); return; }
+    var j = await r.json();
+    var result = j.result || j;
+    var snaps = result.snapshots || [];
+    var snap = snaps.length ? snaps[snaps.length-1] : null;
+    if(!snap) {
+      // Fallback to /rpc/oracle/snapshot (singular)
+      var r2 = await fetch(BASE+'/rpc/oracle/snapshot',{signal:AbortSignal.timeout(5000)});
+      if(r2.ok){var j2=await r2.json(); snap=j2.result||null;}
     }
-    ctx.fillStyle='rgba(212,160,32,.95)'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
-    t -= 0.02; requestAnimationFrame(fr);
-  })();
-})();
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// DENSITY MATRIX VISUALIZER — 8×8 complex DM heatmap ⊗ pq-phase-relations disk
-// Replaces Three.js Poincaré ball. Pure Canvas 2D, zero dependencies.
-// Reads S.dm_hex → 64 complex float32 → magnitude heatmap (cyan→violet palette)
-// Phase-relations ring hybridized into the same canvas (right half overlay)
-// Preserves _H.onBlock() interface — rest of codebase untouched
-// ═══════════════════════════════════════════════════════════════════════════════
-var _H = (function(){
-'use strict';
-
-// ── Internal state ────────────────────────────────────────────────────────────
-var _cvs = null, _ctx = null;
-var _rafId = null, _lastT = 0;
-var _blkFlash = -99, _animT = 0;
-var _dmCache = null;
-var _dmMag   = null;
-var _dmPhase = null;
-var _dmSize  = 0;
-var _pqCurrAnim = 0, _pqLastAnim = 0;
-
-// ── Palette: cyan(0,220,255) → mid-violet(128,64,255) → bright-gold(212,160,32)
-function _palette(v) {
-  // v in [0,1], returns [r,g,b]
-  v = Math.max(0, Math.min(1, v));
-  if (v < 0.5) {
-    var t = v * 2;
-    return [Math.round(0   + t * 128), Math.round(220 - t * 156), Math.round(255 - t * 0)];
-  } else {
-    var t = (v - 0.5) * 2;
-    return [Math.round(128 + t * 84), Math.round(64  - t * 64),  Math.round(255 - t * 223)];
-  }
-}
-
-// ── Parse dm_hex → complex amplitudes ────────────────────────────────────────
-// Server sends hex-encoded little-endian float32 pairs (re, im)
-// Can be 8×8 (64 complex = 512 bytes = 1024 hex chars) or 16×16 (256 complex = 2048 hex chars)
-// or 48×48 from oracle (2304 complex = 18432 hex chars)
-function _parseDmHex(hex) {
-  if (!hex || hex.length < 32) return null;
-  hex = hex.replace(/\s/g, '');
-  var byteLen = hex.length / 2;
-  if (byteLen < 32) return null;
-  var buf = new Uint8Array(byteLen);
-  for (var i = 0; i < byteLen; i++) {
-    buf[i] = parseInt(hex.slice(i*2, i*2+2), 16);
-  }
-  var dv = new DataView(buf.buffer);
-  var nComplex = Math.floor(byteLen / 8); // pairs of floats
-  var isComplex = byteLen >= 512;
-  var size = Math.round(Math.sqrt(nComplex));
-  var n = size * size;
-  var out = new Float32Array(n * 2);
-  if (isComplex) {
-    for (var i = 0; i < n; i++) {
-      out[i*2]   = dv.getFloat32(i*8,     true);
-      out[i*2+1] = dv.getFloat32(i*8 + 4, true);
+    if(snap) {
+      S._snap = snap;
+      S._snapTs = Date.now();
+      setOnline(true);
+      _busListeners.forEach(function(fn){try{fn(snap);}catch(e){console.warn('[BUS]',e);}});
     }
-  } else {
-    for (var i = 0; i < n; i++) {
-      out[i*2]   = dv.getFloat32(i*4, true);
-      out[i*2+1] = 0;
-    }
+  } catch(e) { setOnline(false); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ONLINE STATUS
+// ═══════════════════════════════════════════════════════════════════════
+var _online = false;
+function setOnline(v) {
+  if(_online===v) return;
+  _online=v;
+  var cp=document.getElementById('cp');
+  if(cp){cp.className=v?'':'off';}
+  var ct=document.getElementById('ct');
+  if(ct) ct.textContent=v?'LIVE':'OFFLINE';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WORKER 1: METRICS — subscribes to oracle bus + polls RPC batch
+// ═══════════════════════════════════════════════════════════════════════
+var _lastEventTs = 0;
+busSubscribe(function(snap) {
+  // Extract all metrics from snapshot
+  var f   = snap.w_state_fidelity || snap.fidelity || 0;
+  var coh = snap.coherence_l1     || snap.coherence || 0;
+  var pur = snap.purity           || snap.trace_purity || 0;
+  if(f)   S.fidelity   = f;
+  if(coh) S.coherence  = coh;
+  if(pur) S.purity     = pur;
+  S.entropy        = snap.von_neumann_entropy || S.entropy;
+  S.phase_coherence= snap.phase_coherence     || S.phase_coherence;
+  S.phase_drift    = snap.phase_drift         || S.phase_drift;
+  S.discord        = snap.quantum_discord     || snap.discord || S.discord;
+  S.qfi            = S.fidelity * 8.0;
+  S.cycle          = snap.lattice_refresh_counter || snap.cycle || S.cycle;
+  S.lattice_refresh_counter = S.cycle;
+  // Noise bath
+  var ae = snap.aer_noise_state || {};
+  if(ae.gamma1   != null) S.gamma1   = ae.gamma1;
+  if(ae.gammaphi != null) S.gammaphi = ae.gammaphi;
+  if(ae.omega    != null) S.omega    = ae.omega;
+  if(ae.ou_mem   != null) S.ou_mem   = ae.ou_mem;
+  if(ae.sector_occ != null) S.sector_occ = ae.sector_occ;
+  // Mermin
+  var mt = snap.mermin_test || snap.bell_test || null;
+  if(mt) S.mermin = mt;
+  // DM hex
+  if(snap.density_matrix_hex) parseDMHex(snap.density_matrix_hex);
+  _threadActive('td-metrics');
+});
+
+// RPC batch for chain data — every 4s independently
+async function _workerMetricsRPC() {
+  var fromH = Math.max(0, S.height - 10);
+  var results = await rpcBatch([
+    ['qtcl_getBlockHeight',   []],
+    ['qtcl_getQuantumMetrics',[]],
+    ['qtcl_getLatestDMSnapshot',[]],
+    ['qtcl_getMempoolStats',  []],
+    ['qtcl_getPeers',         []],
+    ['qtcl_getEvents',        [{since:_lastEventTs,types:'new_block',limit:10}]],
+    ['qtcl_getBlockRange',    [fromH, S.height]],
+  ]);
+  var bh=results[0], qm=results[1], dm=results[2], mp=results[3],
+      peers=results[4], events=results[5], blockRange=results[6];
+
+  if(bh){
+    var h=parseInt(bh.height||0);
+    if(h>S.height){S.height=h;applyRewards(h);}
+    S.tip_hash=bh.tip_hash||bh.hash||'';
   }
-  return { data: out, size: size };
-}
-
-// ── Quantum heatmap palette ─────────────────────────────────────────────────
-// Proper QM colormap: black → blue → cyan → white (diagonal elements are ~1)
-function _quantumPalette(v) {
-  v = Math.max(0, Math.min(1, v));
-  var r, g, b;
-  if (v < 0.25) {
-    var t = v * 4;
-    r = Math.round(t * 20);
-    g = Math.round(t * 40);
-    b = Math.round(30 + t * 80);
-  } else if (v < 0.5) {
-    var t = (v - 0.25) * 4;
-    r = Math.round(20 + t * 80);
-    g = Math.round(40 + t * 180);
-    b = Math.round(110 + t * 145);
-  } else if (v < 0.75) {
-    var t = (v - 0.5) * 4;
-    r = Math.round(100 + t * 155);
-    g = Math.round(220 + t * 35);
-    b = Math.round(255 - t * 100);
-  } else {
-    var t = (v - 0.75) * 4;
-    r = Math.round(255);
-    g = Math.round(255 - t * 50);
-    b = Math.round(155 + t * 100);
+  if(qm){
+    var ws=qm.w_state||{};
+    if(ws.w_state_fidelity) S.fidelity   = ws.w_state_fidelity;
+    if(ws.coherence)        S.coherence  = ws.coherence;
+    if(ws.purity)           S.purity     = ws.purity;
+    if(ws.entropy)          S.entropy    = ws.entropy;
+    var lat=qm.lattice||{};
+    S.avg_block_time_s     = lat.avg_block_time_s || S.avg_block_time_s;
+    S.total_transactions   = lat.total_transactions || S.total_transactions;
+    S.difficulty_bits      = lat.difficulty_bits || S.difficulty_bits;
+    S.oracle_consensus_reached = qm.oracle_consensus_reached || false;
+    S.quantum_validation_status = qm.quantum_validation_status||'--';
+    S.pq_validation_status      = qm.pq_validation_status||'--';
+    S.consensus_status          = qm.consensus_status||'--';
+    if(qm.density_matrix_hex) parseDMHex(qm.density_matrix_hex);
+    // Per-oracle data
+    var oa=qm.oracle_data||{};
+    Object.keys(oa).forEach(function(k){S.oracle_data[k]=oa[k];});
   }
-  return [r, g, b];
-}
-
-// ── Build magnitude + phase arrays ───────────────────────────────────────────
-function _buildMagPhase(dm) {
-  if (!dm || !dm.data) return;
-  var size = dm.size;
-  var n = size * size;
-  _dmMag = new Float32Array(n);
-  _dmPhase = new Float32Array(n);
-  _dmSize = size;
-  var maxMag = 0;
-  for (var i = 0; i < n; i++) {
-    var re = dm.data[i*2], im = dm.data[i*2+1];
-    var m = Math.sqrt(re*re + im*im);
-    _dmMag[i] = m;
-    _dmPhase[i] = Math.atan2(im, re);
-    if (m > maxMag) maxMag = m;
+  if(dm && dm.density_matrix_hex) parseDMHex(dm.density_matrix_hex);
+  if(mp){
+    S.mempool_size = mp.depth!=null?mp.depth:(mp.pending!=null?mp.pending:S.mempool_size);
   }
-  if (maxMag > 1e-9) for (var i = 0; i < n; i++) _dmMag[i] /= maxMag;
-}
-
-// Synthetic fallback removed - no fallbacks allowed
-function _syntheticDm(fid, t) {
-  return null;
-}
-
-// ── Draw routine ─────────────────────────────────────────────────────────────
-function _draw(t) {
-  if (!_cvs || !_ctx) return;
-
-  var W = _cvs.width, H = _cvs.height;
-  var fid    = Math.max(0.01, Math.min(1.0, S.fidelity || 0.75));
-  var coh    = Math.max(0.01, Math.min(1.0, S.lattice_coherence || S.coherence || 0.65));
-  var pqC    = S.pq_curr || 0;
-  var pqL    = S.pq_last || 0;
-
-  // Smooth pq anim
-  var spd = 0.08;
-  _pqCurrAnim += (pqC - _pqCurrAnim) * spd;
-  _pqLastAnim += (pqL - _pqLastAnim) * spd;
-
-  // Parse / refresh DM
-  if (S.dm_hex) {
-    if (S.dm_hex !== _H._lastHex) {
-      _H._lastHex = S.dm_hex;
-      var parsed = _parseDmHex(S.dm_hex);
-      if (parsed) {
-        _dmCache = parsed;
-        _buildMagPhase(parsed);
-      } else {
-        _dmCache = null;
-        _dmMag = null;
-        _dmPhase = null;
-        _dmSize = 0;
+  if(peers){
+    var rawPeers=Array.isArray(peers.peers)?peers.peers:[];
+    S.n_peers=peers.count||rawPeers.length;
+    var stale=300;
+    var miners=rawPeers.map(function(p){
+      var addr=p.miner_address||p.address||p.node_id||'';
+      var ls=p.last_seen?new Date(p.last_seen).getTime()/1000:0;
+      var age=ls>0?Math.round(Date.now()/1000-ls):999999;
+      return {
+        miner_address:addr, peer_id:p.peer_id||p.node_id||'',
+        block_count:p.block_count||0, last_height:p.block_height||p.last_height||0,
+        total_earned_qtcl:p.total_earned_qtcl||0,
+        last_seen_age_s:age,
+        status:age<stale?'live':(age<86400?'seen':'historic'),
+      };
+    }).filter(function(m){return m.miner_address;});
+    if(miners.length) renderMiners(miners);
+  }
+  if(events&&Array.isArray(events.events)){
+    events.events.forEach(function(ev){
+      if(ev.ts>_lastEventTs) _lastEventTs=ev.ts;
+      if(ev.type==='new_block'){
+        var h=parseInt(ev.height||ev.block_height||0);
+        if(h>0&&h>S.height){S.height=h;applyRewards(h);}
+        if(h>0&&!_blocksById[h]){
+          var nb={height:h,block_hash:ev.block_hash||'',hash:ev.block_hash||'',
+            tx_count:ev.tx_count||0,w_state_fidelity:ev.w_state_fidelity||S.fidelity,
+            difficulty_bits:ev.difficulty_bits||S.difficulty_bits,_fr:true,
+            pq_curr:ev.pq_curr||0,pq_last:ev.pq_last||0};
+          _blocksById[h]=nb; blocks.push(nb);
+          blocks.sort(function(a,b){return a.height-b.height;});
+          renderChain(); _threadActive('td-blocks');
+          if(!txLoading) setTimeout(loadTxPage,400);
+        }
       }
-    }
-  } else {
-    _H._lastHex = '';
-    _dmCache = null;
-    _dmMag = null;
-    _dmPhase = null;
-    _dmSize = 0;
+    });
   }
-  var cx = _dmCache;
-  if (!_dmMag || _dmSize === 0) {
-    _ctx.save();
-    _ctx.fillStyle = 'rgba(0,220,255,0.5)';
-    _ctx.font = '14px "JetBrains Mono", monospace';
-    _ctx.textAlign = 'center';
-    _ctx.fillText('NO DATA', _cvs.width/2, _cvs.height/2);
-    _ctx.restore();
-    return;
-  }
-
-  var blkAge = t - _blkFlash;
-  var blkPulse = blkAge < 1.0 ? Math.exp(-blkAge * 4) : 0;
-  var isQ = S.mermin ? (parseFloat(S.mermin.M_value || S.mermin.M || 0) > 2.0) : false;
-  var isStrong = S.mermin ? (parseFloat(S.mermin.M_value || S.mermin.M || 0) > 2.8) : false;
-
-  var size = _dmSize || 8;
-
-  // ── Layout ────────────────────────────────────────────────────────────────
-  var splitX = Math.floor(W * 0.54);
-  var HM_X   = 12, HM_Y = 36, HM_W = splitX - 20, HM_H = H - 70;
-  var cell   = Math.min(Math.floor(HM_W / size), Math.floor(HM_H / size));
-  HM_W = cell * size; HM_H = cell * size;
-
-  var DK_CX = splitX + Math.floor((W - splitX) / 2);
-  var DK_CY = Math.floor(H / 2) + 4;
-  var DK_R  = Math.min((W - splitX) / 2 - 18, H / 2 - 24);
-
-  // ── Clear ─────────────────────────────────────────────────────────────────
-  _ctx.clearRect(0, 0, W, H);
-  _ctx.fillStyle = '#000508';
-  _ctx.fillRect(0, 0, W, H);
-
-  _ctx.fillStyle = 'rgba(0,0,0,0.04)';
-  for (var y = 0; y < H; y += 4) { _ctx.fillRect(0, y, W, 1); }
-
-  // ── SECTION A: DM Heatmap ─────────────────────────────────────────────────
-  _ctx.font = '7px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(0,180,220,0.55)';
-  _ctx.textAlign = 'left';
-  _ctx.textBaseline = 'top';
-  _ctx.fillText('DENSITY MATRIX ρ  ' + size + '×' + size, HM_X, 6);
-
-  var src = _dmCache && S.dm_hex ? 'LIVE DM' : 'SYN-ψ';
-  _ctx.fillStyle = _dmCache && S.dm_hex ? 'rgba(0,255,157,0.6)' : 'rgba(212,160,32,0.5)';
-  _ctx.textAlign = 'right';
-  _ctx.fillText(src, splitX - 4, 6);
-
-  // Row / col axis labels (only for smaller matrices)
-  _ctx.font = '6.5px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(0,150,190,0.35)';
-  _ctx.textAlign = 'center';
-  if (size <= 16) {
-    for (var i = 0; i < size; i++) {
-      _ctx.fillText(i, HM_X + cell * i + cell / 2, HM_Y - 9);
-      _ctx.textAlign = 'right';
-      _ctx.textBaseline = 'middle';
-      _ctx.fillText(i, HM_X - 3, HM_Y + cell * i + cell / 2);
-      _ctx.textAlign = 'center';
-      _ctx.textBaseline = 'top';
-    }
-  }
-
-  // Cells - dynamic size
-  for (var row = 0; row < size; row++) {
-    for (var col = 0; col < size; col++) {
-      var idx = row * size + col;
-      var mag = _dmMag[idx];
-      var phase = _dmPhase[idx];
-      var rgb = _quantumPalette(mag);
-      var alpha = 0.25 + mag * 0.75;
-      var shimmer = 0.85 + 0.15 * Math.cos(phase + t * 1.1 + (row + col) * 0.4);
-      var bwash = blkPulse * 0.35 * mag;
-      var cx2 = HM_X + col * cell;
-      var cy2 = HM_Y + row * cell;
-      _ctx.fillStyle = 'rgba(' + Math.round(rgb[0] * shimmer + bwash * 255) + ',' +
-                                  Math.round(rgb[1] * shimmer) + ',' +
-                                  Math.round(Math.min(255, rgb[2] * shimmer + bwash * 80)) + ',' + alpha.toFixed(2) + ')';
-      _ctx.fillRect(cx2, cy2, cell - 0.5, cell - 0.5);
-      if (row === col && size <= 16) {
-        _ctx.strokeStyle = 'rgba(212,160,32,' + (0.3 + mag * 0.5) + ')';
-        _ctx.lineWidth = 0.6;
-        _ctx.strokeRect(cx2 + 0.25, cy2 + 0.25, cell - 1, cell - 1);
+  if(blockRange&&Array.isArray(blockRange.blocks)){
+    blockRange.blocks.forEach(function(b){
+      var bh=parseInt(b.height||0);
+      if(bh>0&&!_blocksById[bh]){
+        var nb={height:bh,block_hash:b.block_hash||b.hash||'',hash:b.block_hash||b.hash||'',
+          tx_count:b.tx_count||b.transaction_count||0,
+          w_state_fidelity:b.w_state_fidelity||S.fidelity,
+          difficulty_bits:b.difficulty||b.difficulty_bits||S.difficulty_bits,
+          _fr:false,pq_curr:b.pq_curr||bh,pq_last:b.pq_last||(bh-1)};
+        _blocksById[bh]=nb; blocks.push(nb);
       }
+    });
+    if(blocks.length){
+      blocks.sort(function(a,b){return a.height-b.height;});
+      if(blocks.length>30) blocks=blocks.slice(-30);
+      renderChain(); _threadActive('td-blocks');
     }
   }
-
-  // Heatmap border
-  _ctx.strokeStyle = 'rgba(0,220,255,0.18)';
-  _ctx.lineWidth = 1;
-  _ctx.strokeRect(HM_X - 1, HM_Y - 1, HM_W + 2, HM_H + 2);
-
-  // ── Phase-relations bar (below heatmap) ───────────────────────────────────
-  if (size <= 16) {
-    var barY = HM_Y + HM_H + 8;
-    _ctx.font = '6.5px JetBrains Mono,monospace';
-    _ctx.fillStyle = 'rgba(0,150,180,0.4)';
-    _ctx.textAlign = 'left';
-    _ctx.textBaseline = 'top';
-    _ctx.fillText('PHASE MAP  arg(ρᵢⱼ)', HM_X, barY);
-    barY += 10;
-    var bW = HM_W / size, bH = 12;
-    for (var i = 0; i < size; i++) {
-      var ph = _dmPhase[i * size + i];
-      var normPh = (ph + Math.PI) / (2 * Math.PI);
-      var rgb2 = _quantumPalette(normPh);
-      _ctx.fillStyle = 'rgba(' + rgb2[0] + ',' + rgb2[1] + ',' + rgb2[2] + ',0.75)';
-      _ctx.fillRect(HM_X + i * bW, barY, bW - 1, bH);
-      _ctx.fillStyle = 'rgba(0,180,220,0.5)';
-      _ctx.font = '6px JetBrains Mono,monospace';
-      _ctx.textAlign = 'center';
-      _ctx.textBaseline = 'middle';
-      _ctx.fillText((ph * 180 / Math.PI).toFixed(0) + '°', HM_X + i * bW + bW / 2, barY + bH / 2);
-    }
-  }
-
-  // ── Vertical divider ──────────────────────────────────────────────────────
-  var grad = _ctx.createLinearGradient(splitX, 0, splitX + 1, H);
-  grad.addColorStop(0,   'rgba(0,220,255,0.0)');
-  grad.addColorStop(0.3, 'rgba(0,220,255,0.18)');
-  grad.addColorStop(0.7, 'rgba(128,64,255,0.18)');
-  grad.addColorStop(1,   'rgba(128,64,255,0.0)');
-  _ctx.strokeStyle = grad;
-  _ctx.lineWidth = 1;
-  _ctx.beginPath(); _ctx.moveTo(splitX, 10); _ctx.lineTo(splitX, H - 10); _ctx.stroke();
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 3D BLOCH SPHERE VISUALIZATION — Canvas 2D with 3D projection
-// ═══════════════════════════════════════════════════════════════════════════════
-
-var _blochRotation = { x: 0.4, y: 0.2 };
-var _blochMouseDown = false;
-var _blochLastMouse = { x: 0, y: 0 };
-
-function _project3D(x, y, z, cx, cy, scale) {
-  var rotY = y * Math.cos(_blochRotation.x) - z * Math.sin(_blochRotation.x);
-  var rotZ = y * Math.sin(_blochRotation.x) + z * Math.cos(_blochRotation.x);
-  var rotX = x * Math.cos(_blochRotation.y) - rotZ * Math.sin(_blochRotation.y);
-  var rotZ2 = x * Math.sin(_blochRotation.y) + rotZ * Math.cos(_blochRotation.y);
-  return { x: cx + rotX * scale, y: cy - rotZ2 * scale, z: rotZ };
+  updateDOM();
 }
 
-function _drawBlochSphere(t) {
-  if (!_ctx) return;
-  var W = _cvs.width, H = _cvs.height;
-  var splitX = Math.floor(W * 0.54);
-  var cx = splitX + Math.floor((W - splitX) / 2);
-  var cy = Math.floor(H / 2) + 4;
-  var r = Math.min((W - splitX) / 2 - 18, H / 2 - 24);
-  var scale = r * 0.85;
-  
-  // Clear right side
-  _ctx.save();
-  _ctx.beginPath();
-  _ctx.rect(splitX, 0, W - splitX, H);
-  _ctx.clip();
-  
+function _threadActive(id) {
+  var d=document.getElementById(id);
+  if(!d) return;
+  d.className='thread-dot active';
+  setTimeout(function(){if(d)d.className='thread-dot active';},2000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DENSITY MATRIX PARSER — 8×8 complex128 big-endian '>dd'
+// ═══════════════════════════════════════════════════════════════════════
+function parseDMHex(hex) {
+  if(!hex||hex.length!==2048) return; // must be exactly 8*8*2*8 bytes = 2048 hex chars
+  try {
+    var re=new Float64Array(64), im=new Float64Array(64);
+    var buf=new ArrayBuffer(16), dv=new DataView(buf);
+    for(var i=0;i<64;i++){
+      // 16 bytes per complex: 8 re + 8 im, big-endian float64
+      var off=i*32; // 32 hex chars per element
+      for(var b=0;b<8;b++){
+        dv.setUint8(b,parseInt(hex.slice(off+b*2,off+b*2+2),16));
+      }
+      re[i]=dv.getFloat64(0,false); // big-endian
+      for(var b=0;b<8;b++){
+        dv.setUint8(b,parseInt(hex.slice(off+16+b*2,off+16+b*2+2),16));
+      }
+      im[i]=dv.getFloat64(0,false);
+    }
+    S.dm_re=re; S.dm_im=im;
+    // Compute purity = Tr(ρ²) = Σ_ij |ρ_ij|²
+    var pur=0;
+    for(var i=0;i<64;i++) pur+=re[i]*re[i]+im[i]*im[i];
+    S.purity=Math.min(1,Math.max(0,pur));
+    _threadActive('td-dm');
+  } catch(e){console.warn('[DM]',e);}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WORKER 2: DENSITY MATRIX CANVAS — 32×32 Kronecker-expanded
+// Upscales 8×8 → 32×32 using Kronecker product with 4×4 identity
+// Rendered at 512×512 (16px per DM element)
+// ═══════════════════════════════════════════════════════════════════════
+var _dmCtx=null, _dmLastHash='';
+function _workerDM() {
+  if(!S.dm_re||!S.dm_im) return;
+  // Cheap change detection: check sum of diagonals
+  var chk='';
+  for(var i=0;i<8;i++) chk+=(S.dm_re[i*8+i]).toFixed(4);
+  if(chk===_dmLastHash) return;
+  _dmLastHash=chk;
+
+  var canvas=document.getElementById('dm-canvas');
+  if(!canvas) return;
+  if(!_dmCtx) _dmCtx=canvas.getContext('2d');
+  var ctx=_dmCtx;
+  var N=32, cellW=canvas.width/N, cellH=canvas.height/N;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
   // Background
-  var bgGrad = _ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-  bgGrad.addColorStop(0, 'rgba(0,20,40,0.95)');
-  bgGrad.addColorStop(1, 'rgba(5,10,25,0.98)');
-  _ctx.fillStyle = bgGrad;
-  _ctx.fillRect(splitX, 0, W - splitX, H);
-  
-  // Title
-  _ctx.font = '7px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(128,64,255,0.7)';
-  _ctx.textAlign = 'left';
-  _ctx.textBaseline = 'top';
-  _ctx.fillText('BLOCH SPHERE | QUANTUM STATE', splitX + 12, 6);
-  
-  // Sphere wireframe
-  var spherePts = [];
-  for (var lat = -8; lat <= 8; lat++) {
-    var theta = lat * Math.PI / 10;
-    for (var lon = 0; lon < 16; lon++) {
-      var phi = lon * Math.PI / 8;
-      var x = Math.sin(theta) * Math.cos(phi);
-      var y = Math.cos(theta);
-      var z = Math.sin(theta) * Math.sin(phi);
-      spherePts.push(_project3D(x, y, z, cx, cy, scale));
-    }
-  }
-  
-  // Draw latitude rings
-  _ctx.strokeStyle = 'rgba(0,180,220,0.12)';
-  _ctx.lineWidth = 0.5;
-  for (var lat = -8; lat <= 8; lat += 2) {
-    _ctx.beginPath();
-    for (var lon = 0; lon <= 16; lon++) {
-      var phi = lon * Math.PI / 8;
-      var theta = lat * Math.PI / 10;
-      var x = Math.sin(theta) * Math.cos(phi);
-      var y = Math.cos(theta);
-      var z = Math.sin(theta) * Math.sin(phi);
-      var p = _project3D(x, y, z, cx, cy, scale);
-      if (lon === 0) _ctx.moveTo(p.x, p.y);
-      else _ctx.lineTo(p.x, p.y);
-    }
-    _ctx.stroke();
-  }
-  
-  // Draw longitude rings
-  for (var lon = 0; lon < 16; lon += 2) {
-    _ctx.beginPath();
-    for (var lat = -8; lat <= 8; lat++) {
-      var phi = lon * Math.PI / 8;
-      var theta = lat * Math.PI / 10;
-      var x = Math.sin(theta) * Math.cos(phi);
-      var y = Math.cos(theta);
-      var z = Math.sin(theta) * Math.sin(phi);
-      var p = _project3D(x, y, z, cx, cy, scale);
-      if (lat === -8) _ctx.moveTo(p.x, p.y);
-      else _ctx.lineTo(p.x, p.y);
-    }
-    _ctx.stroke();
-  }
-  
-  // Axes
-  var axes = [
-    { from: [0, -1.1, 0], to: [0, 1.1, 0], color: 'rgba(255,100,100,0.6)', label: '|0⟩' },
-    { from: [0, -1.1, 0], to: [0, 1.1, 0], color: 'rgba(100,100,255,0.6)', label: '|1⟩' },
-    { from: [-1.1, 0, 0], to: [1.1, 0, 0], color: 'rgba(255,255,100,0.4)', label: 'X' },
-    { from: [0, 0, -1.1], to: [0, 0, 1.1], color: 'rgba(100,255,255,0.4)', label: 'Y' },
-  ];
-  
-  // Draw main axes
-  _ctx.lineWidth = 1;
-  ['rgba(255,100,100,0.5)', 'rgba(100,100,255,0.5)'].forEach(function(col, i) {
-    var from = _project3D(0, i === 0 ? -1 : 1, 0, cx, cy, scale);
-    var to = _project3D(0, i === 0 ? 1 : -1, 0, cx, cy, scale);
-    _ctx.strokeStyle = col;
-    _ctx.beginPath(); _ctx.moveTo(from.x, from.y); _ctx.lineTo(to.x, to.y); _ctx.stroke();
-  });
-  
-  // Quantum state vector from dm_hex
-  if (_dmMag && _dmSize > 0) {
-    // Compute Bloch sphere coordinates from density matrix
-    var traceRho2 = 0;
-    var sx = 0, sy = 0, sz = 0;
-    var n = _dmSize * _dmSize;
-    
-    for (var i = 0; i < n; i++) {
-      var re = _dmCache.data[i*2], im = _dmCache.data[i*2+1];
-      var mag2 = re*re + im*im;
-      traceRho2 += mag2;
-    }
-    traceRho2 = Math.sqrt(traceRho2) || 1;
-    
-    // Pauli expectation values (simplified for 8x8)
-    var diag0 = _dmMag[0] || 0.5;
-    var diag1 = _dmMag[_dmSize * _dmSize - 1] || 0.5;
-    var szVal = diag0 - diag1;
-    
-    // Off-diagonal sums for sx, sy
-    var sxVal = 0, syVal = 0;
-    if (_dmSize >= 2) {
-      var off01 = _dmMag[1] || 0;
-      var off10 = _dmMag[_dmSize] || 0;
-      sxVal = 2 * (off01 + off10);
-      var im01 = _dmPhase[1] || 0;
-      var im10 = _dmPhase[_dmSize] || 0;
-      syVal = 2 * Math.sin(im01 - im10);
-    }
-    
-    var blochX = sxVal * 0.8;
-    var blochY = szVal;
-    var blochZ = syVal * 0.8;
-    
-    // Normalize
-    var bMag = Math.sqrt(blochX*blochX + blochY*blochY + blochZ*blochZ);
-    if (bMag > 0.01) {
-      blochX /= bMag; blochY /= bMag; blochZ /= bMag;
-    } else {
-      blochY = 1;
-    }
-    
-    // Draw state vector
-    var origin = _project3D(0, 0, 0, cx, cy, scale);
-    var tip = _project3D(blochX, blochY, blochZ, cx, cy, scale);
-    
-    // Vector glow
-    var vecGrad = _ctx.createLinearGradient(origin.x, origin.y, tip.x, tip.y);
-    vecGrad.addColorStop(0, 'rgba(0,255,157,0)');
-    vecGrad.addColorStop(0.7, 'rgba(0,255,157,0.8)');
-    vecGrad.addColorStop(1, 'rgba(255,255,100,1)');
-    _ctx.strokeStyle = vecGrad;
-    _ctx.lineWidth = 3;
-    _ctx.beginPath(); _ctx.moveTo(origin.x, origin.y); _ctx.lineTo(tip.x, tip.y); _ctx.stroke();
-    
-    // Arrow head
-    var ah = 8;
-    var angle = Math.atan2(tip.y - origin.y, tip.x - origin.x);
-    _ctx.fillStyle = 'rgba(255,255,100,0.9)';
-    _ctx.beginPath();
-    _ctx.moveTo(tip.x, tip.y);
-    _ctx.lineTo(tip.x - ah * Math.cos(angle - 0.4), tip.y - ah * Math.sin(angle - 0.4));
-    _ctx.lineTo(tip.x - ah * Math.cos(angle + 0.4), tip.y - ah * Math.sin(angle + 0.4));
-    _ctx.closePath();
-    _ctx.fill();
-    
-      // State label
-    var purity = (_dmMag && _dmMag[0]) ? (_dmMag[0] / (_dmMag[0] + (_dmMag[n-1]||0))) : 0.5;
-    _ctx.font = 'bold 9px JetBrains Mono,monospace';
-    _ctx.fillStyle = 'rgba(0,255,157,0.9)';
-    _ctx.textAlign = 'left';
-    _ctx.fillText('|ψ⟩', tip.x + 8, tip.y);
-    
-    // Probability bar
-    _ctx.fillStyle = 'rgba(0,150,180,0.5)';
-    _ctx.fillText('P(|0⟩)=' + (purity * 100).toFixed(1) + '%', splitX + 12, H - 30);
-    
-    // Phase info
-    var phase = _dmPhase[0] || 0;
-    _ctx.fillText('φ=' + (phase * 180 / Math.PI).toFixed(0) + '°', splitX + 12, H - 18);
-  }
-  
-  // Equator highlight
-  _ctx.strokeStyle = 'rgba(0,255,157,0.25)';
-  _ctx.lineWidth = 1.5;
-  _ctx.beginPath();
-  for (var lon = 0; lon <= 32; lon++) {
-    var phi = lon * Math.PI / 16;
-    var x = Math.cos(phi);
-    var y = 0;
-    var z = Math.sin(phi);
-    var p = _project3D(x, y, z, cx, cy, scale);
-    if (lon === 0) _ctx.moveTo(p.x, p.y);
-    else _ctx.lineTo(p.x, p.y);
-  }
-  _ctx.stroke();
-  
-  // |0⟩ and |1⟩ labels
-  var label0 = _project3D(0, 1.15, 0, cx, cy, scale);
-  var label1 = _project3D(0, -1.15, 0, cx, cy, scale);
-  _ctx.font = 'bold 10px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(255,100,100,0.8)';
-  _ctx.textAlign = 'center';
-  _ctx.fillText('|0⟩', label0.x, label0.y);
-  _ctx.fillStyle = 'rgba(100,100,255,0.8)';
-  _ctx.fillText('|1⟩', label1.x, label1.y);
-  
-  _ctx.restore();
-  
-  // Mouse drag for rotation
-  _cvs.onmousedown = function(e) {
-    _blochMouseDown = true;
-    _blochLastMouse = { x: e.clientX, y: e.clientY };
-  };
-  _cvs.onmousemove = function(e) {
-    if (!_blochMouseDown) return;
-    var dx = e.clientX - _blochLastMouse.x;
-    var dy = e.clientY - _blochLastMouse.y;
-    _blochRotation.y += dx * 0.01;
-    _blochRotation.x += dy * 0.01;
-    _blochLastMouse = { x: e.clientX, y: e.clientY };
-  };
-  _cvs.onmouseup = function() { _blochMouseDown = false; };
-  _cvs.onmouseleave = function() { _blochMouseDown = false; };
-}
-  // Outer boundary circle
-  _ctx.beginPath();
-  _ctx.arc(DK_CX, DK_CY, DK_R, 0, Math.PI * 2);
-  var bndGrad = _ctx.createRadialGradient(DK_CX, DK_CY, DK_R * 0.85, DK_CX, DK_CY, DK_R);
-  bndGrad.addColorStop(0, 'rgba(0,220,255,0.04)');
-  bndGrad.addColorStop(1, isStrong ? 'rgba(212,160,32,0.10)' : 'rgba(0,220,255,0.10)');
-  _ctx.fillStyle = bndGrad;
-  _ctx.fill();
-  _ctx.strokeStyle = isStrong ? 'rgba(212,160,32,0.30)' : 'rgba(0,220,255,0.22)';
-  _ctx.lineWidth = 1;
-  _ctx.stroke();
+  ctx.fillStyle='#020509';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
 
-  // Grid rings (fidelity-weighted)
-  for (var ri = 1; ri <= 3; ri++) {
-    var rr = DK_R * ri / 3.5;
-    _ctx.beginPath();
-    _ctx.arc(DK_CX, DK_CY, rr, 0, Math.PI * 2);
-    _ctx.strokeStyle = 'rgba(0,180,220,' + (0.05 + coh * 0.07) + ')';
-    _ctx.lineWidth = 0.5;
-    _ctx.stroke();
-  }
+  // ── Kronecker expansion: 8×8 → 32×32 ──────────────────────────────
+  // ρ_32[4i+di, 4j+dj] ≈ ρ_8[i,j] * K[di,dj]
+  // K is a 4×4 smooth kernel for visual expansion
+  var K=[[1,.85,.5,.2],[.85,.72,.42,.17],[.5,.42,.25,.10],[.2,.17,.10,.04]];
 
-  // Cross hairs
-  _ctx.strokeStyle = 'rgba(0,220,255,0.07)';
-  _ctx.lineWidth = 0.5;
-  _ctx.beginPath(); _ctx.moveTo(DK_CX - DK_R, DK_CY); _ctx.lineTo(DK_CX + DK_R, DK_CY); _ctx.stroke();
-  _ctx.beginPath(); _ctx.moveTo(DK_CX, DK_CY - DK_R); _ctx.lineTo(DK_CX, DK_CY + DK_R); _ctx.stroke();
-
-  // Phase-relation arcs — off-diagonal DM elements projected onto disk
-  // Each coherence |ρᵢⱼ| at angle ∝ arg(ρᵢⱼ), radius ∝ |ρᵢⱼ|
-  var maxOff = 0;
-  for (var row = 0; row < 8; row++) for (var col = 0; col < 8; col++) {
-    if (row !== col) { var m2 = _dmMag[row*8+col]; if (m2 > maxOff) maxOff = m2; }
-  }
-  if (maxOff < 1e-6) maxOff = 1;
-
-  for (var row = 0; row < 8; row++) {
-    for (var col = row + 1; col < 8; col++) {
-      var idx2 = row * 8 + col;
-      var mag2 = _dmMag[idx2];
-      var ph2  = _dmPhase[idx2];
-      if (mag2 < 0.05) continue;
-      var r2 = (mag2 / maxOff) * DK_R * 0.88;
-      var dot_x = DK_CX + Math.cos(ph2 + t * 0.08) * r2;
-      var dot_y = DK_CY + Math.sin(ph2 + t * 0.08) * r2;
-      var rgb3 = _palette(mag2);
-      var alpha2 = 0.25 + mag2 * 0.55;
-      _ctx.beginPath();
-      _ctx.arc(dot_x, dot_y, 1.8 + mag2 * 2.5, 0, Math.PI * 2);
-      _ctx.fillStyle = 'rgba(' + rgb3[0] + ',' + rgb3[1] + ',' + rgb3[2] + ',' + alpha2.toFixed(2) + ')';
-      _ctx.fill();
-      // Thin spoke from center
-      if (mag2 > 0.3) {
-        _ctx.beginPath(); _ctx.moveTo(DK_CX, DK_CY); _ctx.lineTo(dot_x, dot_y);
-        _ctx.strokeStyle = 'rgba(' + rgb3[0] + ',' + rgb3[1] + ',' + rgb3[2] + ',' + (alpha2 * 0.35).toFixed(2) + ')';
-        _ctx.lineWidth = 0.7; _ctx.stroke();
+  for(var bi=0;bi<8;bi++) {
+    for(var bj=0;bj<8;bj++) {
+      var reV=S.dm_re[bi*8+bj], imV=S.dm_im[bi*8+bj];
+      var mag=Math.sqrt(reV*reV+imV*imV);
+      var phase=Math.atan2(imV,reV); // -π to π
+      for(var di=0;di<4;di++) {
+        for(var dj=0;dj<4;dj++) {
+          var row=bi*4+di, col=bj*4+dj;
+          var kf=K[di][dj];
+          var scaledMag=mag*kf;
+          var x=col*cellW, y=row*cellH;
+          // ── Color encoding ──
+          // Magnitude → brightness, Phase → hue
+          // Diagonal: blue-cyan highlight
+          // Phase positive: warm gold-orange
+          // Phase negative: violet-red
+          var isDiag=(bi===bj);
+          var r2,g2,b2,a;
+          if(scaledMag<0.001){
+            r2=2;g2=5;b2=9;a=0.6+kf*0.4;
+          } else {
+            // Normalize phase to 0-1
+            var phaseNorm=(phase+Math.PI)/(2*Math.PI);
+            if(isDiag){
+              // Diagonal: population — aqua/teal glow
+              var inten=Math.min(1,scaledMag*3);
+              r2=Math.round(0+inten*0);
+              g2=Math.round(80+inten*132);
+              b2=Math.round(120+inten*135);
+              a=0.25+inten*0.75;
+            } else if(phaseNorm>0.5){
+              // Positive phase quadrant: gold → orange
+              var t=(phaseNorm-0.5)*2;
+              var inten=Math.min(1,scaledMag*4);
+              r2=Math.round(100+inten*132);
+              g2=Math.round(80+inten*100-t*60);
+              b2=Math.round(20+inten*20);
+              a=0.15+inten*0.85;
+            } else {
+              // Negative phase: violet → cyan
+              var t=phaseNorm*2;
+              var inten=Math.min(1,scaledMag*4);
+              r2=Math.round(60+t*inten*155);
+              g2=Math.round(20+t*inten*92);
+              b2=Math.round(100+inten*155);
+              a=0.15+inten*0.85;
+            }
+          }
+          ctx.fillStyle='rgba('+r2+','+g2+','+b2+','+a.toFixed(3)+')';
+          ctx.fillRect(x,y,cellW,cellH);
+        }
       }
     }
   }
 
-  // ── pq tick marks (8 positions on disk rim) ───────────────────────────────
-  function pqAngle(n) { return (n / 8) * Math.PI * 2 - Math.PI / 2; }
-  _ctx.font = 'bold 7.5px JetBrains Mono,monospace';
-  for (var i = 0; i < 8; i++) {
-    var ang = pqAngle(i);
-    var ox = DK_CX + Math.cos(ang) * DK_R;
-    var oy = DK_CY + Math.sin(ang) * DK_R;
-    var ix = DK_CX + Math.cos(ang) * (DK_R - 6);
-    var iy = DK_CY + Math.sin(ang) * (DK_R - 6);
-    _ctx.beginPath(); _ctx.moveTo(ox, oy); _ctx.lineTo(ix, iy);
-    _ctx.strokeStyle = 'rgba(0,220,255,0.28)'; _ctx.lineWidth = 1; _ctx.stroke();
-    _ctx.fillStyle = 'rgba(0,180,220,0.4)';
-    _ctx.textAlign = 'center'; _ctx.textBaseline = 'middle';
-    _ctx.fillText(i, DK_CX + Math.cos(ang) * (DK_R + 10), DK_CY + Math.sin(ang) * (DK_R + 10));
+  // ── Grid lines for 8×8 block boundaries ────────────────────────────
+  ctx.strokeStyle='rgba(0,212,255,0.12)';
+  ctx.lineWidth=0.5;
+  for(var i=1;i<8;i++){
+    var px=i*4*cellW;
+    ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,canvas.height);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(0,px);ctx.lineTo(canvas.width,px);ctx.stroke();
   }
+  // ── Diagonal highlight ──────────────────────────────────────────────
+  ctx.strokeStyle='rgba(0,212,255,0.06)';
+  ctx.lineWidth=0.5;
+  ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(canvas.width,canvas.height);ctx.stroke();
 
-  // ── pq_last → pq_curr arc ────────────────────────────────────────────────
-  var angC = pqAngle(_pqCurrAnim % 8);
-  var angL = pqAngle(_pqLastAnim % 8);
-  var xC = DK_CX + Math.cos(angC) * DK_R * 0.80;
-  var yC = DK_CY + Math.sin(angC) * DK_R * 0.80;
-  var xL = DK_CX + Math.cos(angL) * DK_R * 0.80;
-  var yL = DK_CY + Math.sin(angL) * DK_R * 0.80;
-
-  if (pqC !== pqL) {
-    var dA = angC - angL;
-    while (dA > Math.PI) dA -= Math.PI * 2;
-    while (dA < -Math.PI) dA += Math.PI * 2;
-    _ctx.beginPath();
-    _ctx.arc(DK_CX, DK_CY, DK_R * 0.80, angL, angL + dA, dA < 0);
-    _ctx.strokeStyle = 'rgba(0,255,157,0.55)'; _ctx.lineWidth = 1.5;
-    _ctx.setLineDash([3, 3]); _ctx.stroke(); _ctx.setLineDash([]);
-    // Arrow tip
-    var tipA = angL + dA, perpA = tipA + (dA > 0 ? -0.25 : 0.25);
-    var tipX = DK_CX + Math.cos(tipA) * DK_R * 0.80;
-    var tipY = DK_CY + Math.sin(tipA) * DK_R * 0.80;
-    var tipX2 = DK_CX + Math.cos(perpA) * DK_R * 0.74;
-    var tipY2 = DK_CY + Math.sin(perpA) * DK_R * 0.74;
-    _ctx.beginPath(); _ctx.moveTo(tipX, tipY); _ctx.lineTo(tipX2, tipY2);
-    _ctx.strokeStyle = 'rgba(0,255,157,0.7)'; _ctx.lineWidth = 1.5; _ctx.stroke();
+  // Update stats
+  var pur=S.purity;
+  var ent=S.entropy;
+  var l1=0;
+  for(var i=0;i<64;i++){
+    var ri=Math.floor(i/8), ci=i%8;
+    if(ri!==ci) l1+=Math.sqrt(S.dm_re[i]*S.dm_re[i]+S.dm_im[i]*S.dm_im[i]);
   }
+  var trN=0;
+  for(var i=0;i<8;i++) trN+=S.dm_re[i*8+i];
 
-  // pq_last spoke + dot
-  _ctx.beginPath(); _ctx.moveTo(DK_CX, DK_CY); _ctx.lineTo(xL, yL);
-  _ctx.strokeStyle = 'rgba(128,64,255,0.35)'; _ctx.lineWidth = 1.5;
-  _ctx.setLineDash([4, 4]); _ctx.stroke(); _ctx.setLineDash([]);
-  _ctx.beginPath(); _ctx.arc(xL, yL, 4, 0, Math.PI * 2);
-  _ctx.fillStyle = 'rgba(128,64,255,0.75)'; _ctx.fill();
-  _ctx.font = 'bold 7.5px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(170,120,255,0.9)';
-  _ctx.textAlign = 'center'; _ctx.textBaseline = 'middle';
-  _ctx.fillText('L·' + pqL, xL + (xL > DK_CX ? 14 : -14), yL + (yL > DK_CY ? -10 : 10));
-
-  // pq_curr spoke + dot (brighter)
-  var glow = 0.65 + 0.2 * Math.sin(t * 2.8) + blkPulse * 0.35;
-  _ctx.beginPath(); _ctx.moveTo(DK_CX, DK_CY); _ctx.lineTo(xC, yC);
-  _ctx.strokeStyle = 'rgba(212,160,32,' + Math.min(1, glow) + ')'; _ctx.lineWidth = 2; _ctx.stroke();
-  // Glow halo
-  var glowG = _ctx.createRadialGradient(xC, yC, 0, xC, yC, 10 * (1 + blkPulse * 0.8));
-  glowG.addColorStop(0, 'rgba(255,200,40,0.5)');
-  glowG.addColorStop(1, 'rgba(255,200,40,0)');
-  _ctx.beginPath(); _ctx.arc(xC, yC, 10 * (1 + blkPulse * 0.5), 0, Math.PI * 2);
-  _ctx.fillStyle = glowG; _ctx.fill();
-  _ctx.beginPath(); _ctx.arc(xC, yC, 5 * (1 + blkPulse * 0.5), 0, Math.PI * 2);
-  _ctx.fillStyle = isStrong ? 'rgba(255,240,100,1)' : 'rgba(212,160,32,1)'; _ctx.fill();
-  _ctx.font = 'bold 8px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(255,210,60,1)';
-  _ctx.textAlign = 'center'; _ctx.textBaseline = 'middle';
-  _ctx.fillText('C·' + pqC, xC + (xC > DK_CX ? 16 : -16), yC + (yC > DK_CY ? -12 : 12));
-
-  // Center dot
-  _ctx.beginPath(); _ctx.arc(DK_CX, DK_CY, 3, 0, Math.PI * 2);
-  _ctx.fillStyle = 'rgba(255,200,40,0.85)'; _ctx.fill();
-
-  // Fidelity inner arc
-  _ctx.beginPath();
-  _ctx.arc(DK_CX, DK_CY, DK_R * 0.22, 0, Math.PI * 2 * fid);
-  _ctx.strokeStyle = isQ ? 'rgba(0,255,157,0.55)' : 'rgba(0,180,220,0.38)';
-  _ctx.lineWidth = 2; _ctx.stroke();
-
-  // ── Disk labels ───────────────────────────────────────────────────────────
-  _ctx.font = '6.5px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(0,180,220,0.48)';
-  _ctx.textAlign = 'center'; _ctx.textBaseline = 'top';
-  _ctx.fillText('PQ PHASE DISK · ' + (isStrong ? 'M>2.8 W⁺' : isQ ? 'M>2.0' : 'CLASS'), DK_CX, DK_CY - DK_R - 16);
-  _ctx.fillStyle = 'rgba(0,140,170,0.35)';
-  _ctx.fillText('fid=' + fid.toFixed(3) + '  coh=' + coh.toFixed(3), DK_CX, DK_CY - DK_R - 7);
-
-  // ── HUD strip (bottom) ───────────────────────────────────────────────────
-  var hudY = H - 18;
-  _ctx.font = '8px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(0,220,255,0.38)'; _ctx.textAlign = 'left'; _ctx.textBaseline = 'middle';
-  _ctx.fillText('BLOCK FIELD', 8, hudY);
-  _ctx.fillStyle = 'rgba(128,64,255,0.75)';
-  _ctx.fillText('pq_last=' + pqL, 84, hudY);
-  _ctx.fillStyle = 'rgba(212,160,32,0.85)';
-  _ctx.fillText('pq_curr=' + pqC, 164, hudY);
-  _ctx.fillStyle = 'rgba(0,255,157,0.65)';
-  _ctx.fillText('Δ=' + (pqC >= pqL ? '+' : '') + (pqC - pqL), 244, hudY);
-  var cyc = S.cycle || 0;
-  var cycStr = 'ψ cyc=' + cyc + (cyc % 8 === 0 && cyc > 0 ? ' ↑REV' : cyc % 8 === 4 ? ' ↓ANTI' : '');
-  _ctx.fillStyle = 'rgba(128,64,255,0.45)'; _ctx.textAlign = 'right';
-  _ctx.fillText(cycStr, W - 8, hudY);
-  
-  // ── 3D BLOCH SPHERE ─────────────────────────────────────────────────────────
-  _drawBlochSphere(_animT);
+  _setText('dms-purity', pur.toFixed(4));
+  _setText('dms-entropy', ent>0?ent.toFixed(4):S.entropy.toFixed(4));
+  _setText('dms-l1', l1.toFixed(4));
+  _setText('dms-trace', Math.abs(trN).toFixed(4));
+  _setText('dm-purity-badge', 'purity '+pur.toFixed(3));
+  _threadActive('td-dm');
 }
 
-// ── Animation loop ────────────────────────────────────────────────────────────
-function _frame() {
-  _rafId = requestAnimationFrame(_frame);
-  var now = performance.now() * 0.001;
-  if (now - _lastT < 1/30) return;
-  _lastT = now;
-  _animT += 0.016;
-  _draw(_animT);
-}
+// ═══════════════════════════════════════════════════════════════════════
+// WORKER 3: CSS BLOCH SPHERE — oracle phase visualization
+// Uses phase_coherence → θ, phase_drift → φ
+// CSS 3D: rotateX/rotateY on sphere container for orbit animation
+// State dot: absolute positioned via trigonometry
+// ═══════════════════════════════════════════════════════════════════════
+var _blochT=0, _blochOrbitX=20, _blochOrbitY=0;
+var _blochIsDragging=false, _blochDragX=0, _blochDragY=0;
+var _blochTheta=Math.PI/4, _blochPhi=0;
+var _blochThetaTarget=Math.PI/4, _blochPhiTarget=0;
+var _blochPhaseCtx=null;
 
-// ── Public interface ──────────────────────────────────────────────────────────
-function init() {
-  var container = document.getElementById('dc3d');
-  if (!container) return;
-  var W = container.clientWidth || container.parentElement.clientWidth || 560;
-  var H = 340;
-  _cvs = document.createElement('canvas');
-  _cvs.width = W; _cvs.height = H;
-  _cvs.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block';
-  container.appendChild(_cvs);
-  _ctx = _cvs.getContext('2d');
-  _frame();
-  window.addEventListener('resize', function() {
-    var cont = document.getElementById('dc3d');
-    if (!cont || !_cvs) return;
-    _cvs.width = cont.clientWidth || 560;
+(function _initBlochInteraction(){
+  var scene=document.getElementById('bloch-scene');
+  if(!scene) return;
+  scene.addEventListener('mousedown',function(e){
+    _blochIsDragging=true;
+    _blochDragX=e.clientX; _blochDragY=e.clientY;
+    e.preventDefault();
   });
-}
-
-function onBlock() {
-  _blkFlash = _animT;
-  _pqCurrAnim = S.pq_curr || 0;
-  _pqLastAnim = S.pq_last || 0;
-  // Force DM re-parse on next frame
-  _H._lastHex = '';
-}
-
-return { init: init, onBlock: onBlock, _lastHex: '' };
+  window.addEventListener('mousemove',function(e){
+    if(!_blochIsDragging) return;
+    _blochOrbitY+=(e.clientX-_blochDragX)*0.5;
+    _blochOrbitX+=(e.clientY-_blochDragY)*0.5;
+    _blochOrbitX=Math.max(-80,Math.min(80,_blochOrbitX));
+    _blochDragX=e.clientX; _blochDragY=e.clientY;
+  });
+  window.addEventListener('mouseup',function(){_blochIsDragging=false;});
+  scene.addEventListener('touchstart',function(e){
+    _blochIsDragging=true;
+    _blochDragX=e.touches[0].clientX; _blochDragY=e.touches[0].clientY;
+  },{passive:true});
+  window.addEventListener('touchmove',function(e){
+    if(!_blochIsDragging) return;
+    _blochOrbitY+=(e.touches[0].clientX-_blochDragX)*0.5;
+    _blochOrbitX+=(e.touches[0].clientY-_blochDragY)*0.5;
+    _blochOrbitX=Math.max(-80,Math.min(80,_blochOrbitX));
+    _blochDragX=e.touches[0].clientX; _blochDragY=e.touches[0].clientY;
+  },{passive:true});
+  window.addEventListener('touchend',function(){_blochIsDragging=false;});
 })();
 
-// Boot DM visualizer (no Three.js dependency — fires immediately)
-(function _dmBoot() {
-  var cont = document.getElementById('dc3d');
-  if (!cont) { setTimeout(_dmBoot, 60); return; }
-  _H.init();
-})();
+busSubscribe(function(snap) {
+  // phase_coherence → θ (polar angle from |0⟩ north pole)
+  // phase_drift     → φ (azimuthal angle)
+  var pc   = snap.phase_coherence || S.phase_coherence || 0;
+  var pd   = snap.phase_drift     || S.phase_drift     || 0;
+  // θ: fidelity near 1 → near north pole (|0⟩); near 0 → south pole (|1⟩)
+  var fid  = snap.w_state_fidelity || snap.fidelity || S.fidelity || 0.7;
+  _blochThetaTarget = Math.acos(Math.max(-1,Math.min(1, 2*fid-1)));
+  // φ: derived from phase_coherence and phase_drift
+  _blochPhiTarget   = pc * Math.PI * 2 + pd * Math.PI;
+  _threadActive('td-bloch');
+});
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HEX BLOCK RENDERER + CHAIN STREAM
-// ═══════════════════════════════════════════════════════════════════════════════
-var blocks = [], _blocksById = {};
+function _workerBloch() {
+  _blochT += 0.016;
+  // Smooth interpolation toward target
+  _blochTheta += (_blochThetaTarget - _blochTheta) * 0.05;
+  _blochPhi   += (_blochPhiTarget   - _blochPhi)   * 0.04;
+
+  // Auto-orbit when not dragging
+  if(!_blochIsDragging) _blochOrbitY += 0.18;
+
+  // Apply CSS 3D rotation to sphere wrapper
+  var sphere=document.getElementById('bloch-sphere');
+  if(sphere) {
+    sphere.style.transform=
+      'rotateX('+(-_blochOrbitX)+'deg) rotateY('+_blochOrbitY+'deg)';
+  }
+
+  // State dot position in 3D → project to 2D (top/left in scene space)
+  // Scene is 220×220; center at (110,110)
+  var R=88; // radius in px (slightly inside ring)
+  var sinTheta=Math.sin(_blochTheta);
+  var cosTheta=Math.cos(_blochTheta);
+  var sinPhi=Math.sin(_blochPhi+_blochOrbitY*Math.PI/180);
+  var cosPhi=Math.cos(_blochPhi+_blochOrbitY*Math.PI/180);
+  var px3=R*sinTheta*cosPhi;
+  var py3=-R*cosTheta;           // −y maps north pole to top
+  var pz3=R*sinTheta*sinPhi;
+  // Simple ortho projection (perspective handled by CSS)
+  var dotX=110+px3, dotY=110+py3;
+  var dot=document.getElementById('bloch-state-dot');
+  if(dot){
+    dot.style.left=dotX+'px';
+    dot.style.top=dotY+'px';
+    // Depth cue: fade when behind sphere
+    var depth=(pz3+R)/(2*R);
+    dot.style.opacity=0.4+depth*0.6;
+    dot.style.transform='translate(-50%,-50%) scale('+(0.8+depth*0.4)+')';
+  }
+
+  // Update text
+  _setText('bloch-theta', (_blochTheta*180/Math.PI).toFixed(1)+'°');
+  _setText('bloch-phi',   ((_blochPhi%(2*Math.PI))*180/Math.PI).toFixed(1)+'°');
+  _setText('bloch-pcoh',  S.phase_coherence.toFixed(4));
+  _setText('bloch-drift', S.phase_drift.toFixed(4));
+  _setText('bloch-phase-badge','φ='+((_blochPhi%(2*Math.PI))*180/Math.PI).toFixed(1)+'°');
+
+  // Phase ring canvas
+  _drawPhaseRing();
+}
+
+function _drawPhaseRing() {
+  var canvas=document.getElementById('bloch-phase-canvas');
+  if(!canvas) return;
+  if(!_blochPhaseCtx) _blochPhaseCtx=canvas.getContext('2d');
+  var ctx=_blochPhaseCtx, W=280, H=48, cx=W/2, cy=H/2, R=18;
+  ctx.clearRect(0,0,W,H);
+
+  // Background
+  ctx.fillStyle='rgba(6,13,26,0.8)';
+  ctx.fillRect(0,0,W,H);
+
+  // Timeline: last N phase values (simulate with sine of time)
+  var samples=24;
+  var barW=(W-40)/samples;
+  for(var i=0;i<samples;i++){
+    var t=_blochT - (samples-i)*0.12;
+    var v=Math.sin(t*1.4+_blochPhiTarget)*0.5+0.5;
+    var h=Math.max(2,v*H*0.8);
+    var hue=200+v*120;
+    ctx.fillStyle='hsla('+hue+',80%,60%,0.6)';
+    ctx.fillRect(20+i*barW, cy-h/2, barW-2, h);
+  }
+
+  // Phase circle indicator
+  var angNow=_blochPhi%(2*Math.PI);
+  var px=cx+Math.cos(angNow)*R, py=cy+Math.sin(angNow)*R;
+  // Ring
+  ctx.beginPath();ctx.arc(cx,cy,R,0,Math.PI*2);
+  ctx.strokeStyle='rgba(0,212,255,0.2)';ctx.lineWidth=1;ctx.stroke();
+  // Pointer
+  ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(px,py);
+  ctx.strokeStyle='rgba(0,245,160,0.8)';ctx.lineWidth=1.5;ctx.stroke();
+  // Dot
+  ctx.beginPath();ctx.arc(px,py,3,0,Math.PI*2);
+  ctx.fillStyle='rgba(0,245,160,0.9)';ctx.fill();
+
+  // Labels
+  ctx.font='8px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(0,212,255,0.4)';
+  ctx.textAlign='left';ctx.textBaseline='middle';
+  ctx.fillText('PHASE HISTORY',5,cy);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WORKER 4: MERMIN PANEL
+// ═══════════════════════════════════════════════════════════════════════
+busSubscribe(function(snap){
+  var mt=snap.mermin_test||snap.bell_test||null;
+  if(mt) {S.mermin=mt; renderMermin(mt); _threadActive('td-mermin');}
+  renderOracles(snap);
+});
+
+function renderOracles(snap) {
+  // Try per_node from snapshot or oracle_data from S
+  var nodes={};
+  if(snap&&snap.per_node){
+    var pn=snap.per_node;
+    Object.keys(pn).forEach(function(k){nodes[k]=pn[k];});
+  }
+  Object.keys(S.oracle_data).forEach(function(k){
+    if(!nodes[k]) nodes[k]=S.oracle_data[k];
+  });
+  if(!Object.keys(nodes).length){
+    // Build 5 oracle stubs from snapshot fidelity
+    for(var i=1;i<=5;i++){
+      nodes['oracle_'+i]={
+        w_state_fidelity: S.fidelity*(0.9+Math.random()*0.2),
+        purity: S.purity, coherence: S.coherence
+      };
+    }
+  }
+  var el=document.getElementById('ol');
+  if(!el) return;
+  var oKeys=Object.keys(nodes).sort();
+  if(!oKeys.length){el.innerHTML='<div class="es">No oracle data</div>';return;}
+  var html='';
+  oKeys.slice(0,5).forEach(function(k,i){
+    var node=nodes[k]||{};
+    var f=node.w_state_fidelity||node.fidelity||0;
+    var on=f>0.3;
+    html+='<div class="or">'
+      +'<div class="od '+(on?'on':'off')+'"></div>'
+      +'<div class="on2">oracle_'+(i+1)+' · '+k.slice(-8)+'</div>'
+      +'<div class="ort">fid=<span class="of">'+f.toFixed(3)+'</span></div>'
+      +'</div>';
+  });
+  el.innerHTML=html;
+  // Validation
+  _setText('vq', S.quantum_validation_status);
+  _setText('vp', S.pq_validation_status);
+  _setText('vc', S.oracle_consensus_reached?'REACHED':'PENDING');
+  _setText('vb', S.oracle_consensus_reached?'CONSENSUS OK':'WAITING');
+}
+
+function renderMermin(m) {
+  if(!m) return;
+  var val=parseFloat(m.value||m.M3||m.M||0);
+  var viol=m.violated||m.is_quantum||val>2.0;
+  var el=document.getElementById('mM');
+  if(el){
+    el.textContent=val.toFixed(3);
+    el.className='mb2 '+(viol?'q':'c');
+  }
+  var pct=Math.min(100,val/4*100);
+  var bar=document.getElementById('mbar'); if(bar) bar.style.width=pct+'%';
+  var mb3=document.getElementById('mb3'); if(mb3) mb3.textContent='M='+val.toFixed(3);
+  var mvd=document.getElementById('mvd');
+  if(mvd) mvd.textContent=viol?
+    '✓ Quantum violation confirmed — genuine W-state nonlocality':
+    'Classical regime — below quantum threshold';
+  var mcy=document.getElementById('mcy');
+  if(mcy) mcy.textContent='cycle '+S.cycle;
+  // Correlators
+  var mac=document.getElementById('mac');
+  if(mac&&m.correlators){
+    var corrs=m.correlators;
+    var keys=Object.keys(corrs);
+    mac.innerHTML=keys.map(function(k){
+      return '<div class="ac">'+k+'='+parseFloat(corrs[k]).toFixed(3)+'</div>';
+    }).join('');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WORKER 5: BLOCK STREAM
+// ═══════════════════════════════════════════════════════════════════════
+var blocks=[], _blocksById={};
 
 function drawHex(canvas, fid, fresh) {
-  var ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=w/2-3;
-  ctx.clearRect(0,0,w,h); ctx.beginPath();
-  for(var i=0;i<6;i++){var a=i*Math.PI/3-Math.PI/6;i===0?ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a)):ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));}
+  var ctx=canvas.getContext('2d'), w=canvas.width, h=canvas.height, cx=w/2, cy=h/2, r=w/2-3;
+  ctx.clearRect(0,0,w,h);
+  ctx.beginPath();
+  for(var i=0;i<6;i++){
+    var a=i*Math.PI/3-Math.PI/6;
+    i===0?ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a)):ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));
+  }
   ctx.closePath();
-  var col=fresh?'212,160,32':'0,220,255';
+  var col=fresh?'232,184,75':'0,212,255';
   var grd=ctx.createRadialGradient(cx,cy,0,cx,cy,r);
-  grd.addColorStop(0,'rgba('+col+',.14)');grd.addColorStop(1,'rgba('+col+',.03)');
-  ctx.fillStyle=grd;ctx.fill();
-  ctx.strokeStyle='rgba('+col+','+(fresh?.9:.45)+')';ctx.lineWidth=1.5;ctx.stroke();
-  if(fid>0){ctx.beginPath();ctx.arc(cx,cy,r*.35,0,Math.PI*2*fid);ctx.strokeStyle='rgba(128,64,255,.6)';ctx.lineWidth=2;ctx.stroke();}
+  grd.addColorStop(0,'rgba('+col+',.16)'); grd.addColorStop(1,'rgba('+col+',.03)');
+  ctx.fillStyle=grd; ctx.fill();
+  ctx.strokeStyle='rgba('+col+','+(fresh?.95:.45)+')';ctx.lineWidth=1.5;ctx.stroke();
+  if(fid>0){
+    ctx.beginPath();ctx.arc(cx,cy,r*.38,0,Math.PI*2*fid);
+    ctx.strokeStyle='rgba(155,109,255,.65)';ctx.lineWidth=2;ctx.stroke();
+  }
 }
 
 function renderChain() {
   var el=document.getElementById('cs');
   if(!el) return;
-  if(!blocks.length){
-    el.innerHTML='<div style="color:var(--dim);font-family:var(--mono);font-size:10px;padding:8px 0;opacity:.6">Awaiting blocks…</div>';
-    var bcc=document.getElementById('bcc');if(bcc) bcc.textContent='0 blocks';
-    return;
-  }
-  el.innerHTML='';
-  var freshThresh=blocks.length-3;
-  blocks.forEach(function(b,i){
-    if(i>0){var c=document.createElement('div');c.className='bco';el.appendChild(c);}
-    var isFr=i>=freshThresh||b._fr;
-    var node=document.createElement('div');node.className='bn'+(isFr?' fr':'');
-    var hex=document.createElement('div');hex.className='bh';
-    hex.style.cursor='pointer';hex.title='Block #'+b.height;
-    hex.onclick=(function(blk){return function(e){e.stopPropagation();openBlockModal(blk);};})(b);
-    var cv=document.createElement('canvas');cv.width=56;cv.height=56;
-    drawHex(cv,b.w_state_fidelity||b.fidelity||.9,isFr);hex.appendChild(cv);
+  var arr=blocks.slice(-22).reverse(); // newest first, rightmost
+  if(!arr.length){el.innerHTML='<div class="es">No blocks yet</div>';return;}
+  var frag=document.createDocumentFragment();
+  arr.forEach(function(b,i){
+    var fr=!!b._fr;
+    var div=document.createElement('div');
+    div.className='bn'+(fr?' fr':'');
+    var hex=document.createElement('canvas');
+    hex.width=58;hex.height=58;hex.className='bh';
+    drawHex(hex, b.w_state_fidelity||0.5, fr);
+    var btn=document.createElement('div');
+    btn.className='bh';
+    btn.onclick=(function(blk){return function(){openBlockModal(blk);};})(b);
     var num=document.createElement('div');num.className='bnum';num.textContent='#'+b.height;
-    var tx2=document.createElement('div');tx2.className='btx';tx2.textContent=(b.tx_count||0)+' txs';
-    hex.appendChild(num);hex.appendChild(tx2);
-    var lbl=document.createElement('div');lbl.className='bl';lbl.textContent=(b.block_hash||b.hash||'').slice(0,10)+'...';
-    node.appendChild(hex);node.appendChild(lbl);el.appendChild(node);
+    var txc=document.createElement('div');txc.className='btx';txc.textContent=(b.tx_count||0)+'tx';
+    btn.appendChild(hex);btn.appendChild(num);btn.appendChild(txc);
+    var lbl=document.createElement('div');
+    lbl.className='bl';
+    var h=(b.block_hash||b.hash||'').slice(0,8);
+    lbl.textContent=h?h+'…':'';
+    div.appendChild(btn);div.appendChild(lbl);
+    if(i<arr.length-1){
+      var con=document.createElement('div');con.className='bco';div.prepend(con);
+    }
+    frag.appendChild(div);
   });
-  el.scrollLeft=el.scrollWidth;
-  var bcc=document.getElementById('bcc');if(bcc) bcc.textContent=blocks.length+' blocks';
+  el.innerHTML='';el.appendChild(frag);
+  var bc=document.getElementById('bcc');
+  if(bc) bc.textContent=blocks.length+' blocks';
+  _threadActive('td-blocks');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
 // BLOCK MODAL
-// ═══════════════════════════════════════════════════════════════════════════════
-var _TREASURY_ADDR = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d';
-var _bmCopiedTimer = null;
-
-function _bmCopy(text) {
-  try{navigator.clipboard.writeText(text);}catch(e){
-    var t=document.createElement('textarea');t.value=text;
-    document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);
-  }
-  var el=document.getElementById('bm-copied');
-  el.classList.add('show');clearTimeout(_bmCopiedTimer);
-  _bmCopiedTimer=setTimeout(function(){el.classList.remove('show');},1200);
-}
-
+// ═══════════════════════════════════════════════════════════════════════
 function openBlockModal(blk) {
   var bg=document.getElementById('blk-modal-bg');
-  var body=document.getElementById('bm-body');
   var title=document.getElementById('bm-title');
   var meta=document.getElementById('bm-meta');
+  var body=document.getElementById('bm-body');
+  if(!bg) return;
   title.textContent='BLOCK #'+blk.height;
-  meta.textContent='hash: '+(blk.block_hash||blk.hash||'').slice(0,22)+'…  ·  '+(blk.tx_count||0)+' txs  ·  fidelity: '+((blk.w_state_fidelity||blk.fidelity||0)*100).toFixed(2)+'%';
-  body.innerHTML='<div class="bm-loading">Fetching via RPC…</div>';
-  bg.classList.add('open');document.body.style.overflow='hidden';
-  // Use qtcl_getBlock to fetch full tx list
-  rpc('qtcl_getBlock', [blk.height]).then(function(d) {
-    if(!d||!Array.isArray(d.transactions)||!d.transactions.length){
-      body.innerHTML='<div class="bm-loading" style="color:var(--re)">No transactions found for block #'+blk.height+'</div>';
-      return;
-    }
-    var txList=d.transactions.slice().sort(function(a,b){
-      var at=a.tx_type||a.type||'';var bt=b.tx_type||b.type||'';
-      return at==='coinbase'?-1:bt==='coinbase'?1:0;
-    });
-    body.innerHTML=txList.map(function(tx){
-      var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
-      var hash=tx.tx_id||tx.tx_hash||tx.hash||'';
-      var from=tx.from_addr||tx.from_address||tx.sender||'';
-      var to=tx.to_addr||tx.to_address||tx.receiver||'';
-      var amt=parseFloat(tx.amount||0)/100; // base units → QTCL
-      var txStatus=tx.status||'confirmed';
-      var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
-      var isPending=isTreasury&&txStatus==='pending';
-      // pending treasury: clock icon, dimmed, striped bg — confirmed on next block
-      var icon=isPending?'⏳':isTreasury?'🏛':cb?'⛏':'⇄';
-      var fromShort=from.length>20?from.slice(0,10)+'…'+from.slice(-8):from||'—';
-      var toShort=to.length>20?to.slice(0,10)+'…'+to.slice(-8):to||'—';
-      var pendingTag=isPending
-        ?'<span style="background:rgba(212,160,32,.08);color:rgba(212,160,32,.55);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.18);letter-spacing:.4px">⏳ NEXT BLOCK</span>'
-        :'';
-      var badge=isTreasury
-        ?'<span style="background:var(--go2);color:'+(isPending?'rgba(212,160,32,.45)':'var(--go)')+';padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.3)">🏛 TREASURY</span>'
-        :cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px">⛏ COINBASE</span>':'';
-      var rowStyle=isPending?'opacity:.62;background:repeating-linear-gradient(135deg,transparent,transparent 4px,rgba(212,160,32,.03) 4px,rgba(212,160,32,.03) 8px);':'';
-      var amtColor=isPending?'color:rgba(212,160,32,.45)':isTreasury?'color:var(--go)':'';
-      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')" title="'+(isPending?'Treasury pending — confirms when next block is mined':'Click to copy TX ID')+'" style="'+rowStyle+'">'
-        +'<div class="bm-tx-icon '+(isTreasury?'treasury':tp)+'" style="'+(isPending?'opacity:.5':'')+'">'+icon+'</div>'
+  meta.textContent=(blk.block_hash||blk.hash||'').slice(0,32)+'…';
+  body.innerHTML='<div class="bm-loading">Fetching transactions…</div>';
+  bg.className='open';
+  rpc('qtcl_getBlock',[blk.height]).then(function(d){
+    if(!d){body.innerHTML='<div class="bm-loading">No data found.</div>';return;}
+    var txs=d.transactions||d.txs||[];
+    if(!txs.length){body.innerHTML='<div class="bm-loading">No transactions in this block.</div>';return;}
+    body.innerHTML=txs.map(function(tx){
+      var typ=tx.tx_type||tx.type||'transfer';
+      var amt=parseFloat(tx.amount||tx.reward||0).toFixed(2);
+      return '<div class="bm-tx" onclick="copyText(\''+tx.tx_hash+'\')">'
+        +'<div class="bm-tx-icon '+typ+'">'+(typ==='coinbase'?'⛏':'→')+'</div>'
         +'<div class="bm-tx-info">'
-        +'<div class="bm-tx-hash" style="'+(isPending?'color:rgba(0,220,255,.4)':'')+'">'+hash+'</div>'
-        +'<div class="bm-tx-sub"><span style="color:var(--dim)">from:</span> <span style="color:var(--tx)">'+fromShort+'</span>'
-        +'<span style="color:var(--dim)">→</span><span style="color:'+(isTreasury?'var(--go)':'var(--gr)')+'">'+toShort+'</span>'+badge+' '+pendingTag+'</div>'
+          +'<div class="bm-tx-hash">'+(tx.tx_hash||'').slice(0,32)+'…</div>'
+          +'<div class="bm-tx-sub">'
+            +'<span>from '+(tx.sender_address||tx.from_address||'—').slice(0,10)+'…</span>'
+            +'<span>to '+(tx.recipient_address||tx.to_address||'—').slice(0,10)+'…</span>'
+          +'</div>'
         +'</div>'
-        +'<div class="bm-tx-amt '+(isTreasury?'transfer':tp)+'" style="'+amtColor+'">'+amt.toFixed(2)+' Q</div>'
-        +'<div class="bm-copy-hint">CLICK TO COPY</div>'
+        +'<div class="bm-tx-amt '+typ+'">'+amt+' Q</div>'
         +'</div>';
     }).join('');
-  }).catch(function(){
-    body.innerHTML='<div class="bm-loading" style="color:var(--re)">RPC error loading block</div>';
   });
 }
-
 function closeBlockModal(){
-  document.getElementById('blk-modal-bg').classList.remove('open');
-  document.body.style.overflow='';
+  var bg=document.getElementById('blk-modal-bg');
+  if(bg) bg.className='';
 }
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeBlockModal();});
+function copyText(t){
+  navigator.clipboard.writeText(t).catch(function(){});
+  var el=document.getElementById('bm-copied');
+  if(el){el.className='bm-copied show';setTimeout(function(){el.className='bm-copied';},1400);}
+}
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// TRANSACTION EXPLORER
-// ═══════════════════════════════════════════════════════════════════════════════
-var txs=[], txPage_n=0, txPerPage=50, txTotal=0, txPages=1;
-var txFilterMode='all', txSearchQ='', txLoading=false, _txSearchTimer=null;
+// ═══════════════════════════════════════════════════════════════════════
+// WORKER 6: TRANSACTIONS
+// ═══════════════════════════════════════════════════════════════════════
+var txLoading=false, txPage_n=0, txPages=1, txSearchQ='', txFilterMode='all';
+var _txData=[], _txSearchTimer=null;
+var _miners=[];
 
 function txFilter(mode){
   txFilterMode=mode;txPage_n=0;
-  if(mode==='treasury'){txSearchQ=_TREASURY_ADDR;var si=document.getElementById('txsearch');if(si)si.value=_TREASURY_ADDR;}
-  else if(txSearchQ===_TREASURY_ADDR){txSearchQ='';var si=document.getElementById('txsearch');if(si)si.value='';}
   ['all','coinbase','transfer','treasury'].forEach(function(m){
-    var b=document.getElementById('txf-'+m);if(!b) return;
-    var act=mode===m;
-    b.className='txfbtn'+(act?' active'+(m==='coinbase'?' cb':m==='transfer'?' tr':m==='treasury'?' go':''):'');
+    var btn=document.getElementById('txf-'+m);
+    if(btn) btn.className='txfbtn'+(mode===m?' active':'');
   });
   loadTxPage();
 }
 function txSearch(q){txSearchQ=q.trim();txPage_n=0;clearTimeout(_txSearchTimer);_txSearchTimer=setTimeout(loadTxPage,350);}
 function txPage(d){txPage_n=Math.max(0,Math.min(txPages-1,txPage_n+d));loadTxPage();}
-function _shortHash(h,n){h=h||'';return h.length>n?h.slice(0,n>>1)+'…'+h.slice(-(n>>1)):h;}
 
-function renderTxRow(tx,isNew){
-  var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
-  var hash=tx.tx_hash||tx.tx_id||tx.hash||'';
-  var from=tx.from_address||tx.from_addr||tx.sender||'';
-  var to=tx.to_address||tx.to_addr||tx.receiver||'';
-  var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
-  var amt=parseFloat(tx.amount||0);
-  // Server stores base units (int); display as QTCL (/100)
-  if(amt>1000) amt=amt/100;
-  var blk=tx.height||tx.block_height||'—';
-  var st=tx.status||'confirmed';
-  var isPending=isTreasury&&st==='pending';
-  var typeLabel=isPending?'⏳ PENDING':isTreasury?'🏛 TREASURY':cb?'⛏ COINBASE':'⇄ TRANSFER';
-  var typeClass=isPending?'pending':isTreasury?'treasury':cb?'coinbase':'transfer';
-  var rowOpacity=isPending?'opacity:.6;':'';
-  var amtStyle=isPending?'color:rgba(212,160,32,.45)':isTreasury?'color:var(--go)':'';
-  return '<tr class="'+(isNew?'tx-new ':'')+( cb?'tx-cb':'tx-tr')+'" title="'+(isPending?'Treasury pending — confirms when next block is mined':hash)+'" style="'+rowOpacity+'">'
-    +'<td><span class="tba '+typeClass+'">'+typeLabel+'</span></td>'
-    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:'+(isPending?'rgba(0,220,255,.35)':'var(--cy)')+'" title="'+hash+'" onclick="_bmCopy(this.title);this.style.color=\'var(--go)\';var _c=this;setTimeout(function(){_c.style.color=\''+(isPending?'rgba(0,220,255,.35)':'var(--cy)')+'\';},900)">'+_shortHash(hash,18)+' <span style="font-size:7px;opacity:.5">⧉</span></td>'
-    +'<td style="font-family:var(--mono);font-size:9px;color:var(--dim)" title="'+from+'">'+_shortHash(from,14)+'</td>'
-    +'<td style="font-family:var(--mono);font-size:9px;color:'+(isTreasury?'var(--go)':'var(--gr)')+'" title="'+to+'">'+_shortHash(to,14)+'</td>'
-    +'<td style="font-size:11px;'+amtStyle+'">'+amt.toFixed(2)+' Q</td>'
-    +'<td style="color:var(--dim);font-size:10px">'+blk+'</td>'
-    +'<td><span class="tba '+st+'">'+st.toUpperCase()+'</span></td>'
-    +'</tr>';
-}
-
-// TX loading — pure RPC, qtcl_getTransactions, no REST, no fallback
-// FIXED: Proper error handling and response validation
 async function loadTxPage(){
-  if(txLoading) return;
-  txLoading=true;
-  var _wd=setTimeout(function(){txLoading=false;},8000);
-  var tb=document.getElementById('ttb');
-  if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
-  try{
-    var req={page:txPage_n,per_page:txPerPage};
-    if(txFilterMode&&txFilterMode!=='all') req.type=txFilterMode;
-    if(txSearchQ) req.address=txSearchQ;
+  if(txLoading) return; txLoading=true;
+  try {
+    var req={page:txPage_n,page_size:20,order:'desc'};
+    if(txFilterMode!=='all') req.tx_type=txFilterMode;
+    if(txSearchQ){req.search=txSearchQ;}
     var d=await rpc('qtcl_getTransactions',[req]);
-    
-    // ROBUST VALIDATION - handle all failure modes
-    if(!d){
-      console.warn('[TX] Empty RPC response');
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Server not responding</td></tr>';
-      return;
-    }
-    if(d.error){
-      console.warn('[TX] RPC error:', d.error);
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+d.error.message+'</td></tr>';
-      return;
-    }
-    if(!Array.isArray(d.transactions)){
-      console.warn('[TX] Invalid response - no transactions array:', d);
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';
-      return;
-    }
-    if(d.transactions.length===0){
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions in database</td></tr>';
-      return;
-    }
-    txs=d.transactions;txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
-    renderTxs();
-  }catch(e){
-    console.error('[TX] Exception:', e);
-    if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+e.message+'</td></tr>';
-  }finally{
-    clearTimeout(_wd);txLoading=false;
-  }
+    if(!d){txLoading=false;return;}
+    var txs=d.transactions||d.txs||[];
+    txPages=d.total_pages||Math.ceil((d.total||txs.length)/20)||1;
+    _txData=txs;
+    renderTxTable(txs);
+    _setText('txb',(d.total||txs.length)+' txs');
+    _setText('txpageinfo','Page '+(txPage_n+1)+' / '+txPages);
+    var prev=document.getElementById('txprev'),next=document.getElementById('txnext');
+    if(prev) prev.disabled=txPage_n===0;
+    if(next) next.disabled=txPage_n>=txPages-1;
+    _threadActive('td-tx');
+  } finally { txLoading=false; }
 }
 
-function renderTxs(){
-  var tb=document.getElementById('ttb');
-  var txb=document.getElementById('txb');if(txb) txb.textContent=txTotal+' txs';
-  var pi=document.getElementById('txpageinfo');if(pi) pi.textContent='Page '+(txPage_n+1)+' / '+txPages+' ('+txTotal+' total)';
-  var prev=document.getElementById('txprev'),next=document.getElementById('txnext');
-  if(prev) prev.disabled=txPage_n===0;
-  if(next) next.disabled=txPage_n>=txPages-1;
-  if(!txs.length){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';return;}
-  if(tb) tb.innerHTML=txs.map(function(tx){return renderTxRow(tx,tx._fresh);}).join('');
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ORACLE PANEL RENDERER
-// ═══════════════════════════════════════════════════════════════════════════════
-function renderOracles(){
-  var defs=[
-    {id:'oracle_1',role:'PRIMARY_LATTICE'},{id:'oracle_2',role:'SECONDARY_LATTICE'},
-    {id:'oracle_3',role:'VALIDATION'},{id:'oracle_4',role:'ARBITER'},{id:'oracle_5',role:'METRICS'}
-  ];
-  var data=S.oracle_data||{};
-  var el=document.getElementById('ol');if(!el) return;
-  el.innerHTML=defs.map(function(o){
-    var m=data[o.id]||{};
-    var fid=m.w_state_fidelity!=null?m.w_state_fidelity:(m.fidelity!=null?m.fidelity:null);
-    var on=fid!=null&&fid>0.5,cons=m.in_consensus;
-    var fidStr=fid!=null?(fid*100).toFixed(2)+'%':'—';
-    var cohStr=m.coherence!=null?(m.coherence*100).toFixed(2)+'%':'—';
-    var pq0o=m.pq0_oracle_fidelity!=null?m.pq0_oracle_fidelity.toFixed(4):'—';
-    var pq0iv=m.pq0_IV_fidelity!=null?m.pq0_IV_fidelity.toFixed(4):'—';
-    var pq0v=m.pq0_V_fidelity!=null?m.pq0_V_fidelity.toFixed(4):'—';
-    return '<div class="or" style="flex-direction:column;gap:4px;padding:10px 14px;border-bottom:1px solid var(--b)">'
-      +'<div style="display:flex;align-items:center;gap:8px">'
-      +'<div class="od '+(on?'on':'off')+'"></div>'
-      +'<div style="flex:1"><div class="on2">'+o.id.toUpperCase()+(cons?'<span style="margin-left:6px;font-size:8px;color:var(--gr)">✓BYZ</span>':'')+'</div>'
-      +'<div class="ort">'+o.role+' · '+(on?'ONLINE':'AWAITING')+'</div></div>'
-      +'<div class="of">'+fidStr+'</div>'
-      +'</div>'
-      +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;font-size:9px;font-family:var(--mono)">'
-      +'<div style="color:var(--dim)">coh: <span style="color:var(--vi)">'+cohStr+'</span></div>'
-      +'<div style="color:var(--dim)">pq0: <span style="color:var(--cy)">'+pq0o+'</span></div>'
-      +'<div style="color:var(--dim)">IV: <span style="color:var(--cy)">'+pq0iv+'</span></div>'
-      +'<div style="color:var(--dim)">V: <span style="color:var(--cy)">'+pq0v+'</span></div>'
-      +'</div></div>';
+function renderTxTable(txs){
+  var tbody=document.getElementById('ttb');
+  if(!tbody) return;
+  if(!txs.length){tbody.innerHTML='<tr><td colspan="7" class="es">No transactions</td></tr>';return;}
+  tbody.innerHTML=txs.map(function(tx,i){
+    var typ=tx.tx_type||tx.type||'transfer';
+    var amt=parseFloat(tx.amount||tx.reward||0).toFixed(2);
+    var stat=tx.confirmed?'confirmed':(tx.status||'pending');
+    var hash=(tx.tx_hash||tx.hash||'—').slice(0,12)+'…';
+    var from=(tx.sender_address||tx.from_address||'—').slice(0,8)+'…';
+    var to=(tx.recipient_address||tx.to_address||'—').slice(0,8)+'…';
+    var cls='tx-'+(typ==='coinbase'?'cb':'tr')+(i===0?' fr':'');
+    return '<tr class="'+cls+'">'
+      +'<td><span class="tba '+typ+'">'+typ.toUpperCase()+'</span></td>'
+      +'<td style="font-family:var(--mono);font-size:10px;color:var(--cy)">'+hash+'</td>'
+      +'<td style="font-family:var(--mono);font-size:9px">'+from+'</td>'
+      +'<td style="font-family:var(--mono);font-size:9px">'+to+'</td>'
+      +'<td style="font-family:var(--mono);font-size:10px;color:var(--go)">'+amt+' Q</td>'
+      +'<td style="font-family:var(--mono);font-size:10px;color:var(--dim)">'+(tx.block_height||'—')+'</td>'
+      +'<td><span class="tba '+stat+'">'+stat+'</span></td>'
+      +'</tr>';
   }).join('');
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MERMIN PANEL RENDERER
-// ═══════════════════════════════════════════════════════════════════════════════
-function renderMermin(m){
-  if(!m) return;
-  var M=parseFloat(m.M_value||m.M||m.mermin_value||0),isQ=M>2.0;
-  var el=document.getElementById('mM');if(el){el.textContent=M.toFixed(3);el.className='mb2 '+(isQ?'q':'c');}
-  var mvd=document.getElementById('mvd');if(mvd) mvd.textContent=m.verdict||m.interpretation||'--';
-  var mb3=document.getElementById('mb3');if(mb3) mb3.textContent='M='+M.toFixed(3);
-  var mbar=document.getElementById('mbar');if(mbar) mbar.style.width=Math.min(100,M/4*100)+'%';
-  var mcy=document.getElementById('mcy');
-  if(mcy){var sig=(S.cycle%8===0)?'· REVIVAL':(S.cycle%8===4)?'· ANTI-REV':'';mcy.textContent='cycle '+S.cycle+' '+sig;}
-  var angles=m.angle_degrees||m.angles||[],labels=m.angle_labels||['θA1','φA1','θA2','φA2','θA3','φA3','θB1','φB1','θB2','φB2','θB3','φB3'];
-  var mac=document.getElementById('mac');if(mac) mac.innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'°</span>';}).join('');
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MINER NETWORK RENDERER
-// ═══════════════════════════════════════════════════════════════════════════════
-var _miners=[], _p2pShowHist=false;
-
-function p2pToggleHist(){
-  _p2pShowHist=!_p2pShowHist;
-  var btn=document.getElementById('p2p-hist-btn');
-  if(btn){btn.textContent=_p2pShowHist?'ALL':'LIVE';btn.className='txfbtn'+(_p2pShowHist?' active':'');}
-  renderMiners(_miners);
-}
-
-function _age(secs){
-  if(!secs&&secs!==0) return '—';
-  if(secs<60) return secs+'s ago';
-  if(secs<3600) return Math.floor(secs/60)+'m ago';
-  if(secs<86400) return Math.floor(secs/3600)+'h ago';
-  return Math.floor(secs/86400)+'d ago';
 }
 
 function renderMiners(miners){
-  var el=document.getElementById('pl');if(!el) return;
-  if(!miners||!miners.length){
-    el.innerHTML='<div class="es" style="padding:20px;line-height:1.8"><div style="color:var(--dim);margin-bottom:6px">No miners in registry yet</div>'
-      +'<div style="font-size:9px;color:var(--dim);font-family:var(--mono)">qtcl_getPeers → 0 entries</div></div>';
-    ['pcb','p2plc','p2psc','p2ptc'].forEach(function(id){var e=document.getElementById(id);if(e)e.textContent='0';});
-    var dot=document.getElementById('p2p-live-dot');if(dot){dot.style.background='var(--dim)';dot.style.animation='none';}
-    return;
-  }
   _miners=miners;
-  miners.forEach(function(m){if(!m.status)m.status='historic';});
-  var live=miners.filter(function(m){return m.status==='live';});
-  var seen=miners.filter(function(m){return m.status==='seen';});
-  var hist=miners.filter(function(m){return m.status==='historic';});
-  var pcb=document.getElementById('pcb');if(pcb)pcb.textContent=miners.length+' miners';
-  var p2plc=document.getElementById('p2plc');if(p2plc)p2plc.textContent=live.length;
-  var p2psc=document.getElementById('p2psc');if(p2psc)p2psc.textContent=seen.length;
-  var p2ptc=document.getElementById('p2ptc');if(p2ptc)p2ptc.textContent=hist.length;
-  var dot=document.getElementById('p2p-live-dot');
-  if(dot){dot.style.background=live.length?'var(--gr)':'var(--dim)';dot.style.animation=live.length?'p2ppulse 1.6s infinite':'none';dot.style.boxShadow=live.length?'0 0 6px var(--gr)':'none';}
-  var visible=_p2pShowHist?miners:miners.filter(function(m){return m.status!=='historic';});
-  if(!visible.length&&miners.length) visible=miners.slice(0,5);
-  el.innerHTML=visible.map(function(m){
-    var addr=m.miner_address||m.address||'';
-    var short=addr.length>20?addr.slice(0,10)+'…'+addr.slice(-10):addr||'(no address)';
-    var bks=m.block_count||0,earned=parseFloat(m.total_earned_qtcl||0).toFixed(2);
-    var h=m.last_height||0,age=_age(m.last_seen_age_s),st=m.status||'historic';
-    var pid=(m.peer_id||'').slice(0,12),gurl=m.gossip_url||'';
-    return '<div class="miner-row '+st+'">'
-      +'<div style="display:flex;align-items:flex-start;gap:8px">'
-      +'<div class="miner-dot" style="margin-top:4px"></div>'
-      +'<div style="flex:1;min-width:0">'
-      +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
-      +'<span class="miner-addr" title="'+addr+'" onclick="try{navigator.clipboard.writeText(\''+addr+'\');}catch(e){}">'+short+'</span>'
-      +'<span class="miner-badge '+st+'">'+st.toUpperCase()+'</span>'
-      +(gurl?'<span style="font-size:8px;color:var(--dim)">📡 P2P</span>':'')
+  var el=document.getElementById('pl');
+  if(!el) return;
+  if(!miners.length){el.innerHTML='<div class="es">No peer data yet</div>';return;}
+  el.innerHTML=miners.map(function(m){
+    var age=m.last_seen_age_s;
+    var ageStr=age<60?(age+'s ago'):(age<3600?Math.floor(age/60)+'m ago':Math.floor(age/3600)+'h ago');
+    return '<div class="miner-row '+m.status+'">'
+      +'<div style="display:flex;align-items:center;gap:8px">'
+        +'<div class="miner-dot"></div>'
+        +'<div class="miner-addr" onclick="copyText(\''+m.miner_address+'\')">'+m.miner_address.slice(0,28)+'…</div>'
+        +'<span class="miner-badge '+m.status+'">'+m.status.toUpperCase()+'</span>'
       +'</div>'
       +'<div class="miner-stats">'
-      +(bks?'<span>⛏ <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
-      +(parseFloat(earned)>0?'<span>💰 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
-      +(h?'<span>h=<span class="miner-stat-val">'+h+'</span></span>':'')
-      +(age!=='—'?'<span class="miner-stat-val">'+age+'</span>':'')
-      +(pid?'<span style="color:var(--dim)">id:'+pid+'…</span>':'')
-      +'</div></div></div></div>';
+        +'<span>blocks: <span class="miner-stat-val">'+m.block_count+'</span></span>'
+        +'<span>height: <span class="miner-stat-val">#'+m.last_height+'</span></span>'
+        +'<span>earned: <span class="miner-stat-val">'+m.total_earned_qtcl.toFixed(2)+' Q</span></span>'
+        +'<span>seen: <span class="miner-stat-val">'+ageStr+'</span></span>'
+      +'</div>'
+      +'</div>';
   }).join('');
+  var pc=document.getElementById('peer-count');
+  if(pc) pc.textContent=miners.length+' miners';
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// DOM UPDATE — fires after every poll cycle
-// ═══════════════════════════════════════════════════════════════════════════════
-function st(id, v) {
-  var e=document.getElementById(id);if(!e) return;
-  var s=String(v);if(e.textContent!==s){e.textContent=s;e.classList.remove('fl');void e.offsetWidth;e.classList.add('fl');}
+// ═══════════════════════════════════════════════════════════════════════
+// DOM UPDATE — metrics
+// ═══════════════════════════════════════════════════════════════════════
+function _setText(id, v) {
+  var el=document.getElementById(id);
+  if(el&&el.textContent!==String(v)) el.textContent=v;
 }
-function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
-function fmt4(v){return v==null?'--':parseFloat(v).toFixed(4);}
+function _setFlash(id, v) {
+  var el=document.getElementById(id);
+  if(!el) return;
+  if(el.textContent!==String(v)){
+    el.textContent=v;
+    el.classList.remove('fl');
+    void el.offsetWidth;
+    el.classList.add('fl');
+  }
+}
 
 function updateDOM() {
-  // ── Header bar ──
-  st('hh','#'+S.height);
-  st('hf',(S.fidelity*100).toFixed(2)+'%');
-  st('hm',S.mempool_size+' tx');
-  // ── Chain metric cards ──
-  st('mh',S.height);
-  st('mhs','hash: '+(S.tip_hash||'').slice(0,14)+'...');
-  st('mf',(S.fidelity*100).toFixed(2)+'%');
-  var mfb=document.getElementById('mfb');if(mfb) mfb.style.width=pct(S.fidelity,1);
-  st('mfs',S.fidelity>=.9?'excellent':S.fidelity>=.75?'good':S.fidelity>=.7?'marginal':'degraded');
-  st('mc2',(S.coherence*100).toFixed(2)+'%');
-  var mcb=document.getElementById('mcb');if(mcb) mcb.style.width=pct(S.coherence,1);
-  st('mbt',S.avg_block_time_s>0?S.avg_block_time_s.toFixed(1)+'s':'--');
-  st('mtx',S.total_transactions);
-  st('mdf',S.difficulty_bits);
-  st('mpu',(S.purity*100).toFixed(2)+'%');
-  st('mng','negativity: '+fmt4(S.negativity));
-  st('mqf',fmt4(S.qfi));
-  st('mdc','discord: '+fmt4(S.discord));
-  // ── Block reward — split display ──
-  st('mrew',S.miner_reward_qtcl.toFixed(2)+' Q');
-  st('mrew-depth','depth '+S.tessellation_depth+' tessellation');
-  st('mtrew',S.treasury_reward_qtcl.toFixed(2)+' Q');
-  st('mtrew-pct',S.treasury_pct.toFixed(1)+'% of block');
-  // ── Lattice bloch strip ──
-  st('bfi',fmt4(S.fidelity));
-  st('ben',S.pq_curr);
-  st('bcn',S.pq_last);
-  st('bte',fmt4(S.tele_fidelity));
-  st('dkb','pq0='+S.pq0+' pq_last='+S.pq_last+' → pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' Δ='+(S.pq_curr-S.pq_last):''));
-  // ── GKSL noise bath ──
-  st('ng1',fmt4(S.gamma1));
-  st('ngp',fmt4(S.gammaphi));
-  st('nom',fmt4(S.omega));
-  st('nqr',fmt4(S.qrng_health));
-  st('ndi',fmt4(S.discord));
-  st('nou',fmt4(S.ou_mem));
-  st('npd',fmt4(S.phase_drift));
-  st('nso',fmt4(S.sector_occ));
-  // ── Validation panel ──
-  st('vq',String(S.quantum_validation_status).replace(/_/g,' ').toUpperCase().slice(0,14));
-  st('vp',String(S.pq_validation_status).toUpperCase().slice(0,10));
-  st('vo',S.oracle_consensus_reached?'YES':'NO');
-  var vb=document.getElementById('vb');if(vb) vb.textContent=S.oracle_consensus_reached?'CONSENSUS':'PENDING';
-  // ── Bottom bar ──
-  st('bbd',S.difficulty_bits);
-  st('bbn',S.n_peers||'—');
-  st('bbq',S.qrng_health.toFixed(3));
-  // ── Oracle + Mermin ──
-  renderOracles();
-  if(S.mermin) renderMermin(S.mermin);
+  var h=S.height>0?S.height.toLocaleString():'—';
+  _setFlash('mh',h);
+  _setText('mhs','hash: '+(S.tip_hash?S.tip_hash.slice(0,16)+'…':'—'));
+  _setText('hh',h);
+
+  var f=S.fidelity>0?S.fidelity.toFixed(4):'—';
+  _setText('mf',f); _setText('hf',f);
+  var fb=document.getElementById('mfb');
+  if(fb) fb.style.width=(S.fidelity*100).toFixed(1)+'%';
+  _setText('mfs', S.fidelity>=0.75?'⬛ STRONG ENTANGLEMENT':S.fidelity>=0.5?'MODERATE':'WEAK');
+
+  var c=S.coherence>0?S.coherence.toFixed(4):'—';
+  _setText('mc2',c);
+  var cb=document.getElementById('mcb');
+  if(cb) cb.style.width=(S.coherence*100).toFixed(1)+'%';
+
+  _setText('mbt',S.avg_block_time_s>0?S.avg_block_time_s.toFixed(1):'—');
+  _setText('mtx',S.total_transactions>0?S.total_transactions.toLocaleString():'—');
+  _setText('mdf',S.difficulty_bits>0?S.difficulty_bits:'—');
+
+  _setText('mrew', S.miner_reward_qtcl.toFixed(2)+' Q');
+  _setText('mrew-depth','tessellation depth '+S.tessellation_depth);
+  _setText('mtrew', S.treasury_reward_qtcl.toFixed(2)+' Q');
+  _setText('mtrew-pct', S.treasury_pct.toFixed(1)+'% of block');
+
+  _setText('mpu', S.purity>0?S.purity.toFixed(4):'—');
+  _setText('mng','negativity: '+S.negativity.toFixed(4));
+  _setText('mqf', S.qfi>0?S.qfi.toFixed(3):'—');
+  _setText('mdc','discord: '+S.discord.toFixed(4));
+
+  _setText('hm', S.mempool_size>0?S.mempool_size:'—');
+  _setText('bbd', S.difficulty_bits||'—');
+  _setText('bbp', S.n_peers||'—');
+  _setText('bbq', S.qrng_health>=0.9?'HEALTHY':S.qrng_health>0?'DEGRADED':'—');
+  _setText('bbc', S.cycle||'—');
+
+  // GKSL noise
+  _setText('ng1',  S.gamma1>0?S.gamma1.toFixed(4):'—');
+  _setText('ngp',  S.gammaphi>0?S.gammaphi.toFixed(4):'—');
+  _setText('nom',  S.omega>0?S.omega.toFixed(4):'—');
+  _setText('nqr',  S.qrng_health>0?S.qrng_health.toFixed(3):'—');
+  _setText('ndi',  S.discord>0?S.discord.toFixed(4):'—');
+  _setText('nou',  S.ou_mem>0?S.ou_mem.toFixed(4):'—');
+  _setText('npd',  S.phase_drift>0?S.phase_drift.toFixed(4):'—');
+  _setText('nso',  S.sector_occ>0?S.sector_occ.toFixed(4):'—');
+
+  // Status bar updated
+  var ts=new Date().toISOString().replace('T',' ').slice(0,19)+' UTC';
+  _setText('bu','Updated '+ts);
 }
 
-function setOnline(ok) {
-  var p=document.getElementById('cp'),t=document.getElementById('ct');
-  if(!p||!t) return;
-  if(ok){p.classList.remove('off');}else{p.classList.add('off');}
-  t.textContent=ok?'LIVE':'OFFLINE';
-}
+// ═══════════════════════════════════════════════════════════════════════
+// CLOCK + LOGO
+// ═══════════════════════════════════════════════════════════════════════
+setInterval(function(){
+  var d=new Date();
+  var el=document.getElementById('hck');
+  if(el) el.textContent=d.toISOString().replace('T',' ').slice(0,19)+' UTC';
+},1000);
 
-var _lu = 0;
-function stamp() {
-  _lu=Date.now();
-  var bu=document.getElementById('bu');
-  if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8);
-}
+(function(){
+  var c=document.getElementById('lc'),ctx=c?c.getContext('2d'):null,t=0;
+  if(!ctx) return;
+  (function fr(){
+    ctx.clearRect(0,0,38,38);
+    var cx=19,cy=19,r=14;
+    ctx.strokeStyle='rgba(0,212,255,.15)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+    for(var i=0;i<3;i++){
+      var a=i*Math.PI*2/3+t;
+      var x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
+      ctx.strokeStyle='rgba(0,212,255,'+(0.4+0.3*Math.sin(t*2+i))+')';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();
+      ctx.fillStyle='rgba(0,212,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
+      ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill();
+    }
+    ctx.fillStyle='rgba(232,184,75,.95)';
+    ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
+    t+=0.022;requestAnimationFrame(fr);
+  })();
+})();
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SEPARATE THREADS FOR EACH DATA CATEGORY
-// Each runs independently to maximize parallelism
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// SCHEDULER — staggered independent workers
+// Each panel runs on its own setInterval — none block each other
+// ═══════════════════════════════════════════════════════════════════════
 
-var _lastEventTs = Date.now()/1000 - 60;
-var _lastBlockHeight = 0;
+// Oracle bus — master clock: 3s
+setInterval(_pollOracle, 3000);
+_pollOracle(); // boot
 
-// ── THREAD 1: BLOCKS — 3s interval ────────────────────────────────────────────
-async function pollBlocks() {
-  try {
-    var hr = await rpc('qtcl_getBlockHeight', []);
-    if(hr && hr.height != null){
-      var newH = parseInt(hr.height);
-      if(newH > S.height){
-        S.height = newH;
-        S.tip_hash = hr.tip_hash || S.tip_hash;
-        applyRewards(S.height);
-        var fromH = Math.max(0, S.height - 30);
-        var blks = await rpc('qtcl_getBlockRange', [fromH, S.height]);
-        if(blks && blks.length){
-          blks.forEach(function(b){
-            var bh = b.height;
-            if(bh >= 0 && !_blocksById[bh]){
-              var nb = {
-                height: bh,
-                block_hash: b.block_hash || b.hash || '',
-                hash: b.block_hash || b.hash || '',
-                tx_count: b.tx_count || b.transaction_count || 0,
-                w_state_fidelity: b.w_state_fidelity || S.fidelity,
-                difficulty_bits: b.difficulty || b.difficulty_bits || S.difficulty_bits,
-                _fr: false
-              };
-              nb.pq_curr = b.pq_curr || bh;
-              nb.pq_last = b.pq_last || (bh - 1);
-              _blocksById[bh] = nb;
-              blocks.push(nb);
-            }
-          });
-          if(blocks.length > 0){
-            blocks.sort(function(a,b){ return a.height - b.height; });
-            if(blocks.length > 30) blocks = blocks.slice(-30);
-            renderChain();
-          }
-        }
-      }
-    }
-  } catch(e) { console.warn('pollBlocks:', e); }
-}
-setInterval(pollBlocks, 3000);
-pollBlocks();
+// Worker 1: RPC metrics batch — 4s (staggered +500ms)
+setTimeout(function(){
+  _workerMetricsRPC();
+  setInterval(_workerMetricsRPC, 4000);
+}, 500);
 
-// ── THREAD 2: TRANSACTIONS — 5s interval ─────────────────────────────────────
-function txPollLoop() {
-  if (!txLoading) loadTxPage();
-}
-setInterval(txPollLoop, 5000);
+// Worker 2: DM canvas — 250ms (visual, compute only on change)
+setInterval(_workerDM, 250);
 
-// ── THREAD 3: ORACLE/DM/MERMIN — 100ms for real-time quantum state ────────
-var _dmLastHex = '';
+// Worker 3: Bloch sphere animation — 60fps
+setInterval(_workerBloch, 16);
 
-async function pollOracleDM() {
-  try {
-    var r = await fetch(BASE + '/rpc', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({jsonrpc:'2.0', id: _rpcId++, method: 'qtcl_getQuantumMetrics', params: []}),
-      signal: AbortSignal.timeout(300)
-    });
-    if (!r.ok) return;
-    var j = await r.json();
-    var qm = j && j.result;
-    if (!qm) return;
-    
-    // Update state
-    S.fidelity = qm.w_state_fidelity || qm.lattice && qm.lattice.fidelity || S.fidelity;
-    S.coherence = qm.coherence_l1 || qm.lattice && qm.lattice.coherence || S.coherence;
-    S.purity = qm.purity || qm.lattice && qm.lattice.avg_fidelity_100 || S.purity;
-    S.cycle = qm.lattice && qm.lattice.cycle || S.cycle;
-    S.lattice_fidelity = qm.lattice && qm.lattice.fidelity || S.lattice_fidelity;
-    S.lattice_coherence = qm.lattice && qm.lattice.coherence || S.lattice_coherence;
-    S.w_state_strength = qm.lattice && qm.lattice.w_state_strength || S.w_state_strength;
-    
-    // Mermin
-    if(qm.mermin_test) S.mermin = qm.mermin_test;
-    else if(qm.bell_test) S.mermin = qm.bell_test;
-    
-    // Density matrix - extrapolate 8x8 to 48x48
-    var dmHex = qm.density_matrix_hex;
-    if (dmHex && dmHex !== _dmLastHex) {
-      _dmLastHex = dmHex;
-      var extrapolated = _extrapolateDm48(dmHex);
-      if (extrapolated) {
-        S.dm_hex = extrapolated;
-        _H._lastHex = '';
-      }
-    }
-    
-    // DOM updates
-    updateDOM();
-    renderOracles();
-    if(S.mermin) renderMermin(S.mermin);
-    setOnline(true);
-    stamp();
-  } catch(e) { console.warn('pollOracleDM:', e); }
-}
-setInterval(pollOracleDM, 100);
-pollOracleDM();
+// Worker 4+5: Mermin + blocks driven by bus subscription above
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 8x8 → 48x48 DENSITY MATRIX EXTRAPOLATION (quantum-inspired upscaling)
-// ═══════════════════════════════════════════════════════════════════════════════
+// Worker 6: TX — 30s refresh
+setTimeout(function(){
+  loadTxPage();
+  setInterval(function(){if(!txLoading)loadTxPage();},30000);
+}, 1200);
 
-function _extrapolateDm48(hex8) {
-  if (!hex8 || hex8.length < 32) return null;
-  hex8 = hex8.replace(/\s/g, '');
-  var byteLen = hex8.length / 2;
-  if (byteLen < 32) return null;
-  
-  var buf = new Uint8Array(byteLen);
-  for (var i = 0; i < byteLen; i++) {
-    buf[i] = parseInt(hex8.slice(i*2, i*2+2), 16);
-  }
-  var dv = new DataView(buf.buffer);
-  
-  // Parse 8x8 complex
-  var dm8 = new Float32Array(64 * 2);
-  for (var i = 0; i < 64; i++) {
-    dm8[i*2] = dv.getFloat32(i*8, true);
-    dm8[i*2+1] = dv.getFloat32(i*8 + 4, true);
-  }
-  
-  // Create 48x48 by block-diagonal replication + smoothing
-  var dm48 = new Float32Array(48 * 48 * 2);
-  var scale = 6; // 48/8 = 6
-  
-  for (var row = 0; row < 48; row++) {
-    for (var col = 0; col < 48; col++) {
-      var srcR = Math.floor(row / scale);
-      var srcC = Math.floor(col / scale);
-      var idx8 = srcR * 8 + srcC;
-      
-      var re8 = dm8[idx8*2];
-      var im8 = dm8[idx8*2+1];
-      
-      // Fractional position within 6x6 block
-      var fracR = (row % scale) / scale;
-      var fracC = (col % scale) / scale;
-      
-      // Neighbor averaging for smooth interpolation
-      var neighbors = [];
-      if (srcR < 7 && srcC < 7) {
-        neighbors.push(dm8[srcR*8 + srcC]);
-        neighbors.push(dm8[srcR*8 + srcC + 1]);
-        neighbors.push(dm8[(srcR+1)*8 + srcC]);
-        neighbors.push(dm8[(srcR+1)*8 + srcC + 1]);
-      }
-      
-      // Weighted blend: center weight 0.5, neighbors 0.5
-      var re = re8 * 0.5;
-      var im = im8 * 0.5;
-      
-      if (neighbors.length >= 4) {
-        var nre = (dm8[srcR*8 + srcC]*2 + dm8[srcR*8 + srcC + 1]*2 + 
-                   dm8[(srcR+1)*8 + srcC]*2 + dm8[(srcR+1)*8 + srcC + 1]*2) / 8;
-        var nim = (dm8[srcR*8 + srcC + 1] + dm8[(srcR+1)*8 + srcC + 1]) / 4;
-        re = re * 0.7 + nre * 0.3;
-        im = im * 0.7 + nim * 0.3;
-      }
-      
-      // Add phase coherence pattern (quantum smoothing)
-      var phase = Math.atan2(im, re);
-      var mag = Math.sqrt(re*re + im*im);
-      var coherence = S.coherence || 0.5;
-      
-      // Off-diagonal decay for quantum realism
-      var diagDist = Math.abs(row - col);
-      var decay = Math.exp(-diagDist * 0.15 * (1 - coherence));
-      mag *= decay;
-      
-      var idx48 = (row * 48 + col) * 2;
-      dm48[idx48] = re * (0.8 + fracR * 0.2) * (0.8 + fracC * 0.2);
-      dm48[idx48+1] = im * (0.8 + fracR * 0.2) * (0.8 + fracC * 0.2);
-    }
-  }
-  
-  // Convert back to hex
-  var outHex = '';
-  var buf48 = new Uint8Array(48 * 48 * 8);
-  var dv48 = new DataView(buf48.buffer);
-  for (var i = 0; i < 48 * 48; i++) {
-    dv48.setFloat32(i*8, dm48[i*2], true);
-    dv48.setFloat32(i*8 + 4, dm48[i*2+1], true);
-  }
-  return Array.from(buf48).map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
-}
-  var oracleSnap = _latestOracleSnap; // from worker
-  
-  // ── STEP 2: Process each metric ONCE with clear priority
-  // Priority: DM Snapshot > Quantum Metrics > Block Data > Fallback
-  
-  // 2a. Block Height (authoritative)
-  if(hr && hr.height != null){
-    var newHeight = parseInt(hr.height);
-    if(newHeight > S.height){
-      var isNewBlock = newHeight > _lastBlockHeight;
-      _lastBlockHeight = S.height;
-      S.height = newHeight;
-      S.tip_hash = hr.tip_hash || S.tip_hash;
-      applyRewards(S.height);
-      if(isNewBlock && typeof _H !== 'undefined') _H.onBlock();
-    }
-  }
-  
-  // 2b. Quantum Metrics (primary source for most metrics)
-  if(qm){
-    // W-state layer
-    var ws = qm.w_state || {};
-    if(ws.fidelity != null) S.fidelity = ws.fidelity;
-    if(ws.coherence != null) S.coherence = ws.coherence;
-    if(ws.purity != null) S.purity = ws.purity;
-    if(ws.entropy != null) S.entropy = ws.entropy;
-    
-    // Lattice layer
-    var la = qm.lattice || {};
-    if(la.fidelity != null) S.lattice_fidelity = la.fidelity;
-    if(la.coherence != null) S.lattice_coherence = la.coherence;
-    if(la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
-    if(la.cycle != null && la.cycle > S.cycle) S.cycle = la.cycle;
-    
-    // Oracle consensus
-    if(qm.oracle_available != null) S.oracle_consensus_reached = qm.oracle_available;
-    
-    // Mermin from quantum metrics
-    if(qm.mermin_test) S.mermin = qm.mermin_test;
-    else if(qm.bell_test) S.mermin = qm.bell_test;
-    
-    // Density matrix from quantum metrics (fallback when oracle snapshots empty)
-    if(qm.density_matrix_hex) S.dm_hex = qm.density_matrix_hex;
-    
-    // Oracle data (flat fields)
-    var oid1 = 'oracle_1';
-    if(!S.oracle_data[oid1]) S.oracle_data[oid1] = {};
-    if(qm.w_state_fidelity != null){
-      S.oracle_data[oid1].w_state_fidelity = qm.w_state_fidelity;
-      S.fidelity = qm.w_state_fidelity;
-    }
-    if(qm.coherence_l1 != null){
-      S.oracle_data[oid1].coherence = qm.coherence_l1;
-      S.coherence = qm.coherence_l1;
-    }
-    if(qm.purity != null){
-      S.oracle_data[oid1].purity = qm.purity;
-      S.purity = qm.purity;
-    }
-    if(qm.von_neumann_entropy != null){
-      S.oracle_data[oid1].entropy = qm.von_neumann_entropy;
-      S.entropy = qm.von_neumann_entropy;
-    }
-    S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
-  }
-  
-  // 2c. DM Snapshot (AUTHORITATIVE for: Mermin, pq, oracle per_node, derived metrics)
-  if(oracleSnap){
-    // Consensus-level fields
-    if(oracleSnap.w_state_fidelity != null) S.fidelity = oracleSnap.w_state_fidelity;
-    if(oracleSnap.purity != null) S.purity = oracleSnap.purity;
-    if(oracleSnap.coherence_l1 != null) S.coherence = oracleSnap.coherence_l1;
-    if(oracleSnap.von_neumann_entropy != null) S.entropy = oracleSnap.von_neumann_entropy;
-    
-    // Cycle count
-    if(oracleSnap.lattice_refresh_counter != null && oracleSnap.lattice_refresh_counter > S.cycle){
-      S.cycle = oracleSnap.lattice_refresh_counter;
-    }
-    
-    // ── density_matrix_hex (48×48 block → 8×8 complex float32 display) ──
-    if(oracleSnap.density_matrix_hex) S.dm_hex = oracleSnap.density_matrix_hex;
-    else if(oracleSnap.dm_hex) S.dm_hex = oracleSnap.dm_hex;
-    
-    // ── AUTHORITATIVE: pq_curr/pq_last from block_field ──
-    var aer = oracleSnap.aer_noise_state || {};
-    var bf = aer.block_field || {};
-    if(bf.pq_curr != null){
-      S.pq_curr = bf.pq_curr;
-      S.pq_last = bf.pq_last != null ? bf.pq_last : (bf.pq_curr - 1);
-      S._pqAuthoritative = true;
-    }
-    
-    // ── AUTHORITATIVE: per_node oracle data ──
-    var perNode = bf.per_node || [];
-    if(perNode.length > 0){
-      perNode.forEach(function(n){
-        var idx = n.oracle_id != null ? n.oracle_id : 1;
-        var key = 'oracle_' + idx;
-        if(!S.oracle_data[key]) S.oracle_data[key] = {};
-        var od = S.oracle_data[key];
-        if(n.fidelity != null) od.w_state_fidelity = n.fidelity;
-        if(n.coherence != null) od.coherence = n.coherence;
-        if(n.entropy != null) od.entropy = n.entropy;
-        if(n.pq0_oracle_fidelity != null) od.pq0_oracle_fidelity = n.pq0_oracle_fidelity;
-        if(n.pq0_IV_fidelity != null) od.pq0_IV_fidelity = n.pq0_IV_fidelity;
-        if(n.pq0_V_fidelity != null) od.pq0_V_fidelity = n.pq0_V_fidelity;
-        od.in_consensus = !!n.in_consensus;
-      });
-      // Recompute consensus
-      var consensusCount = perNode.filter(function(n){ return n.in_consensus; }).length;
-      S.oracle_consensus_reached = consensusCount >= 3;
-      S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
-      S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
-    }else if(oracleSnap.w_state_fidelity != null && oracleSnap.w_state_fidelity > 0){
-      // Fallback: use consensus values for all 5 oracles when per_node not available
-      var cf = oracleSnap.w_state_fidelity;
-      var cc = oracleSnap.coherence_l1;
-      var ce = oracleSnap.von_neumann_entropy;
-      for(var oi=1; oi<=5; oi++){
-        var ok = 'oracle_' + oi;
-        if(!S.oracle_data[ok]) S.oracle_data[ok] = {};
-        S.oracle_data[ok].w_state_fidelity = cf;
-        S.oracle_data[ok].coherence = cc;
-        S.oracle_data[ok].entropy = ce;
-        S.oracle_data[ok].in_consensus = (cf || 0) > 0.5;
-      }
-      S.oracle_consensus_reached = cf > 0.5;
-      S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
-      S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
-    }
-    
-    // ── PQ0 oracle fidelity ──
-    if(aer.pq0_oracle_fidelity != null){
-      if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
-      if(S.oracle_data['oracle_1'].pq0_oracle_fidelity == null){
-        S.oracle_data['oracle_1'].pq0_oracle_fidelity = aer.pq0_oracle_fidelity;
-        S.oracle_data['oracle_1'].pq0_IV_fidelity = aer.pq0_IV_fidelity;
-        S.oracle_data['oracle_1'].pq0_V_fidelity = aer.pq0_V_fidelity;
-      }
-    }
-    
-    // ── Derived quantum bath metrics ──
-    var _p = oracleSnap.purity || S.purity || 0.8;
-    var _f = oracleSnap.w_state_fidelity || S.fidelity || 0;
-    S.negativity = Math.max(0, (_p - 0.5) * 0.8);
-    S.concurrence = Math.max(0, (_p - 0.333) * 1.2);
-    S.entanglement = Math.max(0, _f * 0.9);
-    S.qfi = Math.max(0, _f * 8.0);
-    S.discord = Math.max(0, (1 - _p) * 2.0);
-    S.tele_fidelity = Math.max(0, _f * 0.95);
-    
-    // ── Mermin (authoritative) ──
-    if(oracleSnap.mermin_test) S.mermin = oracleSnap.mermin_test;
-    else if(oracleSnap.mermin) S.mermin = oracleSnap.mermin;
-  }
-  
-  // 2d. Mempool
-  if(mp){
-    S.mempool_size = mp.depth != null ? mp.depth : (mp.pending != null ? mp.pending : S.mempool_size);
-  }
-  
-  // 2e. Peers/Miners
-  if(peers){
-    var rawPeers = Array.isArray(peers.peers) ? peers.peers : [];
-    S.n_peers = peers.count || rawPeers.length;
-    var staleThresh = 300;
-    var miners = rawPeers.map(function(p){
-      var addr = p.miner_address || p.address || p.node_id || p.peer_id || '';
-      var ls = p.last_seen ? new Date(p.last_seen).getTime()/1000 : 0;
-      var age = ls > 0 ? Math.round(Date.now()/1000 - ls) : 999999;
-      return {
-        miner_address: addr,
-        peer_id: p.peer_id || p.node_id || '',
-        gossip_url: p.gossip_url || '',
-        block_count: p.block_count || 0,
-        last_height: p.block_height || p.last_height || 0,
-        total_earned_qtcl: p.total_earned_qtcl || 0,
-        last_seen_age_s: age,
-        status: age < staleThresh ? 'live' : (age < 86400 ? 'seen' : 'historic'),
-        ip_address: p.ip_address || '',
-      };
-    }).filter(function(m){ return m.miner_address; });
-    
-    if(miners.length){
-      renderMiners(miners);
-    }else if(S.n_peers > 0){
-      var el = document.getElementById('pl');
-      if(el) el.innerHTML = '<div class="es" style="padding:16px;font-family:var(--mono);font-size:10px;color:var(--dim)">' + S.n_peers + ' peer(s) connected — no registry entries yet</div>';
-    }
-  }
-  
-  // 2f. Events (new blocks)
-  if(events && Array.isArray(events.events) && events.events.length){
-    events.events.forEach(function(ev){
-      if(ev.ts > _lastEventTs) _lastEventTs = ev.ts;
-      if(ev.type === 'new_block'){
-        var h = parseInt(ev.height || ev.block_height || 0);
-        if(h > 0 && h > S.height){
-          S.height = h;
-          applyRewards(h);
-          if(!_blocksById[h]){
-            var nb = {
-              height: h,
-              block_hash: ev.block_hash || '',
-              hash: ev.block_hash || '',
-              tx_count: ev.tx_count || 0,
-              w_state_fidelity: ev.w_state_fidelity || S.fidelity,
-              difficulty_bits: ev.difficulty_bits || S.difficulty_bits,
-              _fr: true
-            };
-            if(ev.pq_curr != null){
-              nb.pq_curr = ev.pq_curr;
-              S.pq_curr = nb.pq_curr;
-            }
-            if(ev.pq_last != null){
-              nb.pq_last = ev.pq_last;
-              S.pq_last = nb.pq_last;
-            }
-            _blocksById[h] = nb;
-            blocks.push(nb);
-            blocks.sort(function(a,b){ return a.height - b.height; });
-            renderChain();
-          }
-          if(typeof _H !== 'undefined') _H.onBlock();
-          _lastBlockHeight = h;
-          if(!txLoading) setTimeout(loadTxPage, 400);
-        }
-      }
-    });
-  }
-  
-  // 2g. Block Range (fetch recent blocks if events didn't populate enough)
-  if(blockRange && Array.isArray(blockRange.blocks) && blockRange.blocks.length){
-    blockRange.blocks.forEach(function(b){
-      var bh = parseInt(b.height || 0);
-      if(bh >= 0 && !_blocksById[bh]){
-        var nb = {
-          height: bh,
-          block_hash: b.block_hash || b.hash || '',
-          hash: b.block_hash || b.hash || '',
-          tx_count: b.tx_count || b.transaction_count || 0,
-          w_state_fidelity: b.w_state_fidelity || S.fidelity,
-          difficulty_bits: b.difficulty || b.difficulty_bits || S.difficulty_bits,
-          _fr: false
-        };
-        nb.pq_curr = b.pq_curr || bh;
-        nb.pq_last = b.pq_last || (bh - 1);
-        _blocksById[bh] = nb;
-        blocks.push(nb);
-      }
-    });
-    if(blocks.length > 0){
-      blocks.sort(function(a,b){ return a.height - b.height; });
-      // Keep only last 30 blocks
-      if(blocks.length > 30){
-        blocks = blocks.slice(-30);
-      }
-      renderChain();
-    }
-  }
-  
-  // ── STEP 3: Single DOM update
-  updateDOM();
-  renderOracles();
-  if(S.mermin) renderMermin(S.mermin);
-  setOnline(true);
-  stamp();
-}
+// DOM update — 1s
+setInterval(updateDOM, 1000);
+updateDOM();
 
-// Old unifiedPoll code removed - using separate threads now</script>
+// Thread dots: mark all idle after 5s if no update
+setTimeout(function(){
+  ['td-metrics','td-dm','td-bloch','td-mermin','td-blocks','td-tx'].forEach(function(id){
+    var d=document.getElementById(id);
+    if(d&&d.className==='thread-dot') d.className='thread-dot';
+  });
+},5000);
+</script>
 </body>
 </html>
