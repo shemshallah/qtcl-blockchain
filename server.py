@@ -186,20 +186,15 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         }
         timeout_sec = timeout_map.get(method, 3.0)
         
-        import signal
-        def timeout_handler(signum, frame):
-            raise TimeoutError(f"RPC method {method} exceeded {timeout_sec}s timeout")
-        
-        # Only use signal timeout on Unix
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(int(timeout_sec) + 1)
-        try:
-            result = _RPC_METHODS[method](params, rpc_id)
-            signal.alarm(0)
+        # Thread-safe timeout via concurrent.futures (signal.alarm only works on main thread)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_RPC_METHODS[method], params, rpc_id)
+            result = future.result(timeout=timeout_sec)
             return result
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
+    except concurrent.futures.TimeoutError:
+        logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
+        return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
     except TimeoutError as te:
         logger.warning(f"[RPC] {method} TIMEOUT: {te}")
         return _rpc_error(-32000, f"RPC timeout: {str(te)}", rpc_id)
