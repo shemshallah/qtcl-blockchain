@@ -1551,7 +1551,7 @@ _workerMetrics(); _workerDM(); _workerBlocks(); _workerMempool(); _workerPeers()
 if(!txLoading) loadTxPage();
 
 setInterval(_workerMetrics,  1500);
-setInterval(_workerDM,       1000);
+setInterval(_workerDM,       50);
 setInterval(_workerBlocks,   3000);
 setInterval(_workerMempool,  5000);
 setInterval(_workerPeers,   10000);
