@@ -731,29 +731,19 @@ function renderDMFullHeatmap(){
   var dm=_dmFullParsed, maxMag=0;
   for(var i=0;i<4096;i++) if(dm.mag[i]>maxMag) maxMag=dm.mag[i];
 
-  // Use ImageData for speed — 4096 cells via pixel fill, not fillRect loop
-  var imgData=ctx.createImageData(Math.ceil(gW), Math.ceil(gH));
-  var px=imgData.data;
   for(var row=0;row<GRID;row++){
     for(var col=0;col<GRID;col++){
       var idx=row*GRID+col;
       var rgb=_phaseToRGB(dm.phase[idx],dm.mag[idx],maxMag);
       var isDiag=(row===col);
-      // Fill pixel block for this cell
-      var x0=Math.round(col*cellW), y0=Math.round(row*cellH);
-      var x1=Math.round((col+1)*cellW), y1=Math.round((row+1)*cellH);
+      var x=pad.l+col*cellW, y=pad.t+row*cellH;
       var r=isDiag?Math.min(255,rgb[0]+60):rgb[0];
       var g=isDiag?Math.min(255,rgb[1]+60):rgb[1];
       var b=isDiag?Math.min(255,rgb[2]+60):rgb[2];
-      for(var py=y0;py<y1;py++){
-        for(var ppx=x0;ppx<x1;ppx++){
-          var off2=(py*Math.ceil(gW)+ppx)*4;
-          px[off2]=r; px[off2+1]=g; px[off2+2]=b; px[off2+3]=255;
-        }
-      }
+      ctx.fillStyle='rgb('+r+','+g+','+b+')';
+      ctx.fillRect(x, y, cellW, cellH);
     }
   }
-  ctx.putImageData(imgData, pad.l, pad.t);
 
   // Title
   ctx.font='8px JetBrains Mono,monospace';
@@ -1317,6 +1307,7 @@ function _applyOracleFrame(dm){
   if(dm.phase_drift != null) S.phase_drift = dm.phase_drift;
   if(dm.phase_coherence != null) S.phase_coherence = dm.phase_coherence;
   if(dm.qrng_health != null) S.qrng_health = dm.qrng_health;
+  else if(aer.qrng_health != null) S.qrng_health = aer.qrng_health;
 
   var bf = aer.block_field || {};
   if(bf.pq_curr != null){
@@ -1379,6 +1370,12 @@ function _applyOracleFrame(dm){
 
   if(dm.mermin_test) S.mermin = dm.mermin_test;
   else if(dm.mermin) S.mermin = dm.mermin;
+  else if(dm.mermin_M != null && dm.mermin_M > 0){
+    S.mermin = {
+      M_value: dm.mermin_M,
+      verdict: dm.mermin_M > 3.046 ? 'W-state violation' : dm.mermin_M > 2.0 ? 'Quantum violation' : 'Classical'
+    };
+  }
 
   renderOracles();
   if(S.mermin) renderMermin(S.mermin);
