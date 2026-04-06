@@ -912,6 +912,12 @@ async function _pollOracle() {
       S._snap = snap;
       S._snapTs = Date.now();
       setOnline(true);
+      // 48×48 SUPPORT: Prefer expanded format if present
+      if(snap.density_matrix_48x48_hex) {
+        parseDMHex(snap.density_matrix_48x48_hex);
+      } else if(snap.density_matrix_hex) {
+        parseDMHex(snap.density_matrix_hex);
+      }
       _busListeners.forEach(function(fn){try{fn(snap);}catch(e){console.warn('[BUS]',e);}});
     }
   } catch(e) { setOnline(false); }
@@ -959,8 +965,12 @@ busSubscribe(function(snap) {
   // Mermin
   var mt = snap.mermin_test || snap.bell_test || null;
   if(mt) S.mermin = mt;
-  // DM hex
-  if(snap.density_matrix_hex) parseDMHex(snap.density_matrix_hex);
+  // DM hex — 48×48 SUPPORT: prefer expanded format
+  if(snap.density_matrix_48x48_hex) {
+    parseDMHex(snap.density_matrix_48x48_hex);
+  } else if(snap.density_matrix_hex) {
+    parseDMHex(snap.density_matrix_hex);
+  }
   _threadActive('td-metrics');
 });
 
@@ -1076,8 +1086,48 @@ function _threadActive(id) {
 // DENSITY MATRIX PARSER — 8×8 complex128 big-endian '>dd'
 // ═══════════════════════════════════════════════════════════════════════
 function parseDMHex(hex) {
-  if(!hex||hex.length!==2048) return; // must be exactly 8*8*2*8 bytes = 2048 hex chars
+  if(!hex) return;
   try {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 48×48 SUPPORT: Detect and decode expanded format (147,466 hex chars)
+    // ═══════════════════════════════════════════════════════════════════════════
+    if(hex.length===294932) {
+      // 48×48 expanded: sync(4B)+flags(1B)+2304 doubles*2 = 73,733 bytes = 147,466 hex chars
+      var buf=new ArrayBuffer(8), dv=new DataView(buf);
+      var re48=new Float64Array(2304), im48=new Float64Array(2304);
+      var off=10; // skip sync(4B)+flags(1B) = 10 hex chars
+      for(var i=0;i<2304;i++){
+        for(var b=0;b<8;b++) dv.setUint8(b,parseInt(hex.slice(off+b*2,off+b*2+2),16));
+        re48[i]=dv.getFloat64(0,false);
+        off+=16;
+      }
+      for(var i=0;i<2304;i++){
+        for(var b=0;b<8;b++) dv.setUint8(b,parseInt(hex.slice(off+b*2,off+b*2+2),16));
+        im48[i]=dv.getFloat64(0,false);
+        off+=16;
+      }
+      // Store 48×48 for rendering
+      S.dm_48_re=re48; S.dm_48_im=im48;
+      // Extract 8×8 from 48×48 corners for metrics (sampling first of 6×6 blocks)
+      S.dm_re=new Float64Array(64);
+      S.dm_im=new Float64Array(64);
+      for(var i=0;i<8;i++){
+        for(var j=0;j<8;j++){
+          S.dm_re[i*8+j]=re48[i*6*48+j*6];
+          S.dm_im[i*8+j]=im48[i*6*48+j*6];
+        }
+      }
+      // Compute purity from 8×8
+      var pur=0;
+      for(var i=0;i<64;i++) pur+=S.dm_re[i]*S.dm_re[i]+S.dm_im[i]*S.dm_im[i];
+      S.purity=Math.min(1,Math.max(0,pur));
+      _threadActive('td-dm');
+      return;
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // LEGACY 8×8 PATH: Existing code path (unchanged)
+    // ═══════════════════════════════════════════════════════════════════════════
+    if(hex.length!==2048) return; // must be exactly 8*8*2*8 bytes = 2048 hex chars
     var re=new Float64Array(64), im=new Float64Array(64);
     var buf=new ArrayBuffer(16), dv=new DataView(buf);
     for(var i=0;i<64;i++){
@@ -1119,35 +1169,94 @@ function _workerDM() {
   if(!canvas) return;
   if(!_dmCtx) _dmCtx=canvas.getContext('2d');
   var ctx=_dmCtx;
-  var N=32, cellW=canvas.width/N, cellH=canvas.height/N;
+  
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 48×48 SUPPORT: Use expanded format if available, else fall back to 32×32
+  // ═══════════════════════════════════════════════════════════════════════════
+  var use48=S.dm_48_re && S.dm_48_im;
+  var N=use48?48:32, cellW=canvas.width/N, cellH=canvas.height/N;
   ctx.clearRect(0,0,canvas.width,canvas.height);
 
   // Background
   ctx.fillStyle='#020509';
   ctx.fillRect(0,0,canvas.width,canvas.height);
 
-  // ── Kronecker expansion: 8×8 → 32×32 ──────────────────────────────
-  // ρ_32[4i+di, 4j+dj] ≈ ρ_8[i,j] * K[di,dj]
-  // K is a 4×4 smooth kernel for visual expansion
-  var K=[[1,.85,.5,.2],[.85,.72,.42,.17],[.5,.42,.25,.10],[.2,.17,.10,.04]];
-
-  for(var bi=0;bi<8;bi++) {
-    for(var bj=0;bj<8;bj++) {
-      var reV=S.dm_re[bi*8+bj], imV=S.dm_im[bi*8+bj];
+  if(use48) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // FULL RESOLUTION: 48×48 DIRECT RENDER
+    // ─────────────────────────────────────────────────────────────────────────
+    for(var idx=0;idx<2304;idx++) {
+      var row=Math.floor(idx/48), col=idx%48;
+      var reV=S.dm_48_re[idx], imV=S.dm_48_im[idx];
       var mag=Math.sqrt(reV*reV+imV*imV);
-      var phase=Math.atan2(imV,reV); // -π to π
-      for(var di=0;di<4;di++) {
-        for(var dj=0;dj<4;dj++) {
-          var row=bi*4+di, col=bj*4+dj;
-          var kf=K[di][dj];
-          var scaledMag=mag*kf;
-          var x=col*cellW, y=row*cellH;
-          // ── Color encoding ──
-          // Magnitude → brightness, Phase → hue
-          // Diagonal: blue-cyan highlight
-          // Phase positive: warm gold-orange
-          // Phase negative: violet-red
-          var isDiag=(bi===bj);
+      var phase=Math.atan2(imV,reV);
+      var x=col*cellW, y=row*cellH;
+      
+      var isDiag=(row===col);
+      var phaseNorm=(phase+Math.PI)/(2*Math.PI);
+      var r2,g2,b2,a;
+      
+      if(mag<0.001){
+        r2=2;g2=5;b2=9;a=0.6+Math.random()*0.15;
+      } else {
+        var inten=Math.min(1,mag*3);
+        if(isDiag){
+          r2=Math.round(0+inten*0);
+          g2=Math.round(80+inten*132);
+          b2=Math.round(120+inten*135);
+          a=0.25+inten*0.75;
+        } else if(phaseNorm>0.5){
+          var t=(phaseNorm-0.5)*2;
+          r2=Math.round(100+inten*132);
+          g2=Math.round(80+inten*100-t*60);
+          b2=Math.round(20+inten*20);
+          a=0.15+inten*0.85;
+        } else {
+          var t=phaseNorm*2;
+          r2=Math.round(60+t*inten*155);
+          g2=Math.round(20+t*inten*92);
+          b2=Math.round(100+inten*155);
+          a=0.15+inten*0.85;
+        }
+      }
+      ctx.fillStyle='rgba('+r2+','+g2+','+b2+','+a.toFixed(3)+')';
+      ctx.fillRect(x,y,cellW,cellH);
+    }
+    
+    // Grid lines for 8×8 block boundaries
+    ctx.strokeStyle='rgba(0,212,255,0.12)';
+    ctx.lineWidth=0.5;
+    for(var i=1;i<8;i++){
+      var px=i*6*cellW;
+      ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,canvas.height);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(0,px);ctx.lineTo(canvas.width,px);ctx.stroke();
+    }
+  } else {
+    // ─────────────────────────────────────────────────────────────────────────
+    // FALLBACK: 32×32 KRONECKER EXPANSION (original code)
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Kronecker expansion: 8×8 → 32×32 ──────────────────────────────
+    // ρ_32[4i+di, 4j+dj] ≈ ρ_8[i,j] * K[di,dj]
+    // K is a 4×4 smooth kernel for visual expansion
+    var K=[[1,.85,.5,.2],[.85,.72,.42,.17],[.5,.42,.25,.10],[.2,.17,.10,.04]];
+
+    for(var bi=0;bi<8;bi++) {
+      for(var bj=0;bj<8;bj++) {
+        var reV=S.dm_re[bi*8+bj], imV=S.dm_im[bi*8+bj];
+        var mag=Math.sqrt(reV*reV+imV*imV);
+        var phase=Math.atan2(imV,reV); // -π to π
+        for(var di=0;di<4;di++) {
+          for(var dj=0;dj<4;dj++) {
+            var row=bi*4+di, col=bj*4+dj;
+            var kf=K[di][dj];
+            var scaledMag=mag*kf;
+            var x=col*cellW, y=row*cellH;
+            // ── Color encoding ──
+            // Magnitude → brightness, Phase → hue
+            // Diagonal: blue-cyan highlight
+            // Phase positive: warm gold-orange
+            // Phase negative: violet-red
+            var isDiag=(bi===bj);
           var r2,g2,b2,a;
           if(scaledMag<0.001){
             r2=2;g2=5;b2=9;a=0.6+kf*0.4;
@@ -1184,20 +1293,21 @@ function _workerDM() {
         }
       }
     }
+    
+    // ── Grid lines for 8×8 block boundaries (32×32 fallback) ────────────────────────────
+    ctx.strokeStyle='rgba(0,212,255,0.12)';
+    ctx.lineWidth=0.5;
+    for(var i=1;i<8;i++){
+      var px=i*4*cellW;
+      ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,canvas.height);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(0,px);ctx.lineTo(canvas.width,px);ctx.stroke();
+    }
+    // ── Diagonal highlight ──────────────────────────────────────────────
+    ctx.strokeStyle='rgba(0,212,255,0.06)';
+    ctx.lineWidth=0.5;
+    ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(canvas.width,canvas.height);ctx.stroke();
   }
-
-  // ── Grid lines for 8×8 block boundaries ────────────────────────────
-  ctx.strokeStyle='rgba(0,212,255,0.12)';
-  ctx.lineWidth=0.5;
-  for(var i=1;i<8;i++){
-    var px=i*4*cellW;
-    ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,canvas.height);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(0,px);ctx.lineTo(canvas.width,px);ctx.stroke();
-  }
-  // ── Diagonal highlight ──────────────────────────────────────────────
-  ctx.strokeStyle='rgba(0,212,255,0.06)';
-  ctx.lineWidth=0.5;
-  ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(canvas.width,canvas.height);ctx.stroke();
+  // END if(use48) ... else ... 
 
   // Update stats
   var pur=S.purity;
