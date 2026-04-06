@@ -598,7 +598,7 @@ setInterval(tick, 1000); tick();
     }
     // Center gold core
     ctx.fillStyle='rgba(212,160,32,.95)'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
-    t += 0.02; requestAnimationFrame(fr);
+    t += 0.02; setTimeout(() => requestAnimationFrame(fr), 50); // 20fps
   })();
 })();
 
@@ -673,12 +673,15 @@ self.onmessage = function(e){
 
 var _dmFullCanvas = null, _dmFullCtx = null;
 var _dmFullParsed = null; // Float64Array(4096) × 4
+var _dmFullMaxMag = null; // Cache for max magnitude to avoid recalculating every frame
 var _dmFullLastHex = '';
 
 function _scheduleDMFullParse(hex){
   if(!hex || hex.length < 131072) return;
   if(hex === _dmFullLastHex) return;
   _dmFullLastHex = hex;
+  // Invalidate maxMag cache when new hex arrives
+  _dmFullMaxMag = null;
   if(_dmWorker){
     if(_dmWorkerPending) return;
     _dmWorkerPending = true;
@@ -727,7 +730,8 @@ function renderDMFullHeatmap(){
     _dmFullCtx = _dmFullCanvas.getContext('2d');
   }
   var hex = S.dm_full_hex || '';
-  if(hex) _scheduleDMFullParse(hex);
+  // Only schedule parse if hex changed (not every frame)
+  if(hex && hex !== _dmFullLastHex) _scheduleDMFullParse(hex);
 
   var ctx=_dmFullCtx, W=_dmFullCanvas.width, H=_dmFullCanvas.height;
   ctx.clearRect(0,0,W,H);
@@ -746,8 +750,14 @@ function renderDMFullHeatmap(){
     return;
   }
 
-  var dm=_dmFullParsed, maxMag=0;
-  for(var i=0;i<4096;i++) if(dm.mag[i]>maxMag) maxMag=dm.mag[i];
+  // Cache maxMag to avoid recalculating every frame
+  if(_dmFullMaxMag === null || _dmFullMaxMag === undefined){
+    var dm=_dmFullParsed, maxMag=0;
+    for(var i=0;i<4096;i++) if(dm.mag[i]>maxMag) maxMag=dm.mag[i];
+    _dmFullMaxMag = maxMag || 1;
+  }
+  var maxMag = _dmFullMaxMag;
+  var dm = _dmFullParsed;
 
   for(var row=0;row<GRID;row++){
     for(var col=0;col<GRID;col++){
@@ -794,14 +804,14 @@ function renderDMFullHeatmap(){
   ctx.fillText('C='+(S.coherence||0).toFixed(4), W-pad.r-4, pad.t+gH-26);
 }
 
-// Boot rAF loop on dom-ready
+// Boot rAF loop on dom-ready - throttled to 10fps to prevent hangs
 (function _dmBoot(){
   var cont = document.getElementById('dm-full-panel');
   if(!cont){ setTimeout(_dmBoot, 80); return; }
   renderDMFullHeatmap();
   (function _rafLoop(){
     renderDMFullHeatmap();
-    requestAnimationFrame(_rafLoop);
+    setTimeout(() => requestAnimationFrame(_rafLoop), 100); // 10fps max
   })();
 })();
 
@@ -1430,6 +1440,8 @@ function _initSSE(){
   _sseSource = new EventSource(BASE + '/rpc/oracle/stream');
   _sseSource.onopen = function(){
     setSSEStatus('SSE ●', '#00ff9d');
+    _sseConnected = true;
+    _stopDMPolling(); // SSE is working, stop fallback polling
   };
   _sseSource.onmessage = function(e){
     try {
@@ -1441,8 +1453,10 @@ function _initSSE(){
   };
   _sseSource.onerror = function(){
     setSSEStatus('SSE ✕', 'rgba(255,80,80,0.7)');
+    _sseConnected = false;
     _sseSource.close();
     _sseSource = null;
+    _startDMPolling(); // SSE failed, start fallback polling
     setTimeout(_initSSE, 5000);
   };
 }
@@ -1669,8 +1683,12 @@ self.onmessage = async function(e){
   } catch(e){ console.error('TX worker init failed', e); }
 })();
 
-// Fallback: Direct poll worker for density matrix when SSE oracle fails
-(async function _initDMPollingWorker(){
+// Fallback: Direct poll worker for density matrix - ONLY when SSE fails
+var _dmPollingWorker = null;
+var _dmPollingInterval = null;
+var _sseConnected = false;
+
+(function _initDMPollingWorker(){
   try {
     const src = `"use strict";
 self.onmessage = async function(e){
@@ -1688,35 +1706,46 @@ self.onmessage = async function(e){
   }
 };`;
     const blob = new Blob([src], {type:'application/javascript'});
-    const worker = new Worker(URL.createObjectURL(blob));
-    worker.onmessage = function(ev){
+    _dmPollingWorker = new Worker(URL.createObjectURL(blob));
+    _dmPollingWorker.onmessage = function(ev){
       const {qm} = ev.data;
       if(qm){
-        // Extract dm_full_hex from quantum metrics
-        if(qm.dm_full_hex){
-          S.dm_full_hex = qm.dm_full_hex;
+        // Only update if we have no SSE connection
+        if(!_sseConnected){
+          if(qm.dm_full_hex) S.dm_full_hex = qm.dm_full_hex;
+          const ws = qm.w_state || {};
+          if(ws.fidelity != null) S.fidelity = ws.fidelity;
+          if(ws.coherence != null) S.coherence = ws.coherence;
+          if(ws.purity != null) S.purity = ws.purity;
+          if(ws.entropy != null) S.entropy = ws.entropy;
+          const la = qm.lattice || {};
+          if(la.cycle != null) S.cycle = la.cycle;
+          renderOracles();
+          updateDOM();
+          setOnline(true);
+          stamp();
         }
-        // Also capture other quantum metrics from fallback
-        const ws = qm.w_state || {};
-        if(ws.fidelity != null) S.fidelity = ws.fidelity;
-        if(ws.coherence != null) S.coherence = ws.coherence;
-        if(ws.purity != null) S.purity = ws.purity;
-        if(ws.entropy != null) S.entropy = ws.entropy;
-        const la = qm.lattice || {};
-        if(la.cycle != null) S.cycle = la.cycle;
-        // Trigger re-render
-        renderOracles();
-        updateDOM();
-        setOnline(true);
-        stamp();
       }
     };
-    const kick=()=>worker.postMessage({cmd:'start', base:BASE});
-    // Poll every 3s as fallback to SSE
-    kick();
-    setInterval(kick, 3000);
+    _dmPollingWorker.onerror = function(){
+      _dmPollingWorker = null;
+    };
   } catch(e){ console.error('DM polling worker init failed', e); }
 })();
+
+function _startDMPolling(){
+  if(_dmPollingInterval) return;
+  const kick = () => _dmPollingWorker && _dmPollingWorker.postMessage({cmd:'start', base:BASE});
+  kick();
+  _dmPollingInterval = setInterval(kick, 3000);
+}
+
+function _stopDMPolling(){
+  if(_dmPollingInterval){
+    clearInterval(_dmPollingInterval);
+    _dmPollingInterval = null;
+  }
+}
 
 if(!txLoading){
   // Prefer worker-based loading for reliability; fallback to direct RPC
