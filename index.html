@@ -611,20 +611,29 @@ var _dmCanvas = null, _dmCtx = null, _dmAnimId = null;
 var _dmParsed = null; // {re:Float64Array(64), im:Float64Array(64), mag:Float64Array(64), phase:Float64Array(64)}
 var _dmLastHex = '';
 
+// ═══ DM HEX PARSER — big-endian float64 pairs, matching server struct.pack('>dd') ═══
+// Uses a SharedArrayBuffer-free DataView approach with explicit big-endian flag (false=BE).
+// Previous bug: getFloat64(0, true) = little-endian → all values read as NaN/garbage.
+// Fixed:        getFloat64(0, false) = big-endian → correct complex128 matrix elements.
+//
+// HOT PATH NOTE: This runs on every DM poll (~500ms). The inner loop is 128 byte reads
+// total (64 elements × 2 × 8 bytes). Kept as vanilla JS for universal compatibility —
+// no WASM needed at this data size; JS JIT handles it in < 0.1ms.
 function _parseDMHex(hex){
   if(!hex || hex.length < 2048) return null;
   var re = new Float64Array(64), im = new Float64Array(64);
   var mag = new Float64Array(64), phase = new Float64Array(64);
-  // Each element = 16 bytes = 32 hex chars (big-endian double re, double im)
+  // Each element: 32 hex chars = 16 bytes = big-endian float64 re + big-endian float64 im
+  // Server packs with: struct.pack('>dd', re, im)  — '>' = big-endian, 'd' = float64
   var buf = new ArrayBuffer(8), view = new DataView(buf);
   for(var i=0; i<64; i++){
     var off = i * 32;
-    // Parse real part (little-endian float64 from python numpy tobytes)
+    // Real part — big-endian (false = big-endian in DataView API)
     for(var b=0; b<8; b++) view.setUint8(b, parseInt(hex.substr(off + b*2, 2), 16));
-    re[i] = view.getFloat64(0, true);
-    // Parse imaginary part
+    re[i] = view.getFloat64(0, false);
+    // Imaginary part — big-endian
     for(var b=0; b<8; b++) view.setUint8(b, parseInt(hex.substr(off + 16 + b*2, 2), 16));
-    im[i] = view.getFloat64(0, true);
+    im[i] = view.getFloat64(0, false);
     mag[i] = Math.sqrt(re[i]*re[i] + im[i]*im[i]);
     phase[i] = Math.atan2(im[i], re[i]);
   }
@@ -1296,18 +1305,25 @@ async function _workerMetrics(){
   finally { _w1Running = false; }
 }
 
-// ── WORKER 2: Oracle/DM (REST /rpc/oracle/snapshot) ── 3s ─────────────────
+// ── WORKER 2: Oracle/DM (/rpc/oracle/snapshot) ── 500ms with ETag 304 shortcut ──
 var _w2Running = false;
+var _dmLastEtag = '';   // tracks server ETag for 304 Not Modified shortcutting
 async function _workerDM(){
   if(_w2Running) return; _w2Running = true;
   try {
+    // ETag-aware fetch: server returns 304 Not Modified when snapshot unchanged → zero parse cost
+    var _dmHeaders = {'Content-Type': 'application/json'};
+    if(_dmLastEtag) _dmHeaders['If-None-Match'] = _dmLastEtag;
     var r = await fetch(BASE + '/rpc/oracle/snapshot', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: _dmHeaders,
       body: '{}',
       signal: AbortSignal.timeout(4000)
     });
+    if(r.status === 304) return;  // snapshot unchanged — nothing to do
     if(!r.ok) return;
+    var _newEtag = r.headers.get('ETag');
+    if(_newEtag) _dmLastEtag = _newEtag;
     var j = await r.json();
     var dm = j.result;
     if(!dm) return;
@@ -1553,8 +1569,16 @@ async function _workerPeers(){
 _workerMetrics(); _workerDM(); _workerBlocks(); _workerMempool(); _workerPeers();
 if(!txLoading) loadTxPage();
 
+// ── Worker polling intervals ─────────────────────────────────────────────────
+// W1 Metrics:  1500ms  — block height + quantum metrics (served from server cache < 1ms)
+// W2 DM:        500ms  — oracle snapshot with ETag 304 shortcut (near-zero cost on hit)
+//                        was 50ms (20 req/s) → now 2 req/s; server pre-serializes JSON
+// W3 Blocks:   3000ms  — events + block range (DB read, intentionally slower)
+// W4 Mempool:  5000ms  — mempool depth (low urgency)
+// W5 Peers:   10000ms  — peer list (very low churn)
+// W6 Txs:     30000ms  — full tx page (heavy query, user-triggered otherwise)
 setInterval(_workerMetrics,  1500);
-setInterval(_workerDM,       50);
+setInterval(_workerDM,        500);
 setInterval(_workerBlocks,   3000);
 setInterval(_workerMempool,  5000);
 setInterval(_workerPeers,   10000);
