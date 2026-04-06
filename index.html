@@ -503,21 +503,13 @@ function applyRewards(h) {
 // ═══════════════════════════════════════════════════════════════════════════════
 var _rpcId = 1;
 
-// Fast methods get a 2s timeout; slow (DB/crypto) methods keep 6s.
-var _RPC_FAST_METHODS = new Set([
-  'qtcl_getBlockHeight','qtcl_getQuantumMetrics','qtcl_getLatestDMSnapshot',
-  'qtcl_getMempoolStats','qtcl_getHealth','qtcl_getPeers','qtcl_getEvents',
-  'qtcl_getTreasuryAddress','qtcl_getMyAddr','qtcl_getDHTTable',
-]);
-
 async function rpc(method, params) {
   try {
-    var timeoutMs = _RPC_FAST_METHODS.has(method) ? 2000 : 6000;
     var r = await fetch(BASE + '/rpc', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({jsonrpc:'2.0', id: _rpcId++, method: method, params: params || []}),
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: AbortSignal.timeout(6000)
     });
     if (!r.ok) return null;
     var j = await r.json();
@@ -615,37 +607,88 @@ setInterval(tick, 1000); tick();
 // Parses density_matrix_hex (2048 hex chars = 8×8 big-endian complex128)
 // Phase → hue, magnitude → brightness, diagonal highlighted
 // ═══════════════════════════════════════════════════════════════════════════════
-var _dmCanvas = null, _dmCtx = null, _dmAnimId = null;
+var _dmCanvas = null, _dmCtx = null;
 var _dmParsed = null; // {re:Float64Array(64), im:Float64Array(64), mag:Float64Array(64), phase:Float64Array(64)}
 var _dmLastHex = '';
 
-// ═══ DM HEX PARSER — big-endian float64 pairs, matching server struct.pack('>dd') ═══
-// Uses a SharedArrayBuffer-free DataView approach with explicit big-endian flag (false=BE).
-// Previous bug: getFloat64(0, true) = little-endian → all values read as NaN/garbage.
-// Fixed:        getFloat64(0, false) = big-endian → correct complex128 matrix elements.
-//
-// HOT PATH NOTE: This runs on every DM poll (~500ms). The inner loop is 128 byte reads
-// total (64 elements × 2 × 8 bytes). Kept as vanilla JS for universal compatibility —
-// no WASM needed at this data size; JS JIT handles it in < 0.1ms.
-function _parseDMHex(hex){
-  if(!hex || hex.length < 2048) return null;
-  var re = new Float64Array(64), im = new Float64Array(64);
-  var mag = new Float64Array(64), phase = new Float64Array(64);
-  // Each element: 32 hex chars = 16 bytes = big-endian float64 re + big-endian float64 im
-  // Server packs with: struct.pack('>dd', re, im)  — '>' = big-endian, 'd' = float64
-  var buf = new ArrayBuffer(8), view = new DataView(buf);
-  for(var i=0; i<64; i++){
-    var off = i * 32;
-    // Real part — big-endian (false = big-endian in DataView API)
-    for(var b=0; b<8; b++) view.setUint8(b, parseInt(hex.substr(off + b*2, 2), 16));
-    re[i] = view.getFloat64(0, false);
-    // Imaginary part — big-endian
-    for(var b=0; b<8; b++) view.setUint8(b, parseInt(hex.substr(off + 16 + b*2, 2), 16));
-    im[i] = view.getFloat64(0, false);
-    mag[i] = Math.sqrt(re[i]*re[i] + im[i]*im[i]);
-    phase[i] = Math.atan2(im[i], re[i]);
+// ── Web Worker: hex parsing + float math runs OFF main thread ────────────────
+// Worker receives hex string, returns pre-computed typed arrays via transferable
+// ArrayBuffers — zero copy across thread boundary.
+// Falls back to synchronous inline parse if Blob/Worker unavailable (old Safari).
+var _dmWorker = null;
+var _dmWorkerPending = false;
+
+(function _spawnDMWorker(){
+  try {
+    var src = [
+      '"use strict";',
+      'self.onmessage = function(e){',
+      '  var hex = e.data;',
+      '  if(!hex || hex.length < 2048){ self.postMessage(null); return; }',
+      '  var reBuf = new ArrayBuffer(512), imBuf = new ArrayBuffer(512),',
+      '      magBuf = new ArrayBuffer(512), phBuf = new ArrayBuffer(512);',
+      '  var re = new Float64Array(reBuf), im = new Float64Array(imBuf),',
+      '      mag = new Float64Array(magBuf), ph = new Float64Array(phBuf);',
+      '  var dv = new DataView(new ArrayBuffer(8));',
+      '  for(var i=0;i<64;i++){',
+      '    var off = i*32;',
+      '    for(var b=0;b<8;b++) dv.setUint8(b, parseInt(hex.substr(off+b*2,2),16));',
+      '    re[i] = dv.getFloat64(0,true);',
+      '    for(var b=0;b<8;b++) dv.setUint8(b, parseInt(hex.substr(off+16+b*2,2),16));',
+      '    im[i] = dv.getFloat64(0,true);',
+      '    mag[i] = Math.sqrt(re[i]*re[i]+im[i]*im[i]);',
+      '    ph[i] = Math.atan2(im[i],re[i]);',
+      '  }',
+      '  self.postMessage({reBuf:reBuf,imBuf:imBuf,magBuf:magBuf,phBuf:phBuf},[reBuf,imBuf,magBuf,phBuf]);',
+      '};'
+    ].join('\n');
+    var blob = new Blob([src], {type:'application/javascript'});
+    _dmWorker = new Worker(URL.createObjectURL(blob));
+    _dmWorker.onmessage = function(e){
+      _dmWorkerPending = false;
+      if(!e.data) return;
+      var d = e.data;
+      _dmParsed = {
+        re: new Float64Array(d.reBuf),
+        im: new Float64Array(d.imBuf),
+        mag: new Float64Array(d.magBuf),
+        phase: new Float64Array(d.phBuf)
+      };
+    };
+    _dmWorker.onerror = function(err){
+      console.warn('[DM-WORKER] Error:', err.message, '— falling back to sync');
+      _dmWorker = null; _dmWorkerPending = false;
+    };
+  } catch(e){ _dmWorker = null; }
+})();
+
+// Called whenever S.density_matrix_hex changes — dispatches to worker or parses inline
+function _scheduleDMParse(hex){
+  if(!hex || hex.length < 2048) return;
+  if(hex === _dmLastHex) return;
+  _dmLastHex = hex;
+  if(_dmWorker){
+    if(_dmWorkerPending) return; // previous parse still in flight — skip, next rAF will catch up
+    _dmWorkerPending = true;
+    _dmWorker.postMessage(hex); // worker owns the string; no transfer needed (immutable)
+    return;
   }
-  return {re:re, im:im, mag:mag, phase:phase};
+  // Inline fallback (no Worker support)
+  var reBuf = new ArrayBuffer(512), imBuf = new ArrayBuffer(512),
+      magBuf = new ArrayBuffer(512), phBuf = new ArrayBuffer(512);
+  var re = new Float64Array(reBuf), im = new Float64Array(imBuf),
+      mag = new Float64Array(magBuf), phase = new Float64Array(phBuf);
+  var dv = new DataView(new ArrayBuffer(8));
+  for(var i=0;i<64;i++){
+    var off = i*32;
+    for(var b=0;b<8;b++) dv.setUint8(b, parseInt(hex.substr(off+b*2,2),16));
+    re[i] = dv.getFloat64(0,true);
+    for(var b=0;b<8;b++) dv.setUint8(b, parseInt(hex.substr(off+16+b*2,2),16));
+    im[i] = dv.getFloat64(0,true);
+    mag[i] = Math.sqrt(re[i]*re[i]+im[i]*im[i]);
+    phase[i] = Math.atan2(im[i],re[i]);
+  }
+  _dmParsed = {re:re, im:im, mag:mag, phase:phase};
 }
 
 function _phaseToRGB(phase, mag, maxMag){
@@ -675,13 +718,9 @@ function renderDMHeatmap(){
     if(!_dmCanvas) return;
     _dmCtx = _dmCanvas.getContext('2d');
   }
+  // Dispatch hex parse to worker if new data arrived (non-blocking)
   var hex = S.density_matrix_hex || '';
-  // Skip full redraw if hex unchanged — canvas state persists
-  if(hex && hex === _dmLastHex && _dmParsed) return;
-  if(hex && hex !== _dmLastHex){
-    _dmParsed = _parseDMHex(hex);
-    _dmLastHex = hex;
-  }
+  if(hex) _scheduleDMParse(hex);
 
   var ctx = _dmCtx;
   var W = _dmCanvas.width, H = _dmCanvas.height;
@@ -812,12 +851,16 @@ function renderDMHeatmap(){
   ctx.fillText('C=' + (S.coherence||0).toFixed(4), W - pad.r - 4, pad.t + gH - 26);
 }
 
-// Boot heatmap on load + independent 50ms render loop
+// Boot heatmap on load — driven by requestAnimationFrame (vsync-locked, non-blocking)
+// rAF yields to browser compositor between frames; setInterval does not.
 (function _dmBoot(){
   var cont = document.getElementById('dm-panel');
   if(!cont){ setTimeout(_dmBoot, 80); return; }
   renderDMHeatmap();
-  setInterval(renderDMHeatmap, 50);
+  (function _rafLoop(){
+    renderDMHeatmap();
+    requestAnimationFrame(_rafLoop);
+  })();
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1169,60 +1212,10 @@ function renderMiners(miners){
 // ═══════════════════════════════════════════════════════════════════════════════
 // DOM UPDATE — fires after every poll cycle
 // ═══════════════════════════════════════════════════════════════════════════════
-// ═══ RAF-GATED DOM ENGINE ═══════════════════════════════════════════════════
-// All DOM writes coalesce into a single requestAnimationFrame callback.
-// Eliminates the void e.offsetWidth forced-reflow pattern (was causing
-// 30+ synchronous layout recalculations per updateDOM() call = main thread
-// freeze every 500ms). Flash animation still works via CSS class toggle
-// but without the reflow trigger — browser handles it naturally.
-var _rafPending = false;
-var _domQueue = {};          // id → value pending write
-var _flashQueue = new Set(); // ids that need the flash class
-
 function st(id, v) {
-  var s = String(v);
-  _domQueue[id] = s;
-  _scheduleRaf();
+  var e=document.getElementById(id);if(!e) return;
+  var s=String(v);if(e.textContent!==s){e.textContent=s;e.classList.remove('fl');void e.offsetWidth;e.classList.add('fl');}
 }
-
-function _scheduleRaf() {
-  if(_rafPending) return;
-  _rafPending = true;
-  requestAnimationFrame(_flushDom);
-}
-
-function _flushDom() {
-  _rafPending = false;
-  var ids = Object.keys(_domQueue);
-  for(var i = 0; i < ids.length; i++) {
-    var id = ids[i];
-    var e = document.getElementById(id);
-    if(!e) { delete _domQueue[id]; continue; }
-    var s = _domQueue[id];
-    delete _domQueue[id];
-    if(e.textContent !== s) {
-      e.textContent = s;
-      // Flash: remove then re-add in same rAF batch — browser sees one transition
-      e.classList.remove('fl');
-      _flashQueue.add(e);
-    }
-  }
-  // Schedule flash-add for next rAF so browser sees remove→add as transition
-  if(_flashQueue.size > 0) {
-    var toFlash = _flashQueue;
-    _flashQueue = new Set();
-    requestAnimationFrame(function() {
-      toFlash.forEach(function(e) { e.classList.add('fl'); });
-    });
-  }
-}
-
-// Direct DOM write (bypasses queue — for style mutations, innerHTML, etc.)
-function stDirect(id, v) {
-  var e = document.getElementById(id); if(!e) return;
-  if(e.textContent !== String(v)) e.textContent = String(v);
-}
-
 function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
 function fmt4(v){return v==null?'--':parseFloat(v).toFixed(4);}
 
@@ -1281,8 +1274,9 @@ function updateDOM() {
   var hc=document.getElementById('pqh-curr');   if(hc) hc.textContent=pqC;
   var hd=document.getElementById('pqh-delta');  if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
   var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='\u03C8 cyc='+S.cycle+(S.cycle>0&&S.cycle%8===0?' \u2191REVIVAL':S.cycle>0&&S.cycle%8===4?' \u2193ANTI':'');
-  // Oracle + Mermin are rendered by _workerDM exclusively (authoritative DM source).
-  // Calling them here would double-render on every W1+W2 cycle overlap.
+  // ── Oracle + Mermin ──
+  renderOracles();
+  if(S.mermin) renderMermin(S.mermin);
 }
 
 function setOnline(ok) {
@@ -1308,14 +1302,18 @@ function stamp() {
 var _lastEventTs = Date.now()/1000 - 60;
 var _lastBlockHeight = 0;
 
-// ── WORKER 1a: Block Height — 1500ms, 2s timeout, inline cache read ──────────
-// Completely independent of quantum metrics — never shares abort controller.
-// getBlockHeight is an in-memory read: < 5ms always.
-var _w1aRunning = false;
-async function _workerHeight(){
-  if(_w1aRunning) return; _w1aRunning = true;
+// ── WORKER 1: Metrics (block height + quantum metrics) ── 3s ──────────────
+var _w1Running = false;
+async function _workerMetrics(){
+  if(_w1Running) return; _w1Running = true;
   try {
-    var hr = await rpc('qtcl_getBlockHeight', []);
+    var results = await rpcBatch([
+      ['qtcl_getBlockHeight', []],
+      ['qtcl_getQuantumMetrics', []],
+    ]);
+    var hr = results[0], qm = results[1];
+
+    // Block height (authoritative)
     if(hr && hr.height != null){
       var newHeight = parseInt(hr.height);
       if(newHeight > S.height){
@@ -1323,26 +1321,10 @@ async function _workerHeight(){
         S.height = newHeight;
         S.tip_hash = hr.tip_hash || S.tip_hash;
         applyRewards(S.height);
-        // Enqueue DOM update — rAF will batch it
-        st('hh', '#'+S.height);
-        st('mh', S.height);
-        st('mhs', 'hash: '+(S.tip_hash||'').slice(0,14)+'...');
-        setOnline(true);
-        stamp();
       }
     }
-  } catch(e){ console.warn('[W1a-HEIGHT]', e.message); }
-  finally { _w1aRunning = false; }
-}
 
-// ── WORKER 1b: Quantum Metrics — 2500ms, 4s timeout, cache read ──────────────
-// Completely decoupled from height. Cache read on server: < 1ms.
-// Independent timeout — a slow server init cannot freeze height updates.
-var _w1bRunning = false;
-async function _workerMetrics(){
-  if(_w1bRunning) return; _w1bRunning = true;
-  try {
-    var qm = await rpc('qtcl_getQuantumMetrics', []);
+    // Quantum metrics
     if(qm){
       var ws = qm.w_state || {};
       if(ws.fidelity != null) S.fidelity = ws.fidelity;
@@ -1360,67 +1342,34 @@ async function _workerMetrics(){
       if(qm.mermin_test) S.mermin = qm.mermin_test;
       else if(qm.bell_test) S.mermin = qm.bell_test;
 
-      // Top-level flat fields (from _oracle_metrics_cache, always populated)
-      if(qm.w_state_fidelity != null) S.fidelity = qm.w_state_fidelity;
-      if(qm.coherence_l1 != null) S.coherence = qm.coherence_l1;
-      if(qm.purity != null) S.purity = qm.purity;
-      if(qm.von_neumann_entropy != null) S.entropy = qm.von_neumann_entropy;
-      if(qm.density_matrix_hex && !S.density_matrix_hex) S.density_matrix_hex = qm.density_matrix_hex;
-
       var oid1 = 'oracle_1';
       if(!S.oracle_data[oid1]) S.oracle_data[oid1] = {};
-      S.oracle_data[oid1].w_state_fidelity = S.fidelity;
-      S.oracle_data[oid1].coherence = S.coherence;
-      S.oracle_data[oid1].purity = S.purity;
-      S.oracle_data[oid1].entropy = S.entropy;
-      S.oracle_data[oid1].in_consensus = S.fidelity > 0.5;
-
-      // Per-node from cache
-      if(qm.per_node && qm.per_node.length > 0){
-        qm.per_node.forEach(function(n){
-          var key = 'oracle_' + (n.oracle_id || 1);
-          if(!S.oracle_data[key]) S.oracle_data[key] = {};
-          if(n.fidelity != null) S.oracle_data[key].w_state_fidelity = n.fidelity;
-          if(n.coherence != null) S.oracle_data[key].coherence = n.coherence;
-          S.oracle_data[key].in_consensus = !!n.in_consensus;
-        });
-      }
-
-      // Block height from metrics cache (if height worker hasn't fired yet)
-      if(qm.block_height != null && qm.block_height > S.height){
-        S.height = qm.block_height;
-        applyRewards(S.height);
-      }
+      if(qm.w_state_fidelity != null){ S.oracle_data[oid1].w_state_fidelity = qm.w_state_fidelity; S.fidelity = qm.w_state_fidelity; }
+      if(qm.coherence_l1 != null){ S.oracle_data[oid1].coherence = qm.coherence_l1; S.coherence = qm.coherence_l1; }
+      if(qm.purity != null){ S.oracle_data[oid1].purity = qm.purity; S.purity = qm.purity; }
+      if(qm.von_neumann_entropy != null){ S.oracle_data[oid1].entropy = qm.von_neumann_entropy; S.entropy = qm.von_neumann_entropy; }
+      S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
     }
+
     updateDOM();
     setOnline(true);
     stamp();
-  } catch(e){ console.warn('[W1b-METRICS]', e.message); }
-  finally { _w1bRunning = false; }
+  } catch(e){ console.warn('[W1-METRICS]', e.message); }
+  finally { _w1Running = false; }
 }
 
-// Legacy alias kept for any external references
-var _w1Running = false;
-
-// ── WORKER 2: Oracle/DM (/rpc/oracle/snapshot) ── 500ms with ETag 304 shortcut ──
+// ── WORKER 2: Oracle/DM (REST /rpc/oracle/snapshot) ── 3s ─────────────────
 var _w2Running = false;
-var _dmLastEtag = '';   // tracks server ETag for 304 Not Modified shortcutting
 async function _workerDM(){
   if(_w2Running) return; _w2Running = true;
   try {
-    // ETag-aware fetch: server returns 304 Not Modified when snapshot unchanged → zero parse cost
-    var _dmHeaders = {'Content-Type': 'application/json'};
-    if(_dmLastEtag) _dmHeaders['If-None-Match'] = _dmLastEtag;
     var r = await fetch(BASE + '/rpc/oracle/snapshot', {
       method: 'POST',
-      headers: _dmHeaders,
+      headers: {'Content-Type': 'application/json'},
       body: '{}',
       signal: AbortSignal.timeout(4000)
     });
-    if(r.status === 304) return;  // snapshot unchanged — nothing to do
     if(!r.ok) return;
-    var _newEtag = r.headers.get('ETag');
-    if(_newEtag) _dmLastEtag = _newEtag;
     var j = await r.json();
     var dm = j.result;
     if(!dm) return;
@@ -1522,7 +1471,7 @@ async function _workerDM(){
     // DOM updates for oracle-specific panels
     renderOracles();
     if(S.mermin) renderMermin(S.mermin);
-    renderDMHeatmap();
+    // renderDMHeatmap() is driven by rAF loop — do not call here
     updateDOM();
     setOnline(true);
     stamp();
@@ -1663,33 +1612,14 @@ async function _workerPeers(){
 // ═══════════════════════════════════════════════════════════════════════════════
 // BOOT — Launch all independent workers on their own intervals
 // ═══════════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════════
-// BOOT — Fire all workers immediately, then set independent intervals.
-// Each worker is fully isolated: own fetch, own timeout, own error boundary.
-// A slow server response for one worker cannot delay or freeze another.
-// ═══════════════════════════════════════════════════════════════════════════════
-_workerHeight();   // W1a: block height — instant in-memory RPC
-_workerMetrics();  // W1b: quantum metrics — cache read < 1ms
-_workerDM();       // W2:  oracle DM snapshot + heatmap
-_workerBlocks();   // W3:  block chain + events
-_workerMempool();  // W4:  mempool depth
-_workerPeers();    // W5:  peer list
-if(!txLoading) loadTxPage();  // W6: transactions
+_workerMetrics(); _workerDM(); _workerBlocks(); _workerMempool(); _workerPeers();
+if(!txLoading) loadTxPage();
 
-// ── Polling intervals ──────────────────────────────────────────────────────────
-// W1a Height:   800ms — instant, drives header counter & reward display
-// W1b Metrics: 2000ms — metrics cache read, decoupled from height
-// W2 DM:        500ms — ETag-gated; 304 on no change = ~zero cost
-// W3 Blocks:   4000ms — DB reads, lower priority
-// W4 Mempool:  6000ms — low churn
-// W5 Peers:   12000ms — very low churn
-// W6 Txs:     30000ms — heavy, user-triggered otherwise
-setInterval(_workerHeight,   800);
-setInterval(_workerMetrics, 2000);
-setInterval(_workerDM,       500);
-setInterval(_workerBlocks,  4000);
-setInterval(_workerMempool, 6000);
-setInterval(_workerPeers,  12000);
+setInterval(_workerMetrics,  1500);
+setInterval(_workerDM,       3000);  // fetch cadence — rAF owns the 60Hz render
+setInterval(_workerBlocks,   3000);
+setInterval(_workerMempool,  5000);
+setInterval(_workerPeers,   10000);
 setInterval(function(){ if(!txLoading) loadTxPage(); }, 30000);
 </script>
 </body>
