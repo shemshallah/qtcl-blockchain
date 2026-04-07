@@ -4684,8 +4684,10 @@ def _multiplexer_worker():
     """Forks snapshots: DM→SSE, Metrics→RPC PUSH."""
     logger.info("[MUX] Snapshot multiplexer started")
     last_metric_push_ts = 0
-    metric_push_interval = 0.05
+    metric_push_interval = 0.2  # 5 metrics/sec instead of 20
     _mux_loop_count = 0
+    last_dm_send_ts = 0
+    dm_send_interval = 1.0  # DM only once per second
     
     while True:
         _mux_loop_count += 1
@@ -4694,12 +4696,18 @@ def _multiplexer_worker():
             if not snap:
                 continue
             
-            # Get DM from LATTICE - 64x64 only (256x256 is too huge for SSE)
-            dm_hex, dm_dim = _get_lattice_dm_hex()
-            if _mux_loop_count % 20 == 0:  # log every ~1s
-                logger.info(f"[MUX] cycle={_mux_loop_count} DM: {len(dm_hex) if dm_hex else 0} chars, dim={dm_dim}")
+            now_ts = time.time()
             
-            # Send DM to SSE queue
+            # Only send DM once per second to reduce browser load
+            dm_hex = ''
+            dm_dim = 0
+            if now_ts - last_dm_send_ts >= dm_send_interval:
+                dm_hex, dm_dim = _get_lattice_dm_hex()
+                last_dm_send_ts = now_ts
+                if _mux_loop_count % 20 == 0:
+                    logger.info(f"[MUX] cycle={_mux_loop_count} DM: {len(dm_hex) if dm_hex else 0} chars, dim={dm_dim}")
+            
+            # Send DM to SSE queue (only if we got new DM this cycle)
             if dm_hex:
                 dm_snap = {
                     'packet_type': 'dm',
