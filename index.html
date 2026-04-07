@@ -547,46 +547,52 @@ async function rpcBatch(calls){
 })();
 
 // ─── DM WEB WORKER (blob, off main thread) ───────────────────────────────────
-// Decodes variable-dim DM hex → typed arrays via nibble LUT, zero GC
-// dim=64: 4096 complex128 = 131072 hex chars (256×256 block-averaged)
-// dim=8:  64  complex128 = 2048 hex chars (oracle fallback)
+// Cathedral-grade DM Processor: Decodes, Mirrors (Hermitian ρ=ρ†), and calculates SSE
+// Handles all 4 quadrants: Q1 (Top-Right) mirrored to Q3 (Bottom-Left)
 var _DM_WORKER_SRC=[
 'self.onmessage=function(e){',
-'  var hex=e.data.hex, N=e.data.N;',
-'  var n2=N*N, need=n2*32;',
-'  if(!hex||hex.length<need){self.postMessage(null);return;}',
+'  var d=e.data; if(!d||!d.hex) return;',
+'  var hex=d.hex, N=d.N||64, n2=N*N;',
 '  var HEX=new Uint8Array(256);',
 '  for(var c=0;c<10;c++) HEX[48+c]=c;',
 '  for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}',
-'  var re=new Float64Array(n2),im=new Float64Array(n2);',
-'  var mag=new Float64Array(n2),ph=new Float64Array(n2);',
-'  var u8=new Uint8Array(8),dv=new DataView(u8.buffer);',
-'  var maxMag=0;',
+'  var re=new Float64Array(n2), im=new Float64Array(n2);',
+'  var mag=new Float64Array(n2), ph=new Float64Array(n2);',
+'  var dv=new DataView(new ArrayBuffer(8));',
+'  var u8=new Uint8Array(dv.buffer);',
+'  var mx=0;',
 '  for(var i=0;i<n2;i++){',
-'    var off=i*32;',
+'    var off=i*32; if(off+31>=hex.length) break;',
 '    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];',
 '    re[i]=dv.getFloat64(0,true);',
-'    var o2=off+16;',
-'    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(o2+b*2)]<<4)|HEX[hex.charCodeAt(o2+b*2+1)];',
+'    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];',
 '    im[i]=dv.getFloat64(0,true);',
-'    mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);',
-'    ph[i]=Math.atan2(im[i],re[i]);',
-'    if(mag[i]>maxMag) maxMag=mag[i];',
 '  }',
-// Mirror Hermitian: ρ[j,i] = conj(ρ[i,j]) — direct assignment
+'  // ══════════════════════════════════════════════════════════════════════════',
+'  // HERMITIAN MIRRORING (ρ = ρ†) — QUADRANT 1 → QUADRANT 3',
+'  // Enforce Real Diagonal (Populations) and Conjugate Symmetry',
+'  // ══════════════════════════════════════════════════════════════════════════',
 '  for(var r=0;r<N;r++){',
-'    re[r*N+r]=Math.abs(re[r*N+r]); im[r*N+r]=0; mag[r*N+r]=Math.abs(re[r*N+r]); ph[r*N+r]=0;',
+'    var di=r*N+r; re[di]=Math.abs(re[di]); im[di]=0;', // Q2/Q4 Diagonal
 '    for(var c=r+1;c<N;c++){',
-'      var ij=r*N+c, ji=c*N+r, re_up=re[ij], im_up=im[ij];',
-'      re[ji]=re_up; im[ji]=-im_up; mag[ji]=mag[ij]; ph[ji]=-ph[ij];',
+'      var ij=r*N+c; // Upper (Q1)',
+'      var ji=c*N+r; // Lower (Q3)',
+'      // If data only in Q1, mirror to Q3; if both, average to Hermitian',
+'      var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
+'      re[ij]=are; im[ij]=aim;',
+'      re[ji]=are; im[ji]=-aim; // Conjugate mirror',
 '    }',
 '  }',
-'  var rb=re.buffer.slice(0),ib=im.buffer.slice(0),mb=mag.buffer.slice(0),pb=ph.buffer.slice(0);',
-'  var rho_sq=0; for(var i=0;i<n2;i++) rho_sq+=re[i]*re[i]+im[i]*im[i];',
+'  // SSE (Sum of Squared Entropies) & Visual Polish',
+'  var rho_sq=0; for(var i=0;i<n2;i++){',
+'    var m=Math.sqrt(re[i]*re[i]+im[i]*im[i]); mag[i]=m; ph[i]=Math.atan2(im[i],re[i]);',
+'    if(m>mx) mx=m; rho_sq+=m*m;',
+'  }',
 '  var purity=Math.min(1,Math.sqrt(rho_sq));',
-'  var entropy=purity>0.001&&purity<0.9999?(function(){var ev=purity*purity;return ev>1e-10?-ev*Math.log(ev)/Math.LN2-(1-ev)*Math.log(1-ev+1e-10)/Math.LN2:0;})():(purity>=0.9999?0:Math.log(N)/Math.LN2);',
+'  var entropy=purity>0.001&&purity<0.9999?(function(){var ev=purity*purity;return -ev*Math.log2(ev)-(1-ev)*Math.log2(1-ev+1e-10);})():(purity>=0.9999?0:Math.log2(N));',
 '  var sse=entropy*entropy;',
-'  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:maxMag,N:N,purity:purity,entropy:entropy,sse:sse},[rb,ib,mb,pb]);',
+'  var rb=re.buffer.slice(0), ib=im.buffer.slice(0), mb=mag.buffer.slice(0), pb=ph.buffer.slice(0);',
+'  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:mx,N:N,purity:purity,entropy:entropy,sse:sse},[rb,ib,mb,pb]);',
 '};'
 ].join('\n');
 
@@ -1024,16 +1030,21 @@ var _lu=0;
 function stamp(){_lu=Date.now();var bu=document.getElementById('bu');if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8);}
 
 // ─── SNAPSHOT STATE MERGE ────────────────────────────────────────────────────
-// All oracle/DM data flows through here — no DOM calls, no rendering
+// Splitting logic: Pulls DM hex for the Worker and distributes metrics to the UI
 function _applySnapshot(dm){
   if(!dm) return;
+  // 1. High-priority DM extraction for specialized worker
+  if(dm.density_matrix_hex) _dmSubmit(dm.density_matrix_hex, dm.dm_dim||64);
+  
+  // 2. Metric distribution
   if(dm.w_state_fidelity!=null) S.fidelity=dm.w_state_fidelity;
   if(dm.purity!=null) S.purity=dm.purity;
   if(dm.coherence_l1!=null) S.coherence=dm.coherence_l1;
   if(dm.von_neumann_entropy!=null) S.entropy=dm.von_neumann_entropy;
-  // DM hex → Worker (off main thread). dm_dim tells us the grid (64 or 8)
-  if(dm.density_matrix_hex) _dmSubmit(dm.density_matrix_hex, dm.dm_dim||64);
+  if(dm.sse!=null) S.sse=dm.sse;
+  
   if(dm.lattice_refresh_counter!=null&&dm.lattice_refresh_counter>S.cycle) S.cycle=dm.lattice_refresh_counter;
+  
   var aer=dm.aer_noise_state||{};
   if(aer.gamma1!=null) S.gamma1=aer.gamma1;
   if(aer.gammaphi!=null) S.gammaphi=aer.gammaphi;
@@ -1043,8 +1054,10 @@ function _applySnapshot(dm){
   if(dm.phase_drift!=null) S.phase_drift=dm.phase_drift;
   if(dm.phase_coherence!=null) S.phase_coherence=dm.phase_coherence;
   if(dm.qrng_health!=null) S.qrng_health=dm.qrng_health;
+  
   var bf=aer.block_field||{};
-  if(bf.pq_curr!=null){S.pq_curr=bf.pq_curr;S.pq_last=bf.pq_last!=null?bf.pq_last:(bf.pq_curr-1);S.pq0=bf.pq0!=null?bf.pq0:S.pq0;}
+  if(bf.pq_curr!=null){S.pq_curr=bf.pq_curr; S.pq_last=bf.pq_last||(bf.pq_curr-1); S.pq0=bf.pq0||S.pq0;}
+  
   var perNode=bf.per_node||[];
   if(perNode.length>0){
     perNode.forEach(function(n){
@@ -1055,44 +1068,32 @@ function _applySnapshot(dm){
       if(n.coherence!=null) od.coherence=n.coherence;
       if(n.entropy!=null) od.entropy=n.entropy;
       if(n.pq0_oracle_fidelity!=null) od.pq0_oracle_fidelity=n.pq0_oracle_fidelity;
-      if(n.pq0_IV_fidelity!=null) od.pq0_IV_fidelity=n.pq0_IV_fidelity;
-      if(n.pq0_V_fidelity!=null) od.pq0_V_fidelity=n.pq0_V_fidelity;
       od.in_consensus=!!n.in_consensus;
     });
     S.oracle_consensus_reached=perNode.filter(function(n){return n.in_consensus;}).length>=3;
     S.quantum_validation_status=S.oracle_consensus_reached?'VALIDATED':'PENDING';
     S.pq_validation_status=S.oracle_consensus_reached?'HLWE_OK':'PENDING';
-  } else if(dm.w_state_fidelity!=null&&dm.w_state_fidelity>0){
-    for(var oi=1;oi<=5;oi++){
-      var ok2='oracle_'+oi;if(!S.oracle_data[ok2]) S.oracle_data[ok2]={};
-      S.oracle_data[ok2].w_state_fidelity=dm.w_state_fidelity;
-      S.oracle_data[ok2].coherence=dm.coherence_l1;
-      S.oracle_data[ok2].in_consensus=(dm.w_state_fidelity||0)>0.5;
-    }
-    S.oracle_consensus_reached=dm.w_state_fidelity>0.5;
-    S.quantum_validation_status=S.oracle_consensus_reached?'VALIDATED':'PENDING';
-    S.pq_validation_status=S.oracle_consensus_reached?'HLWE_OK':'PENDING';
   }
-  if(aer.pq0_oracle_fidelity!=null){
-    if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1']={};
-    if(S.oracle_data['oracle_1'].pq0_oracle_fidelity==null){
-      S.oracle_data['oracle_1'].pq0_oracle_fidelity=aer.pq0_oracle_fidelity;
-      S.oracle_data['oracle_1'].pq0_IV_fidelity=aer.pq0_IV_fidelity;
-      S.oracle_data['oracle_1'].pq0_V_fidelity=aer.pq0_V_fidelity;
-    }
-  }
-  var _p=dm.purity||S.purity||0.8,_f=dm.w_state_fidelity||S.fidelity||0;
-  S.negativity=Math.max(0,(_p-0.5)*0.8);S.concurrence=Math.max(0,(_p-0.333)*1.2);
-  S.entanglement=Math.max(0,_f*0.9);S.qfi=Math.max(0,_f*8.0);
-  S.discord=Math.max(0,(1-_p)*2.0);S.tele_fidelity=Math.max(0,_f*0.95);
+  
+  // Derived metrics distribution
+  var _p=dm.purity||S.purity||0.8, _f=dm.w_state_fidelity||S.fidelity||0;
+  S.negativity=Math.max(0,(_p-0.5)*0.8);
+  S.concurrence=Math.max(0,(_p-0.333)*1.2);
+  S.entanglement=Math.max(0,_f*0.9);
+  S.qfi=Math.max(0,_f*8.0);
+  S.discord=Math.max(0,(1-_p)*2.0);
+  S.tele_fidelity=Math.max(0,_f*0.95);
+  
   if(dm.mermin_test) S.mermin=dm.mermin_test;
-  else if(dm.mermin) S.mermin=dm.mermin;
 }
 
 // ─── WORKERS ─────────────────────────────────────────────────────────────────
 var _lastEventTs=Date.now()/1000-60,_lastBlockHeight=0;
 
-// W1: Metrics — 1.5s — ONLY DOM driver
+// ─── WORKERS ─────────────────────────────────────────────────────────────────
+var _lastEventTs=Date.now()/1000-60,_lastBlockHeight=0;
+
+// W1: Metrics & Snapshot Orchestrator — ensures no main-thread hang
 var _w1Running=false;
 async function _workerMetrics(){
   if(_w1Running) return; _w1Running=true;
@@ -1106,51 +1107,30 @@ async function _workerMetrics(){
       var nh=parseInt(hr.height);
       if(nh>S.height){_lastBlockHeight=S.height;S.height=nh;S.tip_hash=hr.tip_hash||S.tip_hash;applyRewards(S.height);}
     }
-    if(qm){
-      var ws=qm.w_state||{};
-      if(ws.fidelity!=null) S.fidelity=ws.fidelity;
-      if(ws.coherence!=null) S.coherence=ws.coherence;
-      if(ws.purity!=null) S.purity=ws.purity;
-      if(ws.entropy!=null) S.entropy=ws.entropy;
-      var la=qm.lattice||{};
-      if(la.fidelity!=null) S.lattice_fidelity=la.fidelity;
-      if(la.coherence!=null) S.lattice_coherence=la.coherence;
-      if(la.w_state_strength!=null) S.w_state_strength=la.w_state_strength;
-      if(la.cycle!=null&&la.cycle>S.cycle) S.cycle=la.cycle;
-      if(qm.oracle_available!=null) S.oracle_consensus_reached=qm.oracle_available;
-      if(qm.mermin_test) S.mermin=qm.mermin_test;
-      else if(qm.bell_test) S.mermin=qm.bell_test;
-      // DM from getQuantumMetrics (same 64x64 path)
-      if(qm.density_matrix_hex) _dmSubmit(qm.density_matrix_hex, qm.dm_dim||64);
-      var oid1='oracle_1';if(!S.oracle_data[oid1]) S.oracle_data[oid1]={};
-      if(qm.w_state_fidelity!=null){S.oracle_data[oid1].w_state_fidelity=qm.w_state_fidelity;S.fidelity=qm.w_state_fidelity;}
-      if(qm.coherence_l1!=null){S.oracle_data[oid1].coherence=qm.coherence_l1;S.coherence=qm.coherence_l1;}
-      if(qm.purity!=null){S.oracle_data[oid1].purity=qm.purity;S.purity=qm.purity;}
-      if(qm.von_neumann_entropy!=null){S.oracle_data[oid1].entropy=qm.von_neumann_entropy;S.entropy=qm.von_neumann_entropy;}
-      S.oracle_data[oid1].in_consensus=(qm.w_state_fidelity||0)>0.5;
-    }
+    if(qm) _applySnapshot(qm); // Split and distribute
     updateDOM();setOnline(true);stamp();
-  }catch(e){console.warn('[W1]',e.message);}
-  finally{_w1Running=false;}
+  }catch(e){console.warn('[W1-Metrics]',e.message);}
+  finally{_w1Running=false; setTimeout(_workerMetrics, 2000);}
 }
 
-// W2: Oracle/DM snapshot — 2s — pure state merge, no DOM
+// W2: High-frequency DM Snapshot — separate stream
 var _w2Running=false;
 async function _workerDM(){
   if(_w2Running) return; _w2Running=true;
   try{
     var r=await fetch(BASE+'/rpc/oracle/snapshot',{method:'POST',
       headers:{'Content-Type':'application/json'},body:'{}',
-      signal:AbortSignal.timeout(25000)});
-    if(!r.ok) return;
-    var j=await r.json();
-    _applySnapshot(j.result);
-    setOnline(true);
+      signal:AbortSignal.timeout(20000)});
+    if(r.ok){
+      var j=await r.json();
+      if(j.result) _applySnapshot(j.result);
+      setOnline(true);
+    }
   }catch(e){console.warn('[W2-DM]',e.message);}
-  finally{_w2Running=false;}
+  finally{_w2Running=false; setTimeout(_workerDM, 3000);}
 }
 
-// W3: Blocks + Events — 3s
+// W3: Blocks + Events
 var _w3Running=false;
 async function _workerBlocks(){
   if(_w3Running) return; _w3Running=true;
@@ -1161,50 +1141,47 @@ async function _workerBlocks(){
       ['qtcl_getBlockRange',[fromH,S.height]],
     ]);
     var events=results[0],blockRange=results[1];
-    if(events&&Array.isArray(events.events)&&events.events.length){
+    if(events&&Array.isArray(events.events)){
       events.events.forEach(function(ev){
         if(ev.ts>_lastEventTs) _lastEventTs=ev.ts;
         if(ev.type==='new_block'){
           var h=parseInt(ev.height||ev.block_height||0);
-          if(h>0&&h>S.height){S.height=h;applyRewards(h);}
+          if(h>S.height){S.height=h;applyRewards(h);}
           if(h>0&&!_blocksById[h]){
-            var nb={height:h,block_hash:ev.block_hash||'',hash:ev.block_hash||'',tx_count:ev.tx_count||0,w_state_fidelity:ev.w_state_fidelity||S.fidelity,difficulty_bits:ev.difficulty_bits||S.difficulty_bits,_fr:true};
-            if(ev.pq_curr!=null){nb.pq_curr=ev.pq_curr;S.pq_curr=nb.pq_curr;}
-            if(ev.pq_last!=null){nb.pq_last=ev.pq_last;S.pq_last=nb.pq_last;}
-            _blocksById[h]=nb;blocks.push(nb);blocks.sort(function(a,b){return a.height-b.height;});
-            renderChain();_lastBlockHeight=h;
-            if(!txLoading) setTimeout(loadTxPage,400);
+            var nb={height:h,hash:ev.block_hash||'',tx_count:ev.tx_count||0,w_state_fidelity:ev.w_state_fidelity||S.fidelity,_fr:true};
+            _blocksById[h]=nb;blocks.push(nb);renderChain();
           }
         }
       });
     }
-    if(blockRange&&Array.isArray(blockRange.blocks)&&blockRange.blocks.length){
+    if(blockRange&&Array.isArray(blockRange.blocks)){
       blockRange.blocks.forEach(function(b){
         var bh=parseInt(b.height||0);
         if(bh>0&&!_blocksById[bh]){
-          var nb={height:bh,block_hash:b.block_hash||b.hash||'',hash:b.block_hash||b.hash||'',tx_count:b.tx_count||b.transaction_count||0,w_state_fidelity:b.w_state_fidelity||S.fidelity,difficulty_bits:b.difficulty||b.difficulty_bits||S.difficulty_bits,_fr:false};
-          nb.pq_curr=b.pq_curr||bh;nb.pq_last=b.pq_last||(bh-1);
+          var nb={height:bh,hash:b.block_hash||b.hash||'',tx_count:b.tx_count||b.transaction_count||0,w_state_fidelity:b.w_state_fidelity||S.fidelity,_fr:false};
           _blocksById[bh]=nb;blocks.push(nb);
         }
       });
-      if(blocks.length){blocks.sort(function(a,b){return a.height-b.height;});if(blocks.length>30) blocks=blocks.slice(-30);renderChain();}
+      blocks.sort(function(a,b){return a.height-b.height;});
+      if(blocks.length>30) blocks=blocks.slice(-30);
+      renderChain();
     }
-  }catch(e){console.warn('[W3]',e.message);}
-  finally{_w3Running=false;}
+  }catch(e){console.warn('[W3-Blocks]',e.message);}
+  finally{_w3Running=false; setTimeout(_workerBlocks, 4000);}
 }
 
-// W4: Mempool — 5s
+// W4: Mempool
 var _w4Running=false;
 async function _workerMempool(){
   if(_w4Running) return; _w4Running=true;
   try{
     var mp=await rpc('qtcl_getMempoolStats',[]);
-    if(mp){S.mempool_size=mp.depth!=null?mp.depth:(mp.pending!=null?mp.pending:S.mempool_size);st('hm',S.mempool_size+' tx');}
-  }catch(e){console.warn('[W4]',e.message);}
-  finally{_w4Running=false;}
+    if(mp){S.mempool_size=mp.depth||mp.pending||0;st('hm',S.mempool_size+' tx');}
+  }catch(e){}
+  finally{_w4Running=false; setTimeout(_workerMempool, 6000);}
 }
 
-// W5: Peers — 10s
+// W5: Peers
 var _w5Running=false;
 async function _workerPeers(){
   if(_w5Running) return; _w5Running=true;
@@ -1213,47 +1190,29 @@ async function _workerPeers(){
     if(peers){
       var raw=Array.isArray(peers.peers)?peers.peers:[];
       S.n_peers=peers.count||raw.length;
-      var staleThresh=300;
       var miners=raw.map(function(p){
-        var addr=p.miner_address||p.address||p.node_id||p.peer_id||'';
+        var addr=p.miner_address||p.address||p.node_id||'';
         var ls=p.last_seen?new Date(p.last_seen).getTime()/1000:0;
         var age=ls>0?Math.round(Date.now()/1000-ls):999999;
-        return{miner_address:addr,peer_id:p.peer_id||p.node_id||'',gossip_url:p.gossip_url||'',
-          block_count:p.block_count||0,last_height:p.block_height||p.last_height||0,
-          total_earned_qtcl:p.total_earned_qtcl||0,last_seen_age_s:age,
-          status:age<staleThresh?'live':(age<86400?'seen':'historic'),ip_address:p.ip_address||''};
-      }).filter(function(m){return m.miner_address;});
-      if(miners.length) renderMiners(miners);
+        return{miner_address:addr,last_height:p.block_height||0,status:age<300?'live':(age<86400?'seen':'historic'),last_seen_age_s:age};
+      });
+      renderMiners(miners);
     }
-  }catch(e){console.warn('[W5]',e.message);}
-  finally{_w5Running=false;}
+  }catch(e){}
+  finally{_w5Running=false; setTimeout(_workerPeers, 12000);}
 }
 
-// ─── RING-BUFFER CATCHUP ON CONNECT ──────────────────────────────────────────
-(function(){
-    fetch(BASE+'/rpc/oracle/snapshots?limit=3',{signal:AbortSignal.timeout(30000)})
-    .then(function(r){return r.ok?r.json():null;})
-    .then(function(j){
-      if(!j) return;
-      var snaps=(j.result&&j.result.snapshots)||[];
-      snaps.forEach(function(s){_applySnapshot(s);});
-    }).catch(function(){});
-})();
-
-// ─── BOOT — staggered so workers don't hammer server simultaneously ───────────
-_workerMetrics();
-setTimeout(_workerDM,     500);
-setTimeout(_workerBlocks, 900);
-setTimeout(_workerMempool,1400);
-setTimeout(_workerPeers,  1900);
-setTimeout(function(){if(!txLoading)loadTxPage();},2400);
-
-setInterval(_workerMetrics,  1500);
-setInterval(_workerDM,       2000);
-setInterval(_workerBlocks,   3000);
-setInterval(_workerMempool,  5000);
-setInterval(_workerPeers,   10000);
-setInterval(function(){if(!txLoading)loadTxPage();},30000);
+// ─── BOOT SEQUENCE — Cathedral architecture ──────────────────────────────────
+function _boot(){
+  console.log('[QTCL] Initializing quantum orchestrator...');
+  _workerMetrics();
+  setTimeout(_workerDM, 1000);
+  setTimeout(_workerBlocks, 2000);
+  setTimeout(_workerMempool, 3000);
+  setTimeout(_workerPeers, 4000);
+  setTimeout(function(){if(!txLoading)loadTxPage();}, 5000);
+}
+_boot();
 </script>
 </body>
 </html>
