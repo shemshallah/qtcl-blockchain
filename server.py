@@ -4663,9 +4663,8 @@ import threading as _threading_module
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SNAPSHOT MULTIPLEXER — Non-blocking 50ms DM stream + RPC PUSH metrics
-# ──────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
 _snapshot_sse_queue = _queue_module.Queue(maxsize=50)
-_snapshot_sse_queue_full = _queue_module.Queue(maxsize=20)  # Separate queue for full 256x256
 _snapshot_multiplexer_queue = _queue_module.Queue(maxsize=100)
 _snapshot_multiplexer_lock = _threading_module.Lock()
 _connected_metric_clients = []
@@ -4686,45 +4685,70 @@ def _multiplexer_worker():
     logger.info("[MUX] Snapshot multiplexer started")
     last_metric_push_ts = 0
     metric_push_interval = 0.05
+    _mux_loop_count = 0
     
     while True:
+        _mux_loop_count += 1
         try:
             snap = _snapshot_multiplexer_queue.get(timeout=1.0)
             if not snap:
                 continue
             
-            # Fork 1a: Full 256x256 DM → SSE (full resolution stream)
-            # Get directly from LATTICE in this thread for real-time processing
-            dm_hex_full, dm_dim_full = _get_lattice_dm_hex(force_dim=256)
-            if dm_hex_full:
-                dm_snap_full = {
-                    'packet_type': 'dm_full',
-                    'density_matrix_hex': dm_hex_full,
-                    'dm_dim': 256,
+            # Get DM from LATTICE - 64x64 only (256x256 is too huge for SSE)
+            dm_hex, dm_dim = _get_lattice_dm_hex()
+            logger.debug(f"[MUX] cycle={_mux_loop_count} DM: {len(dm_hex) if dm_hex else 0} chars, dim={dm_dim}")
+            
+            # Send DM to SSE queue
+            if dm_hex:
+                dm_snap = {
+                    'packet_type': 'dm',
+                    'density_matrix_hex': dm_hex,
+                    'dm_dim': dm_dim or 64,
                     'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                     'w_state_fidelity': snap.get('w_state_fidelity'),
                     'purity': snap.get('purity'),
                     'ready': True
                 }
                 try:
-                    _snapshot_sse_queue_full.put_nowait(dm_snap_full)
+                    _snapshot_sse_queue.put_nowait(dm_snap)
                 except _queue_module.Full:
                     pass
             
-            # Fork 1b: Reduced 64x64 DM → SSE (compatibility stream)
-            dm_hex_64, dm_dim_64 = _get_lattice_dm_hex()
-            dm_snap = {
-                'packet_type': 'dm_reduced',
-                'density_matrix_hex': dm_hex_64 or snap.get('density_matrix_hex', ''),
-                'dm_dim': dm_dim_64 or snap.get('dm_dim', 64),
-                'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
-                'w_state_fidelity': snap.get('w_state_fidelity'),
-                'ready': True
-            }
-            try:
-                _snapshot_sse_queue.put_nowait(dm_snap)
-            except _queue_module.Full:
-                pass
+            # Metrics push
+            now_ts = time.time()
+            if now_ts - last_metric_push_ts >= metric_push_interval:
+                metrics_snap = {
+                    'packet_type': 'metrics',
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'coherence_l1': snap.get('coherence_l1'),
+                    'von_neumann_entropy': snap.get('von_neumann_entropy'),
+                    'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
+                    'aer_noise_state': snap.get('aer_noise_state', {}),
+                    'block_field': snap.get('block_field', {}),
+                    'phase_drift': snap.get('phase_drift'),
+                    'phase_coherence': snap.get('phase_coherence'),
+                    'qrng_health': snap.get('qrng_health'),
+                    'mermin_test': snap.get('mermin_test'),
+                }
+                
+                with _snapshot_multiplexer_lock:
+                    for client_q in _connected_metric_clients[:]:
+                        try:
+                            client_q.put_nowait(metrics_snap)
+                        except _queue_module.Full:
+                            _connected_metric_clients.remove(client_q)
+                
+                last_metric_push_ts = now_ts
+        
+        except _queue_module.Empty:
+            continue
+        except GeneratorExit:
+            break
+        except Exception as e:
+            logger.error(f"[MUX] error: {e}")
+            time.sleep(0.1)
             
             # Fork 2: Metrics (no DM) → RPC PUSH
             now_ts = time.time()
@@ -4763,34 +4787,6 @@ def _multiplexer_worker():
 
 _multiplexer_thread = _threading_module.Thread(target=_multiplexer_worker, daemon=True)
 _multiplexer_thread.start()
-
-@app.route("/rpc/oracle/snapshot/full", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshot_full():
-    """
-    SSE STREAM — HIGH-FREQUENCY (50ms) FULL 256x256 DENSITY MATRIX.
-    Returns full-resolution DM with packet_type markers for client routing.
-    """
-    if request.method == "OPTIONS":
-        return "", 204
-
-    def generate():
-        import itertools
-        for _ in itertools.count():
-            try:
-                snap = _snapshot_sse_queue_full.get(timeout=2.0)
-                if snap and snap.get('density_matrix_hex'):
-                    payload = json.dumps({"result": snap, "id": 1})
-                    yield f"data: {payload}\n\n"
-            except _queue_module.Empty:
-                yield f": heartbeat\n\n"
-            except GeneratorExit:
-                break
-            except Exception as e:
-                logger.debug(f"[SSE-SNAPSHOT-FULL] error: {e}")
-                break
-
-    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
-    return Response(generate(), mimetype='text/event-stream', headers=headers)
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
@@ -4858,6 +4854,78 @@ def rpc_metrics_push():
 
     headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
     return Response(generate(), mimetype='text/event-stream', headers=headers)
+
+# ════════════════════════════════════════════════════════════════════════════════
+# BLOCKS SSE STREAM — Dedicated unblockable real-time block events
+# ════════════════════════════════════════════════════════════════════════════════
+_blocks_sse_queue = _queue_module.Queue(maxsize=50)
+_connected_blocks_clients = []
+_blocks_multicast_lock = _threading_module.Lock()
+
+@app.route("/rpc/events/blocks", methods=["GET", "POST", "OPTIONS"])
+def rpc_events_blocks():
+    """SSE STREAM — Real-time block events (new blocks minted)."""
+    if request.method == "OPTIONS":
+        return "", 204
+    
+    client_queue = _queue_module.Queue(maxsize=50)
+    with _blocks_multicast_lock:
+        _connected_blocks_clients.append(client_queue)
+    
+    def generate():
+        import itertools
+        for _ in itertools.count():
+            try:
+                block = client_queue.get(timeout=2.0)
+                if block:
+                    payload = json.dumps({"result": block, "id": 1})
+                    yield f"data: {payload}\n\n"
+            except _queue_module.Empty:
+                yield f": heartbeat\n\n"
+            except GeneratorExit:
+                break
+            except Exception as e:
+                logger.debug(f"[SSE-BLOCKS] error: {e}")
+                break
+        
+        with _blocks_multicast_lock:
+            try:
+                _connected_blocks_clients.remove(client_queue)
+            except ValueError:
+                pass
+    
+    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
+    return Response(generate(), mimetype='text/event-stream', headers=headers)
+
+# Worker to broadcast blocks to all connected clients
+def _blocks_broadcaster_worker():
+    """Broadcasts new blocks to all SSE clients."""
+    logger.info("[BLOCKS-BRD] Block broadcaster started")
+    while True:
+        try:
+            block = _blocks_sse_queue.get(timeout=1.0)
+            if not block:
+                continue
+            
+            with _blocks_multicast_lock:
+                for client_q in _connected_blocks_clients[:]:
+                    try:
+                        client_q.put_nowait(block)
+                    except _queue_module.Full:
+                        try:
+                            _connected_blocks_clients.remove(client_q)
+                        except ValueError:
+                            pass
+        except _queue_module.Empty:
+            continue
+        except GeneratorExit:
+            break
+        except Exception as e:
+            logger.error(f"[BLOCKS-BRD] error: {e}")
+            time.sleep(0.1)
+
+_blocks_broadcaster_thread = _threading_module.Thread(target=_blocks_broadcaster_worker, daemon=True)
+_blocks_broadcaster_thread.start()
 
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():
@@ -5028,35 +5096,18 @@ def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
         return '', 0
 
 
-def _get_lattice_dm_hex(force_dim: int = 0) -> tuple:
-    """
-    Pull current_density_matrix from LATTICE, optionally return full 256x256 or reduced 64x64.
-    Falls back to oracle snapshot 8x8 if LATTICE not available.
+def _get_lattice_dm_hex() -> tuple:
+    """Pull current_density_matrix from LATTICE, return 64x64 reduced hex."""
+    from globals import LATTICE
     
-    Args:
-        force_dim: If > 0, return that dimension (e.g., 256 for full 256x256). 
-                   Otherwise auto-detect based on available data.
-    """
-    # Try to get full 256x256 if requested
-    if force_dim == 256:
-        try:
-            lat = sys.modules[__name__].__dict__.get('LATTICE')
-            if lat is not None and hasattr(lat, 'current_density_matrix'):
-                dm = lat.current_density_matrix
-                if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
-                    return dm.tobytes().hex(), 256
-        except Exception as e:
-            logger.debug(f"[DM-FULL] LATTICE 256x256 access: {e}")
-    
-    # Otherwise try 256->64 reduction
     try:
-        lat = sys.modules[__name__].__dict__.get('LATTICE')
+        lat = LATTICE
         if lat is not None and hasattr(lat, 'current_density_matrix'):
             dm = lat.current_density_matrix
             if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
                 return _lattice_dm_to_64x64_hex(dm)
     except Exception as e:
-        logger.debug(f"[DM-REDUCE] LATTICE access: {e}")
+        logger.debug(f"[DM] LATTICE access: {e}")
 
     # Fallback: oracle snapshot 8x8 as-is
     try:

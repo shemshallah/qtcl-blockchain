@@ -2872,6 +2872,24 @@ class BlockManager:
             self.chain_height   += 1
             self.blocks_sealed  += 1
 
+            # ── Broadcast sealed block to SSE clients ─────────────────────────────
+            try:
+                import sys
+                _srv = sys.modules.get('server')
+                if _srv and hasattr(_srv, '_blocks_sse_queue'):
+                    block_event = {
+                        'height': block.block_height,
+                        'block_hash': block.block_hash,
+                        'parent_hash': block.parent_hash,
+                        'timestamp': block.timestamp_s,
+                        'tx_count': block.tx_count,
+                        'w_state_fidelity': getattr(block, 'w_state_fidelity', None),
+                    }
+                    _srv._blocks_sse_queue.put_nowait(block_event)
+                    logger.debug(f"[BLOCK-BRD] ✅ Broadcasted block #{block.block_height}")
+            except Exception as _brd_err:
+                logger.debug(f"[BLOCK-BRD] skip: {_brd_err}")
+
             logger.info(
                 f"🎉 BLOCK SEALED | #{block.block_height} | "
                 f"{block.tx_count} TXs | {seal_time:.2f}s | "

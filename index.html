@@ -622,75 +622,8 @@ var _dmParsed=null,_dmDirty=false,_dmLastHex='',_dmCanvas=null,_dmCtx=null;
 function _dmSubmit(hex,N){
   if(!hex||hex===_dmLastHex) return;
   _dmLastHex=hex;
-  
-  // Handle 256x256 full resolution: reduce to 64x64 for display rendering
-  // The SSE sends full 256x256, we process it here for visualization
   var targetN=N||64;
-  if(targetN===256){
-    try{
-      var HEX=new Uint8Array(256);
-      for(var c=0;c<10;c++) HEX[48+c]=c;
-      for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}
-      
-      var re256=new Float64Array(65536), im256=new Float64Array(65536);
-      var u8=new Uint8Array(8), dv=new DataView(u8.buffer);
-      
-      for(var i=0;i<65536;i++){
-        var off=i*32;
-        for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
-        re256[i]=dv.getFloat64(0,true);
-        var o2=off+16;
-        for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(o2+b*2)]<<4)|HEX[hex.charCodeAt(o2+b*2+1)];
-        im256[i]=dv.getFloat64(0,true);
-      }
-      
-      var re64=new Float64Array(4096), im64=new Float64Array(4096);
-      var B=4;
-      for(var I=0;I<64;I++){
-        for(var J=0;J<64;J++){
-          var sumRe=0,sumIm=0;
-          for(var ii=0;ii<4;ii++){
-            for(var jj=0;jj<4;jj++){
-              var srcIdx=(I*B+ii)*256+(J*B+jj);
-              sumRe+=re256[srcIdx];
-              sumIm+=im256[srcIdx];
-            }
-          }
-          re64[I*64+J]=sumRe/16;
-          im64[I*64+J]=sumIm/16;
-        }
-      }
-      
-      for(var r=0;r<64;r++){
-        re64[r*64+r]=Math.abs(re64[r*64+r]);im64[r*64+r]=0;
-        for(var c=r+1;c<64;c++){
-          var ij=r*64+c,ji=c*64+r;
-          var are=0.5*(re64[ij]+re64[ji]),aim=0.5*(im64[ij]-im64[ji]);
-          re64[ij]=are;im64[ij]=aim;
-          re64[ji]=are;im64[ji]=-aim;
-        }
-      }
-      
-      var mag=new Float64Array(4096),ph=new Float64Array(4096),mx=0;
-      for(var i=0;i<4096;i++){
-        mag[i]=Math.sqrt(re64[i]*re64[i]+im64[i]*im64[i]);
-        ph[i]=Math.atan2(im64[i],re64[i]);
-        if(mag[i]>mx) mx=mag[i];
-      }
-      
-      var rho_sq=0;for(var i=0;i<4096;i++) rho_sq+=re64[i]*re64[i]+im64[i]*im64[i];
-      var purity=Math.min(1,Math.sqrt(rho_sq));
-      var entropy=purity>0.001&&purity<0.9999?(function(){
-        var ev=purity*purity;return ev>1e-10?-ev*Math.log(ev)/Math.LN2-(1-ev)*Math.log(1-ev+1e-10)/Math.LN2:0;
-      })():(purity>=0.9999?0:Math.log(64)/Math.LN2);
-      var sse=entropy*entropy;
-      
-      _dmParsed={re:re64,im:im64,mag:mag,ph:ph,maxMag:mx,N:64,purity:purity,entropy:entropy,sse:sse};
-      S.purity=purity;S.entropy=entropy;S.sse=sse;
-      _dmDirty=true;
-      return;
-    }catch(x){console.warn('[DM-256->64] reduce failed',x.message);}
-  }
+  
   if(_dmW){_dmW.postMessage({hex:hex,N:targetN});
   } else {
     // sync fallback with Hermitian + SSE
@@ -1201,14 +1134,13 @@ function _workerMetricsPush(){
   }
 }
 
-// W2: Density Matrix Worker — FULL 256x256 SSE stream with packet_type routing
-// Reads packet_type to route DM vs Metrics — single endpoint, dual purpose
+// W2: Density Matrix Worker — SSE stream for 64x64 DM rendering
 var _w2ES=null,_w2ReconnT=null;
 var _w2MsgCount=0;
 function _workerDM(){
   if(_w2ES){_w2ES.close();_w2ES=null;}
   try{
-    _w2ES=new EventSource(BASE+'/rpc/oracle/snapshot/full');
+    _w2ES=new EventSource(BASE+'/rpc/oracle/snapshot');
     _w2ES.onmessage=function(e){
       _w2MsgCount++;
       try{
@@ -1216,17 +1148,13 @@ function _workerDM(){
         var r=d.result;
         if(!r) return;
         
-        var pktype=r.packet_type||'dm_full';
+        var pktype=r.packet_type||'dm';
         console.log('[W2-DM] msg#'+_w2MsgCount+' type='+pktype+' dim='+(r.dm_dim||'?'));
         
-        if(pktype==='dm_full'||pktype==='dm_reduced'){
-          if(r.density_matrix_hex){
-            console.log('[W2-DM] submitting DM, hex len='+r.density_matrix_hex.length);
-            _dmSubmit(r.density_matrix_hex, r.dm_dim||256);
-            console.log('[W2-DM] DM submitted, _dmDirty='+_dmDirty);
-          }
-          if(r.w_state_fidelity!=null) S.fidelity=r.w_state_fidelity;
-          if(r.purity!=null) S.purity=r.purity;
+        if(pktype==='dm'&&r.density_matrix_hex){
+          console.log('[W2-DM] submitting DM, hex len='+r.density_matrix_hex.length);
+          _dmSubmit(r.density_matrix_hex, r.dm_dim||64);
+          console.log('[W2-DM] DM submitted, _dmDirty='+_dmDirty);
         }
         else if(pktype==='metrics'){
           _applySnapshot(r);
@@ -1247,44 +1175,53 @@ function _workerDM(){
   }
 }
 
-// W3: Blocks Worker — Dedicated event stream for chain blocks
-var _w3Running=false;
-async function _workerBlocks(){
-  if(_w3Running) return; _w3Running=true;
+// W3: Blocks Worker — Dedicated SSE stream for chain blocks (UNBLOCKABLE)
+var _w3ES=null,_w3ReconnT=null;
+var _w3LastHeight=0;
+function _workerBlocks(){
+  if(_w3ES){_w3ES.close();_w3ES=null;}
   try{
-    var fromH=Math.max(0,S.height-20);
-    var results=await rpcBatch([
-      ['qtcl_getEvents',[{since:_lastEventTs,types:'new_block',limit:10}]],
-      ['qtcl_getBlockRange',[fromH,S.height]],
-    ]);
-    var events=results[0],blockRange=results[1];
-    if(events&&Array.isArray(events.events)){
-      events.events.forEach(function(ev){
-        if(ev.ts>_lastEventTs) _lastEventTs=ev.ts;
-        if(ev.type==='new_block'){
-          var h=parseInt(ev.height||ev.block_height||0);
+    _w3ES=new EventSource(BASE+'/rpc/events/blocks');
+    _w3ES.onmessage=function(e){
+      try{
+        var d=JSON.parse(e.data);
+        var r=d.result;
+        if(!r) return;
+        
+        console.log('[W3-Blocks] SSE event, height='+(r.height||r.block_height||'?'));
+        
+        var h=parseInt(r.height||r.block_height||0);
+        if(h>0&&h!==_w3LastHeight){
+          _w3LastHeight=h;
           if(h>S.height){S.height=h;applyRewards(h);}
-          if(h>0&&!_blocksById[h]){
-            var nb={height:h,hash:ev.block_hash||'',tx_count:ev.tx_count||0,w_state_fidelity:ev.w_state_fidelity||S.fidelity,_fr:true};
-            _blocksById[h]=nb;blocks.push(nb);renderChain();
+          if(!_blocksById[h]){
+            var nb={
+              height:h,
+              hash:r.block_hash||r.hash||'',
+              tx_count:r.tx_count||r.transaction_count||0,
+              w_state_fidelity:r.w_state_fidelity||S.fidelity,
+              _fr:true
+            };
+            _blocksById[h]=nb;
+            blocks.push(nb);
+            blocks.sort(function(a,b){return a.height-b.height;});
+            if(blocks.length>30) blocks=blocks.slice(-30);
+            renderChain();
           }
         }
-      });
-    }
-    if(blockRange&&Array.isArray(blockRange.blocks)){
-      blockRange.blocks.forEach(function(b){
-        var bh=parseInt(b.height||0);
-        if(bh>0&&!_blocksById[bh]){
-          var nb={height:bh,hash:b.block_hash||b.hash||'',tx_count:b.tx_count||b.transaction_count||0,w_state_fidelity:b.w_state_fidelity||S.fidelity,_fr:false};
-          _blocksById[bh]=nb;blocks.push(nb);
-        }
-      });
-      blocks.sort(function(a,b){return a.height-b.height;});
-      if(blocks.length>30) blocks=blocks.slice(-30);
-      renderChain();
-    }
-  }catch(e){console.warn('[W3-Blocks]',e.message);}
-  finally{_w3Running=false; setTimeout(_workerBlocks, 4000);}
+        setOnline(true);
+      }catch(x){console.warn('[W3-Blocks] parse error',x.message);}
+    };
+    _w3ES.onerror=function(){
+      console.warn('[W3-Blocks] SSE lost, reconnecting...');
+      if(_w3ES){_w3ES.close();_w3ES=null;}
+      clearTimeout(_w3ReconnT);
+      _w3ReconnT=setTimeout(_workerBlocks, 3000);
+    };
+  }catch(e){console.warn('[W3-Blocks] init failed',e.message);
+    clearTimeout(_w3ReconnT);
+    _w3ReconnT=setTimeout(_workerBlocks, 5000);
+  }
 }
 
 // W4: Mempool Worker — Independent polling for mempool state
