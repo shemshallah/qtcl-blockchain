@@ -1090,24 +1090,45 @@ function _applySnapshot(dm){
 // ─── WORKERS ─────────────────────────────────────────────────────────────────
 var _lastEventTs=Date.now()/1000-60,_lastBlockHeight=0;
 
-// W1: Metrics & Snapshot Orchestrator — ensures no main-thread hang
-var _w1Running=false;
-async function _workerMetrics(){
-  if(_w1Running) return; _w1Running=true;
+// W0.5: Block height poll (only block height, non-blocking 4s cadence)
+async function _workerBlockHeight(){
   try{
-    var results=await rpcBatch([
-      ['qtcl_getBlockHeight',[]],
-      ['qtcl_getQuantumMetrics',[]],
-    ]);
-    var hr=results[0],qm=results[1];
+    var hr=await rpc('qtcl_getBlockHeight',[]);
     if(hr&&hr.height!=null){
       var nh=parseInt(hr.height);
       if(nh>S.height){_lastBlockHeight=S.height;S.height=nh;S.tip_hash=hr.tip_hash||S.tip_hash;applyRewards(S.height);}
     }
-    if(qm) _applySnapshot(qm); // Split and distribute
     updateDOM();setOnline(true);stamp();
-  }catch(e){console.warn('[W1-Metrics]',e.message);}
-  finally{_w1Running=false; setTimeout(_workerMetrics, 2000);}
+  }catch(e){}
+  finally{setTimeout(_workerBlockHeight, 4000);}
+}
+
+// W1: RPC PUSH Metrics Receiver — non-blocking real-time metric updates from server
+var _w1RPCPushES=null,_w1RPCReconnT=null;
+function _workerMetricsPush(){
+  if(_w1RPCPushES){_w1RPCPushES.close();_w1RPCPushES=null;}
+  try{
+    _w1RPCPushES=new EventSource(BASE+'/rpc/metrics/push');
+    _w1RPCPushES.onmessage=function(e){
+      try{
+        var d=JSON.parse(e.data);
+        if(d.result) {
+          _applySnapshot(d.result); // Metrics only (no DM)
+          updateDOM();
+        }
+        setOnline(true);
+      }catch(x){console.warn('[W1-RPC-PUSH] parse error',x.message);}
+    };
+    _w1RPCPushES.onerror=function(){
+      console.warn('[W1-RPC-PUSH] connection lost, reconnecting...');
+      if(_w1RPCPushES){_w1RPCPushES.close();_w1RPCPushES=null;}
+      clearTimeout(_w1RPCReconnT);
+      _w1RPCReconnT=setTimeout(_workerMetricsPush, 3000);
+    };
+  }catch(e){console.warn('[W1-RPC-PUSH] init failed',e.message);
+    clearTimeout(_w1RPCReconnT);
+    _w1RPCReconnT=setTimeout(_workerMetricsPush, 5000);
+  }
 }
 
 // W2: High-frequency DM Snapshot — SSE stream
@@ -1210,8 +1231,9 @@ async function _workerPeers(){
 // ─── BOOT SEQUENCE — Cathedral architecture ──────────────────────────────────
 function _boot(){
   console.log('[QTCL] Initializing quantum orchestrator...');
-  _workerMetrics();
-  setTimeout(_workerDM, 1000);
+  _workerBlockHeight();
+  _workerMetricsPush();
+  setTimeout(_workerDM, 500);
   setTimeout(_workerBlocks, 2000);
   setTimeout(_workerMempool, 3000);
   setTimeout(_workerPeers, 4000);

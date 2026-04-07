@@ -4651,44 +4651,156 @@ def _build_snapshot_payload() -> dict:
     _base['ready'] = True
     return _base
 
+import queue as _queue_module
+import threading as _threading_module
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SNAPSHOT MULTIPLEXER — Non-blocking 50ms DM stream + RPC PUSH metrics
+# ──────────────────────────────────────────────────────────────────────────────
+_snapshot_sse_queue = _queue_module.Queue(maxsize=50)
+_snapshot_multiplexer_queue = _queue_module.Queue(maxsize=100)
+_snapshot_multiplexer_lock = _threading_module.Lock()
+_connected_metric_clients = []
+
+def _enqueue_snapshot_for_streaming(snapshot: dict) -> None:
+    """Called by oracle.py/lattice_controller.py every ~50ms."""
+    try:
+        _snapshot_multiplexer_queue.put_nowait(snapshot)
+    except _queue_module.Full:
+        try:
+            _snapshot_multiplexer_queue.get_nowait()
+            _snapshot_multiplexer_queue.put_nowait(snapshot)
+        except Exception:
+            pass
+
+def _multiplexer_worker():
+    """Forks snapshots: DM→SSE, Metrics→RPC PUSH."""
+    logger.info("[MUX] Snapshot multiplexer started")
+    last_metric_push_ts = 0
+    metric_push_interval = 0.05
+    
+    while True:
+        try:
+            snap = _snapshot_multiplexer_queue.get(timeout=1.0)
+            if not snap:
+                continue
+            
+            # Fork 1: DM only → SSE
+            dm_snap = {
+                'density_matrix_hex': snap.get('density_matrix_hex', ''),
+                'dm_dim': snap.get('dm_dim', 64),
+                'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                'w_state_fidelity': snap.get('w_state_fidelity'),
+                'ready': True
+            }
+            try:
+                _snapshot_sse_queue.put_nowait(dm_snap)
+            except _queue_module.Full:
+                pass
+            
+            # Fork 2: Metrics (no DM) → RPC PUSH
+            now_ts = time.time()
+            if now_ts - last_metric_push_ts >= metric_push_interval:
+                metrics_snap = {
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'coherence_l1': snap.get('coherence_l1'),
+                    'von_neumann_entropy': snap.get('von_neumann_entropy'),
+                    'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
+                    'aer_noise_state': snap.get('aer_noise_state', {}),
+                    'block_field': snap.get('block_field', {}),
+                    'phase_drift': snap.get('phase_drift'),
+                    'phase_coherence': snap.get('phase_coherence'),
+                    'qrng_health': snap.get('qrng_health'),
+                    'mermin_test': snap.get('mermin_test'),
+                }
+                
+                with _snapshot_multiplexer_lock:
+                    for client_q in _connected_metric_clients[:]:
+                        try:
+                            client_q.put_nowait(metrics_snap)
+                        except _queue_module.Full:
+                            _connected_metric_clients.remove(client_q)
+                
+                last_metric_push_ts = now_ts
+        
+        except _queue_module.Empty:
+            continue
+        except GeneratorExit:
+            break
+        except Exception as e:
+            logger.error(f"[MUX] error: {e}", exc_info=False)
+            time.sleep(0.1)
+
+_multiplexer_thread = _threading_module.Thread(target=_multiplexer_worker, daemon=True)
+_multiplexer_thread.start()
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """
-    SSE STREAM for /rpc/oracle/snapshot
-    Streams density matrix snapshots at ~1Hz for real-time frontend rendering.
-    Uses event-stream format with JSON payload per frame.
+    SSE STREAM — HIGH-FREQUENCY (50ms) DENSITY MATRIX ONLY.
+    Multiplexer forks DM (here) from metrics (RPC PUSH).
     """
     if request.method == "OPTIONS":
         return "", 204
 
     def generate():
-        last_ts = 0
         import itertools
         for _ in itertools.count():
             try:
-                snap = _build_snapshot_payload()
+                snap = _snapshot_sse_queue.get(timeout=2.0)
                 if snap and snap.get('density_matrix_hex'):
-                    ts = snap.get('timestamp_ns', int(time.time() * 1e9))
-                    if ts != last_ts:
-                        last_ts = ts
-                        payload = json.dumps({"result": snap, "id": 1})
-                        yield f"data: {payload}\n\n"
-                time.sleep(1.0)
+                    payload = json.dumps({"result": snap, "id": 1})
+                    yield f"data: {payload}\n\n"
+            except _queue_module.Empty:
+                yield f": heartbeat\n\n"
             except GeneratorExit:
                 break
             except Exception as e:
-                logger.debug(f"[SSE-SNAPSHOT] stream error: {e}")
-                try:
-                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                except Exception:
-                    pass
+                logger.debug(f"[SSE-SNAPSHOT] error: {e}")
                 break
 
-    headers = {
-        'Cache-Control': 'no-cache',
-        'X-Accel-Buffering': 'no',
-    }
+    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
+    return Response(generate(), mimetype='text/event-stream', headers=headers)
+
+@app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
+def rpc_metrics_push():
+    """
+    SSE STREAM — RPC PUSH metrics (50ms cadence, no density matrix).
+    Server pushes metrics to all connected clients in real-time.
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+
+    client_queue = _queue_module.Queue(maxsize=50)
+    with _snapshot_multiplexer_lock:
+        _connected_metric_clients.append(client_queue)
+
+    def generate():
+        import itertools
+        for _ in itertools.count():
+            try:
+                metrics = client_queue.get(timeout=2.0)
+                if metrics:
+                    payload = json.dumps({"result": metrics, "id": 1})
+                    yield f"data: {payload}\n\n"
+            except _queue_module.Empty:
+                yield f": heartbeat\n\n"
+            except GeneratorExit:
+                break
+            except Exception as e:
+                logger.debug(f"[RPC-PUSH-METRICS] error: {e}")
+                break
+        
+        # Cleanup on disconnect
+        with _snapshot_multiplexer_lock:
+            try:
+                _connected_metric_clients.remove(client_queue)
+            except ValueError:
+                pass
+
+    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
     return Response(generate(), mimetype='text/event-stream', headers=headers)
 
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])

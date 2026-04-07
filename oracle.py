@@ -1900,6 +1900,47 @@ class OracleWStateManager:
             self.current_density_matrix = snapshot
             self.density_matrix_buffer.append(snapshot)
 
+        # ── Step 8: ENQUEUE FOR MULTIPLEXER (CRITICAL: DM + metrics for SSE streams) ──
+        # This is the primary integration point. The server's multiplexer forks this
+        # snapshot into two SSE streams: DM-only for heatmap, metrics-only for gauges.
+        # Called immediately after snapshot construction — non-blocking.
+        try:
+            import sys as _sys
+            _server_mod = _sys.modules.get('server')
+            if _server_mod and hasattr(_server_mod, '_enqueue_snapshot_for_streaming'):
+                # Build the dictionary snapshot for the multiplexer
+                _mux_snapshot = {
+                    'timestamp_ns': snapshot.timestamp_ns,
+                    'lattice_refresh_counter': snapshot.lattice_refresh_counter,
+                    'density_matrix_hex': snapshot.density_matrix_hex,
+                    'dm_dim': 8,  # 8×8 density matrix dimension
+                    'w_state_fidelity': snapshot.w_state_fidelity,
+                    'purity': snapshot.purity,
+                    'coherence_l1': snapshot.coherence_l1,
+                    'von_neumann_entropy': snapshot.von_neumann_entropy,
+                    'coherence_renyi': snapshot.coherence_renyi,
+                    'coherence_geometric': snapshot.coherence_geometric,
+                    'quantum_discord': snapshot.quantum_discord,
+                    'w_state_strength': snapshot.w_state_strength,
+                    'phase_coherence': snapshot.phase_coherence,
+                    'entanglement_witness': snapshot.entanglement_witness,
+                    'trace_purity': snapshot.trace_purity,
+                    'aer_noise_state': snapshot.aer_noise_state,
+                    'measurement_counts': snapshot.measurement_counts,
+                    'bell_test': snapshot.bell_test,
+                    'mermin_test': snapshot.bell_test,
+                    'oracle_id': None,  # Not per-node, consensus snapshot
+                    'hlwe_signature': snapshot.hlwe_signature,
+                    'oracle_address': snapshot.oracle_address,
+                    'signature_valid': snapshot.signature_valid,
+                }
+                _server_mod._enqueue_snapshot_for_streaming(_mux_snapshot)
+                logger.debug(f"[ORACLE CLUSTER] ✅ Snapshot enqueued for multiplexer (cycle {current_cycle})")
+            else:
+                logger.debug(f"[ORACLE CLUSTER] ⚠️ server._enqueue_snapshot_for_streaming not available")
+        except Exception as _mux_err:
+            logger.debug(f"[ORACLE CLUSTER] Multiplexer enqueue skipped: {_mux_err}")
+
         # ── Step 9: Broadcast authoritative snapshot with per_node data ──────────
         # This ensures the DM ring buffer has oracle-specific per_node readings
         # which the frontend needs to display individual oracle status
