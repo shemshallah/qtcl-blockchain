@@ -4607,14 +4607,21 @@ def pyth_oracle_stats():
     return jsonify(po.stats()), 200
 
 def _build_snapshot_payload() -> dict:
-    """Build the full snapshot payload for SSE/polling."""
+    """Build the full snapshot payload for SSE/polling with MULTIPLEX packet types."""
     with _snapshot_lock:
         _base = dict(_latest_snapshot) if _latest_snapshot else {}
 
-    dm_hex, dm_dim = _get_lattice_dm_hex()
-    if dm_hex:
-        _base['density_matrix_hex'] = dm_hex
-        _base['dm_dim']             = dm_dim
+    # Get FULL 256x256 density matrix (raw, un-reduced)
+    dm_hex_256, dm_dim_256 = _get_lattice_dm_hex(force_dim=256)
+    if dm_hex_256:
+        _base['density_matrix_hex_full'] = dm_hex_256
+        _base['dm_dim_full'] = 256
+    
+    # Get reduced 64x64 for compatibility
+    dm_hex_64, dm_dim_64 = _get_lattice_dm_hex()
+    if dm_hex_64:
+        _base['density_matrix_hex'] = dm_hex_64
+        _base['dm_dim'] = dm_dim_64
 
     try:
         lat = sys.modules[__name__].__dict__.get('LATTICE')
@@ -4658,6 +4665,7 @@ import threading as _threading_module
 # SNAPSHOT MULTIPLEXER — Non-blocking 50ms DM stream + RPC PUSH metrics
 # ──────────────────────────────────────────────────────────────────────────────
 _snapshot_sse_queue = _queue_module.Queue(maxsize=50)
+_snapshot_sse_queue_full = _queue_module.Queue(maxsize=20)  # Separate queue for full 256x256
 _snapshot_multiplexer_queue = _queue_module.Queue(maxsize=100)
 _snapshot_multiplexer_lock = _threading_module.Lock()
 _connected_metric_clients = []
@@ -4685,8 +4693,26 @@ def _multiplexer_worker():
             if not snap:
                 continue
             
-            # Fork 1: DM only → SSE
+            # Fork 1a: Full 256x256 DM → SSE (full resolution stream)
+            dm_hex_full = snap.get('density_matrix_hex_full', '')
+            if dm_hex_full:
+                dm_snap_full = {
+                    'packet_type': 'dm_full',
+                    'density_matrix_hex': dm_hex_full,
+                    'dm_dim': 256,
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'ready': True
+                }
+                try:
+                    _snapshot_sse_queue_full.put_nowait(dm_snap_full)
+                except _queue_module.Full:
+                    pass
+            
+            # Fork 1b: Reduced 64x64 DM → SSE (compatibility stream)
             dm_snap = {
+                'packet_type': 'dm_reduced',
                 'density_matrix_hex': snap.get('density_matrix_hex', ''),
                 'dm_dim': snap.get('dm_dim', 64),
                 'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
@@ -4735,6 +4761,34 @@ def _multiplexer_worker():
 
 _multiplexer_thread = _threading_module.Thread(target=_multiplexer_worker, daemon=True)
 _multiplexer_thread.start()
+
+@app.route("/rpc/oracle/snapshot/full", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_snapshot_full():
+    """
+    SSE STREAM — HIGH-FREQUENCY (50ms) FULL 256x256 DENSITY MATRIX.
+    Returns full-resolution DM with packet_type markers for client routing.
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+
+    def generate():
+        import itertools
+        for _ in itertools.count():
+            try:
+                snap = _snapshot_sse_queue_full.get(timeout=2.0)
+                if snap and snap.get('density_matrix_hex'):
+                    payload = json.dumps({"result": snap, "id": 1})
+                    yield f"data: {payload}\n\n"
+            except _queue_module.Empty:
+                yield f": heartbeat\n\n"
+            except GeneratorExit:
+                break
+            except Exception as e:
+                logger.debug(f"[SSE-SNAPSHOT-FULL] error: {e}")
+                break
+
+    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
+    return Response(generate(), mimetype='text/event-stream', headers=headers)
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
@@ -4827,7 +4881,7 @@ def rpc_oracle_snapshots():
         return jsonify({"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}), 500
 
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
-logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots}")
+logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshot/full,snapshots}")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
 
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
@@ -4972,11 +5026,27 @@ def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
         return '', 0
 
 
-def _get_lattice_dm_hex() -> tuple:
+def _get_lattice_dm_hex(force_dim: int = 0) -> tuple:
     """
-    Pull current_density_matrix from LATTICE, reduce to 64×64, return (hex, dim).
-    Falls back to oracle snapshot 8×8 if LATTICE not available.
+    Pull current_density_matrix from LATTICE, optionally return full 256x256 or reduced 64x64.
+    Falls back to oracle snapshot 8x8 if LATTICE not available.
+    
+    Args:
+        force_dim: If > 0, return that dimension (e.g., 256 for full 256x256). 
+                   Otherwise auto-detect based on available data.
     """
+    # Try to get full 256x256 if requested
+    if force_dim == 256:
+        try:
+            lat = sys.modules[__name__].__dict__.get('LATTICE')
+            if lat is not None and hasattr(lat, 'current_density_matrix'):
+                dm = lat.current_density_matrix
+                if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
+                    return dm.tobytes().hex(), 256
+        except Exception as e:
+            logger.debug(f"[DM-FULL] LATTICE 256x256 access: {e}")
+    
+    # Otherwise try 256->64 reduction
     try:
         lat = sys.modules[__name__].__dict__.get('LATTICE')
         if lat is not None and hasattr(lat, 'current_density_matrix'):
@@ -4986,7 +5056,7 @@ def _get_lattice_dm_hex() -> tuple:
     except Exception as e:
         logger.debug(f"[DM-REDUCE] LATTICE access: {e}")
 
-    # Fallback: oracle snapshot 8×8 as-is
+    # Fallback: oracle snapshot 8x8 as-is
     try:
         with _snapshot_lock:
             snap = _latest_snapshot

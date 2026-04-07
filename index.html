@@ -622,8 +622,76 @@ var _dmParsed=null,_dmDirty=false,_dmLastHex='',_dmCanvas=null,_dmCtx=null;
 function _dmSubmit(hex,N){
   if(!hex||hex===_dmLastHex) return;
   _dmLastHex=hex;
-  if(_dmW){
-    _dmW.postMessage({hex:hex,N:N||64});
+  
+  // Handle 256x256 full resolution: reduce to 64x64 for display rendering
+  // The SSE sends full 256x256, we process it here for visualization
+  var targetN=N||64;
+  if(targetN===256){
+    try{
+      var HEX=new Uint8Array(256);
+      for(var c=0;c<10;c++) HEX[48+c]=c;
+      for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}
+      
+      var re256=new Float64Array(65536), im256=new Float64Array(65536);
+      var u8=new Uint8Array(8), dv=new DataView(u8.buffer);
+      
+      for(var i=0;i<65536;i++){
+        var off=i*32;
+        for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
+        re256[i]=dv.getFloat64(0,true);
+        var o2=off+16;
+        for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(o2+b*2)]<<4)|HEX[hex.charCodeAt(o2+b*2+1)];
+        im256[i]=dv.getFloat64(0,true);
+      }
+      
+      var re64=new Float64Array(4096), im64=new Float64Array(4096);
+      var B=4;
+      for(var I=0;I<64;I++){
+        for(var J=0;J<64;J++){
+          var sumRe=0,sumIm=0;
+          for(var ii=0;ii<4;ii++){
+            for(var jj=0;jj<4;jj++){
+              var srcIdx=(I*B+ii)*256+(J*B+jj);
+              sumRe+=re256[srcIdx];
+              sumIm+=im256[srcIdx];
+            }
+          }
+          re64[I*64+J]=sumRe/16;
+          im64[I*64+J]=sumIm/16;
+        }
+      }
+      
+      for(var r=0;r<64;r++){
+        re64[r*64+r]=Math.abs(re64[r*64+r]);im64[r*64+r]=0;
+        for(var c=r+1;c<64;c++){
+          var ij=r*64+c,ji=c*64+r;
+          var are=0.5*(re64[ij]+re64[ji]),aim=0.5*(im64[ij]-im64[ji]);
+          re64[ij]=are;im64[ij]=aim;
+          re64[ji]=are;im64[ji]=-aim;
+        }
+      }
+      
+      var mag=new Float64Array(4096),ph=new Float64Array(4096),mx=0;
+      for(var i=0;i<4096;i++){
+        mag[i]=Math.sqrt(re64[i]*re64[i]+im64[i]*im64[i]);
+        ph[i]=Math.atan2(im64[i],re64[i]);
+        if(mag[i]>mx) mx=mag[i];
+      }
+      
+      var rho_sq=0;for(var i=0;i<4096;i++) rho_sq+=re64[i]*re64[i]+im64[i]*im64[i];
+      var purity=Math.min(1,Math.sqrt(rho_sq));
+      var entropy=purity>0.001&&purity<0.9999?(function(){
+        var ev=purity*purity;return ev>1e-10?-ev*Math.log(ev)/Math.LN2-(1-ev)*Math.log(1-ev+1e-10)/Math.LN2:0;
+      })():(purity>=0.9999?0:Math.log(64)/Math.LN2);
+      var sse=entropy*entropy;
+      
+      _dmParsed={re:re64,im:im64,mag:mag,ph:ph,maxMag:mx,N:64,purity:purity,entropy:entropy,sse:sse};
+      S.purity=purity;S.entropy=entropy;S.sse=sse;
+      _dmDirty=true;
+      return;
+    }catch(x){console.warn('[DM-256->64] reduce failed',x.message);}
+  }
+  if(_dmW){_dmW.postMessage({hex:hex,N:targetN});
   } else {
     // sync fallback with Hermitian + SSE
     var n2=N*N,HEX=new Uint8Array(256);
@@ -1087,10 +1155,12 @@ function _applySnapshot(dm){
   if(dm.mermin_test) S.mermin=dm.mermin_test;
 }
 
-// ─── WORKERS ─────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════════
+// ENTERPRISE WORKER ARCHITECTURE — Full async partition for zero UI blocking
+// ════════════════════════════════════════════════════════════════════════════════
 var _lastEventTs=Date.now()/1000-60,_lastBlockHeight=0;
 
-// W0.5: Block height poll (only block height, non-blocking 4s cadence)
+// W0: Block Height Poller (foundation, minimal footprint)
 async function _workerBlockHeight(){
   try{
     var hr=await rpc('qtcl_getBlockHeight',[]);
@@ -1103,7 +1173,7 @@ async function _workerBlockHeight(){
   finally{setTimeout(_workerBlockHeight, 4000);}
 }
 
-// W1: RPC PUSH Metrics Receiver — non-blocking real-time metric updates from server
+// W1: Metrics Worker — SSE stream for rapid RPC metrics push to UI
 var _w1RPCPushES=null,_w1RPCReconnT=null;
 function _workerMetricsPush(){
   if(_w1RPCPushES){_w1RPCPushES.close();_w1RPCPushES=null;}
@@ -1113,50 +1183,66 @@ function _workerMetricsPush(){
       try{
         var d=JSON.parse(e.data);
         if(d.result) {
-          _applySnapshot(d.result); // Metrics only (no DM)
+          _applySnapshot(d.result);
           updateDOM();
         }
         setOnline(true);
-      }catch(x){console.warn('[W1-RPC-PUSH] parse error',x.message);}
+      }catch(x){console.warn('[W1-Metrics] parse error',x.message);}
     };
     _w1RPCPushES.onerror=function(){
-      console.warn('[W1-RPC-PUSH] connection lost, reconnecting...');
+      console.warn('[W1-Metrics] connection lost, reconnecting...');
       if(_w1RPCPushES){_w1RPCPushES.close();_w1RPCPushES=null;}
       clearTimeout(_w1RPCReconnT);
       _w1RPCReconnT=setTimeout(_workerMetricsPush, 3000);
     };
-  }catch(e){console.warn('[W1-RPC-PUSH] init failed',e.message);
+  }catch(e){console.warn('[W1-Metrics] init failed',e.message);
     clearTimeout(_w1RPCReconnT);
     _w1RPCReconnT=setTimeout(_workerMetricsPush, 5000);
   }
 }
 
-// W2: High-frequency DM Snapshot — SSE stream
+// W2: Density Matrix Worker — FULL 256x256 SSE stream with packet_type routing
+// Reads packet_type to route DM vs Metrics — single endpoint, dual purpose
 var _w2ES=null,_w2ReconnT=null;
 function _workerDM(){
   if(_w2ES){_w2ES.close();_w2ES=null;}
   try{
-    _w2ES=new EventSource(BASE+'/rpc/oracle/snapshot');
+    _w2ES=new EventSource(BASE+'/rpc/oracle/snapshot/full');
     _w2ES.onmessage=function(e){
       try{
         var d=JSON.parse(e.data);
-        if(d.result) _applySnapshot(d.result);
+        var r=d.result;
+        if(!r) return;
+        
+        var pktype=r.packet_type||'dm_full';
+        
+        if(pktype==='dm_full'||pktype==='dm_reduced'){
+          if(r.density_matrix_hex){
+            _dmSubmit(r.density_matrix_hex, r.dm_dim||256);
+          }
+          if(r.w_state_fidelity!=null) S.fidelity=r.w_state_fidelity;
+          if(r.purity!=null) S.purity=r.purity;
+        }
+        else if(pktype==='metrics'){
+          _applySnapshot(r);
+          updateDOM();
+        }
         setOnline(true);
-      }catch(x){console.warn('[W2-SSE] parse error',x.message);}
+      }catch(x){console.warn('[W2-DM] parse error',x.message);}
     };
     _w2ES.onerror=function(){
-      console.warn('[W2-SSE] connection lost, reconnecting...');
+      console.warn('[W2-DM] connection lost, reconnecting...');
       if(_w2ES){_w2ES.close();_w2ES=null;}
       clearTimeout(_w2ReconnT);
       _w2ReconnT=setTimeout(_workerDM, 3000);
     };
-  }catch(e){console.warn('[W2-SSE] init failed',e.message);
+  }catch(e){console.warn('[W2-DM] init failed',e.message);
     clearTimeout(_w2ReconnT);
     _w2ReconnT=setTimeout(_workerDM, 5000);
   }
 }
 
-// W3: Blocks + Events
+// W3: Blocks Worker — Dedicated event stream for chain blocks
 var _w3Running=false;
 async function _workerBlocks(){
   if(_w3Running) return; _w3Running=true;
@@ -1196,7 +1282,7 @@ async function _workerBlocks(){
   finally{_w3Running=false; setTimeout(_workerBlocks, 4000);}
 }
 
-// W4: Mempool
+// W4: Mempool Worker — Independent polling for mempool state
 var _w4Running=false;
 async function _workerMempool(){
   if(_w4Running) return; _w4Running=true;
@@ -1207,7 +1293,7 @@ async function _workerMempool(){
   finally{_w4Running=false; setTimeout(_workerMempool, 6000);}
 }
 
-// W5: Peers
+// W5: Peers Worker — Independent miner network state
 var _w5Running=false;
 async function _workerPeers(){
   if(_w5Running) return; _w5Running=true;
@@ -1228,16 +1314,37 @@ async function _workerPeers(){
   finally{_w5Running=false; setTimeout(_workerPeers, 12000);}
 }
 
-// ─── BOOT SEQUENCE — Cathedral architecture ──────────────────────────────────
+// W6: Transactions Worker — DEDICATED independent worker (ISOLATED from all other data streams)
+// This runs in complete isolation - separate from DM, blocks, peers - to prevent ANY hanging
+var _w6Running=false;
+async function _workerTransactions(){
+  if(_w6Running) return; _w6Running=true;
+  try{
+    if(!txLoading) await loadTxPage();
+  }catch(e){console.warn('[W6-Transactions]',e.message);}
+  finally{_w6Running=false; setTimeout(_workerTransactions, 8000);}
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// BOOT SEQUENCE — Phase-isolated enterprise launch
+// ════════════════════════════════════════════════════════════════════════════════
 function _boot(){
-  console.log('[QTCL] Initializing quantum orchestrator...');
+  console.log('[QTCL] Enterprise quantum orchestrator initializing...');
+  
+  // Phase 1: Foundation workers (minimal footprint)
   _workerBlockHeight();
   _workerMetricsPush();
-  setTimeout(_workerDM, 500);
-  setTimeout(_workerBlocks, 2000);
-  setTimeout(_workerMempool, 3000);
-  setTimeout(_workerPeers, 4000);
-  setTimeout(function(){if(!txLoading)loadTxPage();}, 5000);
+  
+  // Phase 2: DM and Tx load INDEPENDENTLY in parallel (not sequential)
+  // DM runs on isolated SSE stream (/rpc/oracle/snapshot/full - 256x256)
+  // Tx runs on independent worker
+  setTimeout(_workerDM, 100);
+  setTimeout(_workerTransactions, 150);
+  
+  // Phase 3: Chain state workers (blocks, mempool, peers)
+  setTimeout(_workerBlocks, 2500);
+  setTimeout(_workerMempool, 3500);
+  setTimeout(_workerPeers, 4500);
 }
 _boot();
 </script>
