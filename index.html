@@ -1090,9 +1090,6 @@ function _applySnapshot(dm){
 // ─── WORKERS ─────────────────────────────────────────────────────────────────
 var _lastEventTs=Date.now()/1000-60,_lastBlockHeight=0;
 
-// ─── WORKERS ─────────────────────────────────────────────────────────────────
-var _lastEventTs=Date.now()/1000-60,_lastBlockHeight=0;
-
 // W1: Metrics & Snapshot Orchestrator — ensures no main-thread hang
 var _w1Running=false;
 async function _workerMetrics(){
@@ -1113,21 +1110,29 @@ async function _workerMetrics(){
   finally{_w1Running=false; setTimeout(_workerMetrics, 2000);}
 }
 
-// W2: High-frequency DM Snapshot — separate stream
-var _w2Running=false;
-async function _workerDM(){
-  if(_w2Running) return; _w2Running=true;
+// W2: High-frequency DM Snapshot — SSE stream
+var _w2ES=null,_w2ReconnT=null;
+function _workerDM(){
+  if(_w2ES){_w2ES.close();_w2ES=null;}
   try{
-    var r=await fetch(BASE+'/rpc/oracle/snapshot',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:'{}',
-      signal:AbortSignal.timeout(20000)});
-    if(r.ok){
-      var j=await r.json();
-      if(j.result) _applySnapshot(j.result);
-      setOnline(true);
-    }
-  }catch(e){console.warn('[W2-DM]',e.message);}
-  finally{_w2Running=false; setTimeout(_workerDM, 3000);}
+    _w2ES=new EventSource(BASE+'/rpc/oracle/snapshot');
+    _w2ES.onmessage=function(e){
+      try{
+        var d=JSON.parse(e.data);
+        if(d.result) _applySnapshot(d.result);
+        setOnline(true);
+      }catch(x){console.warn('[W2-SSE] parse error',x.message);}
+    };
+    _w2ES.onerror=function(){
+      console.warn('[W2-SSE] connection lost, reconnecting...');
+      if(_w2ES){_w2ES.close();_w2ES=null;}
+      clearTimeout(_w2ReconnT);
+      _w2ReconnT=setTimeout(_workerDM, 3000);
+    };
+  }catch(e){console.warn('[W2-SSE] init failed',e.message);
+    clearTimeout(_w2ReconnT);
+    _w2ReconnT=setTimeout(_workerDM, 5000);
+  }
 }
 
 // W3: Blocks + Events

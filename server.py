@@ -4606,69 +4606,90 @@ def pyth_oracle_stats():
         return jsonify({"error": "Pyth oracle not initialized"}), 503
     return jsonify(po.stats()), 200
 
+def _build_snapshot_payload() -> dict:
+    """Build the full snapshot payload for SSE/polling."""
+    with _snapshot_lock:
+        _base = dict(_latest_snapshot) if _latest_snapshot else {}
+
+    dm_hex, dm_dim = _get_lattice_dm_hex()
+    if dm_hex:
+        _base['density_matrix_hex'] = dm_hex
+        _base['dm_dim']             = dm_dim
+
+    try:
+        lat = sys.modules[__name__].__dict__.get('LATTICE')
+        if lat is not None:
+            _base.setdefault('w_state_fidelity', getattr(lat, 'fidelity', None))
+            _base.setdefault('purity',           getattr(lat, 'purity',   None))
+            _base.setdefault('coherence_l1',     getattr(lat, 'coherence', None))
+            _base.setdefault('lattice_refresh_counter', getattr(lat, 'cycle_count', None))
+    except Exception:
+        pass
+
+    with _CLIENT_DM_POOL_LOCK:
+        _c_re   = list(_client_consensus_dm_re)
+        _c_im   = list(_client_consensus_dm_im)
+        _c_fid  = _client_consensus_fid
+        _c_cnt  = _client_pool_count
+
+    _base['client_fused_fidelity'] = round(_c_fid, 6)
+    _base['client_oracle_count']   = _c_cnt
+
+    if _c_cnt > 0 and any(v != 0.0 for v in _c_re) and not dm_hex:
+        import struct as _ss
+        _base['density_matrix_hex'] = b''.join(
+            _ss.pack('<dd', _c_re[i], _c_im[i]) for i in range(64)
+        ).hex()
+        _base['dm_dim']         = 8
+        _base['w_state_fidelity'] = _c_fid
+        _base['source']           = 'client_tripartite_only'
+        _base['ready']            = True
+
+    if not _base:
+        return {}
+
+    _base['ready'] = True
+    return _base
+
+
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """
-    GET/POST /rpc/oracle/snapshot
-    Single source of truth for quantum state + density matrix.
-    Pulls LATTICE.current_density_matrix (256×256), reduces to 64×64 Hermitian,
-    merges oracle consensus metrics, client tripartite pool, and all block_field data.
-    qtcl_getQuantumMetrics delegates here for DM hex — no separate extraction path.
+    SSE STREAM for /rpc/oracle/snapshot
+    Streams density matrix snapshots at ~1Hz for real-time frontend rendering.
+    Uses event-stream format with JSON payload per frame.
     """
     if request.method == "OPTIONS":
         return "", 204
-    try:
-        # ── 1. Base from cached oracle snapshot (metrics, mermin, per_node) ──
-        with _snapshot_lock:
-            _base = dict(_latest_snapshot) if _latest_snapshot else {}
 
-        # ── 2. Pull 256×256 lattice DM → reduce to 64×64 Hermitian ──────────
-        dm_hex, dm_dim = _get_lattice_dm_hex()
-        if dm_hex:
-            _base['density_matrix_hex'] = dm_hex
-            _base['dm_dim']             = dm_dim   # 64 (or 8 fallback)
+    def generate():
+        last_ts = 0
+        import itertools
+        for _ in itertools.count():
+            try:
+                snap = _build_snapshot_payload()
+                if snap and snap.get('density_matrix_hex'):
+                    ts = snap.get('timestamp_ns', int(time.time() * 1e9))
+                    if ts != last_ts:
+                        last_ts = ts
+                        payload = json.dumps({"result": snap, "id": 1})
+                        yield f"data: {payload}\n\n"
+                time.sleep(1.0)
+            except GeneratorExit:
+                break
+            except Exception as e:
+                logger.debug(f"[SSE-SNAPSHOT] stream error: {e}")
+                try:
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                except Exception:
+                    pass
+                break
 
-        # ── 3. Inject lattice live metrics if LATTICE available ───────────────
-        try:
-            lat = sys.modules[__name__].__dict__.get('LATTICE')
-            if lat is not None:
-                _base.setdefault('w_state_fidelity', getattr(lat, 'fidelity', None))
-                _base.setdefault('purity',           getattr(lat, 'purity',   None))
-                _base.setdefault('coherence_l1',     getattr(lat, 'coherence', None))
-                _base.setdefault('lattice_refresh_counter', getattr(lat, 'cycle_count', None))
-        except Exception:
-            pass
-
-        # ── 4. Enrich with client tripartite pool consensus ───────────────────
-        with _CLIENT_DM_POOL_LOCK:
-            _c_re   = list(_client_consensus_dm_re)
-            _c_im   = list(_client_consensus_dm_im)
-            _c_fid  = _client_consensus_fid
-            _c_cnt  = _client_pool_count
-
-        _base['client_fused_fidelity'] = round(_c_fid, 6)
-        _base['client_oracle_count']   = _c_cnt
-
-        # Client pool fallback DM only if no lattice DM came through
-        if _c_cnt > 0 and any(v != 0.0 for v in _c_re) and not dm_hex:
-            import struct as _ss
-            _base['density_matrix_hex'] = b''.join(
-                _ss.pack('<dd', _c_re[i], _c_im[i]) for i in range(64)
-            ).hex()
-            _base['dm_dim']         = 8
-            _base['w_state_fidelity'] = _c_fid
-            _base['source']           = 'client_tripartite_only'
-            _base['ready']            = True
-
-        if not _base:
-            return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":None}), 202
-
-        _base['ready'] = True
-        return jsonify({"jsonrpc":"2.0","result":_base,"id":request.args.get('id',1)}), 200
-
-    except Exception as e:
-        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshot error: {e}", exc_info=False)
-        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
+    headers = {
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+    }
+    return Response(generate(), mimetype='text/event-stream', headers=headers)
 
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():
