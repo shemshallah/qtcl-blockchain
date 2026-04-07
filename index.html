@@ -1204,21 +1204,26 @@ function _workerMetricsPush(){
 // W2: Density Matrix Worker — FULL 256x256 SSE stream with packet_type routing
 // Reads packet_type to route DM vs Metrics — single endpoint, dual purpose
 var _w2ES=null,_w2ReconnT=null;
+var _w2MsgCount=0;
 function _workerDM(){
   if(_w2ES){_w2ES.close();_w2ES=null;}
   try{
     _w2ES=new EventSource(BASE+'/rpc/oracle/snapshot/full');
     _w2ES.onmessage=function(e){
+      _w2MsgCount++;
       try{
         var d=JSON.parse(e.data);
         var r=d.result;
         if(!r) return;
         
         var pktype=r.packet_type||'dm_full';
+        console.log('[W2-DM] msg#'+_w2MsgCount+' type='+pktype+' dim='+(r.dm_dim||'?'));
         
         if(pktype==='dm_full'||pktype==='dm_reduced'){
           if(r.density_matrix_hex){
+            console.log('[W2-DM] submitting DM, hex len='+r.density_matrix_hex.length);
             _dmSubmit(r.density_matrix_hex, r.dm_dim||256);
+            console.log('[W2-DM] DM submitted, _dmDirty='+_dmDirty);
           }
           if(r.w_state_fidelity!=null) S.fidelity=r.w_state_fidelity;
           if(r.purity!=null) S.purity=r.purity;

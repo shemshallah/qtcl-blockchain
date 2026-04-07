@@ -4694,7 +4694,8 @@ def _multiplexer_worker():
                 continue
             
             # Fork 1a: Full 256x256 DM → SSE (full resolution stream)
-            dm_hex_full = snap.get('density_matrix_hex_full', '')
+            # Get directly from LATTICE in this thread for real-time processing
+            dm_hex_full, dm_dim_full = _get_lattice_dm_hex(force_dim=256)
             if dm_hex_full:
                 dm_snap_full = {
                     'packet_type': 'dm_full',
@@ -4711,10 +4712,11 @@ def _multiplexer_worker():
                     pass
             
             # Fork 1b: Reduced 64x64 DM → SSE (compatibility stream)
+            dm_hex_64, dm_dim_64 = _get_lattice_dm_hex()
             dm_snap = {
                 'packet_type': 'dm_reduced',
-                'density_matrix_hex': snap.get('density_matrix_hex', ''),
-                'dm_dim': snap.get('dm_dim', 64),
+                'density_matrix_hex': dm_hex_64 or snap.get('density_matrix_hex', ''),
+                'dm_dim': dm_dim_64 or snap.get('dm_dim', 64),
                 'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                 'w_state_fidelity': snap.get('w_state_fidelity'),
                 'ready': True
