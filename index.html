@@ -1278,7 +1278,7 @@ function _boot(){
   _workerMetricsPush();
   
   // Phase 2: DM and Tx load INDEPENDENTLY in parallel (not sequential)
-  // DM runs on isolated SSE stream (/rpc/oracle/snapshot/full - 256x256)
+  // DM runs on isolated SSE stream (/rpc/oracle/snapshot - 64x64)
   // Tx runs on independent worker
   setTimeout(_workerDM, 100);
   setTimeout(_workerTransactions, 150);
