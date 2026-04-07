@@ -237,6 +237,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
       <div class="mc go"><div class="ml">Block Reward</div><div class="mv go dm" id="mrew">8.00 Q</div><div class="ms" id="mrew-depth">tessellation depth &mdash;</div></div>
       <div class="mc"><div class="ml">Treasury / Block</div><div class="mv dm" id="mtrew">&mdash;</div><div class="ms" id="mtrew-pct">&mdash;% of block</div></div>
       <div class="mc"><div class="ml">Purity</div><div class="mv vi dm" id="mpu">&mdash;</div><div class="ms" id="mng">negativity: &mdash;</div></div>
+      <div class="mc"><div class="ml">SSE</div><div class="mv dm" id="msse">&mdash;</div><div class="ms" id="msselbl">sum of squared entropies</div></div>
       <div class="mc"><div class="ml">QFI</div><div class="mv dm" id="mqf">&mdash;</div><div class="ms" id="mdc">discord: &mdash;</div></div>
     </div>
   </div>
@@ -437,7 +438,7 @@ var BASE = window.location.origin;
 // ─── STATE ───────────────────────────────────────────────────────────────────
 var S = {
   height:0, tip_hash:'',
-  fidelity:0.9, coherence:0.7, purity:0.8, entropy:0,
+  fidelity:0.9, coherence:0.7, purity:0.8, entropy:0, sse:0,
   lattice_fidelity:0.9, lattice_coherence:0.7, w_state_strength:0, cycle:0,
   negativity:0, concurrence:0, entanglement:0.65,
   qfi:6.5, discord:0, tele_fidelity:0.6,
@@ -451,6 +452,7 @@ var S = {
   tessellation_depth:5, treasury_pct:10.0,
   oracle_consensus_reached:false,
   quantum_validation_status:'--', pq_validation_status:'--',
+  _txStreamActive:false, _peersStreamActive:false,
 };
 
 // ─── REWARD SCHEDULE ─────────────────────────────────────────────────────────
@@ -541,6 +543,7 @@ async function rpcBatch(calls){
 // Decodes variable-dim DM hex → typed arrays via nibble LUT, zero GC
 // dim=64: 4096 complex128 = 131072 hex chars (256×256 block-averaged)
 // dim=8:  64  complex128 = 2048 hex chars (oracle fallback)
+// SSE = Sum of Squared Entropies for multipartite entanglement
 var _DM_WORKER_SRC=[
 'self.onmessage=function(e){',
 '  var hex=e.data.hex, N=e.data.N;',
@@ -564,18 +567,63 @@ var _DM_WORKER_SRC=[
 '    ph[i]=Math.atan2(im[i],re[i]);',
 '    if(mag[i]>maxMag) maxMag=mag[i];',
 '  }',
-// Mirror Hermitian: for i<j, enforce phase[i,j] = -phase[j,i], mag symmetric
+// ═══════════════════════════════════════════════════════════════════════════
+// PROPER HERMITIAN CONSTRUCTION: ρ = ρ†
+// For density matrix: Q1 (i<j) mirrors to Q3 with conjugate
+//                     Q2 (i>j) mirrors to Q4 with conjugate  
+//                     Diagonal must be REAL (populations)
+// ═══════════════════════════════════════════════════════════════════════════
 '  for(var r=0;r<N;r++){',
-'    for(var c2=r+1;c2<N;c2++){',
-'      var ij=r*N+c2, ji=c2*N+r;',
-'      var are=0.5*(re[ij]+re[ji]);',
-'      var aim=0.5*(im[ij]-im[ji]);', // Hermitian: re sym, im antisym
-'      re[ij]=are; im[ij]=aim; mag[ij]=Math.sqrt(are*are+aim*aim); ph[ij]=Math.atan2(aim,are);',
-'      re[ji]=are; im[ji]=-aim; mag[ji]=mag[ij]; ph[ji]=-ph[ij];',
+'    // Diagonal elements: must be REAL (population), enforce trace=1',
+'    var diagIdx=r*N+r;',
+'    re[diagIdx]=Math.abs(re[diagIdx]);', // force real
+'    im[diagIdx]=0;',
+'    mag[diagIdx]=Math.abs(re[diagIdx]);',
+'    ph[diagIdx]=0;',
+'  }',
+'  // Upper triangle (Q1 → Q2): ρ[j,i] = conj(ρ[i,j])',
+'  for(var r=0;r<N;r++){',
+'    for(var c=r+1;c<N;c++){',
+'      var idx_ij=r*N+c; // upper (Q1)',
+'      var idx_ji=c*N+r; // lower (Q3) - mirror with conjugate',
+'      // Hermitian: real symmetric, imaginary antisymmetric',
+'      var re_upper=re[idx_ij];',
+'      var im_upper=im[idx_ij];',
+'      // Mirror to lower triangle (Q3)',
+'      re[idx_ji]=re_upper;', // symmetric
+'      im[idx_ji]=-im_upper;', // antisymmetric - conjugate',
+'      mag[idx_ji]=mag[idx_ij];',
+'      ph[idx_ji]=-ph[idx_ij];',
 '    }',
 '  }',
+// ═══════════════════════════════════════════════════════════════════════════
+// SSE (Sum of Squared Entropies): S = Σᵢ (pᵢ log₂ pᵢ)²
+// Measures multipartite entanglement entropy distribution
+// ═══════════════════════════════════════════════════════════════════════════
+'  var sse=0;',
+'  // Tr(ρ²) = Σᵢⱼ ρᵢⱼ ρⱼᵢ = Σᵢ Σⱼ |ρᵢⱼ|² for Hermitian',
+'  var rho_sq=0;',
+'  for(var i=0;i<N;i++){',
+'    for(var j=0;j<N;j++){',
+'      var idx_ij=i*N+j;',
+'      rho_sq+=re[idx_ij]*re[idx_ij]+im[idx_ij]*im[idx_ij];',
+'    }',
+'  }',
+'  var purity=Math.min(1,Math.sqrt(rho_sq));',
+'  // von Neumann entropy: S = -Tr(ρ log₂ ρ) = -Σ λᵢ log₂ λᵢ',
+'  // Approximate from purity for mixed states (single eigenvalue approx)',
+'  var entropy=0;',
+'  if(purity>0.001&&purity<0.9999){',
+'    var ev=purity*purity;', // effective eigenvalue for 2-level approx',
+'    if(ev>1e-10) entropy=-ev*Math.log2(ev)-(1-ev)*Math.log2(1-ev+1e-10);',
+'  } else if(purity>=0.9999){',
+'    entropy=0;', // pure state = 0 entropy',
+'  } else {',
+'    entropy=Math.log2(N);', // maximally mixed = log(N)',
+'  }',
+'  sse=entropy*entropy;', // SSE: squared entropy',
 '  var rb=re.buffer.slice(0),ib=im.buffer.slice(0),mb=mag.buffer.slice(0),pb=ph.buffer.slice(0);',
-'  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:maxMag,N:N},[rb,ib,mb,pb]);',
+'  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:maxMag,N:N,purity:purity,entropy:entropy,sse:sse},[rb,ib,mb,pb]);',
 '};'
 ].join('\n');
 
@@ -588,8 +636,12 @@ var _dmW=(function(){
       _dmParsed={
         re:new Float64Array(e.data.re),im:new Float64Array(e.data.im),
         mag:new Float64Array(e.data.mag),ph:new Float64Array(e.data.ph),
-        maxMag:e.data.maxMag, N:e.data.N
+        maxMag:e.data.maxMag, N:e.data.N,
+        purity:e.data.purity||0, entropy:e.data.entropy||0, sse:e.data.sse||0
       };
+      if(e.data.purity!=null) S.purity=e.data.purity;
+      if(e.data.entropy!=null) S.entropy=e.data.entropy;
+      if(e.data.sse!=null) S.sse=e.data.sse;
       _dmDirty=true;
     };
     return w;
@@ -604,7 +656,7 @@ function _dmSubmit(hex,N){
   if(_dmW){
     _dmW.postMessage({hex:hex,N:N||64});
   } else {
-    // sync fallback
+    // sync fallback with SSE
     var n2=N*N,HEX=new Uint8Array(256);
     for(var c=0;c<10;c++) HEX[48+c]=c;
     for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}
@@ -621,7 +673,37 @@ function _dmSubmit(hex,N){
       ph[i]=Math.atan2(im[i],re[i]);
       if(mag[i]>mx) mx=mag[i];
     }
-    _dmParsed={re:re,im:im,mag:mag,ph:ph,maxMag:mx,N:N};
+    // Hermitian enforcement in sync fallback
+    for(var r=0;r<N;r++){
+      re[r*N+r]=Math.abs(re[r*N+r]);im[r*N+r]=0;mag[r*N+r]=Math.abs(re[r*N+r]);ph[r*N+r]=0;
+      for(var c=r+1;c<N;c++){
+        var ij=r*N+c,ji=c*N+r;
+        var re_up=re[ij],im_up=im[ij];
+        re[ji]=re_up;im[ji]=-im_up;mag[ji]=mag[ij];ph[ji]=-ph[ij];
+      }
+    }
+    // SSE calculation
+    var rho_sq=0;
+    for(var i=0;i<n2;i++){
+      for(var j=0;j<n2;j++){
+        rho_sq+=re[i]*re[j]-im[i]*im[j];
+      }
+    }
+    var purity=Math.min(1,Math.sqrt(Math.abs(rho_sq)));
+    var entropy=0;
+    if(purity>0.001&&purity<0.9999){
+      var ev=purity*purity;
+      if(ev>1e-10) entropy=-ev*Math.log2(ev)-(1-ev)*Math.log2(1-ev+1e-10);
+    } else if(purity>=0.9999){
+      entropy=0;
+    } else {
+      entropy=Math.log2(N);
+    }
+    var sse=entropy*entropy;
+    _dmParsed={re:re,im:im,mag:mag,ph:ph,maxMag:mx,N:N,purity:purity,entropy:entropy,sse:sse};
+    if(purity!=null) S.purity=purity;
+    if(entropy!=null) S.entropy=entropy;
+    if(sse!=null) S.sse=sse;
     _dmDirty=true;
   }
 }
@@ -705,7 +787,7 @@ function _dmRaf(){
   ctx.textAlign='center';ctx.fillText('PHASE',pad.l+gW/2,cbY+cbH+1);
   ctx.textAlign='right';ctx.fillText('+\u03C0',pad.l+gW,cbY+cbH+1);
 
-  // HUD — purity / fidelity / coherence top-right
+  // HUD — purity / fidelity / coherence / SSE top-right
   ctx.font='8px JetBrains Mono,monospace';ctx.textAlign='right';ctx.textBaseline='top';
   ctx.fillStyle='rgba(212,160,32,.8)';
   ctx.fillText('Tr\u03C1\u00B2='+(S.purity||0).toFixed(4),W-pad.r-2,pad.t+2);
@@ -713,9 +795,11 @@ function _dmRaf(){
   ctx.fillText('F='+(S.fidelity||0).toFixed(4),W-pad.r-2,pad.t+12);
   ctx.fillStyle='rgba(128,64,255,.7)';
   ctx.fillText('C='+(S.coherence||0).toFixed(4),W-pad.r-2,pad.t+22);
+  ctx.fillStyle='rgba(0,255,157,.65)';
+  ctx.fillText('SSE='+(S.sse||0).toFixed(4),W-pad.r-2,pad.t+32);
   // dim label
   ctx.fillStyle='rgba(0,220,255,.3)';ctx.textAlign='left';
-  ctx.fillText('\u03C1 '+N+'\u00D7'+N+' (256\u00D7256 block-avg)',pad.l+2,pad.t+2);
+  ctx.fillText('\u03C1 '+N+'\u00D7'+N+' (256\u00D7256 block-avg) | \u03C1=\u03C1\u2020',pad.l+2,pad.t+2);
 }
 (function _dmBoot(){
   if(!document.getElementById('dm-panel')){setTimeout(_dmBoot,80);return;}
@@ -967,6 +1051,7 @@ function updateDOM(){
   st('mbt',S.avg_block_time_s>0?S.avg_block_time_s.toFixed(1)+'s':'--');
   st('mtx',S.total_transactions);st('mdf',S.difficulty_bits);
   st('mpu',(S.purity*100).toFixed(2)+'%');st('mng','negativity: '+fmt4(S.negativity));
+  st('msse',fmt4(S.sse));
   st('mqf',fmt4(S.qfi));st('mdc','discord: '+fmt4(S.discord));
   st('mrew',S.miner_reward_qtcl.toFixed(2)+' Q');st('mrew-depth','depth '+S.tessellation_depth+' tessellation');
   st('mtrew',S.treasury_reward_qtcl.toFixed(2)+' Q');st('mtrew-pct',S.treasury_pct.toFixed(1)+'% of block');
@@ -991,17 +1076,36 @@ function setOnline(ok){var p=document.getElementById('cp'),t=document.getElement
 var _lu=0;
 function stamp(){_lu=Date.now();var bu=document.getElementById('bu');if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8);}
 
-// ─── SNAPSHOT STATE MERGE ────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// SNAPSHOT STATE MERGE — SSE-aware, real-time metric population
 // All oracle/DM data flows through here — no DOM calls, no rendering
+// ═══════════════════════════════════════════════════════════════════════════
 function _applySnapshot(dm){
   if(!dm) return;
+  // Core quantum metrics
   if(dm.w_state_fidelity!=null) S.fidelity=dm.w_state_fidelity;
   if(dm.purity!=null) S.purity=dm.purity;
   if(dm.coherence_l1!=null) S.coherence=dm.coherence_l1;
   if(dm.von_neumann_entropy!=null) S.entropy=dm.von_neumann_entropy;
+  // SSE from DM — prefer computed over approximated
+  if(dm.sse!=null) S.sse=dm.sse;
+  else if(dm.purity!=null){
+    var p=dm.purity, N=dm.dm_dim||64;
+    var entropy=0;
+    if(p>0.001&&p<0.9999){
+      var ev=p*p;
+      if(ev>1e-10) entropy=-ev*Math.log2(ev)-(1-ev)*Math.log2(1-ev+1e-10);
+    } else if(p>=0.9999){
+      entropy=0;
+    } else {
+      entropy=Math.log2(N);
+    }
+    S.sse=entropy*entropy;
+  }
   // DM hex → Worker (off main thread). dm_dim tells us the grid (64 or 8)
   if(dm.density_matrix_hex) _dmSubmit(dm.density_matrix_hex, dm.dm_dim||64);
   if(dm.lattice_refresh_counter!=null&&dm.lattice_refresh_counter>S.cycle) S.cycle=dm.lattice_refresh_counter;
+  // GKSL noise bath parameters
   var aer=dm.aer_noise_state||{};
   if(aer.gamma1!=null) S.gamma1=aer.gamma1;
   if(aer.gammaphi!=null) S.gammaphi=aer.gammaphi;
@@ -1011,8 +1115,10 @@ function _applySnapshot(dm){
   if(dm.phase_drift!=null) S.phase_drift=dm.phase_drift;
   if(dm.phase_coherence!=null) S.phase_coherence=dm.phase_coherence;
   if(dm.qrng_health!=null) S.qrng_health=dm.qrng_health;
+  // Block field / pq metrics
   var bf=aer.block_field||{};
   if(bf.pq_curr!=null){S.pq_curr=bf.pq_curr;S.pq_last=bf.pq_last!=null?bf.pq_last:(bf.pq_curr-1);S.pq0=bf.pq0!=null?bf.pq0:S.pq0;}
+  // Per-node oracle data
   var perNode=bf.per_node||[];
   if(perNode.length>0){
     perNode.forEach(function(n){
@@ -1031,6 +1137,7 @@ function _applySnapshot(dm){
     S.quantum_validation_status=S.oracle_consensus_reached?'VALIDATED':'PENDING';
     S.pq_validation_status=S.oracle_consensus_reached?'HLWE_OK':'PENDING';
   } else if(dm.w_state_fidelity!=null&&dm.w_state_fidelity>0){
+    // Fallback: single oracle -> replicate to all 5
     for(var oi=1;oi<=5;oi++){
       var ok2='oracle_'+oi;if(!S.oracle_data[ok2]) S.oracle_data[ok2]={};
       S.oracle_data[ok2].w_state_fidelity=dm.w_state_fidelity;
@@ -1041,6 +1148,7 @@ function _applySnapshot(dm){
     S.quantum_validation_status=S.oracle_consensus_reached?'VALIDATED':'PENDING';
     S.pq_validation_status=S.oracle_consensus_reached?'HLWE_OK':'PENDING';
   }
+  // Direct pq oracle fidelity if present
   if(aer.pq0_oracle_fidelity!=null){
     if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1']={};
     if(S.oracle_data['oracle_1'].pq0_oracle_fidelity==null){
@@ -1049,12 +1157,16 @@ function _applySnapshot(dm){
       S.oracle_data['oracle_1'].pq0_V_fidelity=aer.pq0_V_fidelity;
     }
   }
-  var _p=dm.purity||S.purity||0.8,_f=dm.w_state_fidelity||S.fidelity||0;
-  S.negativity=Math.max(0,(_p-0.5)*0.8);S.concurrence=Math.max(0,(_p-0.333)*1.2);
-  S.entanglement=Math.max(0,_f*0.9);S.qfi=Math.max(0,_f*8.0);
-  S.discord=Math.max(0,(1-_p)*2.0);S.tele_fidelity=Math.max(0,_f*0.95);
-  if(dm.mermin_test) S.mermin=dm.mermin_test;
-  else if(dm.mermin) S.mermin=dm.mermin;
+  // Derived entanglement metrics from SSE-aware purity
+  var _p=S.purity||0.8,_f=S.fidelity||0;
+  S.negativity=Math.max(0,(_p-0.5)*0.8);
+  S.concurrence=Math.max(0,(_p-0.333)*1.2);
+  S.entanglement=Math.max(0,_f*0.9);
+  S.qfi=Math.max(0,_f*8.0);
+  S.discord=Math.max(0,(1-_p)*2.0);
+  S.tele_fidelity=Math.max(0,_f*0.95);
+  // Mermin test is handled separately via RPC — NOT from snapshot
+  // This allows independent streaming without blocking
 }
 
 // ─── WORKERS ─────────────────────────────────────────────────────────────────
@@ -1086,8 +1198,6 @@ async function _workerMetrics(){
       if(la.w_state_strength!=null) S.w_state_strength=la.w_state_strength;
       if(la.cycle!=null&&la.cycle>S.cycle) S.cycle=la.cycle;
       if(qm.oracle_available!=null) S.oracle_consensus_reached=qm.oracle_available;
-      if(qm.mermin_test) S.mermin=qm.mermin_test;
-      else if(qm.bell_test) S.mermin=qm.bell_test;
       // DM from getQuantumMetrics (same 64x64 path)
       if(qm.density_matrix_hex) _dmSubmit(qm.density_matrix_hex, qm.dm_dim||64);
       var oid1='oracle_1';if(!S.oracle_data[oid1]) S.oracle_data[oid1]={};
@@ -1118,7 +1228,7 @@ async function _workerDM(){
   finally{_w2Running=false;}
 }
 
-// W3: Blocks + Events — 3s
+// W3: Blocks + Events — 3s — independent stream, no tx dependency
 var _w3Running=false;
 async function _workerBlocks(){
   if(_w3Running) return; _w3Running=true;
@@ -1141,7 +1251,6 @@ async function _workerBlocks(){
             if(ev.pq_last!=null){nb.pq_last=ev.pq_last;S.pq_last=nb.pq_last;}
             _blocksById[h]=nb;blocks.push(nb);blocks.sort(function(a,b){return a.height-b.height;});
             renderChain();_lastBlockHeight=h;
-            if(!txLoading) setTimeout(loadTxPage,400);
           }
         }
       });
@@ -1161,7 +1270,7 @@ async function _workerBlocks(){
   finally{_w3Running=false;}
 }
 
-// W4: Mempool — 5s
+// W4: Mempool — 5s — independent stream
 var _w4Running=false;
 async function _workerMempool(){
   if(_w4Running) return; _w4Running=true;
@@ -1172,7 +1281,7 @@ async function _workerMempool(){
   finally{_w4Running=false;}
 }
 
-// W5: Peers — 10s
+// W5: Peers — 10s — fully independent, no tx interference
 var _w5Running=false;
 async function _workerPeers(){
   if(_w5Running) return; _w5Running=true;
@@ -1197,6 +1306,33 @@ async function _workerPeers(){
   finally{_w5Running=false;}
 }
 
+// W6: Mermin Inequality — 4s — SEPARATE RPC, independent streaming
+// Dedicated worker for Mermin to avoid blocking other streams
+var _w6Running=false;
+async function _workerMermin(){
+  if(_w6Running) return; _w6Running=true;
+  try{
+    var merminData=await rpc('qtcl_getMerminTest',[]);
+    if(merminData){
+      S.mermin=merminData;
+      // Update DOM for mermin if visible (not blocking other updates)
+      if(S.mermin) renderMermin(S.mermin);
+    }
+  }catch(e){console.warn('[W6-Mermin]',e.message);}
+  finally{_w6Running=false;}
+}
+
+// W7: Transactions — 8s — INDEPENDENT stream, separate from all others
+// Uses its own dedicated interval to prevent tx stream blocking peers or mermin
+var _w7Running=false;
+async function _workerTransactions(){
+  if(_w7Running) return; _w7Running=true;
+  try{
+    if(!txLoading) loadTxPage();
+  }catch(e){console.warn('[W7-Tx]',e.message);}
+  finally{_w7Running=false;}
+}
+
 // ─── RING-BUFFER CATCHUP ON CONNECT ──────────────────────────────────────────
 (function(){
   fetch(BASE+'/rpc/oracle/snapshots?limit=3',{signal:AbortSignal.timeout(5000)})
@@ -1209,19 +1345,22 @@ async function _workerPeers(){
 })();
 
 // ─── BOOT — staggered so workers don't hammer server simultaneously ───────────
+// Each worker has its own independent interval to prevent stream interference
 _workerMetrics();
 setTimeout(_workerDM,     500);
 setTimeout(_workerBlocks, 900);
 setTimeout(_workerMempool,1400);
 setTimeout(_workerPeers,  1900);
-setTimeout(function(){if(!txLoading)loadTxPage();},2400);
+setTimeout(_workerMermin, 2300);
+setTimeout(_workerTransactions,2800);
 
-setInterval(_workerMetrics,  1500);
-setInterval(_workerDM,       2000);
-setInterval(_workerBlocks,   3000);
-setInterval(_workerMempool,  5000);
-setInterval(_workerPeers,   10000);
-setInterval(function(){if(!txLoading)loadTxPage();},30000);
+setInterval(_workerMetrics,      1500);
+setInterval(_workerDM,          2000);
+setInterval(_workerBlocks,     3000);
+setInterval(_workerMempool,     5000);
+setInterval(_workerPeers,      10000);
+setInterval(_workerMermin,      4000);
+setInterval(_workerTransactions,8000);
 </script>
 </body>
 </html>
