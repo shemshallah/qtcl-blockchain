@@ -4687,7 +4687,7 @@ def _multiplexer_worker():
     metric_push_interval = 0.2  # 5 metrics/sec instead of 20
     _mux_loop_count = 0
     last_dm_send_ts = 0
-    dm_send_interval = 1.0  # DM only once per second
+    dm_send_interval = 0.5  # DM 2x/sec, metrics 5x/sec
     
     while True:
         _mux_loop_count += 1

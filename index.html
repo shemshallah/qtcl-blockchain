@@ -548,7 +548,7 @@ async function rpcBatch(calls){
 
 // ─── DM WEB WORKER (blob, off main thread) ───────────────────────────────────
 // Cathedral-grade DM Processor: Decodes, Mirrors (Hermitian ρ=ρ†), and calculates SSE
-// Handles all 4 quadrants: Q1 (Top-Right) mirrored to Q3 (Bottom-Left)
+// Handles all 4 quadrants: Q1↔Q3 and Q2↔Q4 conjugate symmetry for proper ρ=ρ†
 var _DM_WORKER_SRC=[
 'self.onmessage=function(e){',
 '  var d=e.data; if(!d||!d.hex) return;',
@@ -569,18 +569,31 @@ var _DM_WORKER_SRC=[
 '    im[i]=dv.getFloat64(0,true);',
 '  }',
 '  // ══════════════════════════════════════════════════════════════════════════',
-'  // HERMITIAN MIRRORING (ρ = ρ†) — QUADRANT 1 → QUADRANT 3',
-'  // Enforce Real Diagonal (Populations) and Conjugate Symmetry',
+'  // HERMITIAN MIRRORING (ρ = ρ†) — All 4 quadrants',
+'  // Q1↔Q3: (r,c) ↔ (c,r) with conjugate',
+'  // Q2↔Q4: reflect across anti-diagonal (r,c) ↔ (N-1-c, N-1-r)',
 '  // ══════════════════════════════════════════════════════════════════════════',
 '  for(var r=0;r<N;r++){',
-'    var di=r*N+r; re[di]=Math.abs(re[di]); im[di]=0;', // Q2/Q4 Diagonal
+'    // Diagonal: make real (populations)',
+'    re[r*N+r]=Math.abs(re[r*N+r]); im[r*N+r]=0;',
 '    for(var c=r+1;c<N;c++){',
-'      var ij=r*N+c; // Upper (Q1)',
-'      var ji=c*N+r; // Lower (Q3)',
-'      // If data only in Q1, mirror to Q3; if both, average to Hermitian',
+'      var ij=r*N+c; // Q1 (upper triangle)',
+'      var ji=c*N+r; // Q3 (lower triangle, conjugate)',
 '      var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
 '      re[ij]=are; im[ij]=aim;',
-'      re[ji]=are; im[ji]=-aim; // Conjugate mirror',
+'      re[ji]=are; im[ji]=-aim;',
+'    }',
+'  }',
+'  // Anti-diagonal mirror: Q2↔Q4 (upper-left ↔ lower-right)',
+'  for(var r=0;r<N;r++){',
+'    for(var c=0;c<N-r-1;c++){',
+'      var ij=r*N+c; // Q2 region',
+'      var ji=(N-1-c)*(N-1-r); // reflected position in Q4',
+'      if(ji>=0&&ji<n2){',
+'        var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
+'        re[ij]=are; im[ij]=aim;',
+'        re[ji]=are; im[ji]=-aim;',
+'      }',
 '    }',
 '  }',
 '  // SSE (Sum of Squared Entropies) & Visual Polish',
@@ -643,12 +656,25 @@ function _dmSubmit(hex,N){
       ph[i]=Math.atan2(im[i],re[i]);
       if(mag[i]>mx) mx=mag[i];
     }
-    // Hermitian enforcement
+    // Hermitian enforcement (all 4 quadrants)
+    // Q1↔Q3: conjugate symmetry across main diagonal
     for(var r=0;r<N;r++){
       re[r*N+r]=Math.abs(re[r*N+r]);im[r*N+r]=0;mag[r*N+r]=Math.abs(re[r*N+r]);ph[r*N+r]=0;
       for(var c=r+1;c<N;c++){
         var ij=r*N+c,ji=c*N+r,re_up=re[ij],im_up=im[ij];
         re[ji]=re_up;im[ji]=-im_up;mag[ji]=mag[ij];ph[ji]=-ph[ij];
+      }
+    }
+    // Q2↔Q4: anti-diagonal mirror (reflect across anti-diagonal)
+    for(var r=0;r<N;r++){
+      for(var c=0;c<N-r-1;c++){
+        var ij=r*N+c, ji=(N-1-c)*(N-1-r);
+        if(ji>=0&&ji<n2){
+          var re_up=re[ij],im_up=im[ij],re_dn=re[ji],im_dn=im[ji];
+          var are=0.5*(re_up+re_dn), aim=0.5*(im_up-im_dn);
+          re[ij]=are;im[ij]=aim;mag[ij]=Math.sqrt(are*are+aim*aim);ph[ij]=Math.atan2(aim,are);
+          re[ji]=are;im[ji]=-aim;mag[ji]=mag[ij];ph[ji]=-ph[ij];
+        }
       }
     }
     // SSE
