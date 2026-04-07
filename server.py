@@ -1743,96 +1743,11 @@ _latest_snapshot: Optional[dict] = None              # Last cached snapshot (pol
 _latest_snapshot_ts: int = 0                         # Timestamp of latest snapshot
 _snapshot_lock = threading.RLock()                   # Guards _latest_snapshot updates
 
-# ── SSE subscriber registry ──────────────────────────────────────────────────
-# Each connected EventSource client gets a Queue(maxsize=4).
-# _cache_snapshot pushes the slim DM frame; the gthread holding that
-# client's streaming Response drains it.  Queues are capped at 4 so a
-# slow mobile client never accumulates unbounded backlog — oldest frame
-# is dropped when the queue is full (non-blocking put).
-import queue as _queue_mod
-_SSE_SUBSCRIBERS: Dict[str, "_queue_mod.Queue"] = {}
-_SSE_LOCK = threading.RLock()
-
-def _sse_subscribe(client_id: str) -> "_queue_mod.Queue":
-    q: "_queue_mod.Queue" = _queue_mod.Queue(maxsize=4)
-    with _SSE_LOCK:
-        _SSE_SUBSCRIBERS[client_id] = q
-    return q
-
-def _sse_unsubscribe(client_id: str) -> None:
-    with _SSE_LOCK:
-        _SSE_SUBSCRIBERS.pop(client_id, None)
-
 def _cache_snapshot(snapshot: dict) -> None:
-    """Cache snapshot for polling AND push frame to all SSE subscribers."""
+    """Cache snapshot for RPC polling (no SSE push)."""
     global _latest_snapshot
-
-    # ── Attach 64×64 downsample of the live 256×256 lattice DM ──────────────
-    # Block-average every non-overlapping 4×4 cell → 64×64 complex128 matrix.
-    # Serialized as 64*64*16 = 65536 bytes = 131072 hex chars, little-endian.
-    # This gives the frontend a true high-resolution view of the full pseudoqubit
-    # manifold rather than the 8×8 W3 consensus subspace alone.
-    try:
-        from globals import get_lattice as _glf
-        _lat = _glf()
-        if _lat is not None:
-            _cdm = getattr(_lat, 'current_density_matrix', None)
-            if _cdm is not None and hasattr(_cdm, 'shape') and _cdm.shape == (256, 256):
-                # Block-average 4×4 → 64×64
-                _d = _cdm.reshape(64, 4, 64, 4).mean(axis=(1, 3))
-                # Normalise trace to 1
-                _tr = float(np.real(np.trace(_d)))
-                if _tr > 1e-12:
-                    _d = _d / _tr
-                # Serialize: row-major, each element = 16 bytes (re float64 LE + im float64 LE)
-                _buf = np.empty(64 * 64 * 2, dtype=np.float64)
-                _buf[0::2] = np.real(_d).ravel()
-                _buf[1::2] = np.imag(_d).ravel()
-                snapshot = dict(snapshot)   # shallow copy — do not mutate original
-                snapshot['dm_full_hex'] = _buf.tobytes().hex()
-    except Exception as _de:
-        logger.debug(f"[SSE] dm_full_hex build error (non-fatal): {_de}")
-
     with _snapshot_lock:
         _latest_snapshot = snapshot
-
-    # Build SSE payload and push to all connected clients
-    try:
-        aer  = snapshot.get("aer_noise_state") or {}
-        mt   = snapshot.get("mermin_test") or snapshot.get("mermin") or {}
-        frame = {
-            "density_matrix_hex":      snapshot.get("density_matrix_hex", ""),
-            "dm_full_hex":             snapshot.get("dm_full_hex", ""),
-            "w_state_fidelity":        snapshot.get("w_state_fidelity", 0.0),
-            "coherence_l1":            snapshot.get("coherence_l1", 0.0),
-            "purity":                  snapshot.get("purity", 0.0),
-            "von_neumann_entropy":     snapshot.get("von_neumann_entropy", 0.0),
-            "phase_drift":             snapshot.get("phase_drift", 0.0),
-            "lattice_refresh_counter": snapshot.get("lattice_refresh_counter", 0),
-            "mermin_M": float(mt.get("M_value") or mt.get("M") or mt.get("mermin_value") or 0.0),
-            "aer_noise_state": {
-                "gamma1":      aer.get("gamma1", 0.0),
-                "gammaphi":    aer.get("gammaphi", 0.0),
-                "omega":       aer.get("omega", 0.5),
-                "ou_mem":      aer.get("ou_mem", 0.0),
-                "sector_occ":  aer.get("sector_occ", 0.0),
-                "block_field": aer.get("block_field", {}),
-            },
-        }
-        payload = "data: " + json.dumps(frame) + "\n\n"
-        with _SSE_LOCK:
-            subs = list(_SSE_SUBSCRIBERS.items())
-        for cid, q in subs:
-            try:
-                q.put_nowait(payload)
-            except _queue_mod.Full:
-                try:
-                    q.get_nowait()
-                    q.put_nowait(payload)
-                except Exception:
-                    pass
-    except Exception as _se:
-        logger.debug(f"[SSE] frame push error (non-fatal): {_se}")
 
 def _log_rpc_event(event_type: str, data: Any) -> None:
     """Log event for /api/events RPC polling endpoint."""
@@ -2495,28 +2410,14 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
                 result["lattice_error"] = str(le)
 
-        # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
-        # Extract DM from oracle snapshot if available
+        # ── WIRE DENSITY_MATRIX_HEX — 256x256->64x64 via shared reducer ─────────
         try:
-            if ORACLE_W_STATE_MANAGER is not None:
-                w_snap = _call_with_timeout(
-                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
-                    timeout_sec=2.0
-                )
-                if w_snap and hasattr(w_snap, 'density_matrix_hex'):
-                    dm_hex = getattr(w_snap, 'density_matrix_hex', '')
-                    if dm_hex:
-                        result["density_matrix_hex"] = dm_hex
-                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex from oracle ({len(dm_hex)} chars)")
-                elif w_snap and hasattr(w_snap, 'density_matrix'):
-                    # Extract DM as hex if it's raw bytes
-                    dm = getattr(w_snap, 'density_matrix', b'')
-                    if dm:
-                        dm_hex = dm.hex() if isinstance(dm, bytes) else str(dm)
-                        result["density_matrix_hex"] = dm_hex
-                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extracted ({len(dm_hex)} chars)")
+            _dm_hex, _dm_dim = _get_lattice_dm_hex()
+            if _dm_hex:
+                result["density_matrix_hex"] = _dm_hex
+                result["dm_dim"]             = _dm_dim
         except Exception as dme:
-            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extraction (non-fatal): {dme}")
+            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: DM (non-fatal): {dme}")
 
         # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
         # No fallback — DB is authoritative
@@ -4706,45 +4607,64 @@ def pyth_oracle_stats():
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
-    """GET/POST /rpc/oracle/snapshot — Latest W-state snapshot fused with client tripartite pool."""
+    """
+    GET/POST /rpc/oracle/snapshot
+    Single source of truth for quantum state + density matrix.
+    Pulls LATTICE.current_density_matrix (256×256), reduces to 64×64 Hermitian,
+    merges oracle consensus metrics, client tripartite pool, and all block_field data.
+    qtcl_getQuantumMetrics delegates here for DM hex — no separate extraction path.
+    """
     if request.method == "OPTIONS":
         return "", 204
     try:
+        # ── 1. Base from cached oracle snapshot (metrics, mermin, per_node) ──
         with _snapshot_lock:
-            if _latest_snapshot is None:
-                # No server snapshot yet — but we may still have client pool data
-                _base = {}
-            else:
-                _base = dict(_latest_snapshot)
+            _base = dict(_latest_snapshot) if _latest_snapshot else {}
 
-        # ── Enrich with client tripartite pool consensus ───────────────────
+        # ── 2. Pull 256×256 lattice DM → reduce to 64×64 Hermitian ──────────
+        dm_hex, dm_dim = _get_lattice_dm_hex()
+        if dm_hex:
+            _base['density_matrix_hex'] = dm_hex
+            _base['dm_dim']             = dm_dim   # 64 (or 8 fallback)
+
+        # ── 3. Inject lattice live metrics if LATTICE available ───────────────
+        try:
+            lat = sys.modules[__name__].__dict__.get('LATTICE')
+            if lat is not None:
+                _base.setdefault('w_state_fidelity', getattr(lat, 'fidelity', None))
+                _base.setdefault('purity',           getattr(lat, 'purity',   None))
+                _base.setdefault('coherence_l1',     getattr(lat, 'coherence', None))
+                _base.setdefault('lattice_refresh_counter', getattr(lat, 'cycle_count', None))
+        except Exception:
+            pass
+
+        # ── 4. Enrich with client tripartite pool consensus ───────────────────
         with _CLIENT_DM_POOL_LOCK:
             _c_re   = list(_client_consensus_dm_re)
             _c_im   = list(_client_consensus_dm_im)
             _c_fid  = _client_consensus_fid
             _c_cnt  = _client_pool_count
 
-        if _c_cnt > 0 and any(v != 0.0 for v in _c_re):
-            _base['client_fused_fidelity'] = round(_c_fid, 6)
-            _base['client_oracle_count']   = _c_cnt
-            # If server has no DM yet, surface the client consensus DM
-            if not _base.get('density_matrix_hex'):
-                import struct as _ss
-                _base['density_matrix_hex'] = b''.join(
-                    _ss.pack('>dd', _c_re[i], _c_im[i]) for i in range(64)
-                ).hex()
-                _base['w_state_fidelity'] = _c_fid
-                _base['fidelity']         = _c_fid
-                _base['source']           = 'client_tripartite_only'
-                _base['ready']            = True
-        else:
-            _base['client_fused_fidelity'] = 0.0
-            _base['client_oracle_count']   = 0
+        _base['client_fused_fidelity'] = round(_c_fid, 6)
+        _base['client_oracle_count']   = _c_cnt
+
+        # Client pool fallback DM only if no lattice DM came through
+        if _c_cnt > 0 and any(v != 0.0 for v in _c_re) and not dm_hex:
+            import struct as _ss
+            _base['density_matrix_hex'] = b''.join(
+                _ss.pack('<dd', _c_re[i], _c_im[i]) for i in range(64)
+            ).hex()
+            _base['dm_dim']         = 8
+            _base['w_state_fidelity'] = _c_fid
+            _base['source']           = 'client_tripartite_only'
+            _base['ready']            = True
 
         if not _base:
             return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":None}), 202
 
+        _base['ready'] = True
         return jsonify({"jsonrpc":"2.0","result":_base,"id":request.args.get('id',1)}), 200
+
     except Exception as e:
         logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshot error: {e}", exc_info=False)
         return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
@@ -4772,81 +4692,8 @@ def rpc_oracle_snapshots():
         logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
         return jsonify({"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}), 500
 
-@app.route("/rpc/oracle/stream", methods=["GET", "OPTIONS"])
-def rpc_oracle_stream():
-    """GET /rpc/oracle/stream — SSE stream, one frame per oracle cycle (~3 s).
-
-    Frame fields:
-      density_matrix_hex   — 8×8 consensus DM (2048 hex chars, little-endian float64 pairs)
-      dm_full_hex          — 64×64 block-averaged downsample of lattice 256×256 DM
-                             (8192 hex chars: 4096 complex128 elements, little-endian)
-      w_state_fidelity, coherence_l1, purity, von_neumann_entropy,
-      phase_drift, lattice_refresh_counter, mermin_M, aer_noise_state
-
-    The gthread holds this Response open indefinitely (gunicorn timeout=0).
-    A keep-alive comment ": ka" is sent every 25 s to prevent Koyeb's 60 s TCP idle reset.
-    On client disconnect GeneratorExit fires → _sse_unsubscribe cleans up the queue.
-    """
-    if request.method == "OPTIONS":
-        return "", 204
-
-    import uuid as _uuid
-    client_id = _uuid.uuid4().hex
-
-    def _build_frame(snap: dict) -> str:
-        aer = snap.get("aer_noise_state") or {}
-        mt  = snap.get("mermin_test") or snap.get("mermin") or {}
-        frame = {
-            "density_matrix_hex":      snap.get("density_matrix_hex", ""),
-            "dm_full_hex":             snap.get("dm_full_hex", ""),
-            "w_state_fidelity":        snap.get("w_state_fidelity", 0.0),
-            "coherence_l1":            snap.get("coherence_l1", 0.0),
-            "purity":                  snap.get("purity", 0.0),
-            "von_neumann_entropy":     snap.get("von_neumann_entropy", 0.0),
-            "phase_drift":             snap.get("phase_drift", 0.0),
-            "lattice_refresh_counter": snap.get("lattice_refresh_counter", 0),
-            "mermin_M": float(mt.get("M_value") or mt.get("M") or mt.get("mermin_value") or 0.0),
-            "aer_noise_state": {
-                "gamma1":      aer.get("gamma1", 0.0),
-                "gammaphi":    aer.get("gammaphi", 0.0),
-                "omega":       aer.get("omega", 0.5),
-                "ou_mem":      aer.get("ou_mem", 0.0),
-                "sector_occ":  aer.get("sector_occ", 0.0),
-                "block_field": aer.get("block_field", {}),
-            },
-        }
-        return "data: " + json.dumps(frame) + "\n\n"
-
-    def generate():
-        q = _sse_subscribe(client_id)
-        try:
-            # Flush current snapshot immediately — client gets live data on connect
-            with _snapshot_lock:
-                snap = _latest_snapshot
-            if snap:
-                yield _build_frame(snap)
-
-            _KA_INTERVAL = 25.0   # keep-alive cadence — below Koyeb 60 s TCP idle reset
-            while True:
-                try:
-                    payload = q.get(timeout=_KA_INTERVAL)
-                    yield payload
-                except _queue_mod.Empty:
-                    yield ": ka\n\n"   # invisible SSE comment — keeps TCP alive
-        except GeneratorExit:
-            pass
-        finally:
-            _sse_unsubscribe(client_id)
-            logger.debug(f"[SSE] client {client_id[:8]} disconnected ({len(_SSE_SUBSCRIBERS)} remaining)")
-
-    resp = Response(generate(), mimetype="text/event-stream")
-    resp.headers["Cache-Control"]     = "no-cache"
-    resp.headers["X-Accel-Buffering"] = "no"    # disable nginx/Koyeb proxy buffering
-    resp.headers["Connection"]        = "keep-alive"
-    return resp
-
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
-logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots,stream}")
+logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots}")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
 
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
@@ -4940,6 +4787,82 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
             logger.debug(f"[RPC-BROADCAST] Supabase skipped: {e}")
     except Exception as e:
         logger.error(f"[RPC-BROADCAST] Error: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# 256×256 → 64×64 HERMITIAN-PRESERVING DENSITY MATRIX REDUCER
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
+    """
+    Collapse 256×256 complex128 DM → 64×64 by block-averaging 4×4 tiles,
+    then enforce ρ = (ρ + ρ†)/2 and renormalise Tr(ρ)=1.
+
+    Each output element [I,J] = mean of the 4×4 subblock dm256[4I:4I+4, 4J:4J+4].
+    Hermitian step: rho64[I,J] = (rho64[I,J] + conj(rho64[J,I])) / 2  ∀ I≤J,
+    then mirror lower triangle.  This preserves physical validity.
+
+    Serialised as row-major little-endian float64 pairs (re, im) — same convention
+    as numpy .tobytes() — 64×64×16 bytes = 65536 bytes = 131072 hex chars.
+    dm_dim=64 flag injected so the client knows the grid size.
+    """
+    try:
+        dm = np.asarray(dm256, dtype=np.complex128)
+        if dm.shape != (256, 256):
+            # Graceful: if it's already 8×8 or some other size, just pass through
+            if dm.shape == (8, 8):
+                return dm.tobytes().hex(), 8
+            return dm.tobytes().hex(), dm.shape[0]
+
+        N = 64
+        B = 4  # block size
+        rho = np.zeros((N, N), dtype=np.complex128)
+
+        # Block-average: rho[I,J] = mean of dm[4I:4I+4, 4J:4J+4]
+        for I in range(N):
+            for J in range(N):
+                rho[I, J] = np.mean(dm256[I*B:(I+1)*B, J*B:(J+1)*B])
+
+        # Enforce Hermitian: ρ = (ρ + ρ†) / 2
+        rho = 0.5 * (rho + rho.conj().T)
+
+        # Renormalise
+        tr = float(np.real(np.trace(rho)))
+        if tr > 1e-12:
+            rho /= tr
+
+        return rho.tobytes().hex(), N
+
+    except Exception as e:
+        logger.warning(f"[DM-REDUCE] 256→64 failed: {e}")
+        return '', 0
+
+
+def _get_lattice_dm_hex() -> tuple:
+    """
+    Pull current_density_matrix from LATTICE, reduce to 64×64, return (hex, dim).
+    Falls back to oracle snapshot 8×8 if LATTICE not available.
+    """
+    try:
+        lat = sys.modules[__name__].__dict__.get('LATTICE')
+        if lat is not None and hasattr(lat, 'current_density_matrix'):
+            dm = lat.current_density_matrix
+            if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
+                return _lattice_dm_to_64x64_hex(dm)
+    except Exception as e:
+        logger.debug(f"[DM-REDUCE] LATTICE access: {e}")
+
+    # Fallback: oracle snapshot 8×8 as-is
+    try:
+        with _snapshot_lock:
+            snap = _latest_snapshot
+        if snap:
+            h = snap.get('density_matrix_hex', '')
+            if h and len(h) == 2048:
+                return h, 8
+    except Exception:
+        pass
+    return '', 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════

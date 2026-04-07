@@ -434,260 +434,183 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 'use strict';
 var BASE = window.location.origin;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CANONICAL STATE — single source of truth for every DOM element
-// Field names match exact RPC result keys from server.py
-// ═══════════════════════════════════════════════════════════════════════════════
+// ─── STATE ───────────────────────────────────────────────────────────────────
 var S = {
-  // qtcl_getBlockHeight
-  height: 0, tip_hash: '',
-  // qtcl_getQuantumMetrics → w_state
-  fidelity: 0.9, coherence: 0.7, purity: 0.8, entropy: 0,
-  // qtcl_getQuantumMetrics → lattice
-  lattice_fidelity: 0.9, lattice_coherence: 0.7, w_state_strength: 0,
-  cycle: 0,
-  // qtcl_getLatestDMSnapshot
-  density_matrix_hex: '', // 2048 hex chars = 8×8 complex128
-  negativity: 0, concurrence: 0, entanglement: 0.65,
-  qfi: 6.5, discord: 0, tele_fidelity: 0.6,
-  phase_drift: 0.02, gamma1: 0.04, gammaphi: 0.12,
-  omega: 0.5, ou_mem: 0.03, sector_occ: 0.9, qrng_health: 1,
-  // qtcl_getMempoolStats
-  mempool_size: 0,
-  // qtcl_getPeers
-  n_peers: 0,
-  // block chain metrics (computed from getBlockRange)
-  total_transactions: 0, avg_block_time_s: 0, difficulty_bits: 4,
-  // pq plane
-  pq_curr: 0, pq_last: 0, pq0: 0, _pqAuthoritative: false,
-  // oracle network (per-node from DM snapshots)
-  oracle_data: {}, // oracle_N → {w_state_fidelity, coherence, purity, pq0_*}
-  // mermin (from DM snapshots)
-  mermin: null,
-  // reward (computed from height via canonical schedule)
-  miner_reward_qtcl: 7.20, treasury_reward_qtcl: 0.80,
-  tessellation_depth: 5, treasury_pct: 10.0,
-  // oracle_consensus
-  oracle_consensus_reached: false,
-  quantum_validation_status: '--', pq_validation_status: '--',
+  height:0, tip_hash:'',
+  fidelity:0.9, coherence:0.7, purity:0.8, entropy:0,
+  lattice_fidelity:0.9, lattice_coherence:0.7, w_state_strength:0, cycle:0,
+  negativity:0, concurrence:0, entanglement:0.65,
+  qfi:6.5, discord:0, tele_fidelity:0.6,
+  phase_drift:0.02, gamma1:0.04, gammaphi:0.12,
+  omega:0.5, ou_mem:0.03, sector_occ:0.9, qrng_health:1,
+  mempool_size:0, n_peers:0,
+  total_transactions:0, avg_block_time_s:0, difficulty_bits:4,
+  pq_curr:0, pq_last:0, pq0:0,
+  oracle_data:{}, mermin:null,
+  miner_reward_qtcl:7.20, treasury_reward_qtcl:0.80,
+  tessellation_depth:5, treasury_pct:10.0,
+  oracle_consensus_reached:false,
+  quantum_validation_status:'--', pq_validation_status:'--',
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// REWARD SCHEDULE — mirrors TessellationRewardSchedule from globals.py exactly
-// ═══════════════════════════════════════════════════════════════════════════════
-var REWARD_SCHEDULE = {
-  depths: [
-    { boundary: 106496,   depth: 5, miner: 720, treasury: 80  },
-    { boundary: 958464,   depth: 6, miner: 760, treasury: 40  },
-    { boundary: 7774208,  depth: 7, miner: 780, treasury: 20  },
-    { boundary: 62300160, depth: 8, miner: 790, treasury: 10  },
-  ],
-  forHeight: function(h) {
-    for (var i = 0; i < this.depths.length; i++) {
-      if (h < this.depths[i].boundary) return this.depths[i];
-    }
-    return this.depths[this.depths.length - 1];
-  }
-};
-
-function applyRewards(h) {
-  var r = REWARD_SCHEDULE.forHeight(h);
-  S.miner_reward_qtcl    = r.miner    / 100;
-  S.treasury_reward_qtcl = r.treasury / 100;
-  S.tessellation_depth   = r.depth;
-  S.treasury_pct         = (r.treasury / (r.miner + r.treasury) * 100);
+// ─── REWARD SCHEDULE ─────────────────────────────────────────────────────────
+var REWARD_SCHEDULE={depths:[
+  {boundary:106496,   depth:5,miner:720,treasury:80},
+  {boundary:958464,   depth:6,miner:760,treasury:40},
+  {boundary:7774208,  depth:7,miner:780,treasury:20},
+  {boundary:62300160, depth:8,miner:790,treasury:10},
+],forHeight:function(h){
+  for(var i=0;i<this.depths.length;i++) if(h<this.depths[i].boundary) return this.depths[i];
+  return this.depths[this.depths.length-1];
+}};
+function applyRewards(h){
+  var r=REWARD_SCHEDULE.forHeight(h);
+  S.miner_reward_qtcl=r.miner/100; S.treasury_reward_qtcl=r.treasury/100;
+  S.tessellation_depth=r.depth; S.treasury_pct=r.treasury/(r.miner+r.treasury)*100;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// JSON-RPC 2.0 TRANSPORT LAYER
-// ═══════════════════════════════════════════════════════════════════════════════
-var _rpcId = 1;
-
-async function rpc(method, params) {
-  try {
-    var r = await fetch(BASE + '/rpc', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({jsonrpc:'2.0', id: _rpcId++, method: method, params: params || []}),
-      signal: AbortSignal.timeout(6000)
-    });
-    if (!r.ok) return null;
-    var j = await r.json();
-    if (j.error) { console.warn('[RPC]', method, j.error.code, j.error.message); return null; }
+// ─── RPC ─────────────────────────────────────────────────────────────────────
+var _rpcId=1;
+async function rpc(method,params){
+  try{
+    var r=await fetch(BASE+'/rpc',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({jsonrpc:'2.0',id:_rpcId++,method:method,params:params||[]}),
+      signal:AbortSignal.timeout(6000)});
+    if(!r.ok) return null;
+    var j=await r.json();
+    if(j.error){console.warn('[RPC]',method,j.error.message);return null;}
     return j.result;
-  } catch(e) { return null; }
+  }catch(e){return null;}
+}
+async function rpcBatch(calls){
+  try{
+    var base=_rpcId, batch=calls.map(function(c,i){
+      return{jsonrpc:'2.0',id:base+i,method:c[0],params:c[1]||[]};
+    });
+    _rpcId+=calls.length;
+    var r=await fetch(BASE+'/rpc',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(batch),signal:AbortSignal.timeout(5000)});
+    if(!r.ok) return calls.map(function(){return null;});
+    var arr=await r.json();
+    if(!Array.isArray(arr)) return calls.map(function(_,i){return i===0&&arr&&!arr.error?arr.result:null;});
+    return calls.map(function(_,i){
+      var res=arr.find(function(a){return a&&a.id===(base+i);});
+      return(res&&!res.error)?res.result:null;
+    });
+  }catch(e){return calls.map(function(){return null;});}
 }
 
-// True JSON-RPC 2.0 batch — single HTTP round-trip
-async function rpcBatch(calls) {
-  try {
-    var base = _rpcId;
-    var batch = calls.map(function(c, i) {
-      return {jsonrpc:'2.0', id: base + i, method: c[0], params: c[1] || []};
-    });
-    _rpcId += calls.length;
-    
-    // Create abort controller with 3s hard timeout (not 8s)
-    var controller = new AbortController();
-    var timeoutId = setTimeout(function() {
-      controller.abort();
-      console.warn('[RPC] Batch timeout after 3s — returning nulls to unblock UI');
-    }, 3000);
-    
-    var r = await fetch(BASE + '/rpc', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(batch),
-      signal: controller.signal
-    });
-    
-    clearTimeout(timeoutId);
-    
-    if (!r.ok) return calls.map(function() { return null; });
-    var arr = await r.json();
-    // Server may return single object on error or batch array
-    if (!Array.isArray(arr)) {
-      return calls.map(function(_, i) { return i === 0 && arr && !arr.error ? arr.result : null; });
-    }
-    return calls.map(function(_, i) {
-      var res = arr.find(function(a) { return a && a.id === (base + i); });
-      return (res && !res.error) ? res.result : null;
-    });
-  } catch(e) {
-    console.error('[RPC] Batch error:', e.message);
-    return calls.map(function() { return null; });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// CLOCK + LOGO CANVAS
-// ═══════════════════════════════════════════════════════════════════════════════
-function tick() {
-  var d = new Date();
-  var el = document.getElementById('hck');
-  if (el) el.textContent = d.toISOString().replace('T',' ').slice(0,19) + ' UTC';
-}
-setInterval(tick, 1000); tick();
-
-(function() {
-  var c = document.getElementById('lc'), ctx = c ? c.getContext('2d') : null, t = 0;
-  if (!ctx) return;
-  (function fr() {
-    ctx.clearRect(0,0,36,36);
-    var cx=18,cy=18,r=13,ri=7;
-    // Outer ring
-    ctx.strokeStyle='rgba(0,220,255,.2)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-    // Inner ring
-    ctx.strokeStyle='rgba(128,64,255,.18)'; ctx.lineWidth=0.8;
-    ctx.beginPath(); ctx.arc(cx,cy,ri,0,Math.PI*2); ctx.stroke();
-    // 4 outer nodes — COUNTER-CLOCKWISE (negative t)
-    for (var i=0;i<4;i++) {
-      var a=i*Math.PI*2/4-t, x=cx+r*Math.cos(a), y=cy+r*Math.sin(a);
-      ctx.strokeStyle='rgba(0,220,255,'+(0.3+0.25*Math.sin(t*2+i))+')'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
-      ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
-      ctx.beginPath(); ctx.arc(x,y,2.2,0,Math.PI*2); ctx.fill();
-      // Inner node at same angle on inner ring
-      var ix=cx+ri*Math.cos(a), iy=cy+ri*Math.sin(a);
-      ctx.fillStyle='rgba(128,64,255,'+(0.5+0.3*Math.sin(t*2.5+i))+')';
-      ctx.beginPath(); ctx.arc(ix,iy,1.5,0,Math.PI*2); ctx.fill();
-      // Connect outer to inner
-      ctx.strokeStyle='rgba(0,220,255,.1)'; ctx.lineWidth=0.5;
-      ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(ix,iy); ctx.stroke();
-    }
-    // Center gold core
-    ctx.fillStyle='rgba(212,160,32,.95)'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
-    t += 0.02; requestAnimationFrame(fr);
-  })();
+// ─── CLOCK ───────────────────────────────────────────────────────────────────
+(function(){
+  var el=document.getElementById('hck'); if(!el) return;
+  function _t(){el.textContent=new Date().toISOString().replace('T',' ').slice(0,19)+' UTC';}
+  setInterval(_t,1000); _t();
 })();
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// DENSITY MATRIX — Web Worker decode (off main thread) + RAF canvas render
-// Worker handles: hex→Float64 parse, mag/phase compute (asm.js typed array ops)
-// Main thread only: ImageData pixel fill + overlay text via RAF (no jank)
-// ═══════════════════════════════════════════════════════════════════════════════
-var _dmCanvas = null, _dmCtx = null;
-var _dmParsed = null; // received from Worker via postMessage
-var _dmDirty  = false; // true = new data pending, trigger RAF repaint
-var _dmRafId  = null;
+// ─── LOGO RAF ────────────────────────────────────────────────────────────────
+(function(){
+  var c=document.getElementById('lc'),ctx=c?c.getContext('2d'):null,t=0;
+  if(!ctx) return;
+  function fr(){
+    ctx.clearRect(0,0,36,36);
+    var cx=18,cy=18,r=13,ri=7;
+    ctx.strokeStyle='rgba(0,220,255,.2)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+    ctx.strokeStyle='rgba(128,64,255,.18)';ctx.lineWidth=0.8;
+    ctx.beginPath();ctx.arc(cx,cy,ri,0,Math.PI*2);ctx.stroke();
+    for(var i=0;i<4;i++){
+      var a=i*Math.PI/2-t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
+      ctx.strokeStyle='rgba(0,220,255,'+(0.3+0.25*Math.sin(t*2+i))+')';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();
+      ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
+      ctx.beginPath();ctx.arc(x,y,2.2,0,Math.PI*2);ctx.fill();
+      var ix=cx+ri*Math.cos(a),iy=cy+ri*Math.sin(a);
+      ctx.fillStyle='rgba(128,64,255,'+(0.5+0.3*Math.sin(t*2.5+i))+')';
+      ctx.beginPath();ctx.arc(ix,iy,1.5,0,Math.PI*2);ctx.fill();
+    }
+    ctx.fillStyle='rgba(212,160,32,.95)';
+    ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
+    t+=0.02; requestAnimationFrame(fr);
+  }
+  fr();
+})();
 
-// ── Web Worker source (blob URL, no extra file) ──────────────────────────────
-var _DM_WORKER_SRC = [
-'self.onmessage = function(e){',
-'  var hex = e.data;',
-'  if(!hex || hex.length < 2048){ self.postMessage(null); return; }',
-'  // typed-array asm.js style — zero GC, zero heap alloc per element',
-'  var re = new Float64Array(64), im = new Float64Array(64);',
-'  var mag = new Float64Array(64), phase = new Float64Array(64);',
-'  var u8 = new Uint8Array(8);',
-'  var buf = u8.buffer;',
-'  var dv = new DataView(buf);',
-'  // Precompute hex→nibble LUT',
-'  var HEX = new Uint8Array(256);',
-'  for(var c=0;c<10;c++) HEX[48+c]=c;',           // 0-9
-'  for(var c=0;c<6;c++){ HEX[65+c]=10+c; HEX[97+c]=10+c; }', // A-F a-f
-'  var maxMag = 0.0;',
-'  for(var i=0;i<64;i++){',
-'    var off = i*32;',
-'    // real part — 8 bytes little-endian',
-'    for(var b=0;b<8;b++) u8[b] = (HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];',
-'    re[i] = dv.getFloat64(0,true);',
-'    // imag part',
-'    var off2 = off+16;',
-'    for(var b=0;b<8;b++) u8[b] = (HEX[hex.charCodeAt(off2+b*2)]<<4)|HEX[hex.charCodeAt(off2+b*2+1)];',
-'    im[i] = dv.getFloat64(0,true);',
-'    var r=re[i],ii=im[i];',
-'    mag[i] = Math.sqrt(r*r+ii*ii);',
-'    phase[i] = Math.atan2(ii,r);',
+// ─── DM WEB WORKER (blob, off main thread) ───────────────────────────────────
+// Decodes variable-dim DM hex → typed arrays via nibble LUT, zero GC
+// dim=64: 4096 complex128 = 131072 hex chars (256×256 block-averaged)
+// dim=8:  64  complex128 = 2048 hex chars (oracle fallback)
+var _DM_WORKER_SRC=[
+'self.onmessage=function(e){',
+'  var hex=e.data.hex, N=e.data.N;',
+'  var n2=N*N, need=n2*32;',
+'  if(!hex||hex.length<need){self.postMessage(null);return;}',
+'  var HEX=new Uint8Array(256);',
+'  for(var c=0;c<10;c++) HEX[48+c]=c;',
+'  for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}',
+'  var re=new Float64Array(n2),im=new Float64Array(n2);',
+'  var mag=new Float64Array(n2),ph=new Float64Array(n2);',
+'  var u8=new Uint8Array(8),dv=new DataView(u8.buffer);',
+'  var maxMag=0;',
+'  for(var i=0;i<n2;i++){',
+'    var off=i*32;',
+'    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];',
+'    re[i]=dv.getFloat64(0,true);',
+'    var o2=off+16;',
+'    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(o2+b*2)]<<4)|HEX[hex.charCodeAt(o2+b*2+1)];',
+'    im[i]=dv.getFloat64(0,true);',
+'    mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);',
+'    ph[i]=Math.atan2(im[i],re[i]);',
 '    if(mag[i]>maxMag) maxMag=mag[i];',
 '  }',
-'  // Transfer typed arrays back — zero copy via Transferable',
-'  var reBuf=re.buffer.slice(0), imBuf=im.buffer.slice(0);',
-'  var mgBuf=mag.buffer.slice(0), phBuf=phase.buffer.slice(0);',
-'  self.postMessage({re:reBuf,im:imBuf,mag:mgBuf,phase:phBuf,maxMag:maxMag},[reBuf,imBuf,mgBuf,phBuf]);',
+// Mirror Hermitian: for i<j, enforce phase[i,j] = -phase[j,i], mag symmetric
+'  for(var r=0;r<N;r++){',
+'    for(var c2=r+1;c2<N;c2++){',
+'      var ij=r*N+c2, ji=c2*N+r;',
+'      var are=0.5*(re[ij]+re[ji]);',
+'      var aim=0.5*(im[ij]-im[ji]);', // Hermitian: re sym, im antisym
+'      re[ij]=are; im[ij]=aim; mag[ij]=Math.sqrt(are*are+aim*aim); ph[ij]=Math.atan2(aim,are);',
+'      re[ji]=are; im[ji]=-aim; mag[ji]=mag[ij]; ph[ji]=-ph[ij];',
+'    }',
+'  }',
+'  var rb=re.buffer.slice(0),ib=im.buffer.slice(0),mb=mag.buffer.slice(0),pb=ph.buffer.slice(0);',
+'  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:maxMag,N:N},[rb,ib,mb,pb]);',
 '};'
 ].join('\n');
 
-var _dmWorker = (function(){
+var _dmW=(function(){
   try{
-    var blob = new Blob([_DM_WORKER_SRC], {type:'application/javascript'});
-    var url  = URL.createObjectURL(blob);
-    var w    = new Worker(url);
-    w.onmessage = function(e){
-      if(!e.data){ _dmParsed = null; return; }
-      _dmParsed = {
-        re:    new Float64Array(e.data.re),
-        im:    new Float64Array(e.data.im),
-        mag:   new Float64Array(e.data.mag),
-        phase: new Float64Array(e.data.phase),
-        maxMag: e.data.maxMag
+    var b=new Blob([_DM_WORKER_SRC],{type:'application/javascript'});
+    var w=new Worker(URL.createObjectURL(b));
+    w.onmessage=function(e){
+      if(!e.data){_dmParsed=null;return;}
+      _dmParsed={
+        re:new Float64Array(e.data.re),im:new Float64Array(e.data.im),
+        mag:new Float64Array(e.data.mag),ph:new Float64Array(e.data.ph),
+        maxMag:e.data.maxMag, N:e.data.N
       };
-      _dmDirty = true;
+      _dmDirty=true;
     };
     return w;
-  }catch(ex){
-    // Worker not available (file:// protocol etc.) — fall back to sync parse
-    return null;
-  }
+  }catch(x){return null;}
 })();
 
-var _dmLastHex = '';
-function _dmSubmitHex(hex){
-  if(!hex || hex === _dmLastHex) return;
-  _dmLastHex = hex;
-  if(_dmWorker){
-    _dmWorker.postMessage(hex); // hand off to worker thread
+var _dmParsed=null,_dmDirty=false,_dmLastHex='',_dmCanvas=null,_dmCtx=null;
+
+function _dmSubmit(hex,N){
+  if(!hex||hex===_dmLastHex) return;
+  _dmLastHex=hex;
+  if(_dmW){
+    _dmW.postMessage({hex:hex,N:N||64});
   } else {
-    // Sync fallback — only used if Worker creation failed
-    var re=new Float64Array(64),im=new Float64Array(64),mag=new Float64Array(64),phase=new Float64Array(64);
-    var buf=new ArrayBuffer(8),dv=new DataView(buf);
-    var u8=new Uint8Array(buf);
-    var HEX=new Uint8Array(256);
+    // sync fallback
+    var n2=N*N,HEX=new Uint8Array(256);
     for(var c=0;c<10;c++) HEX[48+c]=c;
     for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}
-    var mx=0;
-    for(var i=0;i<64;i++){
+    var re=new Float64Array(n2),im=new Float64Array(n2),mag=new Float64Array(n2),ph=new Float64Array(n2);
+    var u8=new Uint8Array(8),dv=new DataView(u8.buffer),mx=0;
+    for(var i=0;i<n2;i++){
       var off=i*32;
       for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
       re[i]=dv.getFloat64(0,true);
@@ -695,423 +618,280 @@ function _dmSubmitHex(hex){
       for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(o2+b*2)]<<4)|HEX[hex.charCodeAt(o2+b*2+1)];
       im[i]=dv.getFloat64(0,true);
       mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);
-      phase[i]=Math.atan2(im[i],re[i]);
+      ph[i]=Math.atan2(im[i],re[i]);
       if(mag[i]>mx) mx=mag[i];
     }
-    _dmParsed={re:re,im:im,mag:mag,phase:phase,maxMag:mx};
+    _dmParsed={re:re,im:im,mag:mag,ph:ph,maxMag:mx,N:N};
     _dmDirty=true;
   }
 }
 
-// ── RAF render — only repaints on new data, zero blocked frames ──────────────
-function _phaseToRGB(ph, mg, mx){
-  var normPhase = (ph + Math.PI) / (2 * Math.PI);
-  var h = 160 + normPhase * 160;
-  var l = Math.min(0.9, 0.1 + (mg / (mx || 1)) * 0.8);
-  var s = 0.8;
-  var c = (1 - Math.abs(2*l - 1)) * s;
-  var x = c * (1 - Math.abs((h/60) % 2 - 1));
-  var m = l - c/2;
+// ─── PHASE→RGB ───────────────────────────────────────────────────────────────
+function _p2rgb(phase,mag,mx){
+  var np=(phase+Math.PI)/(2*Math.PI);
+  var h=160+np*160, l=Math.min(0.9,0.1+(mag/(mx||1))*0.8), s=0.8;
+  var c2=(1-Math.abs(2*l-1))*s, x2=c2*(1-Math.abs((h/60)%2-1)), m2=l-c2/2;
   var r1,g1,b1;
-  if(h<60){r1=c;g1=x;b1=0;}else if(h<120){r1=x;g1=c;b1=0;}
-  else if(h<180){r1=0;g1=c;b1=x;}else if(h<240){r1=0;g1=x;b1=c;}
-  else if(h<300){r1=x;g1=0;b1=c;}else{r1=c;g1=0;b1=x;}
-  return [(r1+m)*255|0,(g1+m)*255|0,(b1+m)*255|0];
+  if(h<60){r1=c2;g1=x2;b1=0;}else if(h<120){r1=x2;g1=c2;b1=0;}
+  else if(h<180){r1=0;g1=c2;b1=x2;}else if(h<240){r1=0;g1=x2;b1=c2;}
+  else if(h<300){r1=x2;g1=0;b1=c2;}else{r1=c2;g1=0;b1=x2;}
+  return[(r1+m2)*255|0,(g1+m2)*255|0,(b1+m2)*255|0];
 }
 
-function _rafDMRender(){
-  _dmRafId = requestAnimationFrame(_rafDMRender); // schedule next frame first
+// ─── DM RAF RENDERER ─────────────────────────────────────────────────────────
+// Renders 64×64 (or 8×8 fallback) via ImageData — single putImageData/frame
+// Only repaints when _dmDirty. Zero layout work on main thread between frames.
+function _dmRaf(){
+  requestAnimationFrame(_dmRaf);
   if(!_dmCanvas){
-    _dmCanvas = document.getElementById('dm-canvas');
+    _dmCanvas=document.getElementById('dm-canvas');
     if(!_dmCanvas) return;
-    _dmCtx = _dmCanvas.getContext('2d', {alpha:false});
+    _dmCtx=_dmCanvas.getContext('2d',{alpha:false});
   }
-  var ctx = _dmCtx;
-  var W = _dmCanvas.width, H = _dmCanvas.height;
-  var pad = {l:38, t:28, r:12, b:36};
-  var gW = W-pad.l-pad.r, gH = H-pad.t-pad.b;
-  var cellW = gW/8, cellH = gH/8;
+  if(!_dmDirty&&_dmParsed) return;
+  _dmDirty=false;
 
-  // Only full repaint if dirty (new DM data) or first frame
-  if(!_dmDirty && _dmParsed) return;
-  _dmDirty = false;
+  var ctx=_dmCtx, W=_dmCanvas.width, H=_dmCanvas.height;
+  var pad={l:8,t:8,r:8,b:28};
+  var gW=W-pad.l-pad.r, gH=H-pad.t-pad.b;
 
-  // Background via ImageData for full-canvas fill (avoids fillRect overhead)
-  ctx.fillStyle = '#000508';
-  ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#000508'; ctx.fillRect(0,0,W,H);
 
   if(!_dmParsed){
-    ctx.strokeStyle = 'rgba(0,220,255,0.08)'; ctx.lineWidth = 1;
-    for(var i=0;i<=8;i++){
-      ctx.beginPath();ctx.moveTo(pad.l+i*cellW,pad.t);ctx.lineTo(pad.l+i*cellW,pad.t+gH);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(pad.l,pad.t+i*cellH);ctx.lineTo(pad.l+gW,pad.t+i*cellH);ctx.stroke();
-    }
-    ctx.font='10px JetBrains Mono,monospace';ctx.fillStyle='rgba(0,220,255,0.25)';
+    ctx.fillStyle='rgba(0,220,255,.18)';ctx.font='10px JetBrains Mono,monospace';
     ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.fillText('Awaiting density matrix\u2026',W/2,H/2);
+    ctx.fillText('Awaiting 256\u00D7256\u2192 64\u00D764 DM\u2026',W/2,H/2);
     return;
   }
 
-  var dm = _dmParsed, mx = dm.maxMag;
+  var dm=_dmParsed, N=dm.N, n2=N*N, mx=dm.maxMag;
+  var cW=gW/N, cH=gH/N;
 
-  // ── Fill cells via ImageData — single putImageData per frame ──
-  var imgData = ctx.getImageData(0,0,W,H);
-  var px = imgData.data;
-
-  for(var row=0;row<8;row++){
-    for(var col=0;col<8;col++){
-      var idx = row*8+col;
-      var rgb = _phaseToRGB(dm.phase[idx],dm.mag[idx],mx);
-      var cx0 = (pad.l + col*cellW)|0, cy0 = (pad.t + row*cellH)|0;
-      var cx1 = (pad.l + (col+1)*cellW)|0, cy1 = (pad.t + (row+1)*cellH)|0;
-      for(var py=cy0+1;py<cy1-1;py++){
-        var rowOff = py*W*4;
-        for(var pxx=cx0+1;pxx<cx1-1;pxx++){
-          var p = rowOff + pxx*4;
-          px[p]=rgb[0]; px[p+1]=rgb[1]; px[p+2]=rgb[2]; px[p+3]=255;
+  // ImageData pixel fill — one allocation, one GPU upload
+  var img=ctx.getImageData(0,0,W,H), px=img.data;
+  for(var row=0;row<N;row++){
+    for(var col=0;col<N;col++){
+      var idx=row*N+col;
+      var rgb=_p2rgb(dm.ph[idx],dm.mag[idx],mx);
+      var x0=(pad.l+col*cW)|0, y0=(pad.t+row*cH)|0;
+      var x1=(pad.l+(col+1)*cW)|0, y1=(pad.t+(row+1)*cH)|0;
+      for(var py=y0;py<y1;py++){
+        var ro=py*W*4;
+        for(var px2=x0;px2<x1;px2++){
+          var p=ro+px2*4; px[p]=rgb[0];px[p+1]=rgb[1];px[p+2]=rgb[2];px[p+3]=255;
         }
       }
     }
   }
-  ctx.putImageData(imgData,0,0);
+  ctx.putImageData(img,0,0);
 
-  // ── Grid lines + labels + overlays (vector, fast) ──
-  ctx.strokeStyle='rgba(0,220,255,0.12)'; ctx.lineWidth=1;
-  for(var i=0;i<=8;i++){
-    ctx.beginPath();ctx.moveTo(pad.l+i*cellW,pad.t);ctx.lineTo(pad.l+i*cellW,pad.t+gH);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(pad.l,pad.t+i*cellH);ctx.lineTo(pad.l+gW,pad.t+i*cellH);ctx.stroke();
+  // Diagonal glow — Hermitian ρ[i,i] are real population terms
+  for(var i=0;i<N;i++){
+    var dx=(pad.l+i*cW)|0, dy=(pad.t+i*cH)|0;
+    ctx.strokeStyle='rgba(0,255,255,0.5)';ctx.lineWidth=1;
+    ctx.strokeRect(dx,dy,cW|0,cH|0);
   }
-  // Diagonal borders
-  for(var i=0;i<8;i++){
-    var dx=(pad.l+i*cellW)|0, dy=(pad.t+i*cellH)|0;
-    ctx.strokeStyle='rgba(0,255,255,0.7)'; ctx.lineWidth=2;
-    ctx.strokeRect(dx+1,dy+1,cellW-2,cellH-2);
-  }
-  // Text inside cells
-  if(cellW>26&&cellH>22){
-    for(var row=0;row<8;row++){
-      for(var col=0;col<8;col++){
-        var idx=row*8+col;
-        var rgb=_phaseToRGB(dm.phase[idx],dm.mag[idx],mx);
-        var lum=rgb[0]*0.299+rgb[1]*0.587+rgb[2]*0.114;
-        var cx=(pad.l+col*cellW+cellW/2)|0, cy=(pad.t+row*cellH+cellH/2)|0;
-        ctx.font='bold 9px JetBrains Mono,monospace';
-        ctx.textAlign='center'; ctx.textBaseline='middle';
-        ctx.fillStyle=lum>128?'rgba(0,0,0,0.8)':'rgba(255,255,255,0.85)';
-        ctx.fillText(dm.mag[idx].toFixed(2),cx,cy-5);
-        ctx.font='7px JetBrains Mono,monospace';
-        ctx.fillStyle=lum>128?'rgba(0,0,0,0.5)':'rgba(255,255,255,0.45)';
-        ctx.fillText(((dm.phase[idx]*180/Math.PI)|0)+'\u00B0',cx,cy+7);
-      }
-    }
-  }
-  var basisLabels=['|000\u27E9','|001\u27E9','|010\u27E9','|011\u27E9','|100\u27E9','|101\u27E9','|110\u27E9','|111\u27E9'];
-  ctx.font='9px JetBrains Mono,monospace'; ctx.fillStyle='rgba(0,220,255,0.5)';
-  for(var i=0;i<8;i++){
-    ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText(basisLabels[i],pad.l+i*cellW+cellW/2,pad.t-10);
-    ctx.save(); ctx.translate(pad.l-6,pad.t+i*cellH+cellH/2); ctx.rotate(-Math.PI/2);
-    ctx.fillText(basisLabels[i],0,0); ctx.restore();
-  }
-  ctx.font='8px JetBrains Mono,monospace'; ctx.fillStyle='rgba(0,220,255,0.4)';
-  ctx.textAlign='left'; ctx.textBaseline='top';
-  ctx.fillText('\u03C1 DENSITY MATRIX \u00B7 8\u00D78 complex128',pad.l,2);
+
   // Colorbar
-  var cbY=H-14,cbH2=8,cbX=pad.l,cbW=gW;
-  for(var ppx=0;ppx<cbW;ppx++){
-    var ph2=-Math.PI+(ppx/cbW)*2*Math.PI;
-    var crgb=_phaseToRGB(ph2,mx*0.7,mx);
+  var cbY=H-20,cbH=6;
+  for(var p2=0;p2<gW;p2++){
+    var ph2=-Math.PI+(p2/gW)*2*Math.PI;
+    var crgb=_p2rgb(ph2,mx*0.7,mx);
     ctx.fillStyle='rgb('+crgb[0]+','+crgb[1]+','+crgb[2]+')';
-    ctx.fillRect(cbX+ppx,cbY,1,cbH2);
+    ctx.fillRect(pad.l+p2,cbY,1,cbH);
   }
-  ctx.font='7px JetBrains Mono,monospace'; ctx.fillStyle='rgba(0,220,255,0.45)';
-  ctx.textAlign='left'; ctx.textBaseline='top'; ctx.fillText('-\u03C0',cbX,cbY+cbH2+1);
-  ctx.textAlign='center'; ctx.fillText('0',cbX+cbW/2,cbY+cbH2+1);
-  ctx.textAlign='right'; ctx.fillText('+\u03C0',cbX+cbW,cbY+cbH2+1);
-  ctx.textAlign='center'; ctx.fillText('PHASE',cbX+cbW/2,cbY-8);
-  // HUD values
-  ctx.font='9px JetBrains Mono,monospace'; ctx.textAlign='right'; ctx.textBaseline='bottom';
-  ctx.fillStyle='rgba(212,160,32,0.7)';
-  ctx.fillText('Tr(\u03C1\u00B2)='+(S.purity||0).toFixed(4),W-pad.r-4,pad.t+gH-2);
-  ctx.fillStyle='rgba(0,220,255,0.6)';
-  ctx.fillText('F='+(S.fidelity||0).toFixed(4),W-pad.r-4,pad.t+gH-14);
-  ctx.fillStyle='rgba(128,64,255,0.6)';
-  ctx.fillText('C='+(S.coherence||0).toFixed(4),W-pad.r-4,pad.t+gH-26);
-}
+  ctx.font='7px JetBrains Mono,monospace';ctx.fillStyle='rgba(0,220,255,.45)';
+  ctx.textAlign='left';ctx.textBaseline='top';ctx.fillText('-\u03C0',pad.l,cbY+cbH+1);
+  ctx.textAlign='center';ctx.fillText('PHASE',pad.l+gW/2,cbY+cbH+1);
+  ctx.textAlign='right';ctx.fillText('+\u03C0',pad.l+gW,cbY+cbH+1);
 
-// Boot RAF loop — starts immediately, never blocks, yields to browser paint pipeline
+  // HUD — purity / fidelity / coherence top-right
+  ctx.font='8px JetBrains Mono,monospace';ctx.textAlign='right';ctx.textBaseline='top';
+  ctx.fillStyle='rgba(212,160,32,.8)';
+  ctx.fillText('Tr\u03C1\u00B2='+(S.purity||0).toFixed(4),W-pad.r-2,pad.t+2);
+  ctx.fillStyle='rgba(0,220,255,.7)';
+  ctx.fillText('F='+(S.fidelity||0).toFixed(4),W-pad.r-2,pad.t+12);
+  ctx.fillStyle='rgba(128,64,255,.7)';
+  ctx.fillText('C='+(S.coherence||0).toFixed(4),W-pad.r-2,pad.t+22);
+  // dim label
+  ctx.fillStyle='rgba(0,220,255,.3)';ctx.textAlign='left';
+  ctx.fillText('\u03C1 '+N+'\u00D7'+N+' (256\u00D7256 block-avg)',pad.l+2,pad.t+2);
+}
 (function _dmBoot(){
-  var cont = document.getElementById('dm-panel');
-  if(!cont){ setTimeout(_dmBoot, 80); return; }
-  _rafDMRender(); // launches self-perpetuating RAF chain
+  if(!document.getElementById('dm-panel')){setTimeout(_dmBoot,80);return;}
+  _dmRaf();
 })();
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HEX BLOCK RENDERER + CHAIN STREAM
-// ═══════════════════════════════════════════════════════════════════════════════
-var blocks = [], _blocksById = {};
-
-function drawHex(canvas, fid, fresh) {
+// ─── BLOCK HEX RENDERER ──────────────────────────────────────────────────────
+var blocks=[],_blocksById={};
+function drawHex(canvas,fid,fresh){
   var ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=w/2-3;
-  ctx.clearRect(0,0,w,h); ctx.beginPath();
+  ctx.clearRect(0,0,w,h);ctx.beginPath();
   for(var i=0;i<6;i++){var a=i*Math.PI/3-Math.PI/6;i===0?ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a)):ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));}
   ctx.closePath();
   var col=fresh?'212,160,32':'0,220,255';
-  var grd=ctx.createRadialGradient(cx,cy,0,cx,cy,r);
-  grd.addColorStop(0,'rgba('+col+',.14)');grd.addColorStop(1,'rgba('+col+',.03)');
-  ctx.fillStyle=grd;ctx.fill();
+  var g=ctx.createRadialGradient(cx,cy,0,cx,cy,r);
+  g.addColorStop(0,'rgba('+col+',.14)');g.addColorStop(1,'rgba('+col+',.03)');
+  ctx.fillStyle=g;ctx.fill();
   ctx.strokeStyle='rgba('+col+','+(fresh?.9:.45)+')';ctx.lineWidth=1.5;ctx.stroke();
   if(fid>0){ctx.beginPath();ctx.arc(cx,cy,r*.35,0,Math.PI*2*fid);ctx.strokeStyle='rgba(128,64,255,.6)';ctx.lineWidth=2;ctx.stroke();}
 }
-
-function renderChain() {
-  var el=document.getElementById('cs');
-  if(!el) return;
-  if(!blocks.length){
-    el.innerHTML='<div style="color:var(--dim);font-family:var(--mono);font-size:10px;padding:8px 0;opacity:.6">Awaiting blocks…</div>';
-    var bcc=document.getElementById('bcc');if(bcc) bcc.textContent='0 blocks';
-    return;
-  }
+function renderChain(){
+  var el=document.getElementById('cs');if(!el) return;
+  if(!blocks.length){el.innerHTML='<div style="color:var(--dim);font-family:var(--mono);font-size:10px;padding:8px;opacity:.6">Awaiting blocks\u2026</div>';return;}
   el.innerHTML='';
-  var freshThresh=blocks.length-3;
+  var ft=blocks.length-3;
   blocks.forEach(function(b,i){
-    if(i>0){var c=document.createElement('div');c.className='bco';el.appendChild(c);}
-    var isFr=i>=freshThresh||b._fr;
-    var node=document.createElement('div');node.className='bn'+(isFr?' fr':'');
-    var hex=document.createElement('div');hex.className='bh';
-    hex.style.cursor='pointer';hex.title='Block #'+b.height;
-    hex.onclick=(function(blk){return function(e){e.stopPropagation();openBlockModal(blk);};})(b);
+    if(i>0){var co=document.createElement('div');co.className='bco';el.appendChild(co);}
+    var fr=i>=ft||b._fr;
+    var nd=document.createElement('div');nd.className='bn'+(fr?' fr':'');
+    var hx=document.createElement('div');hx.className='bh';
+    hx.onclick=(function(blk){return function(e){e.stopPropagation();openBlockModal(blk);};})(b);
     var cv=document.createElement('canvas');cv.width=56;cv.height=56;
-    drawHex(cv,b.w_state_fidelity||b.fidelity||.9,isFr);hex.appendChild(cv);
-    var num=document.createElement('div');num.className='bnum';num.textContent='#'+b.height;
+    drawHex(cv,b.w_state_fidelity||.9,fr);hx.appendChild(cv);
+    var nu=document.createElement('div');nu.className='bnum';nu.textContent='#'+b.height;
     var tx2=document.createElement('div');tx2.className='btx';tx2.textContent=(b.tx_count||0)+' txs';
-    hex.appendChild(num);hex.appendChild(tx2);
-    var lbl=document.createElement('div');lbl.className='bl';lbl.textContent=(b.block_hash||b.hash||'').slice(0,10)+'...';
-    node.appendChild(hex);node.appendChild(lbl);el.appendChild(node);
+    hx.appendChild(nu);hx.appendChild(tx2);
+    var lb=document.createElement('div');lb.className='bl';lb.textContent=(b.block_hash||b.hash||'').slice(0,10)+'...';
+    nd.appendChild(hx);nd.appendChild(lb);el.appendChild(nd);
   });
   el.scrollLeft=el.scrollWidth;
   var bcc=document.getElementById('bcc');if(bcc) bcc.textContent=blocks.length+' blocks';
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// BLOCK MODAL
-// ═══════════════════════════════════════════════════════════════════════════════
-var _TREASURY_ADDR = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d';
-var _bmCopiedTimer = null;
-
-function _bmCopy(text) {
-  try{navigator.clipboard.writeText(text);}catch(e){
-    var t=document.createElement('textarea');t.value=text;
-    document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);
-  }
-  var el=document.getElementById('bm-copied');
-  el.classList.add('show');clearTimeout(_bmCopiedTimer);
-  _bmCopiedTimer=setTimeout(function(){el.classList.remove('show');},1200);
+// ─── BLOCK MODAL ─────────────────────────────────────────────────────────────
+var _TREASURY_ADDR='qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d';
+var _bmT=null;
+function _bmCopy(t){
+  try{navigator.clipboard.writeText(t);}catch(e){var ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);}
+  var el=document.getElementById('bm-copied');el.classList.add('show');clearTimeout(_bmT);
+  _bmT=setTimeout(function(){el.classList.remove('show');},1200);
 }
-
-function openBlockModal(blk) {
-  var bg=document.getElementById('blk-modal-bg');
-  var body=document.getElementById('bm-body');
-  var title=document.getElementById('bm-title');
-  var meta=document.getElementById('bm-meta');
-  title.textContent='BLOCK #'+blk.height;
-  meta.textContent='hash: '+(blk.block_hash||blk.hash||'').slice(0,22)+'…  ·  '+(blk.tx_count||0)+' txs  ·  fidelity: '+((blk.w_state_fidelity||blk.fidelity||0)*100).toFixed(2)+'%';
-  body.innerHTML='<div class="bm-loading">Fetching via RPC…</div>';
+function openBlockModal(blk){
+  var bg=document.getElementById('blk-modal-bg'),body=document.getElementById('bm-body');
+  document.getElementById('bm-title').textContent='BLOCK #'+blk.height;
+  document.getElementById('bm-meta').textContent='hash: '+(blk.block_hash||blk.hash||'').slice(0,22)+'\u2026  \u00B7  '+(blk.tx_count||0)+' txs  \u00B7  fidelity: '+((blk.w_state_fidelity||0)*100).toFixed(2)+'%';
+  body.innerHTML='<div class="bm-loading">Fetching via RPC\u2026</div>';
   bg.classList.add('open');document.body.style.overflow='hidden';
-  // Use qtcl_getBlock to fetch full tx list
-  rpc('qtcl_getBlock', [blk.height]).then(function(d) {
+  rpc('qtcl_getBlock',[blk.height]).then(function(d){
     if(!d||!Array.isArray(d.transactions)||!d.transactions.length){
-      body.innerHTML='<div class="bm-loading" style="color:var(--re)">No transactions found for block #'+blk.height+'</div>';
-      return;
+      body.innerHTML='<div class="bm-loading" style="color:var(--re)">No transactions for block #'+blk.height+'</div>';return;
     }
-    var txList=d.transactions.slice().sort(function(a,b){
-      var at=a.tx_type||a.type||'';var bt=b.tx_type||b.type||'';
-      return at==='coinbase'?-1:bt==='coinbase'?1:0;
-    });
-    body.innerHTML=txList.map(function(tx){
+    var tl=d.transactions.slice().sort(function(a,b){var at=a.tx_type||a.type||'',bt=b.tx_type||b.type||'';return at==='coinbase'?-1:bt==='coinbase'?1:0;});
+    body.innerHTML=tl.map(function(tx){
       var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
       var hash=tx.tx_id||tx.tx_hash||tx.hash||'';
       var from=tx.from_addr||tx.from_address||tx.sender||'';
       var to=tx.to_addr||tx.to_address||tx.receiver||'';
-      var amt=parseFloat(tx.amount||0)/100; // base units → QTCL
-      var txStatus=tx.status||'confirmed';
-      var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
-      var isPending=isTreasury&&txStatus==='pending';
-      // pending treasury: clock icon, dimmed, striped bg — confirmed on next block
-      var icon=isPending?'⏳':isTreasury?'🏛':cb?'⛏':'⇄';
-      var fromShort=from.length>20?from.slice(0,10)+'…'+from.slice(-8):from||'—';
-      var toShort=to.length>20?to.slice(0,10)+'…'+to.slice(-8):to||'—';
-      var pendingTag=isPending
-        ?'<span style="background:rgba(212,160,32,.08);color:rgba(212,160,32,.55);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.18);letter-spacing:.4px">⏳ NEXT BLOCK</span>'
-        :'';
-      var badge=isTreasury
-        ?'<span style="background:var(--go2);color:'+(isPending?'rgba(212,160,32,.45)':'var(--go)')+';padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.3)">🏛 TREASURY</span>'
-        :cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px">⛏ COINBASE</span>':'';
-      var rowStyle=isPending?'opacity:.62;background:repeating-linear-gradient(135deg,transparent,transparent 4px,rgba(212,160,32,.03) 4px,rgba(212,160,32,.03) 8px);':'';
-      var amtColor=isPending?'color:rgba(212,160,32,.45)':isTreasury?'color:var(--go)':'';
-      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')" title="'+(isPending?'Treasury pending — confirms when next block is mined':'Click to copy TX ID')+'" style="'+rowStyle+'">'
-        +'<div class="bm-tx-icon '+(isTreasury?'treasury':tp)+'" style="'+(isPending?'opacity:.5':'')+'">'+icon+'</div>'
+      var amt=parseFloat(tx.amount||0)/100;
+      var isTr=(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
+      var icon=isTr?'🏛':cb?'⛏':'⇄';
+      var fromS=from.length>20?from.slice(0,10)+'\u2026'+from.slice(-8):from||'\u2014';
+      var toS=to.length>20?to.slice(0,10)+'\u2026'+to.slice(-8):to||'\u2014';
+      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')">'
+        +'<div class="bm-tx-icon '+(isTr?'treasury':tp)+'">'+icon+'</div>'
         +'<div class="bm-tx-info">'
-        +'<div class="bm-tx-hash" style="'+(isPending?'color:rgba(0,220,255,.4)':'')+'">'+hash+'</div>'
-        +'<div class="bm-tx-sub"><span style="color:var(--dim)">from:</span> <span style="color:var(--tx)">'+fromShort+'</span>'
-        +'<span style="color:var(--dim)">→</span><span style="color:'+(isTreasury?'var(--go)':'var(--gr)')+'">'+toShort+'</span>'+badge+' '+pendingTag+'</div>'
+        +'<div class="bm-tx-hash">'+hash+'</div>'
+        +'<div class="bm-tx-sub"><span style="color:var(--dim)">from:</span> <span>'+fromS+'</span>'
+        +' <span style="color:var(--dim)">\u2192</span> <span style="color:'+(isTr?'var(--go)':'var(--gr)')+'">'+toS+'</span>'
+        +(cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px">\u26CF COINBASE</span>':'')+'</div>'
         +'</div>'
-        +'<div class="bm-tx-amt '+(isTreasury?'transfer':tp)+'" style="'+amtColor+'">'+amt.toFixed(2)+' Q</div>'
+        +'<div class="bm-tx-amt '+(isTr?'transfer':tp)+'">'+amt.toFixed(2)+' Q</div>'
         +'<div class="bm-copy-hint">CLICK TO COPY</div>'
         +'</div>';
     }).join('');
-  }).catch(function(){
-    body.innerHTML='<div class="bm-loading" style="color:var(--re)">RPC error loading block</div>';
-  });
+  }).catch(function(){body.innerHTML='<div class="bm-loading" style="color:var(--re)">RPC error</div>';});
 }
-
-function closeBlockModal(){
-  document.getElementById('blk-modal-bg').classList.remove('open');
-  document.body.style.overflow='';
-}
+function closeBlockModal(){document.getElementById('blk-modal-bg').classList.remove('open');document.body.style.overflow='';}
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closeBlockModal();});
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// TRANSACTION EXPLORER
-// ═══════════════════════════════════════════════════════════════════════════════
-var txs=[], txPage_n=0, txPerPage=50, txTotal=0, txPages=1;
-var txFilterMode='all', txSearchQ='', txLoading=false, _txSearchTimer=null;
-
+// ─── TX EXPLORER ─────────────────────────────────────────────────────────────
+var txs=[],txPage_n=0,txPerPage=50,txTotal=0,txPages=1;
+var txFilterMode='all',txSearchQ='',txLoading=false,_txSearchTimer=null;
 function txFilter(mode){
   txFilterMode=mode;txPage_n=0;
   if(mode==='treasury'){txSearchQ=_TREASURY_ADDR;var si=document.getElementById('txsearch');if(si)si.value=_TREASURY_ADDR;}
   else if(txSearchQ===_TREASURY_ADDR){txSearchQ='';var si=document.getElementById('txsearch');if(si)si.value='';}
   ['all','coinbase','transfer','treasury'].forEach(function(m){
-    var b=document.getElementById('txf-'+m);if(!b) return;
-    var act=mode===m;
-    b.className='txfbtn'+(act?' active'+(m==='coinbase'?' cb':m==='transfer'?' tr':m==='treasury'?' go':''):'');
+    var b=document.getElementById('txf-'+m);if(b){b.className='txfbtn'+(m===mode?' active'+(m==='coinbase'?' cb':m==='transfer'?' tr':''):'');}
   });
-  loadTxPage();
+  if(!txLoading) loadTxPage();
 }
-function txSearch(q){txSearchQ=q.trim();txPage_n=0;clearTimeout(_txSearchTimer);_txSearchTimer=setTimeout(loadTxPage,350);}
-function txPage(d){txPage_n=Math.max(0,Math.min(txPages-1,txPage_n+d));loadTxPage();}
-function _shortHash(h,n){h=h||'';return h.length>n?h.slice(0,n>>1)+'…'+h.slice(-(n>>1)):h;}
-
+function txPage(d){txPage_n=Math.max(0,Math.min(txPages-1,txPage_n+d));if(!txLoading) loadTxPage();}
+function txSearch(v){txSearchQ=v;txPage_n=0;clearTimeout(_txSearchTimer);_txSearchTimer=setTimeout(function(){if(!txLoading)loadTxPage();},400);}
+function _shortHash(h,n){if(!h) return '\u2014';return h.length>n?h.slice(0,n>>1)+'\u2026'+h.slice(-(n>>1)):h;}
 function renderTxRow(tx,isNew){
   var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
-  var hash=tx.tx_hash||tx.tx_id||tx.hash||'';
-  var from=tx.from_address||tx.from_addr||tx.sender||'';
-  var to=tx.to_address||tx.to_addr||tx.receiver||'';
-  var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
-  var amt=parseFloat(tx.amount||0);
-  // Server stores base units (int); display as QTCL (/100)
-  if(amt>1000) amt=amt/100;
-  var blk=tx.height||tx.block_height||'—';
+  var hash=tx.tx_id||tx.tx_hash||tx.hash||'';
+  var from=tx.from_addr||tx.from_address||tx.sender||'';
+  var to=tx.to_addr||tx.to_address||tx.receiver||'';
+  var amt=parseFloat(tx.amount||0)/100;
+  var blk=tx.block_height||tx.block||'\u2014';
   var st=tx.status||'confirmed';
-  var isPending=isTreasury&&st==='pending';
-  var typeLabel=isPending?'⏳ PENDING':isTreasury?'🏛 TREASURY':cb?'⛏ COINBASE':'⇄ TRANSFER';
-  var typeClass=isPending?'pending':isTreasury?'treasury':cb?'coinbase':'transfer';
-  var rowOpacity=isPending?'opacity:.6;':'';
-  var amtStyle=isPending?'color:rgba(212,160,32,.45)':isTreasury?'color:var(--go)':'';
-  return '<tr class="'+(isNew?'tx-new ':'')+( cb?'tx-cb':'tx-tr')+'" title="'+(isPending?'Treasury pending — confirms when next block is mined':hash)+'" style="'+rowOpacity+'">'
-    +'<td><span class="tba '+typeClass+'">'+typeLabel+'</span></td>'
-    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:'+(isPending?'rgba(0,220,255,.35)':'var(--cy)')+'" title="'+hash+'" onclick="_bmCopy(this.title);this.style.color=\'var(--go)\';var _c=this;setTimeout(function(){_c.style.color=\''+(isPending?'rgba(0,220,255,.35)':'var(--cy)')+'\';},900)">'+_shortHash(hash,18)+' <span style="font-size:7px;opacity:.5">⧉</span></td>'
+  var isTr=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
+  var isPend=isTr&&st==='pending';
+  var typeClass=isPend?'pending':isTr?'treasury':cb?'coinbase':'transfer';
+  var typeLabel=isPend?'\u23F3 PENDING':isTr?'\uD83C\uDFDB TREASURY':cb?'\u26CF COINBASE':'\u21C4 TRANSFER';
+  return '<tr class="'+(isNew?'tx-new ':'')+( cb?'tx-cb':'tx-tr')+'" style="'+(isPend?'opacity:.6':'')+'"><td><span class="tba '+typeClass+'">'+typeLabel+'</span></td>'
+    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:var(--cy)" title="'+hash+'" onclick="_bmCopy(this.title)">'+_shortHash(hash,18)+' <span style="font-size:7px;opacity:.5">\u29CA</span></td>'
     +'<td style="font-family:var(--mono);font-size:9px;color:var(--dim)" title="'+from+'">'+_shortHash(from,14)+'</td>'
-    +'<td style="font-family:var(--mono);font-size:9px;color:'+(isTreasury?'var(--go)':'var(--gr)')+'" title="'+to+'">'+_shortHash(to,14)+'</td>'
-    +'<td style="font-size:11px;'+amtStyle+'">'+amt.toFixed(2)+' Q</td>'
+    +'<td style="font-family:var(--mono);font-size:9px;color:'+(isTr?'var(--go)':'var(--gr)')+'" title="'+to+'">'+_shortHash(to,14)+'</td>'
+    +'<td style="font-size:11px">'+amt.toFixed(2)+' Q</td>'
     +'<td style="color:var(--dim);font-size:10px">'+blk+'</td>'
     +'<td><span class="tba '+st+'">'+st.toUpperCase()+'</span></td>'
     +'</tr>';
 }
-
-// TX loading — pure RPC, qtcl_getTransactions, no REST, no fallback
-// FIXED: Proper error handling and response validation
 async function loadTxPage(){
-  if(txLoading) return;
-  txLoading=true;
+  if(txLoading) return; txLoading=true;
   var _wd=setTimeout(function(){txLoading=false;},8000);
   var tb=document.getElementById('ttb');
-  if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
+  if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading\u2026</td></tr>';
   try{
     var req={page:txPage_n,per_page:txPerPage};
     if(txFilterMode&&txFilterMode!=='all') req.type=txFilterMode;
     if(txSearchQ) req.address=txSearchQ;
     var d=await rpc('qtcl_getTransactions',[req]);
-    
-    // ROBUST VALIDATION - handle all failure modes
-    if(!d){
-      console.warn('[TX] Empty RPC response');
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Server not responding</td></tr>';
-      return;
-    }
-    if(d.error){
-      console.warn('[TX] RPC error:', d.error);
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+d.error.message+'</td></tr>';
-      return;
-    }
-    if(!Array.isArray(d.transactions)){
-      console.warn('[TX] Invalid response - no transactions array:', d);
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';
-      return;
-    }
-    if(d.transactions.length===0){
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions in database</td></tr>';
-      return;
-    }
+    if(!d){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Server not responding</td></tr>';return;}
+    if(!Array.isArray(d.transactions)){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';return;}
     txs=d.transactions;txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
-    renderTxs();
-  }catch(e){
-    console.error('[TX] Exception:', e);
-    if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+e.message+'</td></tr>';
-  }finally{
-    clearTimeout(_wd);txLoading=false;
-  }
+    var tb2=document.getElementById('ttb'),txb=document.getElementById('txb');
+    var pi=document.getElementById('txpageinfo');
+    if(txb) txb.textContent=txTotal+' txs';
+    if(pi) pi.textContent='Page '+(txPage_n+1)+' / '+txPages+' ('+txTotal+' total)';
+    var prev=document.getElementById('txprev'),next=document.getElementById('txnext');
+    if(prev) prev.disabled=txPage_n===0;if(next) next.disabled=txPage_n>=txPages-1;
+    if(tb2) tb2.innerHTML=txs.length?txs.map(function(tx){return renderTxRow(tx,tx._fresh);}).join(''):'<tr><td colspan="7" class="es">No transactions</td></tr>';
+  }catch(e){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+e.message+'</td></tr>';}
+  finally{clearTimeout(_wd);txLoading=false;}
 }
 
-function renderTxs(){
-  var tb=document.getElementById('ttb');
-  var txb=document.getElementById('txb');if(txb) txb.textContent=txTotal+' txs';
-  var pi=document.getElementById('txpageinfo');if(pi) pi.textContent='Page '+(txPage_n+1)+' / '+txPages+' ('+txTotal+' total)';
-  var prev=document.getElementById('txprev'),next=document.getElementById('txnext');
-  if(prev) prev.disabled=txPage_n===0;
-  if(next) next.disabled=txPage_n>=txPages-1;
-  if(!txs.length){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';return;}
-  if(tb) tb.innerHTML=txs.map(function(tx){return renderTxRow(tx,tx._fresh);}).join('');
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ORACLE PANEL RENDERER
-// ═══════════════════════════════════════════════════════════════════════════════
+// ─── ORACLE PANEL ─────────────────────────────────────────────────────────────
 function renderOracles(){
-  var defs=[
-    {id:'oracle_1',role:'PRIMARY_LATTICE'},{id:'oracle_2',role:'SECONDARY_LATTICE'},
-    {id:'oracle_3',role:'VALIDATION'},{id:'oracle_4',role:'ARBITER'},{id:'oracle_5',role:'METRICS'}
-  ];
-  var data=S.oracle_data||{};
+  var defs=[{id:'oracle_1',role:'PRIMARY_LATTICE'},{id:'oracle_2',role:'SECONDARY_LATTICE'},
+    {id:'oracle_3',role:'VALIDATION'},{id:'oracle_4',role:'ARBITER'},{id:'oracle_5',role:'METRICS'}];
   var el=document.getElementById('ol');if(!el) return;
+  var data=S.oracle_data||{};
   el.innerHTML=defs.map(function(o){
     var m=data[o.id]||{};
-    var fid=m.w_state_fidelity!=null?m.w_state_fidelity:(m.fidelity!=null?m.fidelity:null);
-    var on=fid!=null&&fid>0.5,cons=m.in_consensus;
-    var fidStr=fid!=null?(fid*100).toFixed(2)+'%':'—';
-    var cohStr=m.coherence!=null?(m.coherence*100).toFixed(2)+'%':'—';
-    var pq0o=m.pq0_oracle_fidelity!=null?m.pq0_oracle_fidelity.toFixed(4):'—';
-    var pq0iv=m.pq0_IV_fidelity!=null?m.pq0_IV_fidelity.toFixed(4):'—';
-    var pq0v=m.pq0_V_fidelity!=null?m.pq0_V_fidelity.toFixed(4):'—';
+    var fid=m.w_state_fidelity!=null?m.w_state_fidelity:null;
+    var on=fid!=null&&fid>0.5;
     return '<div class="or" style="flex-direction:column;gap:4px;padding:10px 14px;border-bottom:1px solid var(--b)">'
       +'<div style="display:flex;align-items:center;gap:8px">'
       +'<div class="od '+(on?'on':'off')+'"></div>'
-      +'<div style="flex:1"><div class="on2">'+o.id.toUpperCase()+(cons?'<span style="margin-left:6px;font-size:8px;color:var(--gr)">✓BYZ</span>':'')+'</div>'
-      +'<div class="ort">'+o.role+' · '+(on?'ONLINE':'AWAITING')+'</div></div>'
-      +'<div class="of">'+fidStr+'</div>'
+      +'<div style="flex:1"><div class="on2">'+o.id.toUpperCase()+(m.in_consensus?'<span style="margin-left:6px;font-size:8px;color:var(--gr)">\u2713BYZ</span>':'')+'</div>'
+      +'<div class="ort">'+o.role+' \u00B7 '+(on?'ONLINE':'AWAITING')+'</div></div>'
+      +'<div class="of">'+(fid!=null?(fid*100).toFixed(2)+'%':'\u2014')+'</div>'
       +'</div>'
       +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;font-size:9px;font-family:var(--mono)">'
-      +'<div style="color:var(--dim)">coh: <span style="color:var(--vi)">'+cohStr+'</span></div>'
-      +'<div style="color:var(--dim)">pq0: <span style="color:var(--cy)">'+pq0o+'</span></div>'
-      +'<div style="color:var(--dim)">IV: <span style="color:var(--cy)">'+pq0iv+'</span></div>'
-      +'<div style="color:var(--dim)">V: <span style="color:var(--cy)">'+pq0v+'</span></div>'
+      +'<div style="color:var(--dim)">coh: <span style="color:var(--vi)">'+(m.coherence!=null?(m.coherence*100).toFixed(2)+'%':'\u2014')+'</span></div>'
+      +'<div style="color:var(--dim)">pq0: <span style="color:var(--cy)">'+(m.pq0_oracle_fidelity!=null?m.pq0_oracle_fidelity.toFixed(4):'\u2014')+'</span></div>'
+      +'<div style="color:var(--dim)">IV: <span style="color:var(--cy)">'+(m.pq0_IV_fidelity!=null?m.pq0_IV_fidelity.toFixed(4):'\u2014')+'</span></div>'
+      +'<div style="color:var(--dim)">V: <span style="color:var(--cy)">'+(m.pq0_V_fidelity!=null?m.pq0_V_fidelity.toFixed(4):'\u2014')+'</span></div>'
       +'</div></div>';
   }).join('');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// MERMIN PANEL RENDERER
-// ═══════════════════════════════════════════════════════════════════════════════
+// ─── MERMIN PANEL ─────────────────────────────────────────────────────────────
 function renderMermin(m){
   if(!m) return;
   var M=parseFloat(m.M_value||m.M||m.mermin_value||0),isQ=M>2.0;
@@ -1120,42 +900,24 @@ function renderMermin(m){
   var mb3=document.getElementById('mb3');if(mb3) mb3.textContent='M='+M.toFixed(3);
   var mbar=document.getElementById('mbar');if(mbar) mbar.style.width=Math.min(100,M/4*100)+'%';
   var mcy=document.getElementById('mcy');
-  if(mcy){var sig=(S.cycle%8===0)?'· REVIVAL':(S.cycle%8===4)?'· ANTI-REV':'';mcy.textContent='cycle '+S.cycle+' '+sig;}
+  if(mcy){var sig=(S.cycle%8===0)?'\u00B7 REVIVAL':(S.cycle%8===4)?'\u00B7 ANTI-REV':'';mcy.textContent='cycle '+S.cycle+' '+sig;}
   var angles=m.angle_degrees||m.angles||[],labels=m.angle_labels||['θA1','φA1','θA2','φA2','θA3','φA3','θB1','φB1','θB2','φB2','θB3','φB3'];
-  var mac=document.getElementById('mac');if(mac) mac.innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'°</span>';}).join('');
+  var mac=document.getElementById('mac');if(mac) mac.innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'\u00B0</span>';}).join('');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// MINER NETWORK RENDERER
-// ═══════════════════════════════════════════════════════════════════════════════
-var _miners=[], _p2pShowHist=false;
-
+// ─── MINER NETWORK ───────────────────────────────────────────────────────────
+var _miners=[],_p2pShowHist=false;
 function p2pToggleHist(){
   _p2pShowHist=!_p2pShowHist;
   var btn=document.getElementById('p2p-hist-btn');
   if(btn){btn.textContent=_p2pShowHist?'ALL':'LIVE';btn.className='txfbtn'+(_p2pShowHist?' active':'');}
   renderMiners(_miners);
 }
-
-function _age(secs){
-  if(!secs&&secs!==0) return '—';
-  if(secs<60) return secs+'s ago';
-  if(secs<3600) return Math.floor(secs/60)+'m ago';
-  if(secs<86400) return Math.floor(secs/3600)+'h ago';
-  return Math.floor(secs/86400)+'d ago';
-}
-
+function _age(s){if(!s&&s!==0) return '\u2014';if(s<60) return s+'s ago';if(s<3600) return Math.floor(s/60)+'m ago';if(s<86400) return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
 function renderMiners(miners){
   var el=document.getElementById('pl');if(!el) return;
-  if(!miners||!miners.length){
-    el.innerHTML='<div class="es" style="padding:20px;line-height:1.8"><div style="color:var(--dim);margin-bottom:6px">No miners in registry yet</div>'
-      +'<div style="font-size:9px;color:var(--dim);font-family:var(--mono)">qtcl_getPeers → 0 entries</div></div>';
-    ['pcb','p2plc','p2psc','p2ptc'].forEach(function(id){var e=document.getElementById(id);if(e)e.textContent='0';});
-    var dot=document.getElementById('p2p-live-dot');if(dot){dot.style.background='var(--dim)';dot.style.animation='none';}
-    return;
-  }
+  if(!miners||!miners.length){el.innerHTML='<div class="es" style="padding:20px">No miners in registry</div>';return;}
   _miners=miners;
-  miners.forEach(function(m){if(!m.status)m.status='historic';});
   var live=miners.filter(function(m){return m.status==='live';});
   var seen=miners.filter(function(m){return m.status==='seen';});
   var hist=miners.filter(function(m){return m.status==='historic';});
@@ -1164,15 +926,14 @@ function renderMiners(miners){
   var p2psc=document.getElementById('p2psc');if(p2psc)p2psc.textContent=seen.length;
   var p2ptc=document.getElementById('p2ptc');if(p2ptc)p2ptc.textContent=hist.length;
   var dot=document.getElementById('p2p-live-dot');
-  if(dot){dot.style.background=live.length?'var(--gr)':'var(--dim)';dot.style.animation=live.length?'p2ppulse 1.6s infinite':'none';dot.style.boxShadow=live.length?'0 0 6px var(--gr)':'none';}
+  if(dot){dot.style.background=live.length?'var(--gr)':'var(--dim)';dot.style.animation=live.length?'p2ppulse 1.6s infinite':'none';}
   var visible=_p2pShowHist?miners:miners.filter(function(m){return m.status!=='historic';});
   if(!visible.length&&miners.length) visible=miners.slice(0,5);
   el.innerHTML=visible.map(function(m){
     var addr=m.miner_address||m.address||'';
-    var short=addr.length>20?addr.slice(0,10)+'…'+addr.slice(-10):addr||'(no address)';
+    var short=addr.length>20?addr.slice(0,10)+'\u2026'+addr.slice(-10):addr||'(no address)';
     var bks=m.block_count||0,earned=parseFloat(m.total_earned_qtcl||0).toFixed(2);
     var h=m.last_height||0,age=_age(m.last_seen_age_s),st=m.status||'historic';
-    var pid=(m.peer_id||'').slice(0,12),gurl=m.gossip_url||'';
     return '<div class="miner-row '+st+'">'
       +'<div style="display:flex;align-items:flex-start;gap:8px">'
       +'<div class="miner-dot" style="margin-top:4px"></div>'
@@ -1180,235 +941,107 @@ function renderMiners(miners){
       +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
       +'<span class="miner-addr" title="'+addr+'" onclick="try{navigator.clipboard.writeText(\''+addr+'\');}catch(e){}">'+short+'</span>'
       +'<span class="miner-badge '+st+'">'+st.toUpperCase()+'</span>'
-      +(gurl?'<span style="font-size:8px;color:var(--dim)">📡 P2P</span>':'')
       +'</div>'
       +'<div class="miner-stats">'
-      +(bks?'<span>⛏ <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
-      +(parseFloat(earned)>0?'<span>💰 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
+      +(bks?'<span>\u26CF <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
+      +(parseFloat(earned)>0?'<span>\uD83D\uDCB0 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
       +(h?'<span>h=<span class="miner-stat-val">'+h+'</span></span>':'')
-      +(age!=='—'?'<span class="miner-stat-val">'+age+'</span>':'')
-      +(pid?'<span style="color:var(--dim)">id:'+pid+'…</span>':'')
+      +(age!=='\u2014'?'<span class="miner-stat-val">'+age+'</span>':'')
       +'</div></div></div></div>';
   }).join('');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// DOM UPDATE — fires after every poll cycle
-// ═══════════════════════════════════════════════════════════════════════════════
-function st(id, v) {
-  var e=document.getElementById(id);if(!e) return;
-  var s=String(v);if(e.textContent!==s){e.textContent=s;e.classList.remove('fl');void e.offsetWidth;e.classList.add('fl');}
-}
+// ─── DOM UPDATE — single call site, Worker 1 only ────────────────────────────
+function st(id,v){var e=document.getElementById(id);if(!e) return;var s=String(v);if(e.textContent!==s){e.textContent=s;e.classList.remove('fl');void e.offsetWidth;e.classList.add('fl');}}
 function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
 function fmt4(v){return v==null?'--':parseFloat(v).toFixed(4);}
 
-function updateDOM() {
-  // ── Header bar ──
-  st('hh','#'+S.height);
-  st('hf',(S.fidelity*100).toFixed(2)+'%');
-  st('hm',S.mempool_size+' tx');
-  // ── Chain metric cards ──
-  st('mh',S.height);
-  st('mhs','hash: '+(S.tip_hash||'').slice(0,14)+'...');
+function updateDOM(){
+  st('hh','#'+S.height);st('hf',(S.fidelity*100).toFixed(2)+'%');st('hm',S.mempool_size+' tx');
+  st('mh',S.height);st('mhs','hash: '+(S.tip_hash||'').slice(0,14)+'...');
   st('mf',(S.fidelity*100).toFixed(2)+'%');
   var mfb=document.getElementById('mfb');if(mfb) mfb.style.width=pct(S.fidelity,1);
   st('mfs',S.fidelity>=.9?'excellent':S.fidelity>=.75?'good':S.fidelity>=.7?'marginal':'degraded');
   st('mc2',(S.coherence*100).toFixed(2)+'%');
   var mcb=document.getElementById('mcb');if(mcb) mcb.style.width=pct(S.coherence,1);
   st('mbt',S.avg_block_time_s>0?S.avg_block_time_s.toFixed(1)+'s':'--');
-  st('mtx',S.total_transactions);
-  st('mdf',S.difficulty_bits);
-  st('mpu',(S.purity*100).toFixed(2)+'%');
-  st('mng','negativity: '+fmt4(S.negativity));
-  st('mqf',fmt4(S.qfi));
-  st('mdc','discord: '+fmt4(S.discord));
-  // ── Block reward — split display ──
-  st('mrew',S.miner_reward_qtcl.toFixed(2)+' Q');
-  st('mrew-depth','depth '+S.tessellation_depth+' tessellation');
-  st('mtrew',S.treasury_reward_qtcl.toFixed(2)+' Q');
-  st('mtrew-pct',S.treasury_pct.toFixed(1)+'% of block');
-  // ── Lattice bloch strip ──
-  st('bfi',fmt4(S.fidelity));
-  st('ben',S.pq_curr);
-  st('bcn',S.pq_last);
-  st('bte',fmt4(S.tele_fidelity));
-  st('dkb','pq0='+S.pq0+' pq_last='+S.pq_last+' → pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' Δ='+(S.pq_curr-S.pq_last):''));
-  // ── GKSL noise bath ──
-  st('ng1',fmt4(S.gamma1));
-  st('ngp',fmt4(S.gammaphi));
-  st('nom',fmt4(S.omega));
-  st('nqr',fmt4(S.qrng_health));
-  st('ndi',fmt4(S.discord));
-  st('nou',fmt4(S.ou_mem));
-  st('npd',fmt4(S.phase_drift));
-  st('nso',fmt4(S.sector_occ));
-  // ── Validation panel ──
+  st('mtx',S.total_transactions);st('mdf',S.difficulty_bits);
+  st('mpu',(S.purity*100).toFixed(2)+'%');st('mng','negativity: '+fmt4(S.negativity));
+  st('mqf',fmt4(S.qfi));st('mdc','discord: '+fmt4(S.discord));
+  st('mrew',S.miner_reward_qtcl.toFixed(2)+' Q');st('mrew-depth','depth '+S.tessellation_depth+' tessellation');
+  st('mtrew',S.treasury_reward_qtcl.toFixed(2)+' Q');st('mtrew-pct',S.treasury_pct.toFixed(1)+'% of block');
+  st('bfi',fmt4(S.fidelity));st('ben',S.pq_curr);st('bcn',S.pq_last);st('bte',fmt4(S.tele_fidelity));
+  st('dkb','pq0='+S.pq0+' pq_last='+S.pq_last+' \u2192 pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' \u0394='+(S.pq_curr-S.pq_last):''));
+  st('ng1',fmt4(S.gamma1));st('ngp',fmt4(S.gammaphi));st('nom',fmt4(S.omega));st('nqr',fmt4(S.qrng_health));
+  st('ndi',fmt4(S.discord));st('nou',fmt4(S.ou_mem));st('npd',fmt4(S.phase_drift));st('nso',fmt4(S.sector_occ));
   st('vq',String(S.quantum_validation_status).replace(/_/g,' ').toUpperCase().slice(0,14));
   st('vp',String(S.pq_validation_status).toUpperCase().slice(0,10));
   st('vo',S.oracle_consensus_reached?'YES':'NO');
   var vb=document.getElementById('vb');if(vb) vb.textContent=S.oracle_consensus_reached?'CONSENSUS':'PENDING';
-  // ── Bottom bar ──
-  st('bbd',S.difficulty_bits);
-  st('bbn',S.n_peers||'—');
-  st('bbq',S.qrng_health.toFixed(3));
-  // ── PQ HUD strip (was in Three.js update(), now here) ──
-  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
-  var hl=document.getElementById('pqh-last');   if(hl) hl.textContent=pqL;
-  var hc=document.getElementById('pqh-curr');   if(hc) hc.textContent=pqC;
-  var hd=document.getElementById('pqh-delta');  if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
-  var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='\u03C8 cyc='+S.cycle+(S.cycle>0&&S.cycle%8===0?' \u2191REVIVAL':S.cycle>0&&S.cycle%8===4?' \u2193ANTI':'');
-  // ── Oracle + Mermin ──
+  st('bbd',S.difficulty_bits);st('bbn',S.n_peers||'\u2014');st('bbq',S.qrng_health.toFixed(3));
+  var pqC=S.pq_curr||0,pqL=S.pq_last||0;
+  var hl=document.getElementById('pqh-last');if(hl) hl.textContent=pqL;
+  var hc=document.getElementById('pqh-curr');if(hc) hc.textContent=pqC;
+  var hd=document.getElementById('pqh-delta');if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
+  var hcy=document.getElementById('pqh-cycle');if(hcy) hcy.textContent='\u03C8 cyc='+S.cycle+(S.cycle>0&&S.cycle%8===0?' \u2191REVIVAL':S.cycle>0&&S.cycle%8===4?' \u2193ANTI':'');
   renderOracles();
   if(S.mermin) renderMermin(S.mermin);
 }
+function setOnline(ok){var p=document.getElementById('cp'),t=document.getElementById('ct');if(!p||!t) return;ok?p.classList.remove('off'):p.classList.add('off');t.textContent=ok?'LIVE':'OFFLINE';}
+var _lu=0;
+function stamp(){_lu=Date.now();var bu=document.getElementById('bu');if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8);}
 
-function setOnline(ok) {
-  var p=document.getElementById('cp'),t=document.getElementById('ct');
-  if(!p||!t) return;
-  if(ok){p.classList.remove('off');}else{p.classList.add('off');}
-  t.textContent=ok?'LIVE':'OFFLINE';
-}
-
-var _lu = 0;
-function stamp() {
-  _lu=Date.now();
-  var bu=document.getElementById('bu');
-  if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// INDEPENDENT NON-BLOCKING WORKER ARCHITECTURE
-// Each worker is a self-contained async thread: own fetch, own error handling,
-// own DOM update. No worker can block or crash another.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-var _lastEventTs = Date.now()/1000 - 60;
-var _lastBlockHeight = 0;
-
-// ── WORKER 1: Metrics (block height + quantum metrics) ── 3s ──────────────
-var _w1Running = false;
-async function _workerMetrics(){
-  if(_w1Running) return; _w1Running = true;
-  try {
-    var results = await rpcBatch([
-      ['qtcl_getBlockHeight', []],
-      ['qtcl_getQuantumMetrics', []],
-    ]);
-    var hr = results[0], qm = results[1];
-
-    // Block height (authoritative)
-    if(hr && hr.height != null){
-      var newHeight = parseInt(hr.height);
-      if(newHeight > S.height){
-        _lastBlockHeight = S.height;
-        S.height = newHeight;
-        S.tip_hash = hr.tip_hash || S.tip_hash;
-        applyRewards(S.height);
-      }
-    }
-
-    // Quantum metrics
-    if(qm){
-      var ws = qm.w_state || {};
-      if(ws.fidelity != null) S.fidelity = ws.fidelity;
-      if(ws.coherence != null) S.coherence = ws.coherence;
-      if(ws.purity != null) S.purity = ws.purity;
-      if(ws.entropy != null) S.entropy = ws.entropy;
-
-      var la = qm.lattice || {};
-      if(la.fidelity != null) S.lattice_fidelity = la.fidelity;
-      if(la.coherence != null) S.lattice_coherence = la.coherence;
-      if(la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
-      if(la.cycle != null && la.cycle > S.cycle) S.cycle = la.cycle;
-
-      if(qm.oracle_available != null) S.oracle_consensus_reached = qm.oracle_available;
-      if(qm.mermin_test) S.mermin = qm.mermin_test;
-      else if(qm.bell_test) S.mermin = qm.bell_test;
-
-      var oid1 = 'oracle_1';
-      if(!S.oracle_data[oid1]) S.oracle_data[oid1] = {};
-      if(qm.w_state_fidelity != null){ S.oracle_data[oid1].w_state_fidelity = qm.w_state_fidelity; S.fidelity = qm.w_state_fidelity; }
-      if(qm.coherence_l1 != null){ S.oracle_data[oid1].coherence = qm.coherence_l1; S.coherence = qm.coherence_l1; }
-      if(qm.purity != null){ S.oracle_data[oid1].purity = qm.purity; S.purity = qm.purity; }
-      if(qm.von_neumann_entropy != null){ S.oracle_data[oid1].entropy = qm.von_neumann_entropy; S.entropy = qm.von_neumann_entropy; }
-      S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
-    }
-
-    updateDOM();
-    setOnline(true);
-    stamp();
-  } catch(e){ console.warn('[W1-METRICS]', e.message); }
-  finally { _w1Running = false; }
-}
-
-// ── WORKER 2: Oracle/DM — non-blocking, decode offloaded, no DOM calls ────────
-// State merge only. DOM driven exclusively by Worker 1 (updateDOM).
-// DM hex → submitted to _dmWorker for off-thread decode → RAF picks up result.
-// Uses /rpc/oracle/snapshots ring-buffer for rapid catch-up on connect,
-// then polls /rpc/oracle/snapshot at a sane 2s rate (not 50ms).
-var _w2Running = false;
-var _w2LastSnapshotTs = 0;
-
-function _applyDMSnapshot(dm){
+// ─── SNAPSHOT STATE MERGE ────────────────────────────────────────────────────
+// All oracle/DM data flows through here — no DOM calls, no rendering
+function _applySnapshot(dm){
   if(!dm) return;
-  if(dm.w_state_fidelity != null) S.fidelity = dm.w_state_fidelity;
-  if(dm.purity != null) S.purity = dm.purity;
-  if(dm.coherence_l1 != null) S.coherence = dm.coherence_l1;
-  if(dm.von_neumann_entropy != null) S.entropy = dm.von_neumann_entropy;
-  // DM hex — hand off to Worker thread (non-blocking)
-  if(dm.density_matrix_hex) _dmSubmitHex(dm.density_matrix_hex);
-  if(dm.lattice_refresh_counter != null && dm.lattice_refresh_counter > S.cycle){
-    S.cycle = dm.lattice_refresh_counter;
-  }
-  var aer = dm.aer_noise_state || {};
-  if(aer.gamma1 != null) S.gamma1 = aer.gamma1;
-  if(aer.gammaphi != null) S.gammaphi = aer.gammaphi;
-  if(aer.omega != null) S.omega = aer.omega;
-  if(aer.ou_mem != null) S.ou_mem = aer.ou_mem;
-  if(aer.sector_occ != null) S.sector_occ = aer.sector_occ;
-  if(dm.phase_drift != null) S.phase_drift = dm.phase_drift;
-  if(dm.phase_coherence != null) S.phase_coherence = dm.phase_coherence;
-  if(dm.qrng_health != null) S.qrng_health = dm.qrng_health;
-  var bf = aer.block_field || {};
-  if(bf.pq_curr != null){
-    S.pq_curr = bf.pq_curr;
-    S.pq_last = bf.pq_last != null ? bf.pq_last : (bf.pq_curr - 1);
-    S.pq0 = bf.pq0 != null ? bf.pq0 : S.pq0;
-    S._pqAuthoritative = true;
-  }
-  var perNode = bf.per_node || [];
-  if(perNode.length > 0){
+  if(dm.w_state_fidelity!=null) S.fidelity=dm.w_state_fidelity;
+  if(dm.purity!=null) S.purity=dm.purity;
+  if(dm.coherence_l1!=null) S.coherence=dm.coherence_l1;
+  if(dm.von_neumann_entropy!=null) S.entropy=dm.von_neumann_entropy;
+  // DM hex → Worker (off main thread). dm_dim tells us the grid (64 or 8)
+  if(dm.density_matrix_hex) _dmSubmit(dm.density_matrix_hex, dm.dm_dim||64);
+  if(dm.lattice_refresh_counter!=null&&dm.lattice_refresh_counter>S.cycle) S.cycle=dm.lattice_refresh_counter;
+  var aer=dm.aer_noise_state||{};
+  if(aer.gamma1!=null) S.gamma1=aer.gamma1;
+  if(aer.gammaphi!=null) S.gammaphi=aer.gammaphi;
+  if(aer.omega!=null) S.omega=aer.omega;
+  if(aer.ou_mem!=null) S.ou_mem=aer.ou_mem;
+  if(aer.sector_occ!=null) S.sector_occ=aer.sector_occ;
+  if(dm.phase_drift!=null) S.phase_drift=dm.phase_drift;
+  if(dm.phase_coherence!=null) S.phase_coherence=dm.phase_coherence;
+  if(dm.qrng_health!=null) S.qrng_health=dm.qrng_health;
+  var bf=aer.block_field||{};
+  if(bf.pq_curr!=null){S.pq_curr=bf.pq_curr;S.pq_last=bf.pq_last!=null?bf.pq_last:(bf.pq_curr-1);S.pq0=bf.pq0!=null?bf.pq0:S.pq0;}
+  var perNode=bf.per_node||[];
+  if(perNode.length>0){
     perNode.forEach(function(n){
-      var idx = n.oracle_id != null ? n.oracle_id : 1;
-      var key = 'oracle_' + idx;
-      if(!S.oracle_data[key]) S.oracle_data[key] = {};
-      var od = S.oracle_data[key];
-      if(n.fidelity != null) od.w_state_fidelity = n.fidelity;
-      if(n.coherence != null) od.coherence = n.coherence;
-      if(n.entropy != null) od.entropy = n.entropy;
-      if(n.pq0_oracle_fidelity != null) od.pq0_oracle_fidelity = n.pq0_oracle_fidelity;
-      if(n.pq0_IV_fidelity != null) od.pq0_IV_fidelity = n.pq0_IV_fidelity;
-      if(n.pq0_V_fidelity != null) od.pq0_V_fidelity = n.pq0_V_fidelity;
-      od.in_consensus = !!n.in_consensus;
+      var key='oracle_'+(n.oracle_id!=null?n.oracle_id:1);
+      if(!S.oracle_data[key]) S.oracle_data[key]={};
+      var od=S.oracle_data[key];
+      if(n.fidelity!=null) od.w_state_fidelity=n.fidelity;
+      if(n.coherence!=null) od.coherence=n.coherence;
+      if(n.entropy!=null) od.entropy=n.entropy;
+      if(n.pq0_oracle_fidelity!=null) od.pq0_oracle_fidelity=n.pq0_oracle_fidelity;
+      if(n.pq0_IV_fidelity!=null) od.pq0_IV_fidelity=n.pq0_IV_fidelity;
+      if(n.pq0_V_fidelity!=null) od.pq0_V_fidelity=n.pq0_V_fidelity;
+      od.in_consensus=!!n.in_consensus;
     });
-    var cc = perNode.filter(function(n){ return n.in_consensus; }).length;
-    S.oracle_consensus_reached = cc >= 3;
-    S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
-    S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
-  } else if(dm.w_state_fidelity != null && dm.w_state_fidelity > 0){
+    S.oracle_consensus_reached=perNode.filter(function(n){return n.in_consensus;}).length>=3;
+    S.quantum_validation_status=S.oracle_consensus_reached?'VALIDATED':'PENDING';
+    S.pq_validation_status=S.oracle_consensus_reached?'HLWE_OK':'PENDING';
+  } else if(dm.w_state_fidelity!=null&&dm.w_state_fidelity>0){
     for(var oi=1;oi<=5;oi++){
-      var ok2='oracle_'+oi;
-      if(!S.oracle_data[ok2]) S.oracle_data[ok2]={};
+      var ok2='oracle_'+oi;if(!S.oracle_data[ok2]) S.oracle_data[ok2]={};
       S.oracle_data[ok2].w_state_fidelity=dm.w_state_fidelity;
       S.oracle_data[ok2].coherence=dm.coherence_l1;
-      S.oracle_data[ok2].entropy=dm.von_neumann_entropy;
       S.oracle_data[ok2].in_consensus=(dm.w_state_fidelity||0)>0.5;
     }
-    S.oracle_consensus_reached = dm.w_state_fidelity > 0.5;
-    S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
-    S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
+    S.oracle_consensus_reached=dm.w_state_fidelity>0.5;
+    S.quantum_validation_status=S.oracle_consensus_reached?'VALIDATED':'PENDING';
+    S.pq_validation_status=S.oracle_consensus_reached?'HLWE_OK':'PENDING';
   }
-  if(aer.pq0_oracle_fidelity != null){
+  if(aer.pq0_oracle_fidelity!=null){
     if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1']={};
     if(S.oracle_data['oracle_1'].pq0_oracle_fidelity==null){
       S.oracle_data['oracle_1'].pq0_oracle_fidelity=aer.pq0_oracle_fidelity;
@@ -1416,196 +1049,179 @@ function _applyDMSnapshot(dm){
       S.oracle_data['oracle_1'].pq0_V_fidelity=aer.pq0_V_fidelity;
     }
   }
-  var _p=dm.purity||S.purity||0.8, _f=dm.w_state_fidelity||S.fidelity||0;
-  S.negativity=Math.max(0,(_p-0.5)*0.8);
-  S.concurrence=Math.max(0,(_p-0.333)*1.2);
-  S.entanglement=Math.max(0,_f*0.9);
-  S.qfi=Math.max(0,_f*8.0);
-  S.discord=Math.max(0,(1-_p)*2.0);
-  S.tele_fidelity=Math.max(0,_f*0.95);
+  var _p=dm.purity||S.purity||0.8,_f=dm.w_state_fidelity||S.fidelity||0;
+  S.negativity=Math.max(0,(_p-0.5)*0.8);S.concurrence=Math.max(0,(_p-0.333)*1.2);
+  S.entanglement=Math.max(0,_f*0.9);S.qfi=Math.max(0,_f*8.0);
+  S.discord=Math.max(0,(1-_p)*2.0);S.tele_fidelity=Math.max(0,_f*0.95);
   if(dm.mermin_test) S.mermin=dm.mermin_test;
   else if(dm.mermin) S.mermin=dm.mermin;
-  // NO DOM calls here — Worker 1 owns all DOM via updateDOM()
 }
 
-async function _workerDM(){
-  if(_w2Running) return; _w2Running = true;
-  try {
-    var r = await fetch(BASE + '/rpc/oracle/snapshot', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: '{}',
-      signal: AbortSignal.timeout(4000)
-    });
-    if(!r.ok) return;
-    var j = await r.json();
-    _applyDMSnapshot(j.result);
-    setOnline(true);
-  } catch(e){ console.warn('[W2-DM]', e.message); }
-  finally { _w2Running = false; }
-}
+// ─── WORKERS ─────────────────────────────────────────────────────────────────
+var _lastEventTs=Date.now()/1000-60,_lastBlockHeight=0;
 
-// ── Ring-buffer catch-up on first connect (pulls last N snapshots non-blocking) ──
-(function _dmRingCatchup(){
-  fetch(BASE + '/rpc/oracle/snapshots?limit=3', {signal: AbortSignal.timeout(5000)})
-    .then(function(r){ return r.ok ? r.json() : null; })
-    .then(function(j){
-      if(!j) return;
-      var snaps = (j.result && j.result.snapshots) || [];
-      // Apply oldest→newest so newest wins
-      snaps.forEach(function(s){ _applyDMSnapshot(s); });
-    })
-    .catch(function(){});
-})();
-
-// ── WORKER 3: Blocks + Events ── 3s ──────────────────────────────────────
-var _w3Running = false;
-async function _workerBlocks(){
-  if(_w3Running) return; _w3Running = true;
-  try {
-    var fromH = Math.max(0, S.height - 20);
-    var results = await rpcBatch([
-      ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
-      ['qtcl_getBlockRange', [fromH, S.height]],
+// W1: Metrics — 1.5s — ONLY DOM driver
+var _w1Running=false;
+async function _workerMetrics(){
+  if(_w1Running) return; _w1Running=true;
+  try{
+    var results=await rpcBatch([
+      ['qtcl_getBlockHeight',[]],
+      ['qtcl_getQuantumMetrics',[]],
     ]);
-    var events = results[0], blockRange = results[1];
+    var hr=results[0],qm=results[1];
+    if(hr&&hr.height!=null){
+      var nh=parseInt(hr.height);
+      if(nh>S.height){_lastBlockHeight=S.height;S.height=nh;S.tip_hash=hr.tip_hash||S.tip_hash;applyRewards(S.height);}
+    }
+    if(qm){
+      var ws=qm.w_state||{};
+      if(ws.fidelity!=null) S.fidelity=ws.fidelity;
+      if(ws.coherence!=null) S.coherence=ws.coherence;
+      if(ws.purity!=null) S.purity=ws.purity;
+      if(ws.entropy!=null) S.entropy=ws.entropy;
+      var la=qm.lattice||{};
+      if(la.fidelity!=null) S.lattice_fidelity=la.fidelity;
+      if(la.coherence!=null) S.lattice_coherence=la.coherence;
+      if(la.w_state_strength!=null) S.w_state_strength=la.w_state_strength;
+      if(la.cycle!=null&&la.cycle>S.cycle) S.cycle=la.cycle;
+      if(qm.oracle_available!=null) S.oracle_consensus_reached=qm.oracle_available;
+      if(qm.mermin_test) S.mermin=qm.mermin_test;
+      else if(qm.bell_test) S.mermin=qm.bell_test;
+      // DM from getQuantumMetrics (same 64x64 path)
+      if(qm.density_matrix_hex) _dmSubmit(qm.density_matrix_hex, qm.dm_dim||64);
+      var oid1='oracle_1';if(!S.oracle_data[oid1]) S.oracle_data[oid1]={};
+      if(qm.w_state_fidelity!=null){S.oracle_data[oid1].w_state_fidelity=qm.w_state_fidelity;S.fidelity=qm.w_state_fidelity;}
+      if(qm.coherence_l1!=null){S.oracle_data[oid1].coherence=qm.coherence_l1;S.coherence=qm.coherence_l1;}
+      if(qm.purity!=null){S.oracle_data[oid1].purity=qm.purity;S.purity=qm.purity;}
+      if(qm.von_neumann_entropy!=null){S.oracle_data[oid1].entropy=qm.von_neumann_entropy;S.entropy=qm.von_neumann_entropy;}
+      S.oracle_data[oid1].in_consensus=(qm.w_state_fidelity||0)>0.5;
+    }
+    updateDOM();setOnline(true);stamp();
+  }catch(e){console.warn('[W1]',e.message);}
+  finally{_w1Running=false;}
+}
 
-    // Events (new blocks)
-    if(events && Array.isArray(events.events) && events.events.length){
+// W2: Oracle/DM snapshot — 2s — pure state merge, no DOM
+var _w2Running=false;
+async function _workerDM(){
+  if(_w2Running) return; _w2Running=true;
+  try{
+    var r=await fetch(BASE+'/rpc/oracle/snapshot',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:'{}',
+      signal:AbortSignal.timeout(4000)});
+    if(!r.ok) return;
+    var j=await r.json();
+    _applySnapshot(j.result);
+    setOnline(true);
+  }catch(e){console.warn('[W2-DM]',e.message);}
+  finally{_w2Running=false;}
+}
+
+// W3: Blocks + Events — 3s
+var _w3Running=false;
+async function _workerBlocks(){
+  if(_w3Running) return; _w3Running=true;
+  try{
+    var fromH=Math.max(0,S.height-20);
+    var results=await rpcBatch([
+      ['qtcl_getEvents',[{since:_lastEventTs,types:'new_block',limit:10}]],
+      ['qtcl_getBlockRange',[fromH,S.height]],
+    ]);
+    var events=results[0],blockRange=results[1];
+    if(events&&Array.isArray(events.events)&&events.events.length){
       events.events.forEach(function(ev){
-        if(ev.ts > _lastEventTs) _lastEventTs = ev.ts;
-        if(ev.type === 'new_block'){
-          var h = parseInt(ev.height || ev.block_height || 0);
-          if(h > 0 && h > S.height){
-            S.height = h;
-            applyRewards(h);
-            if(!_blocksById[h]){
-              var nb = {
-                height: h,
-                block_hash: ev.block_hash || '',
-                hash: ev.block_hash || '',
-                tx_count: ev.tx_count || 0,
-                w_state_fidelity: ev.w_state_fidelity || S.fidelity,
-                difficulty_bits: ev.difficulty_bits || S.difficulty_bits,
-                _fr: true
-              };
-              if(ev.pq_curr != null){ nb.pq_curr = ev.pq_curr; S.pq_curr = nb.pq_curr; }
-              if(ev.pq_last != null){ nb.pq_last = ev.pq_last; S.pq_last = nb.pq_last; }
-              _blocksById[h] = nb;
-              blocks.push(nb);
-              blocks.sort(function(a,b){ return a.height - b.height; });
-              renderChain();
-            }
-            _lastBlockHeight = h;
-            if(!txLoading) setTimeout(loadTxPage, 400);
+        if(ev.ts>_lastEventTs) _lastEventTs=ev.ts;
+        if(ev.type==='new_block'){
+          var h=parseInt(ev.height||ev.block_height||0);
+          if(h>0&&h>S.height){S.height=h;applyRewards(h);}
+          if(h>0&&!_blocksById[h]){
+            var nb={height:h,block_hash:ev.block_hash||'',hash:ev.block_hash||'',tx_count:ev.tx_count||0,w_state_fidelity:ev.w_state_fidelity||S.fidelity,difficulty_bits:ev.difficulty_bits||S.difficulty_bits,_fr:true};
+            if(ev.pq_curr!=null){nb.pq_curr=ev.pq_curr;S.pq_curr=nb.pq_curr;}
+            if(ev.pq_last!=null){nb.pq_last=ev.pq_last;S.pq_last=nb.pq_last;}
+            _blocksById[h]=nb;blocks.push(nb);blocks.sort(function(a,b){return a.height-b.height;});
+            renderChain();_lastBlockHeight=h;
+            if(!txLoading) setTimeout(loadTxPage,400);
           }
         }
       });
     }
-
-    // Block range
-    if(blockRange && Array.isArray(blockRange.blocks) && blockRange.blocks.length){
+    if(blockRange&&Array.isArray(blockRange.blocks)&&blockRange.blocks.length){
       blockRange.blocks.forEach(function(b){
-        var bh = parseInt(b.height || 0);
-        if(bh > 0 && !_blocksById[bh]){
-          var nb = {
-            height: bh,
-            block_hash: b.block_hash || b.hash || '',
-            hash: b.block_hash || b.hash || '',
-            tx_count: b.tx_count || b.transaction_count || 0,
-            w_state_fidelity: b.w_state_fidelity || S.fidelity,
-            difficulty_bits: b.difficulty || b.difficulty_bits || S.difficulty_bits,
-            _fr: false
-          };
-          nb.pq_curr = b.pq_curr || bh;
-          nb.pq_last = b.pq_last || (bh - 1);
-          _blocksById[bh] = nb;
-          blocks.push(nb);
+        var bh=parseInt(b.height||0);
+        if(bh>0&&!_blocksById[bh]){
+          var nb={height:bh,block_hash:b.block_hash||b.hash||'',hash:b.block_hash||b.hash||'',tx_count:b.tx_count||b.transaction_count||0,w_state_fidelity:b.w_state_fidelity||S.fidelity,difficulty_bits:b.difficulty||b.difficulty_bits||S.difficulty_bits,_fr:false};
+          nb.pq_curr=b.pq_curr||bh;nb.pq_last=b.pq_last||(bh-1);
+          _blocksById[bh]=nb;blocks.push(nb);
         }
       });
-      if(blocks.length > 0){
-        blocks.sort(function(a,b){ return a.height - b.height; });
-        if(blocks.length > 30) blocks = blocks.slice(-30);
-        renderChain();
-      }
+      if(blocks.length){blocks.sort(function(a,b){return a.height-b.height;});if(blocks.length>30) blocks=blocks.slice(-30);renderChain();}
     }
-  } catch(e){ console.warn('[W3-BLOCKS]', e.message); }
-  finally { _w3Running = false; }
+  }catch(e){console.warn('[W3]',e.message);}
+  finally{_w3Running=false;}
 }
 
-// ── WORKER 4: Mempool ── 5s ──────────────────────────────────────────────
-var _w4Running = false;
+// W4: Mempool — 5s
+var _w4Running=false;
 async function _workerMempool(){
-  if(_w4Running) return; _w4Running = true;
-  try {
-    var mp = await rpc('qtcl_getMempoolStats', []);
-    if(mp){
-      S.mempool_size = mp.depth != null ? mp.depth : (mp.pending != null ? mp.pending : S.mempool_size);
-      st('hm', S.mempool_size + ' tx');
-    }
-  } catch(e){ console.warn('[W4-MEMPOOL]', e.message); }
-  finally { _w4Running = false; }
+  if(_w4Running) return; _w4Running=true;
+  try{
+    var mp=await rpc('qtcl_getMempoolStats',[]);
+    if(mp){S.mempool_size=mp.depth!=null?mp.depth:(mp.pending!=null?mp.pending:S.mempool_size);st('hm',S.mempool_size+' tx');}
+  }catch(e){console.warn('[W4]',e.message);}
+  finally{_w4Running=false;}
 }
 
-// ── WORKER 5: Peers ── 10s ───────────────────────────────────────────────
-var _w5Running = false;
+// W5: Peers — 10s
+var _w5Running=false;
 async function _workerPeers(){
-  if(_w5Running) return; _w5Running = true;
-  try {
-    var peers = await rpc('qtcl_getPeers', []);
+  if(_w5Running) return; _w5Running=true;
+  try{
+    var peers=await rpc('qtcl_getPeers',[]);
     if(peers){
-      var rawPeers = Array.isArray(peers.peers) ? peers.peers : [];
-      S.n_peers = peers.count || rawPeers.length;
-      var staleThresh = 300;
-      var miners = rawPeers.map(function(p){
-        var addr = p.miner_address || p.address || p.node_id || p.peer_id || '';
-        var ls = p.last_seen ? new Date(p.last_seen).getTime()/1000 : 0;
-        var age = ls > 0 ? Math.round(Date.now()/1000 - ls) : 999999;
-        return {
-          miner_address: addr,
-          peer_id: p.peer_id || p.node_id || '',
-          gossip_url: p.gossip_url || '',
-          block_count: p.block_count || 0,
-          last_height: p.block_height || p.last_height || 0,
-          total_earned_qtcl: p.total_earned_qtcl || 0,
-          last_seen_age_s: age,
-          status: age < staleThresh ? 'live' : (age < 86400 ? 'seen' : 'historic'),
-          ip_address: p.ip_address || '',
-        };
-      }).filter(function(m){ return m.miner_address; });
-
-      if(miners.length){
-        renderMiners(miners);
-      } else if(S.n_peers > 0){
-        var el = document.getElementById('pl');
-        if(el) el.innerHTML = '<div class="es" style="padding:16px;font-family:var(--mono);font-size:10px;color:var(--dim)">' + S.n_peers + ' peer(s) connected — no registry entries yet</div>';
-      }
+      var raw=Array.isArray(peers.peers)?peers.peers:[];
+      S.n_peers=peers.count||raw.length;
+      var staleThresh=300;
+      var miners=raw.map(function(p){
+        var addr=p.miner_address||p.address||p.node_id||p.peer_id||'';
+        var ls=p.last_seen?new Date(p.last_seen).getTime()/1000:0;
+        var age=ls>0?Math.round(Date.now()/1000-ls):999999;
+        return{miner_address:addr,peer_id:p.peer_id||p.node_id||'',gossip_url:p.gossip_url||'',
+          block_count:p.block_count||0,last_height:p.block_height||p.last_height||0,
+          total_earned_qtcl:p.total_earned_qtcl||0,last_seen_age_s:age,
+          status:age<staleThresh?'live':(age<86400?'seen':'historic'),ip_address:p.ip_address||''};
+      }).filter(function(m){return m.miner_address;});
+      if(miners.length) renderMiners(miners);
     }
-  } catch(e){ console.warn('[W5-PEERS]', e.message); }
-  finally { _w5Running = false; }
+  }catch(e){console.warn('[W5]',e.message);}
+  finally{_w5Running=false;}
 }
 
-// ── WORKER 6: Transactions ── 30s ────────────────────────────────────────
-// (loadTxPage already exists as a self-contained async function)
+// ─── RING-BUFFER CATCHUP ON CONNECT ──────────────────────────────────────────
+(function(){
+  fetch(BASE+'/rpc/oracle/snapshots?limit=3',{signal:AbortSignal.timeout(5000)})
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(j){
+      if(!j) return;
+      var snaps=(j.result&&j.result.snapshots)||[];
+      snaps.forEach(function(s){_applySnapshot(s);});
+    }).catch(function(){});
+})();
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// BOOT — Launch all independent workers on their own intervals
-// ═══════════════════════════════════════════════════════════════════════════════
-// ── Boot all workers — staggered so they don't hammer the server at t=0 ──
+// ─── BOOT — staggered so workers don't hammer server simultaneously ───────────
 _workerMetrics();
-setTimeout(_workerDM,      400);
-setTimeout(_workerBlocks,  800);
-setTimeout(_workerMempool, 1200);
-setTimeout(_workerPeers,   1600);
-if(!txLoading) setTimeout(loadTxPage, 2000);
+setTimeout(_workerDM,     500);
+setTimeout(_workerBlocks, 900);
+setTimeout(_workerMempool,1400);
+setTimeout(_workerPeers,  1900);
+setTimeout(function(){if(!txLoading)loadTxPage();},2400);
 
-// ── Intervals — each section owns its own cadence, none block others ──
-setInterval(_workerMetrics,  1500);  // W1: metrics + DOM — 1.5s
-setInterval(_workerDM,       2000);  // W2: DM state only (decode off-thread via Worker) — 2s
-setInterval(_workerBlocks,   3000);  // W3: chain events — 3s
-setInterval(_workerMempool,  5000);  // W4: mempool — 5s
-setInterval(_workerPeers,   10000);  // W5: peers — 10s
-setInterval(function(){ if(!txLoading) loadTxPage(); }, 30000); // W6: txs — 30s
+setInterval(_workerMetrics,  1500);
+setInterval(_workerDM,       2000);
+setInterval(_workerBlocks,   3000);
+setInterval(_workerMempool,  5000);
+setInterval(_workerPeers,   10000);
+setInterval(function(){if(!txLoading)loadTxPage();},30000);
 </script>
 </body>
 </html>
