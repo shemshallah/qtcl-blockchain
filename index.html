@@ -473,11 +473,19 @@ function applyRewards(h){
 // ─── RPC ─────────────────────────────────────────────────────────────────────
 var _rpcId=1;
 async function rpc(method,params){
+  var timeouts={
+    'qtcl_getQuantumMetrics': 30000,
+    'qtcl_getBlockRange': 12000,
+    'qtcl_getTransactions': 12000,
+    'qtcl_getPeers': 6000,
+    'qtcl_getMerminTest': 25000,
+  };
+  var to=(timeouts[method]||8000);
   try{
     var r=await fetch(BASE+'/rpc',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({jsonrpc:'2.0',id:_rpcId++,method:method,params:params||[]}),
-      signal:AbortSignal.timeout(6000)});
+      signal:AbortSignal.timeout(to)});
     if(!r.ok) return null;
     var j=await r.json();
     if(j.error){console.warn('[RPC]',method,j.error.message);return null;}
@@ -492,7 +500,7 @@ async function rpcBatch(calls){
     _rpcId+=calls.length;
     var r=await fetch(BASE+'/rpc',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(batch),signal:AbortSignal.timeout(5000)});
+      body:JSON.stringify(batch),signal:AbortSignal.timeout(30000)});
     if(!r.ok) return calls.map(function(){return null;});
     var arr=await r.json();
     if(!Array.isArray(arr)) return calls.map(function(_,i){return i===0&&arr&&!arr.error?arr.result:null;});
@@ -1133,7 +1141,7 @@ async function _workerDM(){
   try{
     var r=await fetch(BASE+'/rpc/oracle/snapshot',{method:'POST',
       headers:{'Content-Type':'application/json'},body:'{}',
-      signal:AbortSignal.timeout(4000)});
+      signal:AbortSignal.timeout(25000)});
     if(!r.ok) return;
     var j=await r.json();
     _applySnapshot(j.result);
@@ -1223,7 +1231,7 @@ async function _workerPeers(){
 
 // ─── RING-BUFFER CATCHUP ON CONNECT ──────────────────────────────────────────
 (function(){
-  fetch(BASE+'/rpc/oracle/snapshots?limit=3',{signal:AbortSignal.timeout(5000)})
+    fetch(BASE+'/rpc/oracle/snapshots?limit=3',{signal:AbortSignal.timeout(30000)})
     .then(function(r){return r.ok?r.json():null;})
     .then(function(j){
       if(!j) return;

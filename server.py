@@ -176,13 +176,14 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
     
     try:
-        # Per-method timeout: 3s for most, 5s for expensive queries
+        # Per-method timeout: 3s for most, longer for expensive quantum queries
         timeout_map = {
-            'qtcl_getBlockRange': 5.0,
-            'qtcl_getQuantumMetrics': 5.0,
-            'qtcl_getLatestDMSnapshot': 2.0,
-            'qtcl_getTransactions': 5.0,
-            'qtcl_getPeers': 2.0,
+            'qtcl_getBlockRange': 10.0,
+            'qtcl_getQuantumMetrics': 25.0,  # Oracle cluster - generous to let AER complete
+            'qtcl_getLatestDMSnapshot': 5.0,
+            'qtcl_getTransactions': 10.0,
+            'qtcl_getPeers': 5.0,
+            'qtcl_getMerminTest': 20.0,
         }
         timeout_sec = timeout_map.get(method, 3.0)
         

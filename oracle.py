@@ -512,7 +512,7 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-MEASUREMENT_TIMEOUT          = 15   # 15s cap — increased from 10s for better reliability with AER simulations
+MEASUREMENT_TIMEOUT          = 20   # 20s cap — reasonable for AER single shot
 
 W_STATE_STREAM_INTERVAL_MS   = 10
 LATTICE_REFRESH_INTERVAL_MS  = 50
@@ -1276,8 +1276,8 @@ class OracleNode:
             # Log timing breakdown for debugging
             if total_ms > 8000:  # Log if total takes >8s (leaving buffer for other ops)
                 logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] AER slow: circuit={circuit_ms:.1f}ms + aer={aer_ms:.1f}ms = {total_ms:.1f}ms")
-            if aer_ms > 5000:  # Log if AER takes >5s
-                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] AER took {aer_ms:.1f}ms (>5s threshold)")
+            if aer_ms > 40000:  # Log if AER takes >40s (AER can be extremely slow)
+                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] AER took {aer_ms:.1f}ms (>40s threshold)")
             _d   = res.data(0)
             _raw = _d['density_matrix'] if isinstance(_d, dict) and 'density_matrix' in _d else _d
             evolved = np.array(DensityMatrix(_raw).data, dtype=complex)
