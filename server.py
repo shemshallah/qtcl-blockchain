@@ -4696,7 +4696,8 @@ def _multiplexer_worker():
             
             # Get DM from LATTICE - 64x64 only (256x256 is too huge for SSE)
             dm_hex, dm_dim = _get_lattice_dm_hex()
-            logger.debug(f"[MUX] cycle={_mux_loop_count} DM: {len(dm_hex) if dm_hex else 0} chars, dim={dm_dim}")
+            if _mux_loop_count % 20 == 0:  # log every ~1s
+                logger.info(f"[MUX] cycle={_mux_loop_count} DM: {len(dm_hex) if dm_hex else 0} chars, dim={dm_dim}")
             
             # Send DM to SSE queue
             if dm_hex:

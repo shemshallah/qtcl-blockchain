@@ -881,14 +881,14 @@ function renderTxRow(tx,isNew){
 }
 async function loadTxPage(){
   if(txLoading) return; txLoading=true;
-  var _wd=setTimeout(function(){txLoading=false;},8000);
+  var _wd=setTimeout(function(){txLoading=false;},5000);  // reduced timeout
   var tb=document.getElementById('ttb');
   if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading\u2026</td></tr>';
   try{
-    var req={page:txPage_n,per_page:txPerPage};
+    var req={page:txPage_n,per_page:Math.min(txPerPage,25)};  // limit page size
     if(txFilterMode&&txFilterMode!=='all') req.type=txFilterMode;
     if(txSearchQ) req.address=txSearchQ;
-    var d=await rpc('qtcl_getTransactions',[req]);
+    var d=await rpc('qtcl_getTransactions',[req],8000);  // 8s RPC timeout
     if(!d){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Server not responding</td></tr>';return;}
     if(!Array.isArray(d.transactions)){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';return;}
     txs=d.transactions;txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;

@@ -1935,7 +1935,7 @@ class OracleWStateManager:
                     'signature_valid': snapshot.signature_valid,
                 }
                 _server_mod._enqueue_snapshot_for_streaming(_mux_snapshot)
-                logger.debug(f"[ORACLE CLUSTER] ✅ Snapshot enqueued for multiplexer (cycle {current_cycle})")
+                logger.info(f"[ORACLE CLUSTER] ✅ Snapshot enqueued for multiplexer (cycle {current_cycle})")
             else:
                 logger.debug(f"[ORACLE CLUSTER] ⚠️ server._enqueue_snapshot_for_streaming not available")
         except Exception as _mux_err:
