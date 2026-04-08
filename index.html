@@ -1204,6 +1204,38 @@ function _workerDM(){
 // W3: Blocks Worker — Dedicated SSE stream for chain blocks (UNBLOCKABLE)
 var _w3ES=null,_w3ReconnT=null;
 var _w3LastHeight=0;
+var _blocksLoaded=false;
+
+async function _loadInitialBlocks(){
+  if(_blocksLoaded) return;
+  _blocksLoaded=true;
+  try{
+    // First get chain height
+    var bh=await rpc('qtcl_getBlockHeight',[],3000);
+    if(bh&&bh.result){
+      S.height=bh.result.height||0;
+      console.log('[W3-Blocks] Chain height='+S.height);
+    }
+    // Then load recent blocks (last 30)
+    if(S.height>0){
+      var startH=Math.max(1,S.height-29);
+      var blks=await rpc('qtcl_getBlockRange',[startH,S.height],5000);
+      if(blks&&blks.result&&blks.result.blocks){
+        blks.result.blocks.forEach(function(b){
+          var h=parseInt(b.height||0);
+          if(h>0&&!_blocksById[h]){
+            _blocksById[h]={height:h,hash:b.block_hash||b.hash||'',tx_count:b.tx_count||b.transaction_count||0,w_state_fidelity:b.w_state_fidelity||S.fidelity,_fr:false};
+          }
+        });
+        blocks=Object.values(_blocksById).sort(function(a,b){return a.height-b.height;});
+        if(blocks.length>30) blocks=blocks.slice(-30);
+        renderChain();
+        console.log('[W3-Blocks] Loaded '+blocks.length+' blocks, height='+S.height);
+      }
+    }
+  }catch(e){console.warn('[W3-Blocks] init load failed:',e.message);}
+}
+
 function _workerBlocks(){
   if(_w3ES){_w3ES.close();_w3ES=null;}
   try{
@@ -1310,6 +1342,7 @@ function _boot(){
   setTimeout(_workerTransactions, 150);
   
   // Phase 3: Chain state workers (blocks, mempool, peers)
+  setTimeout(_loadInitialBlocks, 200);  // Load blocks on startup
   setTimeout(_workerBlocks, 2500);
   setTimeout(_workerMempool, 3500);
   setTimeout(_workerPeers, 4500);
