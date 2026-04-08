@@ -564,6 +564,10 @@ def _safe_start_oracle_c_thread():
 
 _safe_start_oracle_c_thread()
 
+# FORCED SYNC C COMPILATION - ensure C layer ready before any measurements
+# This forces compilation at import time, not in background
+_compile_oracle_c_layer()
+
 
 def _c_dm8_to_flat(rho: np.ndarray):
     """Convert 8×8 numpy complex128 DM to flat re[64], im[64] cffi arrays."""
@@ -1553,46 +1557,26 @@ class OracleNode:
             # Each oracle node has distinct κ/T1/T2 from _init_aer (QRNG-seeded).
             # The per-oracle seed below further differentiates the noise realisation.
             aer_start = time.time_ns()
-            _use_aer = False
             
             # USE C LAYER WHEN AVAILABLE - bypasses GIL, much faster
-            # Only use for hot path measurement, fall back to AER if C fails
-            if _OC_OK and _OC_LIB is not None and hasattr(_OC_LIB, 'qtcl_oracle_measure'):
+            # Force C layer - no AER fallback
+            _c_available = _OC_OK and _OC_LIB is not None and hasattr(_OC_LIB, 'qtcl_oracle_measure')
+            if not _c_available:
+                logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] C LAYER NOT AVAILABLE - _OC_OK={_OC_OK}, _OC_LIB={_OC_LIB is not None}")
+            else:
                 try:
                     # Use C Lindblad solver - bypasses GIL, ~100x faster
                     evolved = _c_oracle_measure(lattice_dm, self.kappa, self.T1, self.T2)
                     circuit_ms = 0.0
                     aer_ms = (time.time_ns() - aer_start) / 1e6
                     total_ms = circuit_ms + aer_ms
-                    logger.info(f"[ORACLE-NODE-{self.oracle_id+1}] C measure OK: {total_ms:.1f}ms (bypassing AER)")
+                    logger.info(f"[ORACLE-NODE-{self.oracle_id+1}] C measure OK: {total_ms:.1f}ms")
                 except Exception as _e:
-                    logger.debug(f"[ORACLE-NODE-{self.oracle_id+1}] C measure failed: {_e}, falling back to AER")
-                    _use_aer = True
-            else:
-                _use_aer = True
+                    logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] C measure EXCEPTION: {_e}")
+                    # Emergency fallback - use simple identity (no evolution)
+                    evolved = lattice_dm.copy()
             
-            if _use_aer:
-                # C layer failed or unavailable - use AER as fallback
-                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] Using AER fallback (C layer unavailable)")
-                qc = QuantumCircuit(8)
-                qc.set_density_matrix(DensityMatrix(lattice_dm))
-                for _q in range(8):
-                    qc.id(_q)   # phase_damping + depolarizing attached to "id" in _init_aer
-                qc.save_density_matrix()
-                circuit_ms = (time.time_ns() - aer_start) / 1e6
-                
-                seed = (int.from_bytes(_oracle_qrng_bytes(4), 'big') % (2**31)
-                        + int(self.sigma_offset * 1000)) % (2**31)
-                seed_start = time.time_ns()
-                res = self.aer.run(qc, shots=1, seed_simulator=seed).result()
-                aer_ms = (time.time_ns() - seed_start) / 1e6
-                total_ms = circuit_ms + aer_ms
-                
-                _d   = res.data(0)
-                _raw = _d['density_matrix'] if isinstance(_d, dict) and 'density_matrix' in _d else _d
-                evolved = np.array(DensityMatrix(_raw).data, dtype=complex)
-            
-            # Log timing breakdown for debugging
+            # Log timing for debugging
 
             # ── Fidelity: Tr(evolved_8q @ w8_target) — full 8-qubit ──────────
             w8_target = getattr(_lat, '_w8_target', None)
