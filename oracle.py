@@ -1553,6 +1553,7 @@ class OracleNode:
             # Each oracle node has distinct κ/T1/T2 from _init_aer (QRNG-seeded).
             # The per-oracle seed below further differentiates the noise realisation.
             aer_start = time.time_ns()
+            _use_aer = False
             
             # USE C LAYER WHEN AVAILABLE - bypasses GIL, much faster
             # Only use for hot path measurement, fall back to AER if C fails
@@ -1563,6 +1564,7 @@ class OracleNode:
                     circuit_ms = 0.0
                     aer_ms = (time.time_ns() - aer_start) / 1e6
                     total_ms = circuit_ms + aer_ms
+                    logger.info(f"[ORACLE-NODE-{self.oracle_id+1}] C measure OK: {total_ms:.1f}ms (bypassing AER)")
                 except Exception as _e:
                     logger.debug(f"[ORACLE-NODE-{self.oracle_id+1}] C measure failed: {_e}, falling back to AER")
                     _use_aer = True
@@ -1570,6 +1572,8 @@ class OracleNode:
                 _use_aer = True
             
             if _use_aer:
+                # C layer failed or unavailable - use AER as fallback
+                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] Using AER fallback (C layer unavailable)")
                 qc = QuantumCircuit(8)
                 qc.set_density_matrix(DensityMatrix(lattice_dm))
                 for _q in range(8):
