@@ -4669,6 +4669,94 @@ _snapshot_multiplexer_queue = _queue_module.Queue(maxsize=100)
 _snapshot_multiplexer_lock = _threading_module.Lock()
 _connected_metric_clients = []
 
+# SEPARATE THREADS FOR DM AND METRICS - prevents race condition
+def _dm_sse_worker():
+    """Dedicated thread for DM→SSE stream only"""
+    logger.info("[MUX-DM] DM SSE worker started")
+    last_dm_send_ts = 0
+    dm_send_interval = 0.5
+    
+    while True:
+        try:
+            snap = _snapshot_multiplexer_queue.get(timeout=1.0)
+            if not snap:
+                continue
+            
+            now_ts = time.time()
+            if now_ts - last_dm_send_ts >= dm_send_interval:
+                dm_hex, dm_dim = _get_lattice_dm_hex()
+                last_dm_send_ts = now_ts
+                
+                if dm_hex:
+                    dm_snap = {
+                        'packet_type': 'dm',
+                        'density_matrix_hex': dm_hex,
+                        'dm_dim': dm_dim or 64,
+                        'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                        'w_state_fidelity': snap.get('w_state_fidelity'),
+                        'purity': snap.get('purity'),
+                        'ready': True
+                    }
+                    try:
+                        _snapshot_sse_queue.put_nowait(dm_snap)
+                    except _queue_module.Full:
+                        pass
+                    
+        except _queue_module.Empty:
+            continue
+        except GeneratorExit:
+            break
+        except Exception as e:
+            logger.error(f"[MUX-DM] error: {e}")
+            time.sleep(0.1)
+
+def _metrics_rpc_worker():
+    """Dedicated thread for Metrics→RPC PUSH only"""
+    logger.info("[MUX-METRICS] Metrics RPC worker started")
+    last_metric_push_ts = 0
+    metric_push_interval = 0.2
+    
+    while True:
+        try:
+            snap = _snapshot_multiplexer_queue.get(timeout=1.0)
+            if not snap:
+                continue
+            
+            now_ts = time.time()
+            if now_ts - last_metric_push_ts >= metric_push_interval:
+                metrics_snap = {
+                    'packet_type': 'metrics',
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'coherence_l1': snap.get('coherence_l1'),
+                    'von_neumann_entropy': snap.get('von_neumann_entropy'),
+                    'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
+                    'aer_noise_state': snap.get('aer_noise_state', {}),
+                    'block_field': snap.get('block_field', {}),
+                    'phase_drift': snap.get('phase_drift'),
+                    'phase_coherence': snap.get('phase_coherence'),
+                    'qrng_health': snap.get('qrng_health'),
+                    'mermin_test': snap.get('mermin_test'),
+                }
+                
+                with _snapshot_multiplexer_lock:
+                    for client_q in _connected_metric_clients[:]:
+                        try:
+                            client_q.put_nowait(metrics_snap)
+                        except _queue_module.Full:
+                            _connected_metric_clients.remove(client_q)
+                
+                last_metric_push_ts = now_ts
+                    
+        except _queue_module.Empty:
+            continue
+        except GeneratorExit:
+            break
+        except Exception as e:
+            logger.error(f"[MUX-METRICS] error: {e}")
+            time.sleep(0.1)
+
 def _enqueue_snapshot_for_streaming(snapshot: dict) -> None:
     """Called by oracle.py/lattice_controller.py every ~50ms."""
     try:
@@ -4791,11 +4879,16 @@ def _multiplexer_worker():
         except GeneratorExit:
             break
         except Exception as e:
-            logger.error(f"[MUX] error: {e}", exc_info=False)
+            logger.error(f"[MUX-METRICS] error: {e}", exc_info=False)
             time.sleep(0.1)
 
-_multiplexer_thread = _threading_module.Thread(target=_multiplexer_worker, daemon=True)
-_multiplexer_thread.start()
+# Start SEPARATE THREADS for DM and Metrics - eliminates race condition
+_dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="MUX-DM")
+_dm_thread.start()
+
+_metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
+_metrics_thread.start()
+logger.info("[MUX] Started 2 separate threads: DM→SSE, Metrics→RPC")
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
