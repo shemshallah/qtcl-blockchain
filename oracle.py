@@ -1331,6 +1331,8 @@ class OracleNode:
         self.noise_seed   = (0xDEAD_BEEF + oracle_id * 0x1337) & 0xFFFF_FFFF
         self.sigma_offset = oracle_id * 8.0 / 5.0   # 0.0, 1.6, 3.2, 4.8, 6.4
         self.kappa        = self.sigma_offset
+        self.T1            = 0.001    # Will be overwritten in _init_aer
+        self.T2            = 0.0005   # Will be overwritten in _init_aer
 
         self.oracle_address = (
             pre_fetched_address or
@@ -1386,6 +1388,8 @@ class OracleNode:
             k_eff  = k_base * mults[0]
             a_eff  = a_base * mults[1]
             p_eff  = p_base * mults[2]
+            self.T1 = a_eff  # Store for C layer
+            self.T2 = p_eff  # Store for C layer
             nm = NoiseModel()
             nm.add_all_qubit_quantum_error(depolarizing_error(k_eff, 1),       ["rx", "rz", "ry", "x"])
             nm.add_all_qubit_quantum_error(depolarizing_error(k_eff * 1.5, 2), ["cx"])
