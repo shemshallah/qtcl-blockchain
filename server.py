@@ -4886,9 +4886,10 @@ def _multiplexer_worker():
 _dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="MUX-DM")
 _dm_thread.start()
 
-_metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
-_metrics_thread.start()
-logger.info("[MUX] Started 2 separate threads: DM→SSE, Metrics→RPC")
+# TEMPORARILY DISABLED - focusing on Mermin + Density Matrix only
+# _metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
+# _metrics_thread.start()
+logger.info("[MUX] DM thread only - metrics disabled for now")
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
