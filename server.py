@@ -4687,7 +4687,7 @@ def _multiplexer_worker():
     metric_push_interval = 0.2  # 5 metrics/sec instead of 20
     _mux_loop_count = 0
     last_dm_send_ts = 0
-    dm_send_interval = 0.5  # DM 2x/sec, metrics 5x/sec
+    dm_send_interval = 0.5  # DM 2x/sec - real-time density matrix
     
     while True:
         _mux_loop_count += 1
@@ -5105,16 +5105,31 @@ def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
         return '', 0
 
 
+_dm_hex_cache = ('', 0, 0)  # (hex, dim, timestamp)
+
 def _get_lattice_dm_hex() -> tuple:
-    """Pull current_density_matrix from LATTICE, return 64x64 reduced hex."""
+    """Pull current_density_matrix from LATTICE, return 64x64 reduced hex (cached).
+    
+    NOTE: This is server-side caching ONLY - does NOT affect oracle quantum simulation.
+    The oracle still runs true AER with real noise every cycle. This just caches
+    the 256→64 reduction for the frontend to avoid repeated CPU work.
+    """
+    global _dm_hex_cache
     from globals import LATTICE
+    
+    now = time.time()
+    # Cache for 1s - oracle runs at ~10ms so this is safe
+    if now - _dm_hex_cache[2] < 1.0 and _dm_hex_cache[0]:
+        return _dm_hex_cache[0], _dm_hex_cache[1]
     
     try:
         lat = LATTICE
         if lat is not None and hasattr(lat, 'current_density_matrix'):
             dm = lat.current_density_matrix
             if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
-                return _lattice_dm_to_64x64_hex(dm)
+                hex_val, dim = _lattice_dm_to_64x64_hex(dm)
+                _dm_hex_cache = (hex_val, dim, now)
+                return hex_val, dim
     except Exception as e:
         logger.debug(f"[DM] LATTICE access: {e}")
 
@@ -5125,6 +5140,7 @@ def _get_lattice_dm_hex() -> tuple:
         if snap:
             h = snap.get('density_matrix_hex', '')
             if h and len(h) == 2048:
+                _dm_hex_cache = (h, 8, now)
                 return h, 8
     except Exception:
         pass

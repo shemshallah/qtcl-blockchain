@@ -33,6 +33,7 @@ import hashlib
 import secrets
 import traceback
 import threading
+import multiprocessing
 import numpy as np
 import psycopg2
 import queue
@@ -361,6 +362,56 @@ def _c_flat_to_dm8(re, im) -> np.ndarray:
     c = np.array([float(im[i]) for i in range(64)], dtype=np.float64).reshape(8, 8)
     return (r + 1j * c).astype(np.complex128)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MULTIPROCESSING ORACLE WORKERS — True parallel AER via multiprocessing
+# Each worker process gets its own OracleNode with independent AER simulator
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_WORKER_NODE: Optional['OracleNode'] = None
+
+def _oracle_worker_init(oracle_id: int, role: str, kappa: float, 
+                       sigma_offset: float, pre_fetched_address: str) -> None:
+    """
+    Worker process initializer - called once per worker at pool creation.
+    Sets up this process's OracleNode with independent AER simulator.
+    """
+    global _WORKER_NODE
+    try:
+        _WORKER_NODE = OracleNode(oracle_id, role, pre_fetched_address)
+        logger.info(f"[ORACLE-WORKER-{oracle_id}] Initialized in pid={os.getpid()}")
+    except Exception as e:
+        logger.error(f"[ORACLE-WORKER-{oracle_id}] Init failed: {e}")
+        _WORKER_NODE = None
+
+def _oracle_worker_measure(args: tuple) -> Optional['BlockFieldReading']:
+    """
+    Top-level measurement function for multiprocessing.
+    Unpacks args, converts shared_pq0 from hex, calls worker node.
+    """
+    global _WORKER_NODE
+    pq_curr, pq_last, shared_pq0_hex, oracle_id = args
+    
+    if _WORKER_NODE is None:
+        logger.error(f"[ORACLE-WORKER-{oracle_id}] No worker node")
+        return None
+    
+    # Convert shared_pq0 from hex to numpy array if provided
+    shared_pq0 = None
+    if shared_pq0_hex:
+        try:
+            shared_pq0 = np.frombuffer(
+                bytes.fromhex(shared_pq0_hex), dtype=np.complex128
+            ).reshape(256, 256)
+        except Exception as e:
+            logger.debug(f"[ORACLE-WORKER-{oracle_id}] shared_pq0 parse: {e}")
+    
+    try:
+        return _WORKER_NODE.measure_block_field(pq_curr, pq_last, shared_pq0, None)
+    except Exception as e:
+        logger.error(f"[ORACLE-WORKER-{oracle_id}] Measure failed: {e}")
+        return None
+
 # ─── QRNG singleton ───────────────────────────────────────────────────────────
 
 _ORACLE_QRNG_INSTANCE = None
@@ -514,7 +565,7 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 MEASUREMENT_TIMEOUT          = 20   # 20s cap — reasonable for AER single shot
 
-W_STATE_STREAM_INTERVAL_MS   = 10
+W_STATE_STREAM_INTERVAL_MS   = 10  # Original - true quantum takes time
 LATTICE_REFRESH_INTERVAL_MS  = 50
 AER_NOISE_KAPPA              = 0.005
 NUM_QUBITS_WSTATE            = 3
@@ -1095,6 +1146,7 @@ class OracleNode:
             nm.add_all_qubit_quantum_error(amplitude_damping_error(a_eff),     ["measure"])
             nm.add_all_qubit_quantum_error(phase_damping_error(p_eff),         ["id"])
             self.noise_model = nm
+            # AER with noise - truly quantum, no optimizations that alter behavior
             self.aer = AerSimulator(method='density_matrix', noise_model=nm)
             logger.info(
                 f"[ORACLE-NODE-{self.oracle_id+1}:{self.role}] "
@@ -1439,7 +1491,14 @@ class OracleWStateManager:
         self._lattice_w_coherence: float = 0.0
         self._w_state_measurement_cycle: int = 0
         self._w_state_lock = threading.Lock()
-        self._pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="OracleMeasure")
+        
+        # MULTIPROCESSING: Create pool for true parallel AER across CPU cores
+        # Each worker process gets its own OracleNode with independent AER
+        self._mp_context = multiprocessing.get_context('spawn')
+        self._pool = None  # Created lazily in start()
+        self._mp_async_result: Optional[Any] = None
+        self._worker_init_args = None
+        
         self._mermin_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MerminAsync")
         self._mermin_future: Optional[Any] = None
         self._last_mermin: Optional[dict] = None
@@ -1692,43 +1751,48 @@ class OracleWStateManager:
         # ── Step 3: All-5 simultaneous block-field measurement ───────────────
         bf_start_ns = time.time_ns()
         
-        # Guard: check executor state before submitting (prevents hang on shutdown)
-        if self._pool._shutdown:
-            logger.warning("[ORACLE CLUSTER] Executor pool is shut down, skipping block-field measurement")
+        # Guard: check pool state before submitting (prevents hang on shutdown)
+        if self._pool is None:
+            logger.warning("[ORACLE CLUSTER] Pool is None, skipping block-field measurement")
             return None
         
+        # Convert shared_pq0 to hex for multiprocessing (can't pass numpy arrays directly)
+        shared_pq0_hex = shared_pq0.tobytes().hex() if shared_pq0 is not None else ""
+        
+        # Prepare args for each node
+        measure_args = [
+            (pq_curr, pq_last, shared_pq0_hex, node.oracle_id)
+            for node in self.nodes
+        ]
+        
         try:
-            bf_futures = {
-                self._pool.submit(node.measure_block_field, pq_curr, pq_last, shared_pq0, LATTICE): node
-                for node in self.nodes
-            }
-        except RuntimeError as e:
-            if 'cannot schedule new futures' in str(e):
-                logger.debug(f"[ORACLE CLUSTER] Executor shutdown detected: {e}")
+            # Use map_async for non-blocking parallel execution
+            self._mp_async_result = self._pool.map_async(
+                _oracle_worker_measure, 
+                measure_args,
+                callback=None  # Results handled in stream worker
+            )
+        except Exception as e:
+            if 'shutdown' in str(e).lower() or 'closed' in str(e).lower():
+                logger.debug(f"[ORACLE CLUSTER] Pool shutdown detected: {e}")
                 return None
-            raise
+            logger.error(f"[ORACLE CLUSTER] map_async failed: {e}")
+            return None
+        
+        # Poll for results with timeout
         readings: List[BlockFieldReading] = []
         try:
-            for fut in as_completed(bf_futures, timeout=MEASUREMENT_TIMEOUT):
-                try:
-                    r = fut.result()
-                    if r is not None:
-                        readings.append(r)
-                        with self._bf_lock:
-                            self.block_field_readings[r.oracle_id] = r
-                except Exception as exc:
-                    logger.error(f"[ORACLE CLUSTER] Oracle-{bf_futures[fut].oracle_id+1} BF exception: {exc}")
-        except TimeoutError:
-            unfinished = [f for f in bf_futures if not f.done()]
-            logger.error(f"[ORACLE CLUSTER] Stream error: {len(unfinished)} (of 5) futures unfinished (timeout={MEASUREMENT_TIMEOUT}s)")
-            # Log which specific nodes timed out
-            for f in bf_futures:
-                if not f.done():
-                    node_idx = bf_futures[f].oracle_id + 1
-                    logger.warning(f"[ORACLE CLUSTER] Timeout on oracle_{node_idx}")
-            # Attempt to cancel unfinished futures to free resources
-            for f in unfinished:
-                f.cancel()
+            # Wait for all results with timeout
+            results = self._mp_async_result.get(timeout=MEASUREMENT_TIMEOUT)
+            for r in results:
+                if r is not None:
+                    readings.append(r)
+                    with self._bf_lock:
+                        self.block_field_readings[r.oracle_id] = r
+        except multiprocessing.TimeoutError:
+            logger.error(f"[ORACLE CLUSTER] Stream error: Timeout waiting for measurements ({MEASUREMENT_TIMEOUT}s)")
+        except Exception as e:
+            logger.error(f"[ORACLE CLUSTER] Measurement execution error: {e}")
         
         bf_ms = (time.time_ns() - bf_start_ns) / 1e6
 
@@ -2072,21 +2136,22 @@ class OracleWStateManager:
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
             except Exception as exc:
                 _exc_str = str(exc)
-                if 'cannot schedule new futures' in _exc_str:
+                if 'cannot schedule new futures' in _exc_str or 'shutdown' in _exc_str.lower() or 'closed' in _exc_str.lower():
                     # Check if Python interpreter is shutting down — if so, exit cleanly
                     import sys as _sys
                     if getattr(_sys, 'is_finalizing', lambda: False)() or                        'interpreter shutdown' in _exc_str:
                         logger.debug("[ORACLE CLUSTER] Interpreter shutdown — stream worker exiting")
                         return   # clean exit during process teardown
-                    # Worker recycle (not interpreter shutdown) — recreate executors
+                    # Worker recycle (not interpreter shutdown) — recreate multiprocessing pool
                     try:
-                        self._pool = ThreadPoolExecutor(
-                            max_workers=5, thread_name_prefix="OracleMeasure")
-                        self._mermin_executor = ThreadPoolExecutor(
-                            max_workers=1, thread_name_prefix="MerminAsync")
-                        logger.info("[ORACLE CLUSTER] 🔄 Executors resurrected after shutdown")
+                        self._pool = self._mp_context.Pool(
+                            processes=5,
+                            initializer=_oracle_worker_init,
+                            initargs=self._worker_init_args
+                        )
+                        logger.info("[ORACLE CLUSTER] 🔄 Multiprocessing pool resurrected after shutdown")
                     except Exception as _re:
-                        logger.debug(f"[ORACLE CLUSTER] executor resurrect: {_re}")
+                        logger.debug(f"[ORACLE CLUSTER] pool resurrect: {_re}")
                     time.sleep(1.0)
                 else:
                     logger.error(f"[ORACLE CLUSTER] Stream error: {exc}")
@@ -2107,6 +2172,20 @@ class OracleWStateManager:
         try:
             logger.info("[ORACLE CLUSTER] 🚀 Booting 5-node block-field measurement cluster...")
             self.setup_quantum_backend()
+            
+            # MULTIPROCESSING: Create worker pool AFTER quantum backend setup
+            # Each worker needs the nodes configured with AER params
+            self._worker_init_args = tuple(
+                (node.oracle_id, node.role, node.kappa, node.sigma_offset, node.oracle_address)
+                for node in self.nodes
+            )
+            self._pool = self._mp_context.Pool(
+                processes=5,
+                initializer=_oracle_worker_init,
+                initargs=self._worker_init_args
+            )
+            logger.info("[ORACLE CLUSTER] 🔄 Multiprocessing pool started (5 workers)")
+            
             self.running = True
             self.stream_thread = threading.Thread(
                 target=self._stream_worker, daemon=True, name="OracleClusterStream")
