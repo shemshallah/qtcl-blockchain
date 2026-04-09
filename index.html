@@ -3,8 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>QTCL &middot; Quantum Temporal Coherence Ledger</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<title>QTCL &middot; Quantum Ledger</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -15,88 +14,43 @@
   --go:#d4a020;--go2:rgba(212,160,32,.12);
   --vi:#8040ff;--vi2:rgba(128,64,255,.12);
   --gr:#00ff9d;--gr2:rgba(0,255,157,.10);
-  --re:#ff3355;--dim:#3a4a68;--tx:#bbc8e0;--br:#e8f0ff;
+  --dim:#3a4a68;--tx:#bbc8e0;--br:#e8f0ff;
   --mono:'JetBrains Mono',monospace;--disp:'Orbitron',sans-serif;--body:'DM Sans',sans-serif;
 }
 html{font-size:14px;background:var(--bg)}
-body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100vh;display:flex;flex-direction:column;overflow-x:hidden}
-#hdr{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;background:rgba(3,6,16,.97);border-bottom:1px solid var(--b2);position:sticky;top:0;z-index:100;flex-shrink:0}
-#hdr::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cy) 40%,var(--vi) 70%,transparent);opacity:.5}
+body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100vh;display:flex;flex-direction:column}
+#hdr{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;background:rgba(3,6,16,.97);border-bottom:1px solid var(--b2)}
 .hb{display:flex;align-items:center;gap:12px}
 #lc{display:block;flex-shrink:0}
 .ht{font-family:var(--disp);font-size:15px;font-weight:900;letter-spacing:4px;color:var(--cy);text-shadow:0 0 18px rgba(0,220,255,.5)}
 .hs{font-size:9px;color:var(--dim);letter-spacing:2px;text-transform:uppercase;margin-top:2px}
 .hr{display:flex;align-items:center;gap:20px}
-.hst{text-align:right}
-.hstl{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
-.hstv{font-family:var(--mono);font-size:13px;color:var(--go);margin-top:2px}
-#cp{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;letter-spacing:1px;padding:4px 10px;border-radius:20px;background:var(--gr2);border:1px solid rgba(0,255,157,.25);color:var(--gr);transition:all .3s}
-#cp.off{background:rgba(255,51,85,.1);border-color:rgba(255,51,85,.25);color:var(--re)}
-.cd{width:6px;height:6px;border-radius:50%;background:var(--gr);animation:pl 2s infinite;flex-shrink:0}
-#cp.off .cd{background:var(--re);animation:none}
+#cp{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;padding:4px 10px;border-radius:20px;background:var(--gr2);border:1px solid rgba(0,255,157,.25);color:var(--gr)}
+.cd{width:6px;height:6px;border-radius:50%;background:var(--gr);animation:pl 2s infinite}
 @keyframes pl{0%,100%{opacity:1;box-shadow:0 0 6px var(--gr)}50%{opacity:.4;box-shadow:none}}
 #hck{font-family:var(--mono);font-size:10px;color:var(--dim)}
 
-/* TABS */
-#nav{display:flex;background:var(--bg2);border-bottom:1px solid var(--b);padding:0 20px}
-.tab{padding:10px 20px;font-family:var(--disp);font-size:9px;font-weight:700;color:var(--dim);cursor:pointer;transition:all .3s;border-bottom:2px solid transparent}
-.tab.active{color:var(--cy);border-bottom-color:var(--cy);background:var(--cy2)}
-
-#page{flex:1;padding:16px 20px 32px;display:none;flex-direction:column;gap:16px;max-width:1600px;width:100%;margin:0 auto}
-#page.active{display:flex}
-.st{font-family:var(--disp);font-size:8px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--dim);margin-bottom:10px}
-.tc{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:900px){.tc{grid-template-columns:1fr}}
+#main{flex:1;padding:20px;max-width:1400px;margin:0 auto;width:100%}
+.tc{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 .pn{background:var(--card);border:1px solid var(--b);border-radius:8px;overflow:hidden}
-.ph{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--b);background:rgba(0,0,0,.2)}
+.ph{padding:10px 16px;border-bottom:1px solid var(--b);background:rgba(0,0,0,.2);display:flex;justify-content:space-between;align-items:center}
 .pht{font-family:var(--disp);font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--dim)}
-.pb{font-family:var(--mono);font-size:8px;letter-spacing:1px;padding:2px 8px;border-radius:3px;background:var(--cy2);color:var(--cy);border:1px solid rgba(0,220,255,.2)}
-.pb.go{background:var(--go2);color:var(--go);border-color:rgba(212,160,32,.2)}
-.pb.vi{background:var(--vi2);color:var(--vi);border-color:rgba(128,64,255,.2)}
-.md{padding:16px;display:flex;align-items:center;gap:20px}
-.mb2{font-family:var(--disp);font-size:48px;font-weight:900;line-height:1;flex-shrink:0;transition:color .5s}
-.mb2.q{color:var(--cy);text-shadow:0 0 30px rgba(0,220,255,.4)}
-.mb2.c{color:var(--re);text-shadow:0 0 20px rgba(255,51,85,.3)}
-.mi{flex:1;min-width:0}
-.mv2{font-size:11px;color:var(--br);font-weight:500;margin-bottom:6px}
-.ms2{font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:4px}
-.mba{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;margin-top:8px}
-.mbaf{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--vi),var(--cy));transition:width .8s ease}
-.mbl{display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:4px}
-.mac{padding:0 16px 12px;display:flex;flex-wrap:wrap;gap:4px}
-.ac{font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:var(--bg3);color:var(--dim);border:1px solid var(--b)}
+.pb{font-family:var(--mono);font-size:8px;padding:2px 8px;border-radius:3px;background:var(--vi2);color:var(--vi);border:1px solid rgba(128,64,255,.2)}
+.dm-panel{width:100%;height:340px;position:relative;overflow:hidden;background:#000508}
+#dm-canvas{width:100%;height:100%;display:block}
+.pq-hud{position:absolute;left:0;bottom:0;right:0;height:28px;background:linear-gradient(0deg,rgba(0,5,8,.92) 0%,transparent 100%);display:flex;align-items:center;padding:0 10px;gap:14px;font-family:var(--mono);font-size:9px;color:rgba(0,220,255,.55)}
 .bs{display:flex;border-top:1px solid var(--b)}
 .bv{flex:1;padding:10px 14px;border-right:1px solid var(--b);text-align:center}
 .bv:last-child{border-right:none}
-.bvl{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
+.bvl{font-size:8px;color:var(--dim);text-transform:uppercase;margin-bottom:4px}
 .bvn{font-family:var(--mono);font-size:13px;color:var(--vi)}
-
-/* TERMINAL STYLES */
-#terminal-container{display:flex;flex-direction:column;height:calc(100vh - 100px);background:var(--bg2);border-radius:8px;border:1px solid var(--b);overflow:hidden}
-#output{flex:1;overflow-y:auto;padding:20px;font-family:var(--mono);font-size:12px;color:var(--tx)}
-.line{margin-bottom:4px;white-space:pre-wrap}
-.line-system{color:var(--cy)}
-.line-success{color:var(--gr)}
-.line-error{color:var(--re)}
-.line-info{color:var(--vi)}
-#input-area{display:flex;align-items:center;padding:12px 20px;background:var(--bg3);border-top:1px solid var(--b)}
-.prompt{color:var(--cy);font-weight:bold;margin-right:10px}
-#cmd{flex:1;background:transparent;border:none;outline:none;color:var(--tx);font-family:var(--mono);font-size:12px}
-
-/* LIST TABLES */
-.data-table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px;text-align:left}
-.data-table th{padding:8px;color:var(--dim);border-bottom:1px solid var(--b)}
-.data-table td{padding:8px;border-bottom:1px solid var(--b2)}
 </style>
 </head>
 <body>
 <header id="hdr">
   <div class="hb">
     <canvas id="lc" width="36" height="36"></canvas>
-    <div>
-      <div class="ht">QTCL</div>
-      <div class="hs">Quantum Temporal Coherence Ledger</div>
-    </div>
+    <div><div class="ht">QTCL</div><div class="hs">Quantum Ledger</div></div>
   </div>
   <div class="hr">
     <div id="cp"><span class="cd"></span><span id="ct">CONNECTING</span></div>
@@ -104,316 +58,94 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
   </div>
 </header>
 
-<div id="nav">
-  <div class="tab active" data-page="dashboard" onclick="showPage('dashboard')">DASHBOARD</div>
-  <div class="tab" data-page="explorer" onclick="showPage('explorer')">EXPLORER</div>
-  <div class="tab" data-page="network" onclick="showPage('network')">NETWORK</div>
-  <div class="tab" data-page="console" onclick="showPage('console')">CONSOLE</div>
-</div>
-
-<div id="dashboard" class="page active" style="display:flex; flex-direction:column; gap:16px; padding:16px 20px 32px; max-width:1600px; width:100%; margin:0 auto">
-  <div class="st">Core Quantum Engine</div>
+<div id="main">
   <div class="tc">
-    <div class="pn" id="dm-module">
-      <div class="ph"><span class="pht">Density Matrix · 64×64 Complex128</span><span class="pb vi" id="dm-status">INIT</span></div>
-      <div id="dm-panel" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;">
-        <canvas id="dm-canvas" width="640" height="340" style="width:100%;height:100%;display:block"></canvas>
-        <div id="pq-hud" style="position:absolute;left:0;bottom:0;right:0;height:28px;pointer-events:none;z-index:11;display:flex;align-items:center;padding:0 10px;gap:14px;background:linear-gradient(0deg,rgba(0,5,8,.92) 0%,transparent 100%)">
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.55);letter-spacing:1.5px">BLOCK FIELD</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_last=<span id="pqh-last" style="color:#8040ff">—</span></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_curr=<span id="pqh-curr" style="color:#d4a020">—</span></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">&Delta;=<span id="pqh-delta" style="color:#00ff9d">—</span></span>
-          <span style="flex:1"></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">ψ —</span>
+    <div class="pn">
+      <div class="ph"><span class="pht">Density Matrix 64x64</span><span class="pb" id="dm-status">INIT</span></div>
+      <div class="dm-panel">
+        <canvas id="dm-canvas" width="640" height="340"></canvas>
+        <div class="pq-hud">
+          <span>BLOCK FIELD</span>
+          <span>Fidelity: <span id="dm-fid">—</span></span>
         </div>
       </div>
       <div class="bs">
-        <div class="bv"><div class="bvl">|W₃| Fidelity</div><div class="bvn" id="dm-fidelity">—</div></div>
-        <div class="bv"><div class="bvl">pq_curr</div><div class="bvn" id="dm-pq-curr" style="color:var(--go)">—</div></div>
-        <div class="bv"><div class="bvl">pq_last</div><div class="bvn" id="dm-pq-last">—</div></div>
+        <div class="bv"><div class="bvl">|W₃|</div><div class="bvn" id="dm-fidelity">—</div></div>
         <div class="bv"><div class="bvl">Purity</div><div class="bvn" id="dm-purity">—</div></div>
+        <div class="bv"><div class="bvl">Cycle</div><div class="bvn" id="dm-cycle">—</div></div>
       </div>
-    </div>
-    <div class="pn" id="mermin-module">
-      <div class="ph"><span class="pht">Mermin Inequality Test</span><span class="pb" id="mermin-status">INIT</span><span class="pb vi" id="mermin-cycle" style="font-size:.72em;opacity:.6">cycle —</span></div>
-      <div class="md">
-        <div class="mb2 c" id="mermin-M">—</div>
-        <div class="mi">
-          <div class="mv2" id="mermin-verdict">Awaiting oracle measurement…</div>
-          <div class="ms2">Classical bound: 2.0 · W-max: 3.046 · GHZ-max: 4.0</div>
-          <div class="mba"><div class="mbaf" id="mermin-bar" style="width:0"></div></div>
-          <div class="mbl"><span>0</span><span>2.0</span><span>3.046</span><span>4.0</span></div>
-        </div>
-      </div>
-      <div class="mac" id="mermin-angles"></div>
-    </div>
-  </div>
-  <div class="st">Blockchain Telemetry</div>
-  <div class="tc">
-    <div class="pn" id="chain-module">
-       <div class="ph"><span class="pht">Network Coherence</span><span class="pb go" id="chain-status">SYNCING</span></div>
-       <div class="md">
-         <div class="mi">
-           <div class="ms2">Lattice Height: <span id="chain-height" style="color:var(--cy)">—</span></div>
-           <div class="ms2">Total Transactions: <span id="chain-tx" style="color:var(--cy)">—</span></div>
-           <div class="ms2">Active Peers: <span id="chain-peers" style="color:var(--cy)">—</span></div>
-           <div class="ms2">Coherence Jitter: <span id="chain-jitter" style="color:var(--cy)">—</span></div>
-         </div>
-       </div>
-    </div>
-    <div class="pn" id="telemetry-module">
-       <div class="ph"><span class="pht">System Telemetry</span><span class="pb vi" id="tel-status">IDLE</span></div>
-       <div class="md">
-         <div class="mi">
-           <div class="ms2">Lattice Cycle: <span id="tel-cycle" style="color:var(--go)">—</span></div>
-           <div class="ms2">Oracle Latency: <span id="tel-lat" style="color:var(--go)">—</span></div>
-           <div class="ms2">Nexus Throughput: <span id="tel-thr" style="color:var(--go)">—</span></div>
-         </div>
-       </div>
-    </div>
-  </div>
-</div>
-
-<div id="explorer" class="page" style="display:none; flex-direction:column; gap:16px; padding:16px 20px 32px; max-width:1600px; width:100%; margin:0 auto">
-  <div class="st">Block Explorer</div>
-  <div class="pn">
-    <div class="ph"><span class="pht">Latest Blocks</span></div>
-    <div class="md" style="display:block; padding:0">
-      <table class="data-table" id="block-table">
-        <thead><tr><th>Height</th><th>Hash</th><th>Timestamp</th><th>Txs</th><th>Status</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-  <div class="st">Transaction Stream</div>
-  <div class="pn">
-    <div class="ph"><span class="pht">Live Transactions</span></div>
-    <div class="md" style="display:block; padding:0">
-      <table class="data-table" id="tx-table">
-        <thead><tr><th>TXID</th><th>From</th><th>To</th><th>Amount</th><th>Status</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-<div id="network" class="page" style="display:none; flex-direction:column; gap:16px; padding:16px 20px 32px; max-width:1600px; width:100%; margin:0 auto">
-  <div class="st">Peer Topology</div>
-  <div class="pn">
-    <div class="ph"><span class="pht">Active Nodes</span><span class="pb go" id="peer-count">0 Peers</span></div>
-    <div class="md" style="display:block; padding:0">
-      <table class="data-table" id="peer-table">
-        <thead><tr><th>Peer ID</th><th>Address</th><th>Role</th><th>Verified</th><th>Latency</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-<div id="console" class="page" style="display:none; flex-direction:column; gap:16px; padding:16px 20px 32px; max-width:1600px; width:100%; margin:0 auto">
-  <div class="st">Quantum Shell</div>
-  <div id="terminal-container">
-    <div id="output"></div>
-    <div id="input-area">
-      <span class="prompt">QTCL ›</span>
-      <input type="text" id="cmd" autofocus spellcheck="false" autocomplete="off">
     </div>
   </div>
 </div>
 
 <script src="nexus.js"></script>
+<script src="matrix_worker.js"></script>
 <script>
-'use strict';
-
-function showPage(id) {
-  document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.getElementById(id).style.display = 'flex';
-  document.querySelector(`[data-page="${id}"]`).classList.add('active');
-  if(id === 'console') document.getElementById('cmd').focus();
-}
-
 (function(){
+  // LOGO ANIMATION
+  const c = document.getElementById('lc');
+  const ctx = c ? c.getContext('2d') : null;
+  let t = 0;
+  if(ctx){
+    function drawLogo(){
+      ctx.clearRect(0,0,36,36);
+      const cx=18,cy=18,r=13,ri=7;
+      ctx.strokeStyle='rgba(0,220,255,.2)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle='rgba(128,64,255,.18)'; ctx.lineWidth=0.8;
+      ctx.beginPath(); ctx.arc(cx,cy,ri,0,Math.PI*2); ctx.stroke();
+      for(let i=0;i<4;i++){
+        const a=i*Math.PI/2-t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
+        ctx.strokeStyle='rgba(0,220,255,.5)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
+        ctx.fillStyle='rgba(0,220,255,.8)';
+        ctx.beginPath(); ctx.arc(x,y,2.2,0,Math.PI*2); ctx.fill();
+        const ix=cx+ri*Math.cos(a),iy=cy+ri*Math.sin(a);
+        ctx.fillStyle='rgba(128,64,255,.8)';
+        ctx.beginPath(); ctx.arc(ix,iy,1.5,0,Math.PI*2); ctx.fill();
+      }
+      ctx.fillStyle='rgba(212,160,32,.95)';
+      ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
+      t -= 0.02;
+      requestAnimationFrame(drawLogo);
+    }
+    drawLogo();
+  }
+
+  // CLOCK
+  const hck = document.getElementById('hck');
+  if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
+
+  // NEXUS & WORKERS
   const nexus = new StreamNexus(window.location.origin + '/rpc/oracle/snapshot');
-  
-  const workers = {
-    matrix: new Worker('matrix_worker.js'),
-    mermin: new Worker('mermin_worker.js'),
-    chain: new Worker('chain_worker.js'),
-    telemetry: new Worker('telemetry_worker.js'),
-    peers: new Worker('peer_worker.js'),
-    tx: new Worker('tx_worker.js')
-  };
+  const matrixWorker = new Worker('matrix_worker.js');
+  nexus.registerWorker('matrix', matrixWorker);
 
-  Object.entries(workers).forEach(([id, worker]) => nexus.registerWorker(id, worker));
-
-  const sinks = {
-    matrix: (data) => {
+  // SINK
+  matrixWorker.onmessage = function(e){
+    if(e.data.type === 'MATRIX_RENDER_READY'){
       const canvas = document.getElementById('dm-canvas');
       if(!canvas) return;
       const ctx = canvas.getContext('2d');
       if(!ctx) return;
-      try {
-        const img = ctx.createImageData(data.N || 64, data.N || 64);
-        img.data.set(data.pixelBuffer);
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = data.N || 64; tempCanvas.height = data.N || 64;
-        tempCanvas.getContext('2d').putImageData(img, 0, 0);
-        ctx.fillStyle = '#000508'; ctx.fillRect(0,0,canvas.width, canvas.height);
-        ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(tempCanvas, 8, 8, canvas.width-16, canvas.height-44);
-      } catch(e) { console.warn('Matrix render error:', e); }
-      const el = document.getElementById('dm-fidelity');
-      if(el) el.textContent = data.fidelity?.toFixed(4) || '—';
-      const el2 = document.getElementById('dm-purity');
-      if(el2) el2.textContent = data.purity?.toFixed(4) || '—';
-      const el3 = document.getElementById('dm-status');
-      if(el3) el3.textContent = 'LIVE';
-    },
-    mermin: (data) => {
-      const elM = document.getElementById('mermin-M');
-      if(elM) {
-        elM.textContent = data.M?.toFixed(3) || '—';
-        elM.className = 'mb2 ' + ((data.M ?? 0) > 2.0 ? 'q' : 'c');
-      }
-      const elV = document.getElementById('mermin-verdict');
-      if(elV) elV.textContent = data.verdict || '—';
-      const elS = document.getElementById('mermin-status');
-      if(elS) elS.textContent = 'M=' + (data.M?.toFixed(3) || '—');
-      const elB = document.getElementById('mermin-bar');
-      if(elB) elB.style.width = Math.min(100, ((data.M ?? 0) / 4) * 100) + '%';
-      const elC = document.getElementById('mermin-cycle');
-      if(elC) elC.textContent = 'cycle ' + (data.cycle || '—');
-      const elA = document.getElementById('mermin-angles');
-      if(elA) elA.innerHTML = (data.angles || []).map((a,i) => 
-        `<span class="ac">${data.labels?.[i] || 'a'+i}=${a.toFixed(1)}°</span>`
-      ).join('');
-    },
-    chain: (data) => {
-      const s = data?.state || {};
-      document.getElementById('chain-height').textContent = s.block_height ?? '—';
-      document.getElementById('chain-tx').textContent = s.tx_count ?? '—';
-      document.getElementById('chain-peers').textContent = s.peer_count ?? '—';
-      const el = document.getElementById('dm-pq-curr');
-      if(el) el.textContent = s.pq_curr ?? '—';
-      const el2 = document.getElementById('dm-pq-last');
-      if(el2) el2.textContent = s.pq_last ?? '—';
-      const el3 = document.getElementById('pqh-curr');
-      if(el3) el3.textContent = s.pq_curr ?? '—';
-      const el4 = document.getElementById('pqh-last');
-      if(el4) el4.textContent = s.pq_last ?? '—';
-      const el5 = document.getElementById('pqh-delta');
-      if(el5) el5.textContent = ((s.pq_curr ?? 0) - (s.pq_last ?? 0) >= 0 ? '+' : '') + ((s.pq_curr ?? 0) - (s.pq_last ?? 0));
-    },
-    telemetry: (data) => {
-      const el = document.getElementById('tel-cycle');
-      if(el) el.textContent = data?.cycle ?? '—';
-      const el2 = document.getElementById('tel-lat');
-      if(el2) el2.textContent = (data?.jitter ?? 0) + 'ms';
-      const el3 = document.getElementById('pqh-cycle');
-      if(el3) el3.textContent = 'ψ cyc=' + (data?.cycle ?? '—');
-    },
-    peers: (data) => {
-      const el = document.getElementById('peer-count');
-      if(el) el.textContent = (data?.count ?? 0) + ' Peers';
-      const tbody = document.querySelector('#peer-table tbody');
-      if(tbody) tbody.innerHTML = (data?.peers ?? []).map(p => `
-        <tr>
-          <td>${p.id}</td>
-          <td>${p.addr}:${p.port}</td>
-          <td>${p.role}</td>
-          <td style="color:${p.verified?'var(--gr)':'var(--re)'}">${p.verified?'YES':'NO'}</td>
-          <td>${p.latency}ms</td>
-        </tr>
-      `).join('');
-    },
-    tx: (data) => {
-      const tbody = document.querySelector('#tx-table tbody');
-      if(tbody) tbody.innerHTML = (data?.transactions ?? []).map(tx => `
-        <tr>
-          <td>${(tx.id ?? '').slice(0,8)}...</td>
-          <td>${(tx.from ?? '').slice(0,6)}...</td>
-          <td>${(tx.to ?? '').slice(0,6)}...</td>
-          <td style="color:var(--cy)">${tx.amount ?? '—'}</td>
-          <td style="color:${tx.status==='confirmed'?'var(--gr)':'var(--go)'}">${tx.status ?? 'pending'}</td>
-        </tr>
-      `).join('');
+      const img = ctx.createImageData(e.data.N || 64, e.data.N || 64);
+      img.data.set(e.data.pixelBuffer);
+      const tc = document.createElement('canvas');
+      tc.width = e.data.N || 64; tc.height = e.data.N || 64;
+      tc.getContext('2d').putImageData(img, 0, 0);
+      ctx.fillStyle = '#000508'; ctx.fillRect(0,0,canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tc, 8, 8, canvas.width-16, canvas.height-44);
+      
+      document.getElementById('dm-status').textContent = 'LIVE';
+      document.getElementById('dm-fidelity').textContent = e.data.fidelity?.toFixed(4) || '—';
+      document.getElementById('dm-purity').textContent = e.data.purity?.toFixed(4) || '—';
+      document.getElementById('dm-fid').textContent = e.data.fidelity?.toFixed(4) || '—';
+      document.getElementById('dm-cycle').textContent = e.data.cycle || '—';
     }
   };
 
-  workers.matrix.onmessage = (e) => { if(e.data.type === 'MATRIX_RENDER_READY') sinks.matrix(e.data); };
-  workers.mermin.onmessage = (e) => { if(e.data.type === 'MERMIN_RESULT') sinks.mermin(e.data); };
-  workers.chain.onmessage = (e) => { if(e.data.type === 'CHAIN_STATE_READY') sinks.chain(e.data); };
-  workers.telemetry.onmessage = (e) => { if(e.data.type === 'TELEMETRY_READY') sinks.telemetry(e.data); };
-  workers.peers.onmessage = (e) => { if(e.data.type === 'PEER_STATE_READY') sinks.peers(e.data); };
-  workers.tx.onmessage = (e) => { if(e.data.type === 'TX_STATE_READY') sinks.tx(e.data); };
-
   nexus.connect();
-
-  // Console Logic
-  const output = document.getElementById('output');
-  const cmdInput = document.getElementById('cmd');
-  function addLine(text, style='system') {
-    const div = document.createElement('div');
-    div.className = 'line line-' + style;
-    div.textContent = text;
-    output.appendChild(div);
-    output.scrollTop = output.scrollHeight;
-  }
-
-  cmdInput.addEventListener('keydown', async (e) => {
-    if(e.key === 'Enter') {
-      const val = cmdInput.value.trim();
-      if(!val) return;
-      addLine('› ' + val, 'system');
-      cmdInput.value = '';
-      try {
-        const res = await fetch('/api/command', { 
-          method: 'POST', 
-          headers: {'Content-Type': 'application/json'}, 
-          body: JSON.stringify({command: val}) 
-        });
-        const data = await res.json();
-        addLine(data.result || data.error || 'OK', data.status === 'success' ? 'success' : 'error');
-      } catch(err) {
-        addLine('Network error: ' + err.message, 'error');
-      }
-    }
-  });
-
-  // Clock & Logo
-  (function(){
-    const el=document.getElementById('hck');
-    if(el){
-      setInterval(() => { el.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
-    }
-    const c=document.getElementById('lc'), ctx=c?c.getContext('2d'):null;
-    let t=0; // Properly declared t
-    if(ctx){
-      function fr(){
-        ctx.clearRect(0,0,36,36);
-        const cx=18,cy=18,r=13,ri=7;
-        ctx.strokeStyle='rgba(0,220,255,.2)'; ctx.lineWidth=1;
-        ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-        ctx.strokeStyle='rgba(128,64,255,.18)'; ctx.lineWidth=0.8;
-        ctx.beginPath(); ctx.arc(cx,cy,ri,0,Math.PI*2); ctx.stroke();
-        for(let i=0;i<4;i++){
-          const a=i*Math.PI/2-t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
-          ctx.strokeStyle='rgba(0,220,255,'+(0.3+0.25*Math.sin(t*2+i))+')'; ctx.lineWidth=1;
-          ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
-          ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
-          ctx.beginPath(); ctx.arc(x,y,2.2,0,Math.PI*2); ctx.fill();
-          const ix=cx+ri*Math.cos(a),iy=cy+ri*Math.sin(a);
-          ctx.fillStyle='rgba(128,64,255,'+(0.5+0.3*Math.sin(t*2.5+i))+')';
-          ctx.beginPath(); ctx.arc(ix,iy,1.5,0,Math.PI*2); ctx.fill();
-        }
-        ctx.fillStyle='rgba(212,160,32,.95)'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
-        t-=0.02; requestAnimationFrame(fr);
-      }
-      fr();
-    }
-  })();
-
   document.getElementById('cp').classList.remove('off');
   document.getElementById('ct').textContent = 'LIVE';
 })();
