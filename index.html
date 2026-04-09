@@ -167,7 +167,7 @@ document.querySelectorAll('.tab').forEach(tab => {
   const hck = document.getElementById('hck');
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
-  // RENDER FUNCTION - Hermitian density matrix with proper mirroring
+  // RENDER FUNCTION - Simple 64x64 density matrix with Hermitian mirroring
   function renderMatrix(hex, fidelity, purity, cycle){
     const canvas = document.getElementById('dm-canvas');
     if(!canvas || !hex) return;
@@ -175,101 +175,60 @@ document.querySelectorAll('.tab').forEach(tab => {
     if(!ctx) return;
     
     try {
+      const N = 64;
+      const re = new Float64Array(N*N);
+      const im = new Float64Array(N*N);
       const HEX = new Uint8Array(256);
       for(let i=0;i<10;i++)HEX[48+i]=i;
       for(let i=0;i<6;i++){HEX[65+i]=10+i;HEX[97+i]=10+i;}
       const dv = new DataView(new ArrayBuffer(8));
       const u8 = new Uint8Array(dv.buffer);
       
-      // Detect matrix size from hex length
-      const hexLen = hex.length;
-      let srcN = 8; // default 8x8
-      if(hexLen >= 131072) srcN = 64; // 64x64 = 131072 hex chars
-      else if(hexLen >= 8192) srcN = 16; // 16x16
-      
-      const srcLen = srcN * srcN;
-      const srcRe = new Float64Array(srcLen);
-      const srcIm = new Float64Array(srcLen);
-      
-      // Parse source matrix
-      for(let i=0;i<srcLen;i++){
+      // Parse hex into complex matrix
+      for(let i=0;i<N*N;i++){
         const off = i*32;
-        if(off+31>=hexLen) break;
-        for(let b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
-        srcRe[i]=dv.getFloat64(0,true);
-        for(let b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
-        srcIm[i]=dv.getFloat64(0,true);
+        if(off+31>=hex.length) break;
+        for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
+        re[i]=dv.getFloat64(0,true);
+        for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
+        im[i]=dv.getFloat64(0,true);
       }
       
-      // Build display grid: Hermitian mirror for upper triangle
-      const N = 64;
-      const disp = new Float64Array(N*N); // magnitude
-      const dispPh = new Float64Array(N*N); // phase
-      
-      if(srcN === 8){
-        // 8x8 → 64x64: tile with Hermitian symmetry
-        for(let bi=0;bi<8;bi++){
-          for(let bj=0;bj<8;bj++){
-            const si = bi*8 + bj;
-            const re = srcRe[si], im = srcIm[si];
-            const mag = Math.sqrt(re*re + im*im);
-            const ph = Math.atan2(im, re);
-            // Place in 8x8 block of the 64x64 grid
-            for(let ri=0;ri<8;ri++){
-              for(let rj=0;rj<8;rj++){
-                const ti = bi*8 + ri;
-                const tj = bj*8 + rj;
-                disp[ti*N + tj] = mag;
-                dispPh[ti*N + tj] = ph;
-              }
-            }
-          }
-        }
-      } else {
-        // 64x64 or larger: direct copy
-        for(let i=0;i<N;i++){
-          for(let j=0;j<N;j++){
-            const si = i*srcN + j;
-            if(si < srcLen){
-              const re = srcRe[si], im = srcIm[si];
-              disp[i*N+j] = Math.sqrt(re*re+im*im);
-              dispPh[i*N+j] = Math.atan2(im, re);
-            }
-          }
-        }
-      }
-      
-      // Apply Hermitian symmetry: mirror upper triangle to lower
+      // Hermitian mirror: copy upper triangle to lower
       for(let i=0;i<N;i++){
         for(let j=i+1;j<N;j++){
-          const upper = i*N+j;
-          const lower = j*N+i;
-          disp[lower] = disp[upper];
-          dispPh[lower] = dispPh[upper];
+          const ui = i*N+j;
+          const li = j*N+i;
+          re[li]=re[ui]; im[li]=im[ui];
         }
       }
       
-      // Find max magnitude
-      let maxMag = 0;
-      for(let i=0;i<N*N;i++){if(disp[i]>maxMag) maxMag=disp[i];}
+      // Compute magnitude and find max
+      const mag = new Float64Array(N*N);
+      let maxMag=0;
+      for(let i=0;i<N*N;i++){
+        mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);
+        if(mag[i]>maxMag)maxMag=mag[i];
+      }
       
       // Render pixels
       const px = new Uint8ClampedArray(N*N*4);
       for(let i=0;i<N*N;i++){
-        const normP = (dispPh[i]+Math.PI)/(2*Math.PI);
+        const ph = Math.atan2(im[i],re[i]);
+        const normP = (ph+Math.PI)/(2*Math.PI);
         const hue = 160 + normP * 160;
-        const lig = Math.min(0.9, 0.1 + (disp[i]/(maxMag||1))*0.8);
+        const lig = Math.min(0.9, 0.1 + (mag[i]/(maxMag||1))*0.8);
         const sat = 0.8;
-        const cc = (1-Math.abs(2*lig-1))*sat;
-        const x = cc*(1-Math.abs((hue/60)%2-1));
-        const m = lig-cc/2;
+        const c = (1-Math.abs(2*lig-1))*sat;
+        const x = c*(1-Math.abs((hue/60)%2-1));
+        const m = lig-c/2;
         let r,g,b;
-        if(hue<60){r=cc;g=x;b=0}else if(hue<120){r=x;g=cc;b=0}else if(hue<180){r=0;g=cc;b=x}else if(hue<240){r=0;g=x;b=cc}else if(hue<300){r=x;g=0;b=cc}else{r=cc;g=0;b=0}
+        if(hue<60){r=c;g=x;b=0}else if(hue<120){r=x;g=c;b=0}else if(hue<180){r=0;g=c;b=x}else if(hue<240){r=0;g=x;b=c}else if(hue<300){r=x;g=0;b=c}else{r=c;g=0;b=0}
         const p=i*4;
         px[p]=(r+m)*255;px[p+1]=(g+m)*255;px[p+2]=(b+m)*255;px[p+3]=255;
       }
       
-      // Draw scaled to canvas
+      // Draw to canvas
       const img = new ImageData(px, N, N);
       const tc = document.createElement('canvas');
       tc.width=N;tc.height=N;
