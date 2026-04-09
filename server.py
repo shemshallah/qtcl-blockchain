@@ -4882,15 +4882,17 @@ def _multiplexer_worker():
             logger.error(f"[MUX-METRICS] error: {e}", exc_info=False)
             time.sleep(0.1)
 
-# Start SEPARATE THREADS for DM and Metrics - eliminates race condition
+# Start DM thread - clean multiplexor for DM-only SSE stream
 _dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="MUX-DM")
 _dm_thread.start()
+logger.info("[MUX] DM SSE thread started (200ms interval, 5 FPS max)")
 
-# TEMPORARILY DISABLED - focusing on Mermin + Density Matrix only
-# _metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
-# _metrics_thread.start()
-logger.info("[MUX] DM thread only - metrics disabled for now")
+# Metrics thread also starts but sends on different endpoint
+_metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
+_metrics_thread.start()
+logger.info("[MUX] Metrics RPC thread started (200ms interval)")
 
+# Clean unified SSE endpoint - DM only, properly throttled
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """
