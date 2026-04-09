@@ -4693,11 +4693,11 @@ def _dm_sse_worker():
     """Dedicated thread for DM→SSE stream only"""
     logger.info("[MUX-DM] DM SSE worker started")
     last_dm_send_ts = 0
-    dm_send_interval = 0.1  # 10x/sec for faster updates
+    dm_send_interval = 0.05  # 20x/sec for real-time updates
     
     while True:
         try:
-            snap = _snapshot_multiplexer_queue.get(timeout=1.0)
+            snap = _snapshot_multiplexer_queue.get(timeout=0.01)  # Non-blocking, check more often
             if not snap:
                 continue
             
@@ -4724,23 +4724,24 @@ def _dm_sse_worker():
                         pass
                     
         except _queue_module.Empty:
-            continue
+            time.sleep(0.005)  # Brief pause before retry
         except GeneratorExit:
             break
         except Exception as e:
             logger.error(f"[MUX-DM] error: {e}")
-            time.sleep(0.1)
+            time.sleep(0.01)
 
 def _metrics_rpc_worker():
     """Dedicated thread for Metrics→RPC PUSH only"""
     logger.info("[MUX-METRICS] Metrics RPC worker started")
     last_metric_push_ts = 0
-    metric_push_interval = 0.2
+    metric_push_interval = 0.05  # 20x/sec
     
     while True:
         try:
-            snap = _snapshot_multiplexer_queue.get(timeout=1.0)
+            snap = _snapshot_multiplexer_queue.get(timeout=0.01)  # Non-blocking
             if not snap:
+                time.sleep(0.005)
                 continue
             
             now_ts = time.time()
@@ -4793,21 +4794,22 @@ def _multiplexer_worker():
     """Forks snapshots: DM→SSE, Metrics→RPC PUSH."""
     logger.info("[MUX] Snapshot multiplexer started")
     last_metric_push_ts = 0
-    metric_push_interval = 0.2  # 5 metrics/sec instead of 20
+    metric_push_interval = 0.05  # 20 metrics/sec - real-time
     _mux_loop_count = 0
     last_dm_send_ts = 0
-    dm_send_interval = 0.1  # 10x/sec for faster updates
+    dm_send_interval = 0.05  # 20x/sec for real-time updates
     
     while True:
         _mux_loop_count += 1
         try:
-            snap = _snapshot_multiplexer_queue.get(timeout=1.0)
+            snap = _snapshot_multiplexer_queue.get(timeout=0.01)  # Non-blocking
             if not snap:
+                time.sleep(0.005)
                 continue
             
             now_ts = time.time()
             
-            # Send DM at faster interval (100ms)
+            # Send DM at faster interval (50ms)
             dm_hex = ''
             dm_dim = 0
             if now_ts - last_dm_send_ts >= dm_send_interval:

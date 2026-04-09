@@ -809,7 +809,7 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-MEASUREMENT_TIMEOUT          = 20   # 20s cap — reasonable for AER single shot
+MEASUREMENT_TIMEOUT          = 2    # 2s cap — fast for AER single shot
 
 W_STATE_STREAM_INTERVAL_MS   = 10  # Original - true quantum takes time
 LATTICE_REFRESH_INTERVAL_MS  = 50
