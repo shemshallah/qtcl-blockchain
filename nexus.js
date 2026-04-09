@@ -83,14 +83,33 @@ class StreamNexus {
                 }
             }
 
-            // Telemetry Routing
-            if (result.lattice_refresh_counter !== undefined && this.workers.has('telemetry')) {
-                this.workers.get('telemetry').postMessage({
-                    type: 'UPDATE_METRICS',
-                    cycle: result.lattice_refresh_counter,
-                    timestamp: Date.now()
-                });
-            }
+        // Telemetry Routing
+        if (result.lattice_refresh_counter !== undefined && this.workers.has('telemetry')) {
+            this.workers.get('telemetry').postMessage({
+                type: 'UPDATE_METRICS',
+                cycle: result.lattice_refresh_counter,
+                timestamp: Date.now()
+            });
+        }
+
+        // Peer Routing
+        if (result.peers && this.workers.has('peers')) {
+            this.workers.get('peers').postMessage({
+                type: 'UPDATE_PEERS',
+                peers: result.peers,
+                status: result.network_status
+            });
+        }
+
+        // Transaction Routing
+        if (result.transactions && this.workers.has('tx')) {
+            this.workers.get('tx').postMessage({
+                type: 'UPDATE_TXS',
+                txs: result.transactions,
+                block: result.latest_block
+            });
+        }
+
 
         } catch (e) {
             console.warn('[StreamNexus] Packet Corruption:', e);
