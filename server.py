@@ -4907,114 +4907,59 @@ def _multiplexer_worker():
             logger.error(f"[MUX-METRICS] error: {e}", exc_info=False)
             time.sleep(0.1)
 
-# ─── RING-BUFFER DRAIN ARCHITECTURE ───────────────────────────────────────────
-# _dm_sse_worker removed — was double-consuming _snapshot_multiplexer_queue,
-# racing with _multiplexer_worker and starving both. SSE now drains
-# _DM_SNAPSHOT_RING directly inside rpc_oracle_snapshot generator.
-# _multiplexer_worker still runs for metrics fanout to _connected_metric_clients.
-logger.info("[MUX] Ring-buffer drain SSE active — double-consumer race eliminated")
+# Start SEPARATE THREADS for DM and Metrics - eliminates race condition
+_dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="MUX-DM")
+_dm_thread.start()
 
-@app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
+# TEMPORARILY DISABLED - focusing on Mermin + Density Matrix only
+# _metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
+# _metrics_thread.start()
+logger.info("[MUX] DM thread only - metrics disabled for now")
+
 def rpc_oracle_snapshot():
     """
-    SSE STREAM — Real-time omnibus snapshot drained from _DM_SNAPSHOT_RING.
-
-    Architecture: oracle → _broadcast_snapshot_to_database → _DM_SNAPSHOT_RING
-                  (deque, maxlen=1000) → this SSE generator drains tail via pointer.
-
-    Each event is a fat omnibus packet with ALL fields so every UI module
-    (DM heatmap, Mermin, metrics, pq0, block_field) updates from one bus.
-    Heartbeat every 100ms guarantees <200ms latency even between oracle ticks.
-    No queue intermediary — no double-consumer race — no starvation.
+    SSE STREAM — HIGH-FREQUENCY (50ms) DENSITY MATRIX AND METRICS.
+    Crossover: RPC Snapshot logic internally, but serves as a persistent SSE stream.
     """
     if request.method == "OPTIONS":
         return "", 204
 
     def generate():
         import itertools
-        # Snapshot position pointer — track how many items we've seen
-        last_seen_id = None
-        last_hb = time.time()
-        HB_INTERVAL = 0.10   # 100ms max latency guarantee
-
         for _ in itertools.count():
             try:
-                # Drain new tail entries since last_seen_id
-                with _DM_SNAPSHOT_LOCK:
-                    ring_list = list(_DM_SNAPSHOT_RING)
-
-                # Find unseen entries (keyed by timestamp_ns)
-                new_entries = []
-                if ring_list:
-                    if last_seen_id is None:
-                        # First connection — send latest only (don't dump 1000 backlog)
-                        new_entries = [ring_list[-1]]
-                        last_seen_id = ring_list[-1].get('timestamp_ns', 0)
-                    else:
-                        for entry in ring_list:
-                            ts = entry.get('timestamp_ns', 0)
-                            if ts > last_seen_id:
-                                new_entries.append(entry)
-                        if new_entries:
-                            last_seen_id = new_entries[-1].get('timestamp_ns', last_seen_id)
-
-                if new_entries:
-                    # Fold all new entries into one omnibus fat packet (latest wins)
-                    snap = {}
-                    for entry in new_entries:
-                        snap.update({k: v for k, v in entry.items() if v is not None})
-
-                    # Augment with fresh DM hex if ring entry doesn't have one
-                    if not snap.get('density_matrix_hex'):
-                        dm_hex, dm_dim = _get_lattice_dm_hex()
-                        if dm_hex:
-                            snap['density_matrix_hex'] = dm_hex
-                            snap['dm_dim'] = dm_dim
-
-                    # Normalize mermin key — frontend expects mermin_test
-                    if 'bell_test' in snap and 'mermin_test' not in snap:
-                        snap['mermin_test'] = snap['bell_test']
-
-                    # Mark packet type for bus routing on frontend
-                    snap['packet_type'] = 'omnibus'
-                    snap['ready'] = True
-
-                    payload = json.dumps({"result": snap, "id": 1}, default=str)
-                    yield f"data: {payload}\n\n"
-                    last_hb = time.time()
-
-                # Heartbeat if no new data within interval
-                elif time.time() - last_hb >= HB_INTERVAL:
-                    # Push latest cached snapshot as heartbeat (not empty ping)
-                    with _snapshot_lock:
-                        cached = dict(_latest_snapshot) if _latest_snapshot else {}
-                    if cached:
-                        dm_hex, dm_dim = _get_lattice_dm_hex()
-                        if dm_hex:
-                            cached['density_matrix_hex'] = dm_hex
-                            cached['dm_dim'] = dm_dim
-                        cached['packet_type'] = 'heartbeat'
-                        cached['ready'] = True
-                        payload = json.dumps({"result": cached, "id": 1}, default=str)
-                        yield f"data: {payload}\n\n"
-                    else:
-                        yield f": heartbeat\n\n"
-                    last_hb = time.time()
-                else:
-                    time.sleep(0.02)  # 20ms poll on ring buffer — tight
-
-            except GeneratorExit:
-                break
+                # Fetch the current result as if it were an RPC call
+                # Use the internal logic of qtcl_getQuantumMetrics but stripped for SSE
+                
+                # 1. Get basic quantum state
+                res_metrics = _rpc_getQuantumMetrics(None, None)
+                result_data = res_metrics.get('result', {}) if isinstance(res_metrics, dict) else {}
+                
+                # 2. Get the specific high-res DM hex
+                dm_hex, dm_dim = _get_lattice_dm_hex()
+                if dm_hex:
+                    result_data['density_matrix_hex'] = dm_hex
+                    result_data['dm_dim'] = dm_dim
+                
+                # 3. Add any block field a la snapshot
+                _db_tip = query_latest_block()
+                _bh = int(_db_tip['height']) if _db_tip else 0
+                result_data['block_height'] = _bh
+                result_data['height'] = _bh
+                
+                # SSE Format: data: {"result": {...}, "id": 1}\n\n
+                payload = json.dumps({"result": result_data, "id": 1})
+                yield f"data: {payload}\n\n"
+                
+                # 300ms push interval for network stability
+                time.sleep(0.3)
             except Exception as e:
-                logger.debug(f"[SSE-RING] error: {e}")
-                time.sleep(0.05)
+                logger.debug(f"[SSE-SNAPSHOT] error: {e}")
+                yield f": heartbeat\n\n"
+                time.sleep(1)
 
-    headers = {
-        'Cache-Control': 'no-cache',
-        'X-Accel-Buffering': 'no',
-        'Access-Control-Allow-Origin': '*',
-    }
-    return Response(generate(), mimetype='text/event-stream', headers=headers)
+    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Content-Type': 'text/event-stream'}
+    return Response(generate(), headers=headers)
 
 @app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
 def rpc_metrics_push():
@@ -5309,8 +5254,8 @@ def _get_lattice_dm_hex() -> tuple:
     from globals import LATTICE
     
     now = time.time()
-    # Cache for 80ms — oracle runs at ~10ms; 1s was criminally stale
-    if now - _dm_hex_cache[2] < 0.08 and _dm_hex_cache[0]:
+    # Cache for 1s - oracle runs at ~10ms so this is safe
+    if now - _dm_hex_cache[2] < 1.0 and _dm_hex_cache[0]:
         return _dm_hex_cache[0], _dm_hex_cache[1]
     
     try:
