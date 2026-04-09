@@ -253,7 +253,7 @@ function showPage(id){
     document.getElementById('dm-cycle').textContent = cycle ?? '—';
   }
 
-  // POLL
+  // POLL using SSE endpoint
   function poll(){
     const ep = window.location.origin + '/rpc/oracle/snapshot';
     fetch(ep).then(r => r.text()).then(text => {
@@ -264,11 +264,8 @@ function showPage(id){
           const r = data.result || {};
           if(r.density_matrix_hex){
             renderMatrix(r.density_matrix_hex, r.w_state_fidelity, r.purity, r.lattice_refresh_counter);
-            // Update other UI
             document.getElementById('mermin-status').textContent = 'M=' + ((r.mermin_test?.M||0).toFixed(2));
             if(r.mermin_test) document.getElementById('mermin-M').textContent = r.mermin_test.M?.toFixed(3) || '—';
-            
-            // Update chain height
             if(r.block_height !== undefined) {
                 document.getElementById('chain-height').textContent = r.block_height;
             }
