@@ -4916,6 +4916,7 @@ _dm_thread.start()
 # _metrics_thread.start()
 logger.info("[MUX] DM thread only - metrics disabled for now")
 
+@app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """
     SSE STREAM — HIGH-FREQUENCY (50ms) DENSITY MATRIX AND METRICS.
@@ -4928,24 +4929,29 @@ def rpc_oracle_snapshot():
         import itertools
         for _ in itertools.count():
             try:
-                # Fetch the current result as if it were an RPC call
-                # Use the internal logic of qtcl_getQuantumMetrics but stripped for SSE
+                # 1. Get lattice state directly (in-memory, no DB required)
+                result_data = {}
+                try:
+                    lat = sys.modules[__name__].__dict__.get('LATTICE')
+                    if lat is not None:
+                        result_data['w_state_fidelity'] = getattr(lat, 'fidelity', None)
+                        result_data['purity'] = getattr(lat, 'purity', None)
+                        result_data['coherence_l1'] = getattr(lat, 'coherence', None)
+                        result_data['lattice_refresh_counter'] = getattr(lat, 'cycle_count', None)
+                except Exception:
+                    pass
                 
-                # 1. Get basic quantum state
-                res_metrics = _rpc_getQuantumMetrics(None, None)
-                result_data = res_metrics.get('result', {}) if isinstance(res_metrics, dict) else {}
-                
-                # 2. Get the specific high-res DM hex
+                # 2. Get the specific high-res DM hex (in-memory, no DB required)
                 dm_hex, dm_dim = _get_lattice_dm_hex()
                 if dm_hex:
                     result_data['density_matrix_hex'] = dm_hex
                     result_data['dm_dim'] = dm_dim
                 
-                # 3. Add any block field a la snapshot
-                _db_tip = query_latest_block()
-                _bh = int(_db_tip['height']) if _db_tip else 0
-                result_data['block_height'] = _bh
-                result_data['height'] = _bh
+                # 3. Add Mermin test data if available (in-memory)
+                with _snapshot_lock:
+                    _snap = dict(_latest_snapshot) if _latest_snapshot else {}
+                if 'mermin_test' in _snap:
+                    result_data['mermin_test'] = _snap.get('mermin_test')
                 
                 # SSE Format: data: {"result": {...}, "id": 1}\n\n
                 payload = json.dumps({"result": result_data, "id": 1})
