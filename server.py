@@ -609,8 +609,12 @@ logger.info("[ORACLE] 🔄 Oracle init deferred to background thread — gunicor
 
 POOLER_URL = os.getenv('POOLER_URL')
 _USE_HTTP_DB = os.getenv('USE_HTTP_DB', '0') == '1'  # PythonAnywhere: route SQL over HTTPS PostgREST
+_USE_DB_NONE = os.getenv('USE_DB', '1') == '0'  # Dev mode: no database
 
-if not POOLER_URL:
+if _USE_DB_NONE:
+    POOLER_URL = 'postgresql://disabled'
+    logger.warning("[DB] ⚠️  USE_DB=0 — database disabled (dev mode)")
+elif not POOLER_URL:
     POOLER_HOST     = os.getenv('POOLER_HOST')
     POOLER_USER     = os.getenv('POOLER_USER')
     POOLER_PASSWORD = os.getenv('POOLER_PASSWORD')
@@ -633,12 +637,8 @@ if not POOLER_URL:
         POOLER_URL = 'postgresql://http-mode-no-tcp-needed/postgres'
         logger.info("[DB] USE_HTTP_DB=1 — POOLER_URL not required (all SQL routes via HTTPS PostgREST)")
     else:
-        logger.error("[DB] ❌ CRITICAL: Supabase connection not configured!")
-        logger.error("[DB] Set one of:")
-        logger.error("[DB]   1. POOLER_URL=postgresql://...")
-        logger.error("[DB]   2. POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_DB, POOLER_PORT")
-        logger.error("[DB]   3. USE_HTTP_DB=1 + SUPABASE_URL + SUPABASE_SERVICE_KEY  (PythonAnywhere)")
-        raise ValueError("Supabase pooler connection variables not set")
+        logger.warning("[DB] ⚠️  No Supabase connection configured — using MOCK mode")
+        POOLER_URL = 'postgresql://mock:mock@mock.local:6543/mock'
 
 DB_URL = POOLER_URL
 
@@ -693,6 +693,15 @@ def _tx_worker_thread():
     import psycopg2 as _pg
     _tx_log = logging.getLogger('tx_worker')
     dsn = _build_tx_dsn()
+    if _USE_DB_NONE:
+        _tx_log.warning("[TX-WORKER] Database disabled (USE_DB=0)")
+        while True:
+            try:
+                job = _TX_JOB_Q.get(timeout=5)
+                job['result_q'].put({'error': 'DB disabled (USE_DB=0)'})
+            except _queue_mod2.Empty:
+                pass
+        return
     if not dsn:
         _tx_log.warning("[TX-WORKER] No DSN — thread idle (USE_HTTP_DB mode)")
         while True:
@@ -1333,6 +1342,14 @@ class DatabasePool:
             if self._initialized:
                 return
 
+            # ── Dev mode: no database ────────────────────────────────────────────
+            if _USE_DB_NONE:
+                logger.warning("[DB] Database disabled (USE_DB=0)")
+                self._initialized = True
+                self.use_pooling = False
+                self.pool = None
+                return
+
             # ── Retry backoff (soft — allows rapid retry for startup, backs off on persistent failure) ──
             _now = time.monotonic()
             if _now < self._next_retry_at:
@@ -1411,6 +1428,8 @@ class DatabasePool:
     def get_connection(self):
         if not self._initialized:
             self._initialize_pool()
+        if _USE_DB_NONE:
+            return None
         try:
             if self._http_mode and self.pool:
                 return self.pool.getconn()
@@ -4882,17 +4901,15 @@ def _multiplexer_worker():
             logger.error(f"[MUX-METRICS] error: {e}", exc_info=False)
             time.sleep(0.1)
 
-# Start DM thread - DM ONLY, no metrics multiplexing
+# Start SEPARATE THREADS for DM and Metrics - eliminates race condition
 _dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="MUX-DM")
 _dm_thread.start()
-logger.info("[MUX] DM SSE thread started (500ms interval, 2 FPS max)")
 
-# Metrics threading DISABLED - only DM + Mermin streams active
+# TEMPORARILY DISABLED - focusing on Mermin + Density Matrix only
 # _metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
 # _metrics_thread.start()
-logger.info("[MUX] Metrics disabled - DM+Mermin only")
+logger.info("[MUX] DM thread only - metrics disabled for now")
 
-# Clean unified SSE endpoint - DM only, properly throttled
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """
@@ -4921,11 +4938,14 @@ def rpc_oracle_snapshot():
     headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
     return Response(generate(), mimetype='text/event-stream', headers=headers)
 
-# Metrics push DISABLED - only DM+Mermin active
-# @app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
-# def rpc_metrics_push():
-#     """SSE STREAM — RPC PUSH metrics (disabled for DM+Mermin only)"""
-#     pass
+@app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
+def rpc_metrics_push():
+    """
+    SSE STREAM — RPC PUSH metrics (50ms cadence, no density matrix).
+    Server pushes metrics to all connected clients in real-time.
+    """
+    if request.method == "OPTIONS":
+        return "", 204
 
     client_queue = _queue_module.Queue(maxsize=50)
     with _snapshot_multiplexer_lock:
