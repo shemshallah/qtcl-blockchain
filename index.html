@@ -167,7 +167,7 @@ document.querySelectorAll('.tab').forEach(tab => {
   const hck = document.getElementById('hck');
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
-  // RENDER FUNCTION - Simple 64x64 density matrix with Hermitian mirroring
+  // RENDER FUNCTION - handles 8x8 oracle matrix expanded to full canvas
   function renderMatrix(hex, fidelity, purity, cycle){
     const canvas = document.getElementById('dm-canvas');
     if(!canvas || !hex) return;
@@ -175,46 +175,78 @@ document.querySelectorAll('.tab').forEach(tab => {
     if(!ctx) return;
     
     try {
-      const N = 64;
-      const re = new Float64Array(N*N);
-      const im = new Float64Array(N*N);
       const HEX = new Uint8Array(256);
       for(let i=0;i<10;i++)HEX[48+i]=i;
       for(let i=0;i<6;i++){HEX[65+i]=10+i;HEX[97+i]=10+i;}
       const dv = new DataView(new ArrayBuffer(8));
       const u8 = new Uint8Array(dv.buffer);
       
-      // Parse hex into complex matrix
-      for(let i=0;i<N*N;i++){
+      // Parse source matrix - detect size from hex length
+      // 8x8 = 2048 hex, 64x64 = 131072 hex
+      const hexLen = hex.length;
+      let srcN = 8;
+      if(hexLen >= 131072) srcN = 64;
+      else if(hexLen >= 8192) srcN = 16;
+      
+      const srcLen = srcN * srcN;
+      const srcRe = new Float64Array(srcLen);
+      const srcIm = new Float64Array(srcLen);
+      
+      for(let i=0;i<srcLen;i++){
         const off = i*32;
-        if(off+31>=hex.length) break;
-        for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
-        re[i]=dv.getFloat64(0,true);
-        for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
-        im[i]=dv.getFloat64(0,true);
+        if(off+31>=hexLen) break;
+        for(let b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
+        srcRe[i]=dv.getFloat64(0,true);
+        for(let b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
+        srcIm[i]=dv.getFloat64(0,true);
       }
       
-      // Hermitian mirror: copy upper triangle to lower
+      // Build 64x64 display by tiling the NxN source
+      const N = 64;
+      const outRe = new Float64Array(N*N);
+      const outIm = new Float64Array(N*N);
+      const tile = Math.floor(N / srcN);
+      
+      for(let si=0;si<srcN;si++){
+        for(let sj=0;sj<srcN;sj++){
+          const val = srcRe[si*srcN+sj];
+          const valIm = srcIm[si*srcN+sj];
+          // Tile this value across tile x tile area
+          for(let ti=0;ti<tile;ti++){
+            for(let tj=0;tj<tile;tj++){
+              const oi = si*tile + ti;
+              const oj = sj*tile + tj;
+              if(oi<N && oj<N){
+                outRe[oi*N+oj] = val;
+                outIm[oi*N+oj] = valIm;
+              }
+            }
+          }
+        }
+      }
+      
+      // Hermitian mirror upper to lower
       for(let i=0;i<N;i++){
         for(let j=i+1;j<N;j++){
           const ui = i*N+j;
           const li = j*N+i;
-          re[li]=re[ui]; im[li]=im[ui];
+          outRe[li]=outRe[ui]; 
+          outIm[li]=outIm[ui];
         }
       }
       
-      // Compute magnitude and find max
+      // Compute magnitude
       const mag = new Float64Array(N*N);
       let maxMag=0;
       for(let i=0;i<N*N;i++){
-        mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);
-        if(mag[i]>maxMag)maxMag=mag[i];
+        mag[i]=Math.sqrt(outRe[i]*outRe[i]+outIm[i]*outIm[i]);
+        if(mag[i]>maxMag) maxMag=mag[i];
       }
       
       // Render pixels
       const px = new Uint8ClampedArray(N*N*4);
       for(let i=0;i<N*N;i++){
-        const ph = Math.atan2(im[i],re[i]);
+        const ph = Math.atan2(outIm[i],outRe[i]);
         const normP = (ph+Math.PI)/(2*Math.PI);
         const hue = 160 + normP * 160;
         const lig = Math.min(0.9, 0.1 + (mag[i]/(maxMag||1))*0.8);
@@ -228,7 +260,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         px[p]=(r+m)*255;px[p+1]=(g+m)*255;px[p+2]=(b+m)*255;px[p+3]=255;
       }
       
-      // Draw to canvas
+      // Draw full 64x64 image scaled to canvas
       const img = new ImageData(px, N, N);
       const tc = document.createElement('canvas');
       tc.width=N;tc.height=N;
