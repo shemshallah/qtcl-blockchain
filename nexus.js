@@ -11,6 +11,7 @@ class StreamNexus {
         this.reconnectInterval = 1000;
         this.maxReconnectInterval = 30000;
         this.currentReconnectDelay = this.reconnectInterval;
+        this.pollInterval = null;
     }
 
     registerWorker(id, worker) {
@@ -19,31 +20,52 @@ class StreamNexus {
 
     connect() {
         console.log(`[StreamNexus] Initializing Quantum Stream: ${this.endpoint}`);
-        this.eventSource = new EventSource(this.endpoint);
+        
+        // Try EventSource (SSE) first
+        try {
+            this.eventSource = new EventSource(this.endpoint);
+            this.eventSource.onopen = () => {
+                console.log('[StreamNexus] SSE Stream Synchronized.');
+                this.currentReconnectDelay = this.reconnectInterval;
+            };
+            this.eventSource.onmessage = (e) => this.route(e.data);
+            this.eventSource.onerror = (err) => {
+                console.warn('[StreamNexus] SSE Divergence. Switching to RPC Polling...');
+                this.disconnect();
+                this.startPolling();
+            };
+        } catch (e) {
+            console.error('[StreamNexus] SSE Connection Failed:', e);
+            this.startPolling();
+        }
+    }
 
-        this.eventSource.onopen = () => {
-            console.log('[StreamNexus] Stream Synchronized.');
-            this.currentReconnectDelay = this.reconnectInterval;
-        };
-
-        this.eventSource.onmessage = (e) => {
-            this.route(e.data);
-        };
-
-        this.eventSource.onerror = (err) => {
-            console.error('[StreamNexus] Stream Divergence Detected. Attempting Re-coherence...');
-            this.disconnect();
-            setTimeout(() => {
-                this.currentReconnectDelay = Math.min(this.currentReconnectDelay * 2, this.maxReconnectInterval);
-                this.connect();
-            }, this.currentReconnectDelay);
-        };
+    startPolling() {
+        if (this.pollInterval) return;
+        console.log(`[StreamNexus] Transitioning to Aggressive RPC Polling: ${this.endpoint}`);
+        this.pollInterval = setInterval(async () => {
+            try {
+                const res = await fetch(this.endpoint);
+                if (res.ok) {
+                    const data = await res.json();
+                    // The server returns the result inside a 'result' key for RPC snapshots
+                    const wrappedData = data.result ? JSON.stringify({ result: data.result }) : JSON.stringify(data);
+                    this.route(wrappedData);
+                }
+            } catch (e) {
+                console.debug('[StreamNexus] Poll error:', e);
+            }
+        }, 300); // 300ms as specified in qtcl_client.py
     }
 
     disconnect() {
         if (this.eventSource) {
             this.eventSource.close();
             this.eventSource = null;
+        }
+        if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = null;
         }
     }
 
