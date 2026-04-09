@@ -121,7 +121,7 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
 <div id="network" class="page">
   <div class="pn">
     <div class="ph"><span class="pht">Nodes</span><span class="pb" id="network-status">IDLE</span></div>
-    <div style="padding:20px; font-family:var(--mono); font-size:10px" id="peer-list">
+    <div style="padding:20px; font-family:var(--mono); font-size:10px" id="node-list">
       <div style="color:var(--dim); text-align:center">Scanning for peers...</div>
     </div>
   </div>
@@ -330,8 +330,8 @@ document.querySelectorAll('.tab').forEach(tab => {
       body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getPeers', params: [50], id: 1})
     }).then(r => r.json()).then(res => {
       const peers = res.result?.peers || [];
-      const list = document.getElementById('peer-list');
-      list.innerHTML = peers.map(p => 
+      const list = document.getElementById('node-list');
+      if(list) list.innerHTML = peers.map(p => 
         '<div style="border-bottom:1px solid var(--b);padding:4px 0;display:flex;justify-content:space-between;color:var(--tx)">' +
         '<span>'+(p.peer_id||p.node_id||'').slice(0,12)+'...</span>' +
         '<span style="color:var(--vi)">'+(p.address||p.external_addr||'unknown')+'</span>' +
@@ -372,6 +372,12 @@ document.querySelectorAll('.tab').forEach(tab => {
   
   updateBlockChain();
   setInterval(updateBlockChain, 5000);
+  
+  connectSSE();
+  updateExplorer();
+  updateNetwork();
+  setInterval(updateExplorer, 5000);
+  setInterval(updateNetwork, 5000);
   
   document.getElementById('cp').classList.remove('off');
   document.getElementById('ct').textContent = 'LIVE';
