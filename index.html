@@ -94,15 +94,25 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
     </div>
   </div>
   <div class="tc">
-    <div class="pn"><div class="ph"><span class="pht">Lattice Height</span><span class="pb" id="chain-height">—</span></div></div>
-    <div class="pn"><div class="ph"><span class="pht">Peers</span><span class="pb" id="peer-count">0</span></div></div>
+    <div class="pn">
+      <div class="ph"><span class="pht">Block Chain</span><span class="pb" id="chain-height">—</span></div>
+      <div style="padding:10px; max-height:200px; overflow-y:auto" id="block-chain">
+        <div style="color:var(--dim); text-align:center">Loading chain...</div>
+      </div>
+    </div>
+    <div class="pn">
+      <div class="ph"><span class="pht">Peers</span><span class="pb" id="peer-count">0</span></div>
+      <div style="padding:10px; max-height:200px; overflow-y:auto" id="peer-list">
+        <div style="color:var(--dim); text-align:center">Scanning...</div>
+      </div>
+    </div>
   </div>
 </div>
 
 <div id="explorer" class="page">
   <div class="pn">
-    <div class="ph"><span class="pht">Blocks</span><span class="pb" id="explorer-status">IDLE</span></div>
-    <div style="padding:20px; font-family:var(--mono); font-size:10px" id="block-list">
+    <div class="ph"><span class="pht">Block Explorer</span><span class="pb" id="explorer-status">IDLE</span></div>
+    <div style="padding:10px; max-height:500px; overflow-y:auto" id="block-list">
       <div style="color:var(--dim); text-align:center">Fetching chain data...</div>
     </div>
   </div>
@@ -157,7 +167,7 @@ document.querySelectorAll('.tab').forEach(tab => {
   const hck = document.getElementById('hck');
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
-  // RENDER FUNCTION - Hermitian density matrix with quadrant mirroring
+  // RENDER FUNCTION - Hermitian density matrix with proper mirroring
   function renderMatrix(hex, fidelity, purity, cycle){
     const canvas = document.getElementById('dm-canvas');
     if(!canvas || !hex) return;
@@ -165,41 +175,90 @@ document.querySelectorAll('.tab').forEach(tab => {
     if(!ctx) return;
     
     try {
-      const N = 64;
-      const re = new Float64Array(N*N);
-      const im = new Float64Array(N*N);
       const HEX = new Uint8Array(256);
       for(let i=0;i<10;i++)HEX[48+i]=i;
       for(let i=0;i<6;i++){HEX[65+i]=10+i;HEX[97+i]=10+i;}
       const dv = new DataView(new ArrayBuffer(8));
       const u8 = new Uint8Array(dv.buffer);
       
-      // Parse hex into complex matrix
-      for(let i=0;i<N*N;i++){
+      // Detect matrix size from hex length
+      const hexLen = hex.length;
+      let srcN = 8; // default 8x8
+      if(hexLen >= 131072) srcN = 64; // 64x64 = 131072 hex chars
+      else if(hexLen >= 8192) srcN = 16; // 16x16
+      
+      const srcLen = srcN * srcN;
+      const srcRe = new Float64Array(srcLen);
+      const srcIm = new Float64Array(srcLen);
+      
+      // Parse source matrix
+      for(let i=0;i<srcLen;i++){
         const off = i*32;
-        if(off+31>=hex.length) break;
-        for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
-        re[i]=dv.getFloat64(0,true);
-        for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
-        im[i]=dv.getFloat64(0,true);
+        if(off+31>=hexLen) break;
+        for(let b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
+        srcRe[i]=dv.getFloat64(0,true);
+        for(let b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
+        srcIm[i]=dv.getFloat64(0,true);
       }
       
-      // Compute magnitude and phase
-      const mag = new Float64Array(N*N);
-      const phase = new Float64Array(N*N);
+      // Build display grid: Hermitian mirror for upper triangle
+      const N = 64;
+      const disp = new Float64Array(N*N); // magnitude
+      const dispPh = new Float64Array(N*N); // phase
+      
+      if(srcN === 8){
+        // 8x8 → 64x64: tile with Hermitian symmetry
+        for(let bi=0;bi<8;bi++){
+          for(let bj=0;bj<8;bj++){
+            const si = bi*8 + bj;
+            const re = srcRe[si], im = srcIm[si];
+            const mag = Math.sqrt(re*re + im*im);
+            const ph = Math.atan2(im, re);
+            // Place in 8x8 block of the 64x64 grid
+            for(let ri=0;ri<8;ri++){
+              for(let rj=0;rj<8;rj++){
+                const ti = bi*8 + ri;
+                const tj = bj*8 + rj;
+                disp[ti*N + tj] = mag;
+                dispPh[ti*N + tj] = ph;
+              }
+            }
+          }
+        }
+      } else {
+        // 64x64 or larger: direct copy
+        for(let i=0;i<N;i++){
+          for(let j=0;j<N;j++){
+            const si = i*srcN + j;
+            if(si < srcLen){
+              const re = srcRe[si], im = srcIm[si];
+              disp[i*N+j] = Math.sqrt(re*re+im*im);
+              dispPh[i*N+j] = Math.atan2(im, re);
+            }
+          }
+        }
+      }
+      
+      // Apply Hermitian symmetry: mirror upper triangle to lower
+      for(let i=0;i<N;i++){
+        for(let j=i+1;j<N;j++){
+          const upper = i*N+j;
+          const lower = j*N+i;
+          disp[lower] = disp[upper];
+          dispPh[lower] = dispPh[upper];
+        }
+      }
+      
+      // Find max magnitude
       let maxMag = 0;
-      for(let i=0;i<N*N;i++){
-        mag[i] = Math.sqrt(re[i]*re[i]+im[i]*im[i]);
-        phase[i] = Math.atan2(im[i],re[i]);
-        if(mag[i]>maxMag) maxMag = mag[i];
-      }
+      for(let i=0;i<N*N;i++){if(disp[i]>maxMag) maxMag=disp[i];}
       
-      // Build pixel buffer - Hermitian: display full matrix
+      // Render pixels
       const px = new Uint8ClampedArray(N*N*4);
       for(let i=0;i<N*N;i++){
-        const normP = (phase[i]+Math.PI)/(2*Math.PI);
+        const normP = (dispPh[i]+Math.PI)/(2*Math.PI);
         const hue = 160 + normP * 160;
-        const lig = Math.min(0.9, 0.1 + (mag[i]/(maxMag||1))*0.8);
+        const lig = Math.min(0.9, 0.1 + (disp[i]/(maxMag||1))*0.8);
         const sat = 0.8;
         const cc = (1-Math.abs(2*lig-1))*sat;
         const x = cc*(1-Math.abs((hue/60)%2-1));
@@ -210,21 +269,15 @@ document.querySelectorAll('.tab').forEach(tab => {
         px[p]=(r+m)*255;px[p+1]=(g+m)*255;px[p+2]=(b+m)*255;px[p+3]=255;
       }
       
-      // Draw full matrix scaled to canvas
+      // Draw scaled to canvas
       const img = new ImageData(px, N, N);
       const tc = document.createElement('canvas');
       tc.width=N;tc.height=N;
       tc.getContext('2d').putImageData(img,0,0);
       ctx.fillStyle='#000508';ctx.fillRect(0,0,canvas.width,canvas.height);
       ctx.imageSmoothingEnabled=false;
+      ctx.drawImage(tc,8,8,canvas.width-16,canvas.height-44);
       
-      // Center the matrix on the canvas, scale up to fill
-      const scale = Math.min(canvas.width-16, canvas.height-44) / N;
-      const ox = (canvas.width - N*scale)/2;
-      const oy = 8;
-      ctx.drawImage(tc, ox, oy, N*scale, N*scale);
-      
-      // Update HUD
       document.getElementById('dm-status').textContent = 'LIVE';
       document.getElementById('dm-fidelity').textContent = fidelity?.toFixed(4) || '—';
       document.getElementById('dm-purity').textContent = purity?.toFixed(4) || '—';
@@ -278,21 +331,31 @@ document.querySelectorAll('.tab').forEach(tab => {
     snapshotSource.onerror = function(){};
   }
   
-  // Explorer - fetch recent blocks
+  // Explorer - fetch recent blocks with in-depth info
   function updateExplorer(){
     fetch('/rpc', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getBlockRange', params: [0, 10], id: 1})
+      body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getBlockRange', params: [-20, -1], id: 1})
     }).then(r => r.json()).then(res => {
       if(res.result && res.result.blocks){
+        const blocks = res.result.blocks;
         const list = document.getElementById('block-list');
-        list.innerHTML = res.result.blocks.map(b => 
-          '<div style="border-bottom:1px solid var(--b);padding:4px 0;display:flex;justify-content:space-between;color:var(--tx)">' +
-          '<span>H:'+b.height+'</span>' +
-          '<span style="color:var(--cy)">'+(b.block_hash||'').slice(0,16)+'...</span>' +
-          '<span style="color:var(--dim)">'+new Date(b.timestamp*1000).toISOString().slice(11,19)+'</span></div>'
-        ).join('') || '<div style="color:var(--dim);text-align:center">No blocks</div>';
+        list.innerHTML = blocks.reverse().map(b => 
+          '<div style="border:1px solid var(--b);border-radius:4px;padding:8px;margin-bottom:8px;font-family:var(--mono);font-size:9px;color:var(--tx)">' +
+          '<div style="display:flex;justify-content:space-between;margin-bottom:4px">' +
+          '<span style="color:var(--cy);font-weight:bold">Block #' + b.height + '</span>' +
+          '<span style="color:var(--dim)">' + new Date(b.timestamp*1000).toISOString().slice(0,19) + ' UTC</span>' +
+          '</div>' +
+          '<div style="margin-bottom:3px"><span style="color:var(--dim)">Hash:</span> <span style="color:var(--go);word-break:break-all">' + (b.block_hash||'—') + '</span></div>' +
+          '<div style="margin-bottom:3px"><span style="color:var(--dim)">Parent:</span> <span style="color:var(--vi);word-break:break-all">' + (b.parent_hash||'genesis') + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between">' +
+          '<span style="color:var(--gr)">QF: ' + ((b.quantum_fidelity||0).toFixed(4)) + '</span>' +
+          '<span style="color:var(--dim)">PQ: ' + (b.pq_curr||'—') + '</span>' +
+          '<span style="color:var(--dim)">Txns: ' + (b.transaction_count||0) + '</span>' +
+          '</div>' +
+          '</div>'
+        ).join('') || '<div style="color:var(--dim);text-align:center">No blocks found</div>';
         document.getElementById('explorer-status').textContent = 'LIVE';
       }
     }).catch(() => {
@@ -322,26 +385,34 @@ document.querySelectorAll('.tab').forEach(tab => {
     });
   }
 
-  // Block height - fetch via RPC
-  function updateBlockHeight(){
+  // Block chain - fetch recent blocks with hashes and parent hashes
+  function updateBlockChain(){
     fetch('/rpc', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getBlockHeight', params: [], id: 1})
+      body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getBlockRange', params: [-10, -1], id: 1})
     }).then(r => r.json()).then(res => {
-      if(res.result){
-        document.getElementById('chain-height').textContent = res.result.height || res.result.blockHeight || '—';
+      if(res.result && res.result.blocks){
+        const blocks = res.result.blocks;
+        const list = document.getElementById('block-chain');
+        list.innerHTML = blocks.reverse().map((b, i) => 
+          '<div style="border-bottom:1px solid var(--b);padding:6px 0;font-family:var(--mono);font-size:9px;color:var(--tx)">' +
+          '<div style="display:flex;justify-content:space-between;margin-bottom:2px">' +
+          '<span style="color:var(--cy);font-weight:bold">H:' + b.height + '</span>' +
+          '<span style="color:var(--dim)">' + (b.block_hash||'').slice(0,16) + '...</span>' +
+          '</div>' +
+          '<div style="color:var(--dim);font-size:8px">' +
+          'Parent: ' + (b.parent_hash||'genesis').slice(0,20) + '...' +
+          '</div>' +
+          '</div>'
+        ).join('');
+        document.getElementById('chain-height').textContent = blocks.length > 0 ? blocks[blocks.length-1].height : '—';
       }
     }).catch(() => {});
   }
   
-  connectSSE();
-  updateExplorer();
-  updateNetwork();
-  updateBlockHeight();
-  setInterval(updateExplorer, 5000);
-  setInterval(updateNetwork, 5000);
-  setInterval(updateBlockHeight, 3000);
+  updateBlockChain();
+  setInterval(updateBlockChain, 5000);
   
   document.getElementById('cp').classList.remove('off');
   document.getElementById('ct').textContent = 'LIVE';

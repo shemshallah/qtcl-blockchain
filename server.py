@@ -3694,9 +3694,30 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
                 _srv_snap = dict(_latest_snapshot) if _latest_snapshot else {}
         except Exception:
             _srv_snap = {}
-
-
-        logger.debug(
+        
+        # Update _latest_snapshot with client DM data
+        if _client_consensus_dm_re and any(v != 0.0 for v in _client_consensus_dm_re):
+            try:
+                # Rebuild DM hex from client consensus
+                fused_re = _client_consensus_dm_re
+                fused_im = _client_consensus_dm_im
+                fused_hex = b''.join(struct.pack('>dd', fused_re[i], fused_im[i]) for i in range(64)).hex()
+                
+                composite = {
+                    **_srv_snap,
+                    'density_matrix_hex': fused_hex,
+                    'dm_dim': 8,
+                    'w_state_fidelity': _cons_fid,
+                    'purity': _cons_fid,
+                    'lattice_refresh_counter': _srv_snap.get('lattice_refresh_counter'),
+                    'mermin_test': _srv_snap.get('mermin_test'),
+                    'source': 'client_tripartite',
+                    'timestamp_ns': int(time.time() * 1e9),
+                }
+                _cache_snapshot(composite)
+                logger.debug(f"[PUSH-DM] Updated _latest_snapshot with client DM")
+            except Exception as fe:
+                logger.debug(f"[PUSH-DM] fuse error: {fe}")        logger.debug(
             f"[PUSH-DM] ✅ oracle_addr={oracle_addr[:16]} fid={fidelity:.4f} "
             f"pool={_pool_size} cons_fid={_cons_fid:.4f}"
         )
@@ -4917,11 +4938,14 @@ def rpc_oracle_snapshot():
                 except Exception:
                     pass
                 
-                # Get DM hex
+                # Get DM hex (no cache - fresh every call)
                 dm_hex, dm_dim = _get_lattice_dm_hex()
                 if dm_hex:
                     result_data['density_matrix_hex'] = dm_hex
                     result_data['dm_dim'] = dm_dim
+                    logger.debug(f"[SSE-SNAPSHOT] DM hex len={len(dm_hex)} dim={dm_dim}")
+                else:
+                    logger.debug(f"[SSE-SNAPSHOT] DM hex empty")
                 
                 # Get mermin test
                 with _snapshot_lock:
@@ -4946,8 +4970,52 @@ def rpc_oracle_snapshot():
     return Response(generate(), headers=headers)
 
 # ════════════════════════════════════════════════════════════════════════════════
-# BLOCKS SSE STREAM — Dedicated unblockable real-time block events
+# ORACLE SNAPSHOT PULLER — Background worker to keep _latest_snapshot fresh
 # ════════════════════════════════════════════════════════════════════════════════
+
+def _oracle_snapshot_puller():
+    """Pulls fresh snapshot from oracle every 300ms and updates _latest_snapshot."""
+    import time as _time
+    logger.info("[ORACLE-PULL] Oracle snapshot puller started")
+    while True:
+        try:
+            # Pull from LATTICE
+            from globals import LATTICE as _LAT
+            if _LAT is not None and hasattr(_LAT, 'current_density_matrix'):
+                dm = _LAT.current_density_matrix
+                if dm is not None and hasattr(dm, 'tobytes'):
+                    dm_hex = dm.tobytes().hex() if dm.shape == (8, 8) else ''
+                    
+                    # Pull metrics from LATTICE
+                    fidelity = getattr(_LAT, 'fidelity', None)
+                    purity = getattr(_LAT, 'purity', None)
+                    coherence = getattr(_LAT, 'coherence', None)
+                    cycle = getattr(_LAT, 'cycle_count', None)
+                    
+                    # Pull mermin from LATTICE
+                    mermin = getattr(_LAT, 'mermin_test', None)
+                    
+                    # Update snapshot cache
+                    snap = {
+                        'density_matrix_hex': dm_hex,
+                        'dm_dim': 8,
+                        'w_state_fidelity': fidelity,
+                        'purity': purity,
+                        'coherence_l1': coherence,
+                        'lattice_refresh_counter': cycle,
+                        'mermin_test': mermin,
+                        'timestamp_ns': int(_time.time() * 1e9),
+                        'ready': True,
+                    }
+                    _cache_snapshot(snap)
+                    logger.debug(f"[ORACLE-PULL] Updated snapshot cycle={cycle} fid={fidelity}")
+        except Exception as e:
+            logger.debug(f"[ORACLE-PULL] error: {e}")
+        _time.sleep(0.3)
+
+_oracle_puller_thread = threading.Thread(target=_oracle_snapshot_puller, daemon=True, name="OraclePuller")
+_oracle_puller_thread.start()
+logger.info("[ORACLE-PULL] Oracle snapshot puller started (300ms interval)")
 _blocks_sse_queue = _queue_module.Queue(maxsize=50)
 _connected_blocks_clients = []
 _blocks_multicast_lock = _threading_module.Lock()
@@ -5096,27 +5164,19 @@ def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
 _dm_hex_cache = ('', 0, 0)  # (hex, dim, timestamp)
 
 def _get_lattice_dm_hex() -> tuple:
-    """Pull current_density_matrix from LATTICE, return 64x64 reduced hex (cached).
+    """Pull current_density_matrix from LATTICE, return 64x64 reduced hex.
     
-    NOTE: This is server-side caching ONLY - does NOT affect oracle quantum simulation.
-    The oracle still runs true AER with real noise every cycle. This just caches
-    the 256→64 reduction for the frontend to avoid repeated CPU work.
+    No server-side caching - oracle runs at ~10ms, SSE at 300ms.
     """
     global _dm_hex_cache
-    from globals import LATTICE
-    
-    now = time.time()
-    # Cache for 1s - oracle runs at ~10ms so this is safe
-    if now - _dm_hex_cache[2] < 1.0 and _dm_hex_cache[0]:
-        return _dm_hex_cache[0], _dm_hex_cache[1]
+    from globals import LATTICE as _LAT
     
     try:
-        lat = LATTICE
+        lat = _LAT
         if lat is not None and hasattr(lat, 'current_density_matrix'):
             dm = lat.current_density_matrix
             if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
                 hex_val, dim = _lattice_dm_to_64x64_hex(dm)
-                _dm_hex_cache = (hex_val, dim, now)
                 return hex_val, dim
     except Exception as e:
         logger.debug(f"[DM] LATTICE access: {e}")
@@ -5127,8 +5187,7 @@ def _get_lattice_dm_hex() -> tuple:
             snap = _latest_snapshot
         if snap:
             h = snap.get('density_matrix_hex', '')
-            if h and len(h) == 2048:
-                _dm_hex_cache = (h, 8, now)
+            if h:
                 return h, 8
     except Exception:
         pass
