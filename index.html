@@ -14,6 +14,7 @@
   --go:#d4a020;--go2:rgba(212,160,32,.12);
   --vi:#8040ff;--vi2:rgba(128,64,255,.12);
   --gr:#00ff9d;--gr2:rgba(0,255,157,.10);
+  --re:#ff3355;--re2:rgba(255,51,85,.10);
   --dim:#3a4a68;--tx:#bbc8e0;--br:#e8f0ff;
   --mono:'JetBrains Mono',monospace;--disp:'Orbitron',sans-serif;--body:'DM Sans',sans-serif;
 }
@@ -156,7 +157,7 @@ document.querySelectorAll('.tab').forEach(tab => {
   const hck = document.getElementById('hck');
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
-  // RENDER FUNCTION
+  // RENDER FUNCTION - Hermitian density matrix with quadrant mirroring
   function renderMatrix(hex, fidelity, purity, cycle){
     const canvas = document.getElementById('dm-canvas');
     if(!canvas || !hex) return;
@@ -173,6 +174,7 @@ document.querySelectorAll('.tab').forEach(tab => {
       const dv = new DataView(new ArrayBuffer(8));
       const u8 = new Uint8Array(dv.buffer);
       
+      // Parse hex into complex matrix
       for(let i=0;i<N*N;i++){
         const off = i*32;
         if(off+31>=hex.length) break;
@@ -182,34 +184,47 @@ document.querySelectorAll('.tab').forEach(tab => {
         im[i]=dv.getFloat64(0,true);
       }
       
+      // Compute magnitude and phase
       const mag = new Float64Array(N*N);
-      let maxMag=0;
-      for(let i=0;i<N*N;i++){mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);if(mag[i]>maxMag)maxMag=mag[i];}
+      const phase = new Float64Array(N*N);
+      let maxMag = 0;
+      for(let i=0;i<N*N;i++){
+        mag[i] = Math.sqrt(re[i]*re[i]+im[i]*im[i]);
+        phase[i] = Math.atan2(im[i],re[i]);
+        if(mag[i]>maxMag) maxMag = mag[i];
+      }
+      
+      // Build pixel buffer - Hermitian: display full matrix
       const px = new Uint8ClampedArray(N*N*4);
       for(let i=0;i<N*N;i++){
-        const ph = Math.atan2(im[i],re[i]);
-        const normP = (ph+Math.PI)/(2*Math.PI);
+        const normP = (phase[i]+Math.PI)/(2*Math.PI);
         const hue = 160 + normP * 160;
         const lig = Math.min(0.9, 0.1 + (mag[i]/(maxMag||1))*0.8);
         const sat = 0.8;
-        const c = (1-Math.abs(2*lig-1))*sat;
-        const x = c*(1-Math.abs((hue/60)%2-1));
-        const m = lig-c/2;
+        const cc = (1-Math.abs(2*lig-1))*sat;
+        const x = cc*(1-Math.abs((hue/60)%2-1));
+        const m = lig-cc/2;
         let r,g,b;
-        if(hue<60){r=c;g=x;b=0}else if(hue<120){r=x;g=c;b=0}else if(hue<180){r=0;g=c;b=x}else if(hue<240){r=0;g=x;b=c}else if(hue<300){r=x;g=0;b=c}else{r=c;g=0;b=0}
+        if(hue<60){r=cc;g=x;b=0}else if(hue<120){r=x;g=cc;b=0}else if(hue<180){r=0;g=cc;b=x}else if(hue<240){r=0;g=x;b=cc}else if(hue<300){r=x;g=0;b=cc}else{r=cc;g=0;b=0}
         const p=i*4;
         px[p]=(r+m)*255;px[p+1]=(g+m)*255;px[p+2]=(b+m)*255;px[p+3]=255;
       }
       
-      const img = new ImageData(N,N);
-      img.data.set(px);
+      // Draw full matrix scaled to canvas
+      const img = new ImageData(px, N, N);
       const tc = document.createElement('canvas');
       tc.width=N;tc.height=N;
       tc.getContext('2d').putImageData(img,0,0);
       ctx.fillStyle='#000508';ctx.fillRect(0,0,canvas.width,canvas.height);
       ctx.imageSmoothingEnabled=false;
-      ctx.drawImage(tc,8,8,canvas.width-16,canvas.height-44);
       
+      // Center the matrix on the canvas, scale up to fill
+      const scale = Math.min(canvas.width-16, canvas.height-44) / N;
+      const ox = (canvas.width - N*scale)/2;
+      const oy = 8;
+      ctx.drawImage(tc, ox, oy, N*scale, N*scale);
+      
+      // Update HUD
       document.getElementById('dm-status').textContent = 'LIVE';
       document.getElementById('dm-fidelity').textContent = fidelity?.toFixed(4) || '—';
       document.getElementById('dm-purity').textContent = purity?.toFixed(4) || '—';
@@ -225,7 +240,6 @@ document.querySelectorAll('.tab').forEach(tab => {
   let snapshotSource;
   
   function connectSSE(){
-    // Main snapshot stream - server splits and distributes
     snapshotSource = new EventSource('/rpc/oracle/snapshot');
     snapshotSource.onmessage = function(e) {
       try {
@@ -248,22 +262,86 @@ document.querySelectorAll('.tab').forEach(tab => {
         
         // Mermin → display
         if(r.mermin_test){
-          document.getElementById('mermin-status').textContent = 'M=' + ((r.mermin_test.M||0).toFixed(2));
-          document.getElementById('mermin-M').textContent = r.mermin_test.M?.toFixed(3) || '—';
+          const M = r.mermin_test.M ?? r.mermin_test.value ?? 0;
+          document.getElementById('mermin-status').textContent = 'LIVE';
+          document.getElementById('mermin-M').textContent = M.toFixed(3);
+          const verdict = M > 2.0 ? 'ENTANGLED' : M < -2.0 ? 'ENTANGLED' : 'SEPARABLE';
+          document.getElementById('mermin-verdict').textContent = verdict;
         }
         
-        // Chain height
+        // Cycle
         if(r.lattice_refresh_counter !== undefined){
           document.getElementById('dm-cycle').textContent = r.lattice_refresh_counter ?? '—';
         }
-      } catch(e){}
+      } catch(e){console.log('SSE parse error', e);}
     };
     snapshotSource.onerror = function(){};
+  }
+  
+  // Explorer - fetch recent blocks
+  function updateExplorer(){
+    fetch('/rpc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getBlockRange', params: [0, 10], id: 1})
+    }).then(r => r.json()).then(res => {
+      if(res.result && res.result.blocks){
+        const list = document.getElementById('block-list');
+        list.innerHTML = res.result.blocks.map(b => 
+          '<div style="border-bottom:1px solid var(--b);padding:4px 0;display:flex;justify-content:space-between;color:var(--tx)">' +
+          '<span>H:'+b.height+'</span>' +
+          '<span style="color:var(--cy)">'+(b.block_hash||'').slice(0,16)+'...</span>' +
+          '<span style="color:var(--dim)">'+new Date(b.timestamp*1000).toISOString().slice(11,19)+'</span></div>'
+        ).join('') || '<div style="color:var(--dim);text-align:center">No blocks</div>';
+        document.getElementById('explorer-status').textContent = 'LIVE';
+      }
+    }).catch(() => {
+      document.getElementById('explorer-status').textContent = 'ERR';
+    });
+  }
+
+  // Network - fetch peers and count
+  function updateNetwork(){
+    fetch('/rpc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getPeers', params: [50], id: 1})
+    }).then(r => r.json()).then(res => {
+      const peers = res.result?.peers || [];
+      const list = document.getElementById('peer-list');
+      list.innerHTML = peers.map(p => 
+        '<div style="border-bottom:1px solid var(--b);padding:4px 0;display:flex;justify-content:space-between;color:var(--tx)">' +
+        '<span>'+(p.peer_id||p.node_id||'').slice(0,12)+'...</span>' +
+        '<span style="color:var(--vi)">'+(p.address||p.external_addr||'unknown')+'</span>' +
+        '<span>H:'+(p.chain_height||0)+'</span></div>'
+      ).join('') || '<div style="color:var(--dim);text-align:center">No peers</div>';
+      document.getElementById('network-status').textContent = 'LIVE';
+      document.getElementById('peer-count').textContent = peers.length;
+    }).catch(() => {
+      document.getElementById('network-status').textContent = 'ERR';
+    });
+  }
+
+  // Block height - fetch via RPC
+  function updateBlockHeight(){
+    fetch('/rpc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getBlockHeight', params: [], id: 1})
+    }).then(r => r.json()).then(res => {
+      if(res.result){
+        document.getElementById('chain-height').textContent = res.result.height || res.result.blockHeight || '—';
+      }
+    }).catch(() => {});
   }
   
   connectSSE();
   updateExplorer();
   updateNetwork();
+  updateBlockHeight();
+  setInterval(updateExplorer, 5000);
+  setInterval(updateNetwork, 5000);
+  setInterval(updateBlockHeight, 3000);
   
   document.getElementById('cp').classList.remove('off');
   document.getElementById('ct').textContent = 'LIVE';
