@@ -29,8 +29,11 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
 .cd{width:6px;height:6px;border-radius:50%;background:var(--gr);animation:pl 2s infinite}
 @keyframes pl{0%,100%{opacity:1;box-shadow:0 0 6px var(--gr)}50%{opacity:.4;box-shadow:none}}
 #hck{font-family:var(--mono);font-size:10px;color:var(--dim)}
-
-#main{flex:1;padding:20px;max-width:1400px;margin:0 auto;width:100%}
+#nav{display:flex;background:var(--bg2);border-bottom:1px solid var(--b);padding:0 20px}
+.tab{padding:10px 20px;font-family:var(--disp);font-size:9px;font-weight:700;color:var(--dim);cursor:pointer;transition:all .3s;border-bottom:2px solid transparent}
+.tab.active{color:var(--cy);border-bottom-color:var(--cy);background:var(--cy2)}
+.page{display:none;padding:20px;max-width:1400px;margin:0 auto;width:100%;flex:1}
+.page.active{display:flex;flex-direction:column;gap:20px}
 .tc{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 .pn{background:var(--card);border:1px solid var(--b);border-radius:8px;overflow:hidden}
 .ph{padding:10px 16px;border-bottom:1px solid var(--b);background:rgba(0,0,0,.2);display:flex;justify-content:space-between;align-items:center}
@@ -58,7 +61,13 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
   </div>
 </header>
 
-<div id="main">
+<div id="nav">
+  <div class="tab active" onclick="showPage('dashboard')">DASHBOARD</div>
+  <div class="tab" onclick="showPage('explorer')">EXPLORER</div>
+  <div class="tab" onclick="showPage('network')">NETWORK</div>
+</div>
+
+<div id="dashboard" class="page active">
   <div class="tc">
     <div class="pn">
       <div class="ph"><span class="pht">Density Matrix 64x64</span><span class="pb" id="dm-status">INIT</span></div>
@@ -75,14 +84,38 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
         <div class="bv"><div class="bvl">Cycle</div><div class="bvn" id="dm-cycle">—</div></div>
       </div>
     </div>
+    <div class="pn" id="mermin-module">
+      <div class="ph"><span class="pht">Mermin Test</span><span class="pb" id="mermin-status">INIT</span></div>
+      <div style="padding:20px;text-align:center">
+        <div style="font-size:36px;font-weight:bold;color:var(--re)" id="mermin-M">—</div>
+        <div style="font-size:10px;color:var(--dim);margin-top:8px" id="mermin-verdict">Awaiting...</div>
+      </div>
+    </div>
+  </div>
+  <div class="tc">
+    <div class="pn"><div class="ph"><span class="pht">Lattice Height</span><span class="pb" id="chain-height">—</span></div></div>
+    <div class="pn"><div class="ph"><span class="pht">Peers</span><span class="pb" id="peer-count">0</span></div></div>
   </div>
 </div>
 
-<script src="nexus.js"></script>
-<script src="matrix_worker.js"></script>
+<div id="explorer" class="page">
+  <div class="pn"><div class="ph"><span class="pht">Blocks</span></div><div style="padding:20px" id="block-list">No blocks yet</div></div>
+</div>
+
+<div id="network" class="page">
+  <div class="pn"><div class="ph"><span class="pht">Nodes</span></div><div style="padding:20px" id="peer-list">No peers yet</div></div>
+</div>
+
 <script>
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+
 (function(){
-  // LOGO ANIMATION
+  // LOGO - COUNTER-CLOCKWISE
   const c = document.getElementById('lc');
   const ctx = c ? c.getContext('2d') : null;
   let t = 0;
@@ -90,22 +123,16 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
     function drawLogo(){
       ctx.clearRect(0,0,36,36);
       const cx=18,cy=18,r=13,ri=7;
-      ctx.strokeStyle='rgba(0,220,255,.2)'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-      ctx.strokeStyle='rgba(128,64,255,.18)'; ctx.lineWidth=0.8;
-      ctx.beginPath(); ctx.arc(cx,cy,ri,0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle='rgba(0,220,255,.2)'; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle='rgba(128,64,255,.18)'; ctx.beginPath(); ctx.arc(cx,cy,ri,0,Math.PI*2); ctx.stroke();
       for(let i=0;i<4;i++){
         const a=i*Math.PI/2-t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
-        ctx.strokeStyle='rgba(0,220,255,.5)'; ctx.lineWidth=1;
-        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
-        ctx.fillStyle='rgba(0,220,255,.8)';
-        ctx.beginPath(); ctx.arc(x,y,2.2,0,Math.PI*2); ctx.fill();
+        ctx.strokeStyle='rgba(0,220,255,.5)'; ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
+        ctx.fillStyle='rgba(0,220,255,.8)'; ctx.beginPath(); ctx.arc(x,y,2.2,0,Math.PI*2); ctx.fill();
         const ix=cx+ri*Math.cos(a),iy=cy+ri*Math.sin(a);
-        ctx.fillStyle='rgba(128,64,255,.8)';
-        ctx.beginPath(); ctx.arc(ix,iy,1.5,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='rgba(128,64,255,.8)'; ctx.beginPath(); ctx.arc(ix,iy,1.5,0,Math.PI*2); ctx.fill();
       }
-      ctx.fillStyle='rgba(212,160,32,.95)';
-      ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='rgba(212,160,32,.95)'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
       t -= 0.02;
       requestAnimationFrame(drawLogo);
     }
@@ -116,36 +143,89 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
   const hck = document.getElementById('hck');
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
-  // NEXUS & WORKERS
-  const nexus = new StreamNexus(window.location.origin + '/rpc/oracle/snapshot');
-  const matrixWorker = new Worker('matrix_worker.js');
-  nexus.registerWorker('matrix', matrixWorker);
-
-  // SINK
-  matrixWorker.onmessage = function(e){
-    if(e.data.type === 'MATRIX_RENDER_READY'){
-      const canvas = document.getElementById('dm-canvas');
-      if(!canvas) return;
-      const ctx = canvas.getContext('2d');
-      if(!ctx) return;
-      const img = ctx.createImageData(e.data.N || 64, e.data.N || 64);
-      img.data.set(e.data.pixelBuffer);
-      const tc = document.createElement('canvas');
-      tc.width = e.data.N || 64; tc.height = e.data.N || 64;
-      tc.getContext('2d').putImageData(img, 0, 0);
-      ctx.fillStyle = '#000508'; ctx.fillRect(0,0,canvas.width, canvas.height);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(tc, 8, 8, canvas.width-16, canvas.height-44);
-      
-      document.getElementById('dm-status').textContent = 'LIVE';
-      document.getElementById('dm-fidelity').textContent = e.data.fidelity?.toFixed(4) || '—';
-      document.getElementById('dm-purity').textContent = e.data.purity?.toFixed(4) || '—';
-      document.getElementById('dm-fid').textContent = e.data.fidelity?.toFixed(4) || '—';
-      document.getElementById('dm-cycle').textContent = e.data.cycle || '—';
+  // RENDER FUNCTION
+  function renderMatrix(hex, fidelity, purity, cycle){
+    const canvas = document.getElementById('dm-canvas');
+    if(!canvas || !hex) return;
+    const ctx = canvas.getContext('2d');
+    if(!ctx) return;
+    
+    const N = 64;
+    const re = new Float64Array(N*N);
+    const im = new Float64Array(N*N);
+    const HEX = new Uint8Array(256);
+    for(let i=0;i<10;i++)HEX[48+i]=i;
+    for(let i=0;i<6;i++){HEX[65+i]=10+i;HEX[97+i]=10+i;}
+    const dv = new DataView(new ArrayBuffer(8));
+    const u8 = new Uint8Array(dv.buffer);
+    
+    for(let i=0;i<N*N;i++){
+      const off = i*32;
+      if(off+31>=hex.length) break;
+      for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
+      re[i]=dv.getFloat64(0,true);
+      for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
+      im[i]=dv.getFloat64(0,true);
     }
-  };
+    
+    const mag = new Float64Array(N*N);
+    let maxMag=0;
+    for(let i=0;i<N*N;i++){mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);if(mag[i]>maxMag)maxMag=mag[i];}
+    const px = new Uint8ClampedArray(N*N*4);
+    for(let i=0;i<N*N;i++){
+      const ph = Math.atan2(im[i],re[i]);
+      const normP = (ph+Math.PI)/(2*Math.PI);
+      const hue = 160 + normP * 160;
+      const lig = Math.min(0.9, 0.1 + (mag[i]/(maxMag||1))*0.8);
+      const sat = 0.8;
+      const c = (1-Math.abs(2*lig-1))*sat;
+      const x = c*(1-Math.abs((hue/60)%2-1));
+      const m = lig-c/2;
+      let r,g,b;
+      if(hue<60){r=c;g=x;b=0}else if(hue<120){r=x;g=c;b=0}else if(hue<180){r=0;g=c;b=x}else if(hue<240){r=0;g=x;b=c}else if(hue<300){r=x;g=0;b=c}else{r=c;g=0;b=0}
+      const p=i*4;
+      px[p]=(r+m)*255;px[p+1]=(g+m)*255;px[p+2]=(b+m)*255;px[p+3]=255;
+    }
+    
+    const img = new ImageData(N,N);
+    img.data.set(px);
+    const tc = document.createElement('canvas');
+    tc.width=N;tc.height=N;
+    tc.getContext('2d').putImageData(img,0,0);
+    ctx.fillStyle='#000508';ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.imageSmoothingEnabled=false;
+    ctx.drawImage(tc,8,8,canvas.width-16,canvas.height-44);
+    
+    document.getElementById('dm-status').textContent = 'LIVE';
+    document.getElementById('dm-fidelity').textContent = fidelity?.toFixed(4) || '—';
+    document.getElementById('dm-purity').textContent = purity?.toFixed(4) || '—';
+    document.getElementById('dm-fid').textContent = fidelity?.toFixed(4) || '—';
+    document.getElementById('dm-cycle').textContent = cycle ?? '—';
+  }
 
-  nexus.connect();
+  // POLL
+  function poll(){
+    const ep = window.location.origin + '/rpc/oracle/snapshot';
+    fetch(ep).then(r => r.text()).then(text => {
+      const match = text.match(/data:\s*(\{.*\})/);
+      if(match){
+        try{
+          const data = JSON.parse(match[1]);
+          const r = data.result || {};
+          if(r.density_matrix_hex){
+            renderMatrix(r.density_matrix_hex, r.w_state_fidelity, r.purity, r.lattice_refresh_counter);
+            // Update other UI
+            document.getElementById('mermin-status').textContent = 'M=' + ((r.mermin_test?.M||0).toFixed(2));
+            if(r.mermin_test) document.getElementById('mermin-M').textContent = r.mermin_test.M?.toFixed(3) || '—';
+          }
+        }catch(e){console.log('parse error',e);}
+      }
+    }).catch(e => { console.log('poll error',e); document.getElementById('dm-status').textContent = 'ERR'; });
+  }
+
+  setInterval(poll, 500);
+  poll();
+  
   document.getElementById('cp').classList.remove('off');
   document.getElementById('ct').textContent = 'LIVE';
 })();
