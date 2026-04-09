@@ -1323,13 +1323,13 @@ async function _workerTransactions(){
 // BOOT SEQUENCE — Phase-isolated enterprise launch
 // ════════════════════════════════════════════════════════════════════════════════
 function _boot(){
-  console.log('[QTCL] DM + Mermin only mode');
+  console.log('[QTCL] DENSITY STREAM ONLY - all other UI metrics frozen');
   
-  // Only: Density Matrix + Mermin via single SSE stream
-  _workerBlockHeight();  // lightweight height check
-  setTimeout(_workerDM, 100);  // DM + metrics via /rpc/oracle/snapshot
+  // ONLY: Density Matrix stream (W2) - all else disabled for hanging isolation
+  setTimeout(_workerDM, 100);  // DM + Mermin via /rpc/oracle/snapshot
   
-  // ALL OTHER WORKERS DISABLED for DM+Mermin debug only
+  // ALL OTHER WORKERS DISABLED for hanging debug
+  // _workerBlockHeight disabled
   // _workerMetricsPush disabled
   // _workerTransactions disabled  
   // _loadInitialBlocks disabled
