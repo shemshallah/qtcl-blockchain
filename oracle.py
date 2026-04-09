@@ -2210,9 +2210,9 @@ class OracleWStateManager:
         try:
             import sys as _sys
             _server_mod = _sys.modules.get('server')
-            if _server_mod and hasattr(_server_mod, '_enqueue_snapshot_for_streaming'):
-                # Build the dictionary snapshot for the multiplexer
-                _mux_snapshot = {
+            if _server_mod and hasattr(_server_mod, '_broadcast_snapshot_to_database'):
+                # Build the dictionary snapshot for the ring buffer/database
+                _broadcast_snap = {
                     'timestamp_ns': snapshot.timestamp_ns,
                     'lattice_refresh_counter': snapshot.lattice_refresh_counter,
                     'density_matrix_hex': snapshot.density_matrix_hex,
@@ -2232,17 +2232,18 @@ class OracleWStateManager:
                     'measurement_counts': snapshot.measurement_counts,
                     'bell_test': snapshot.bell_test,
                     'mermin_test': snapshot.bell_test,
-                    'oracle_id': None,  # Not per-node, consensus snapshot
+                    'oracle_id': None,  # consensus snapshot
                     'hlwe_signature': snapshot.hlwe_signature,
                     'oracle_address': snapshot.oracle_address,
                     'signature_valid': snapshot.signature_valid,
                 }
-                _server_mod._enqueue_snapshot_for_streaming(_mux_snapshot)
-                logger.info(f"[ORACLE CLUSTER] ✅ Snapshot enqueued for multiplexer (cycle {current_cycle})")
+                _server_mod._broadcast_snapshot_to_database(_broadcast_snap)
+                logger.info(f"[ORACLE CLUSTER] ✅ Snapshot broadcasted (cycle {current_cycle})")
             else:
-                logger.debug(f"[ORACLE CLUSTER] ⚠️ server._enqueue_snapshot_for_streaming not available")
+                logger.debug(f"[ORACLE CLUSTER] ⚠️ server._broadcast_snapshot_to_database not available")
         except Exception as _mux_err:
-            logger.debug(f"[ORACLE CLUSTER] Multiplexer enqueue skipped: {_mux_err}")
+            logger.debug(f"[ORACLE CLUSTER] Broadcast enqueue skipped: {_mux_err}")
+
 
         # ── Step 9: Broadcast authoritative snapshot with per_node data ──────────
         # This ensures the DM ring buffer has oracle-specific per_node readings
