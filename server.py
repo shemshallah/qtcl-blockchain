@@ -3717,7 +3717,9 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
                 _cache_snapshot(composite)
                 logger.debug(f"[PUSH-DM] Updated _latest_snapshot with client DM")
             except Exception as fe:
-                logger.debug(f"[PUSH-DM] fuse error: {fe}")        logger.debug(
+                logger.debug(f"[PUSH-DM] fuse error: {fe}")
+        
+        logger.debug(
             f"[PUSH-DM] ✅ oracle_addr={oracle_addr[:16]} fid={fidelity:.4f} "
             f"pool={_pool_size} cons_fid={_cons_fid:.4f}"
         )
