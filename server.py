@@ -4882,15 +4882,15 @@ def _multiplexer_worker():
             logger.error(f"[MUX-METRICS] error: {e}", exc_info=False)
             time.sleep(0.1)
 
-# Start DM thread - clean multiplexor for DM-only SSE stream
+# Start DM thread - DM ONLY, no metrics multiplexing
 _dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="MUX-DM")
 _dm_thread.start()
-logger.info("[MUX] DM SSE thread started (200ms interval, 5 FPS max)")
+logger.info("[MUX] DM SSE thread started (500ms interval, 2 FPS max)")
 
-# Metrics thread also starts but sends on different endpoint
-_metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
-_metrics_thread.start()
-logger.info("[MUX] Metrics RPC thread started (200ms interval)")
+# Metrics threading DISABLED - only DM + Mermin streams active
+# _metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
+# _metrics_thread.start()
+logger.info("[MUX] Metrics disabled - DM+Mermin only")
 
 # Clean unified SSE endpoint - DM only, properly throttled
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
@@ -4921,14 +4921,11 @@ def rpc_oracle_snapshot():
     headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
     return Response(generate(), mimetype='text/event-stream', headers=headers)
 
-@app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
-def rpc_metrics_push():
-    """
-    SSE STREAM — RPC PUSH metrics (50ms cadence, no density matrix).
-    Server pushes metrics to all connected clients in real-time.
-    """
-    if request.method == "OPTIONS":
-        return "", 204
+# Metrics push DISABLED - only DM+Mermin active
+# @app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
+# def rpc_metrics_push():
+#     """SSE STREAM — RPC PUSH metrics (disabled for DM+Mermin only)"""
+#     pass
 
     client_queue = _queue_module.Queue(maxsize=50)
     with _snapshot_multiplexer_lock:

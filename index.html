@@ -1015,41 +1015,39 @@ function renderMiners(miners){
   }).join('');
 }
 
-// ─── DOM UPDATE — single call site, Worker 1 only ────────────────────────────
-function st(id,v){var e=document.getElementById(id);if(!e) return;var s=String(v);if(e.textContent!==s){e.textContent=s;e.classList.remove('fl');void e.offsetWidth;e.classList.add('fl');}}
+// ─── DOM UPDATE — throttled, NO FLASH ───────────────────────────────
+var _domThrottle=0;
+function st(id,v){
+  var e=document.getElementById(id);
+  if(!e) return;
+  var s=String(v);
+  if(e.textContent!==s){
+    e.textContent=s;  // NO flash animation - just update
+  }
+}
 function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
 function fmt4(v){return v==null?'--':parseFloat(v).toFixed(4);}
 
 function updateDOM(){
-  st('hh','#'+S.height);st('hf',(S.fidelity*100).toFixed(2)+'%');st('hm',S.mempool_size+' tx');
-  st('mh',S.height);st('mhs','hash: '+(S.tip_hash||'').slice(0,14)+'...');
-  st('mf',(S.fidelity*100).toFixed(2)+'%');
-  var mfb=document.getElementById('mfb');if(mfb) mfb.style.width=pct(S.fidelity,1);
-  st('mfs',S.fidelity>=.9?'excellent':S.fidelity>=.75?'good':S.fidelity>=.7?'marginal':'degraded');
-  st('mc2',(S.coherence*100).toFixed(2)+'%');
-  var mcb=document.getElementById('mcb');if(mcb) mcb.style.width=pct(S.coherence,1);
-  st('mbt',S.avg_block_time_s>0?S.avg_block_time_s.toFixed(1)+'s':'--');
-  st('mtx',S.total_transactions);st('mdf',S.difficulty_bits);
-  st('mpu',(S.purity*100).toFixed(2)+'%');st('mng','negativity: '+fmt4(S.negativity));
-  st('msse',fmt4(S.sse));
-  st('mqf',fmt4(S.qfi));st('mdc','discord: '+fmt4(S.discord));
-  st('mrew',S.miner_reward_qtcl.toFixed(2)+' Q');st('mrew-depth','depth '+S.tessellation_depth+' tessellation');
-  st('mtrew',S.treasury_reward_qtcl.toFixed(2)+' Q');st('mtrew-pct',S.treasury_pct.toFixed(1)+'% of block');
-  st('bfi',fmt4(S.fidelity));st('ben',S.pq_curr);st('bcn',S.pq_last);st('bte',fmt4(S.tele_fidelity));
+  var now=Date.now();
+  if(now-_domThrottle<100) return;  // throttle: max 10 updates/sec
+  _domThrottle=now;
+  
+  // Only update DM+Mermin related elements
+  st('bfi',fmt4(S.fidelity));
+  st('ben',S.pq_curr);
+  st('bcn',S.pq_last);
+  st('bte',fmt4(S.tele_fidelity));
   st('dkb','pq0='+S.pq0+' pq_last='+S.pq_last+' \u2192 pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' \u0394='+(S.pq_curr-S.pq_last):''));
-  st('ng1',fmt4(S.gamma1));st('ngp',fmt4(S.gammaphi));st('nom',fmt4(S.omega));st('nqr',fmt4(S.qrng_health));
-  st('ndi',fmt4(S.discord));st('nou',fmt4(S.ou_mem));st('npd',fmt4(S.phase_drift));st('nso',fmt4(S.sector_occ));
-  st('vq',String(S.quantum_validation_status).replace(/_/g,' ').toUpperCase().slice(0,14));
-  st('vp',String(S.pq_validation_status).toUpperCase().slice(0,10));
-  st('vo',S.oracle_consensus_reached?'YES':'NO');
-  var vb=document.getElementById('vb');if(vb) vb.textContent=S.oracle_consensus_reached?'CONSENSUS':'PENDING';
-  st('bbd',S.difficulty_bits);st('bbn',S.n_peers||'\u2014');st('bbq',S.qrng_health.toFixed(3));
+  
+  // pq HUD
   var pqC=S.pq_curr||0,pqL=S.pq_last||0;
   var hl=document.getElementById('pqh-last');if(hl) hl.textContent=pqL;
   var hc=document.getElementById('pqh-curr');if(hc) hc.textContent=pqC;
   var hd=document.getElementById('pqh-delta');if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
   var hcy=document.getElementById('pqh-cycle');if(hcy) hcy.textContent='\u03C8 cyc='+S.cycle+(S.cycle>0&&S.cycle%8===0?' \u2191REVIVAL':S.cycle>0&&S.cycle%8===4?' \u2193ANTI':'');
-  renderOracles();
+  
+  // Mermin
   if(S.mermin) renderMermin(S.mermin);
 }
 function setOnline(ok){var p=document.getElementById('cp'),t=document.getElementById('ct');if(!p||!t) return;ok?p.classList.remove('off'):p.classList.add('off');t.textContent=ok?'LIVE':'OFFLINE';}
@@ -1132,32 +1130,18 @@ async function _workerBlockHeight(){
   finally{setTimeout(_workerBlockHeight, 4000);}
 }
 
-// W1: Metrics Worker — SSE stream for rapid RPC metrics push to UI
+// W1: Metrics Worker — DISABLED (DM+Mermin only)
 var _w1RPCPushES=null,_w1RPCReconnT=null;
 function _workerMetricsPush(){
+  // DISABLED - metrics streaming disabled, only DM+Mermin active
+  console.log('[W1-Metrics] disabled');
+  return;
+  /* OLD CODE DISABLED
   if(_w1RPCPushES){_w1RPCPushES.close();_w1RPCPushES=null;}
   try{
     _w1RPCPushES=new EventSource(BASE+'/rpc/metrics/push');
-    _w1RPCPushES.onmessage=function(e){
-      try{
-        var d=JSON.parse(e.data);
-        if(d.result) {
-          _applySnapshot(d.result);
-          updateDOM();
-        }
-        setOnline(true);
-      }catch(x){console.warn('[W1-Metrics] parse error',x.message);}
-    };
-    _w1RPCPushES.onerror=function(){
-      console.warn('[W1-Metrics] connection lost, reconnecting...');
-      if(_w1RPCPushES){_w1RPCPushES.close();_w1RPCPushES=null;}
-      clearTimeout(_w1RPCReconnT);
-      _w1RPCReconnT=setTimeout(_workerMetricsPush, 3000);
-    };
-  }catch(e){console.warn('[W1-Metrics] init failed',e.message);
-    clearTimeout(_w1RPCReconnT);
-    _w1RPCReconnT=setTimeout(_workerMetricsPush, 5000);
-  }
+    ...
+  */
 }
 
 // W2: Density Matrix Worker — SSE stream for 64x64 DM rendering
@@ -1177,15 +1161,18 @@ function _workerDM(){
         var pktype=r.packet_type||'dm';
         console.log('[W2-DM] msg#'+_w2MsgCount+' type='+pktype+' dim='+(r.dm_dim||'?'));
         
+        // DM packet - render density matrix heatmap
         if(pktype==='dm'&&r.density_matrix_hex){
           console.log('[W2-DM] submitting DM, hex len='+r.density_matrix_hex.length);
           _dmSubmit(r.density_matrix_hex, r.dm_dim||64);
           console.log('[W2-DM] DM submitted, _dmDirty='+_dmDirty);
         }
-        else if(pktype==='metrics'){
-          _applySnapshot(r);
-          updateDOM();
-        }
+        // Metrics also come through same stream for Mermin display
+        if(r.w_state_fidelity!=null) S.fidelity=r.w_state_fidelity;
+        if(r.purity!=null) S.purity=r.purity;
+        if(r.lattice_refresh_counter!=null) S.cycle=r.lattice_refresh_counter;
+        if(r.mermin_test) S.mermin=r.mermin_test;
+        updateDOM();
         setOnline(true);
       }catch(x){console.warn('[W2-DM] parse error',x.message);}
     };
@@ -1329,23 +1316,19 @@ async function _workerTransactions(){
 // BOOT SEQUENCE — Phase-isolated enterprise launch
 // ════════════════════════════════════════════════════════════════════════════════
 function _boot(){
-  console.log('[QTCL] Enterprise quantum orchestrator initializing...');
+  console.log('[QTCL] DM + Mermin only mode');
   
-  // Phase 1: Foundation workers (minimal footprint)
-  _workerBlockHeight();
-  _workerMetricsPush();
+  // Only: Density Matrix + Mermin via single SSE stream
+  _workerBlockHeight();  // lightweight height check
+  setTimeout(_workerDM, 100);  // DM + metrics via /rpc/oracle/snapshot
   
-  // Phase 2: DM and Tx load INDEPENDENTLY in parallel (not sequential)
-  // DM runs on isolated SSE stream (/rpc/oracle/snapshot - 64x64)
-  // Tx runs on independent worker
-  setTimeout(_workerDM, 100);
-  setTimeout(_workerTransactions, 150);
-  
-  // Phase 3: Chain state workers (blocks, mempool, peers)
-  setTimeout(_loadInitialBlocks, 200);  // Load blocks on startup
-  setTimeout(_workerBlocks, 2500);
-  setTimeout(_workerMempool, 3500);
-  setTimeout(_workerPeers, 4500);
+  // ALL OTHER WORKERS DISABLED for DM+Mermin debug only
+  // _workerMetricsPush disabled
+  // _workerTransactions disabled  
+  // _loadInitialBlocks disabled
+  // _workerBlocks disabled
+  // _workerMempool disabled
+  // _workerPeers disabled
 }
 _boot();
 </script>
