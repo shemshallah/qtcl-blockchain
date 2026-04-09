@@ -376,11 +376,11 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
   })();
 
   // ═══════════════════════════════════════════════════════════════════════════════
-  // MODULE 2: MERMIN INEQUALITY (Completely Sandboxed, Separate SSE Stream)
+  // MODULE 2: MERMIN INEQUALITY (Completely Sandboxed - POLLING ONLY, no SSE)
   // ═══════════════════════════════════════════════════════════════════════════════
   var MERMIN = (function(){
     var STATE = {M:0,verdict:'',cycle:0,angles:[],anglesLabels:[]};
-    var es=null, reconn=null, msgCount=0;
+    var msgCount=0, pollInterval=null, polling=false;
     
     function updateDOM(){
       var M=STATE.M, isQ=M>2.0;
@@ -401,69 +401,41 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
       }).join('');
     }
     
-    // Separate SSE stream - ONLY for Mermin, completely ignores DM
-    function startStream(){
-      if(es){es.close();es=null;}
+    // Polling ONLY - fetch mermin data via RPC (no SSE at all)
+    async function pollMermin(){
+      if(polling) return;
+      polling=true;
       try{
-        es=new EventSource(window.location.origin+'/rpc/events/mermin');  // DEDICATED endpoint
-        es.onmessage=function(e){
+        var r=await fetch(window.location.origin+'/rpc',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({jsonrpc:'2.0',id:Date.now(),method:'qtcl_getMerminTest',params:[]}),
+          signal:AbortSignal.timeout(5000)
+        });
+        if(!r.ok){polling=false;return;}
+        var j=await r.json();
+        var m=j.result||j;
+        if(!m){polling=false;return;}
+        
+        var mval=m.M_value||m.M||m.mermin_value||0;
+        if(mval){
+          STATE.M=parseFloat(mval);
+          STATE.verdict=m.verdict||m.interpretation||(STATE.M>2.0?'Quantum violation detected':'Classical bound');
+          if(m.cycle!=null) STATE.cycle=m.cycle;
+          if(m.angle_degrees) STATE.angles=m.angle_degrees;
+          if(m.angle_labels) STATE.anglesLabels=m.angle_labels;
           msgCount++;
-          try{
-            var d=JSON.parse(e.data);
-            var r=d.result||d;
-            if(!r) return;
-            
-            // ONLY process Mermin - ignore all DM data
-            var mval=r.M_value||r.M||r.mermin_value||0;
-            STATE.M=parseFloat(mval);
-            STATE.verdict=r.verdict||r.interpretation||(STATE.M>2.0?'Quantum violation detected':'Classical bound');
-            if(r.cycle!=null) STATE.cycle=r.cycle;
-            if(r.angle_degrees) STATE.angles=r.angle_degrees;
-            if(r.angle_labels) STATE.anglesLabels=r.angle_labels;
-            
-            updateDOM();
-            document.getElementById('mermin-status').textContent='LIVE '+msgCount;
-          }catch(x){console.warn('[MERMIN-SSE]',x.message);}
-        };
-        es.onerror=function(){
-          if(es){es.close();es=null;}
-          clearTimeout(reconn);
-          reconn=setTimeout(startStream,3000);
-        };
-      }catch(e){
-        clearTimeout(reconn);
-        reconn=setTimeout(startStream,5000);
-      }
+          updateDOM();
+          var st=document.getElementById('mermin-status');
+          if(st)st.textContent='POLL '+msgCount;
+        }
+      }catch(x){/* silent fail */}
+      polling=false;
     }
     
-    // Fallback: also listen on general oracle snapshot but ONLY extract Mermin
-    function startFallbackStream(){
-      try{
-        var fallES=new EventSource(window.location.origin+'/rpc/oracle/snapshot');
-        fallES.onmessage=function(e){
-          try{
-            var d=JSON.parse(e.data);
-            var r=d.result;
-            if(!r) return;
-            
-            // Only extract Mermin - ignore DM completely
-            if(r.mermin_test||r.mermin){
-              var m=(r.mermin_test||r.mermin);
-              var mval=m.M_value||m.M||m.mermin_value||0;
-              STATE.M=parseFloat(mval)||STATE.M;
-              STATE.verdict=m.verdict||m.interpretation||(STATE.M>2.0?'Quantum violation detected':'Classical bound');
-              if(m.angle_degrees) STATE.angles=m.angle_degrees;
-              if(m.cycle!=null) STATE.cycle=m.cycle;
-              updateDOM();
-            }
-          }catch(x){}
-        };
-      }catch(x){}
-    }
-    
-    // Start
-    setTimeout(startStream,150);
-    setTimeout(startFallbackStream,300);
+    // Start polling - NO SSE at all
+    setTimeout(pollMermin,200);
+    pollInterval=setInterval(pollMermin, 4000);
     
     return {getState:function(){return STATE;}};
   })();
