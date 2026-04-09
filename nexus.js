@@ -1,5 +1,5 @@
 /**
- * StreamNexus: Minimal Worker Orchestrator
+ * StreamNexus: Worker Orchestrator
  */
 class StreamNexus {
     constructor(endpoint) {
@@ -15,12 +15,10 @@ class StreamNexus {
     connect() {
         console.log('[Nexus] Connecting to:', this.endpoint);
         
-        // Use simple polling - no SSE fallback complexity
         this.pollInterval = setInterval(async () => {
             try {
                 const res = await fetch(this.endpoint);
                 const text = await res.text();
-                // Parse SSE: data: {"result": {...}}\n\n
                 const match = text.match(/data:\s*(\{.*\})/);
                 if (match) {
                     const data = JSON.parse(match[1]);
@@ -33,7 +31,7 @@ class StreamNexus {
     }
 
     route(result) {
-        // Route to matrix worker only for now
+        // Matrix Worker
         if (result.density_matrix_hex && this.workers.has('matrix')) {
             this.workers.get('matrix').postMessage({
                 type: 'UPDATE_MATRIX',
@@ -41,6 +39,22 @@ class StreamNexus {
                 dim: result.dm_dim || 64,
                 fidelity: result.w_state_fidelity,
                 purity: result.purity
+            });
+        }
+        // Peer Worker
+        if (result.peers && this.workers.has('peers')) {
+            this.workers.get('peers').postMessage({
+                type: 'UPDATE_PEERS',
+                peers: result.peers,
+                status: result.status || 'stable'
+            });
+        }
+        // Transaction Worker
+        if (result.transactions && this.workers.has('txs')) {
+            this.workers.get('txs').postMessage({
+                type: 'UPDATE_TXS',
+                txs: result.transactions,
+                block: result.latest_block || null
             });
         }
     }

@@ -99,11 +99,21 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
 </div>
 
 <div id="explorer" class="page">
-  <div class="pn"><div class="ph"><span class="pht">Blocks</span></div><div style="padding:20px" id="block-list">No blocks yet</div></div>
+  <div class="pn">
+    <div class="ph"><span class="pht">Blocks</span><span class="pb" id="explorer-status">IDLE</span></div>
+    <div style="padding:20px; font-family:var(--mono); font-size:10px" id="block-list">
+      <div style="color:var(--dim); text-align:center">Fetching chain data...</div>
+    </div>
+  </div>
 </div>
 
 <div id="network" class="page">
-  <div class="pn"><div class="ph"><span class="pht">Nodes</span></div><div style="padding:20px" id="peer-list">No peers yet</div></div>
+  <div class="pn">
+    <div class="ph"><span class="pht">Nodes</span><span class="pb" id="network-status">IDLE</span></div>
+    <div style="padding:20px; font-family:var(--mono); font-size:10px" id="peer-list">
+      <div style="color:var(--dim); text-align:center">Scanning for peers...</div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -133,7 +143,7 @@ function showPage(id){
         ctx.fillStyle='rgba(128,64,255,.8)'; ctx.beginPath(); ctx.arc(ix,iy,1.5,0,Math.PI*2); ctx.fill();
       }
       ctx.fillStyle='rgba(212,160,32,.95)'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
-      t -= 0.02; // Counter-clockwise
+      t += 0.02; // Corrected for counter-clockwise in standard canvas coords
       requestAnimationFrame(drawLogo);
     }
     drawLogo();
@@ -150,23 +160,63 @@ function showPage(id){
     const ctx = canvas.getContext('2d');
     if(!ctx) return;
     
-    const N = 64;
-    const re = new Float64Array(N*N);
-    const im = new Float64Array(N*N);
-    const HEX = new Uint8Array(256);
-    for(let i=0;i<10;i++)HEX[48+i]=i;
-    for(let i=0;i<6;i++){HEX[65+i]=10+i;HEX[97+i]=10+i;}
-    const dv = new DataView(new ArrayBuffer(8));
-    const u8 = new Uint8Array(dv.buffer);
-    
-    for(let i=0;i<N*N;i++){
-      const off = i*32;
-      if(off+31>=hex.length) break;
-      for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
-      re[i]=dv.getFloat64(0,true);
-      for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
-      im[i]=dv.getFloat64(0,true);
+    try {
+      const N = 64;
+      const re = new Float64Array(N*N);
+      const im = new Float64Array(N*N);
+      const HEX = new Uint8Array(256);
+      for(let i=0;i<10;i++)HEX[48+i]=i;
+      for(let i=0;i<6;i++){HEX[65+i]=10+i;HEX[97+i]=10+i;}
+      const dv = new DataView(new ArrayBuffer(8));
+      const u8 = new Uint8Array(dv.buffer);
+      
+      for(let i=0;i<N*N;i++){
+        const off = i*32;
+        if(off+31>=hex.length) break;
+        for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
+        re[i]=dv.getFloat64(0,true);
+        for(let b=0;b<8;b++)u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
+        im[i]=dv.getFloat64(0,true);
+      }
+      
+      const mag = new Float64Array(N*N);
+      let maxMag=0;
+      for(let i=0;i<N*N;i++){mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);if(mag[i]>maxMag)maxMag=mag[i];}
+      const px = new Uint8ClampedArray(N*N*4);
+      for(let i=0;i<N*N;i++){
+        const ph = Math.atan2(im[i],re[i]);
+        const normP = (ph+Math.PI)/(2*Math.PI);
+        const hue = 160 + normP * 160;
+        const lig = Math.min(0.9, 0.1 + (mag[i]/(maxMag||1))*0.8);
+        const sat = 0.8;
+        const c = (1-Math.abs(2*lig-1))*sat;
+        const x = c*(1-Math.abs((hue/60)%2-1));
+        const m = lig-c/2;
+        let r,g,b;
+        if(hue<60){r=c;g=x;b=0}else if(hue<120){r=x;g=c;b=0}else if(hue<180){r=0;g=c;b=x}else if(hue<240){r=0;g=x;b=c}else if(hue<300){r=x;g=0;b=c}else{r=c;g=0;b=0}
+        const p=i*4;
+        px[p]=(r+m)*255;px[p+1]=(g+m)*255;px[p+2]=(b+m)*255;px[p+3]=255;
+      }
+      
+      const img = new ImageData(N,N);
+      img.data.set(px);
+      const tc = document.createElement('canvas');
+      tc.width=N;tc.height=N;
+      tc.getContext('2d').putImageData(img,0,0);
+      ctx.fillStyle='#000508';ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.imageSmoothingEnabled=false;
+      ctx.drawImage(tc,8,8,canvas.width-16,canvas.height-44);
+      
+      document.getElementById('dm-status').textContent = 'LIVE';
+      document.getElementById('dm-fidelity').textContent = fidelity?.toFixed(4) || '—';
+      document.getElementById('dm-purity').textContent = purity?.toFixed(4) || '—';
+      document.getElementById('dm-fid').textContent = fidelity?.toFixed(4) || '—';
+      document.getElementById('dm-cycle').textContent = cycle ?? '—';
+    } catch (e) {
+      console.error('Render Error:', e);
+      document.getElementById('dm-status').textContent = 'RENDER ERR';
     }
+  }
     
     const mag = new Float64Array(N*N);
     let maxMag=0;
@@ -217,14 +267,82 @@ function showPage(id){
             // Update other UI
             document.getElementById('mermin-status').textContent = 'M=' + ((r.mermin_test?.M||0).toFixed(2));
             if(r.mermin_test) document.getElementById('mermin-M').textContent = r.mermin_test.M?.toFixed(3) || '—';
+            
+            // Update chain height
+            if(r.block_height !== undefined) {
+                document.getElementById('chain-height').textContent = r.block_height;
+            }
           }
         }catch(e){console.log('parse error',e);}
       }
     }).catch(e => { console.log('poll error',e); document.getElementById('dm-status').textContent = 'ERR'; });
   }
+  
+  function updateExplorer(){
+    const ep = window.location.origin + '/rpc';
+    const req = {
+        jsonrpc: "2.0",
+        method: "qtcl_getBlockRange",
+        params: [0, 10],
+        id: 1
+    };
+    fetch(ep, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(req)
+    }).then(r => r.json()).then(res => {
+        if(res.result && res.result.blocks){
+            const list = document.getElementById('block-list');
+            list.innerHTML = res.result.blocks.map(b => 
+                `<div style="border-bottom:1px solid var(--b); padding:4px 0; display:flex; justify-content:space-between">
+                    <span>H: ${b.height}</span>
+                    <span style="color:var(--cy)">${b.block_hash?.slice(0,16)}...</span>
+                    <span>${new Date(b.timestamp*1000).toISOString().slice(11,19)}</span>
+                </div>`
+            ).join('') || '<div style="color:var(--dim); text-align:center">No blocks found</div>';
+            document.getElementById('explorer-status').textContent = 'LIVE';
+        }
+    }).catch(e => {
+        document.getElementById('explorer-status').textContent = 'ERR';
+    });
+  }
 
+  function updateNetwork(){
+    const ep = window.location.origin + '/rpc';
+    const req = {
+        jsonrpc: "2.0",
+        method: "qtcl_getPeers",
+        params: [50],
+        id: 1
+    };
+    fetch(ep, {
+        method: 'POST',
+        headers: {'Content-Hype': 'application/json'},
+        body: JSON.stringify(req)
+    }).then(r => r.json()).then(res => {
+        if(res.result && res.result.peers){
+            const list = document.getElementById('peer-list');
+            list.innerHTML = res.result.peers.map(p => 
+                `<div style="border-bottom:1px solid var(--b); padding:4px 0; display:flex; justify-content:space-between">
+                    <span>${p.node_id?.slice(0,8)}...</span>
+                    <span style="color:var(--vi)">${p.address || 'unknown'}</span>
+                    <span>H: ${p.chain_height || 0}</span>
+                </div>`
+            ).join('') || '<div style="color:var(--dim); text-align:center">No peers found</div>';
+            document.getElementById('network-status').textContent = 'LIVE';
+            document.getElementById('peer-count').textContent = res.result.count;
+        }
+    }).catch(e => {
+        document.getElementById('network-status').textContent = 'ERR';
+    });
+  }
+  
   setInterval(poll, 500);
+  setInterval(updateExplorer, 5000);
+  setInterval(updateNetwork, 5000);
   poll();
+  updateExplorer();
+  updateNetwork();
   
   document.getElementById('cp').classList.remove('off');
   document.getElementById('ct').textContent = 'LIVE';

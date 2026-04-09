@@ -78,6 +78,25 @@ _snapshot_log_interval = 10
 _DM_SNAPSHOT_RING = deque(maxlen=1000)
 _DM_SNAPSHOT_LOCK = threading.RLock()
 
+def _broadcast_snapshot_to_database(snapshot: dict) -> None:
+    """
+    Push snapshot into the ring buffer and latest_snapshot cache.
+    If it's a database-backed environment, we could also persist here.
+    """
+    global _latest_snapshot, _latest_snapshot_ts
+    with _DM_SNAPSHOT_LOCK:
+        _DM_SNAPSHOT_RING.append(snapshot)
+    
+    with _snapshot_lock:
+        _latest_snapshot = snapshot
+        _latest_snapshot_ts = int(time.time())
+    
+    _log_rpc_event('oracle_snapshot', {
+        'cycle': snapshot.get('lattice_cycle'), 
+        'fidelity': snapshot.get('fidelity')
+    })
+
+
 # ═══ CLIENT TRIPARTITE ORACLE POOL ═══════════════════════════════════════════
 # Receives fused DMs pushed by trusted client oracle nodes (qtcl_pushOracleDM).
 # Keyed by oracle_addr → {dm_re, dm_im, fidelity, ts, node_ip, oracle_type}
