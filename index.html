@@ -6,22 +6,14 @@
 <title>QTCL &middot; Quantum Temporal Coherence Ledger</title>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="QTCL is a live post-quantum proof-of-work blockchain with W-state entangled block certification, HLWE post-quantum signatures, and Mermin inequality-verified 5-node oracle consensus. Block explorer, live transactions, and quantum metrics.">
-  <meta name="keywords" content="quantum blockchain, post-quantum cryptography, W-state entanglement, Mermin inequality, HLWE, lattice cryptography, proof of work, block explorer, QRNG">
+  <meta name="description" content="QTCL is a live post-quantum proof-of-work blockchain with W-state entangled block certification, HLWE post-quantum signatures, and Mermin inequality-verified 5-node oracle consensus.">
   <meta name="author" content="Shemshallah">
   <meta property="og:title" content="QTCL · Quantum Temporal Coherence Ledger">
-  <meta property="og:description" content="Live post-quantum PoW blockchain. W-state certified blocks. HLWE signatures. Mermin M₃≈2.8 oracle consensus.">
+  <meta property="og:description" content="Live post-quantum PoW blockchain">
   <meta property="og:url" content="https://qtcl-blockchain.koyeb.app/">
   <meta property="og:type" content="website">
-  <meta name="twitter:card" content="summary">
-  <meta name="twitter:site" content="@galacticfed638">
-  <meta name="twitter:creator" content="@galacticfed638">
-  <meta name="twitter:title" content="QTCL · Quantum Blockchain Explorer">
-  <meta name="twitter:description" content="Live post-quantum PoW blockchain. W-state certified blocks. Mermin inequality oracle.">
   <link rel="canonical" href="https://qtcl-blockchain.koyeb.app/">
-  <link rel="sitemap" type="application/xml" href="/sitemap.xml">
-  <meta name="google-site-verification" content="TCf7Ywazq-Y0iMZJj51d6L-AgbPgp-4h2ayXQmVIDMo">
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
 
 <style>
@@ -38,7 +30,6 @@
 }
 html{font-size:14px;background:var(--bg)}
 body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100vh;display:flex;flex-direction:column}
-body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.05) 3px,rgba(0,0,0,.05) 4px)}
 #hdr{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;background:rgba(3,6,16,.97);border-bottom:1px solid var(--b2);position:sticky;top:0;z-index:100;flex-shrink:0}
 #hdr::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cy) 40%,var(--vi) 70%,transparent);opacity:.5}
 .hb{display:flex;align-items:center;gap:12px}
@@ -57,19 +48,6 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 #hck{font-family:var(--mono);font-size:10px;color:var(--dim)}
 #page{flex:1;padding:16px 20px 32px;display:flex;flex-direction:column;gap:16px;max-width:1600px;width:100%;margin:0 auto}
 .st{font-family:var(--disp);font-size:8px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--dim);margin-bottom:10px}
-.mg{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px}
-.mc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .2s}
-.mc:hover{border-color:var(--b2)}
-.mc::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cy),var(--vi));opacity:.6}
-.mc.go::after{background:linear-gradient(90deg,var(--go),#ffcf60)}
-.mc.vi::after{background:linear-gradient(90deg,var(--vi),var(--cy))}
-.mc.gr::after{background:var(--gr)}
-.ml{font-size:9px;color:var(--dim);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
-.mv{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--cy);line-height:1;min-height:26px;transition:color .3s}
-.mv.go{color:var(--go)}.mv.vi{color:var(--vi)}.mv.gr{color:var(--gr)}.mv.dm{color:var(--dim)}
-.ms{font-size:9px;color:var(--dim);margin-top:5px;font-family:var(--mono)}
-.mb{height:2px;background:var(--bg3);border-radius:2px;margin-top:8px;overflow:hidden}
-.mbf{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--cy),var(--vi));transition:width .8s ease}
 .tc{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 @media(max-width:900px){.tc{grid-template-columns:1fr}}
 .pn{background:var(--card);border:1px solid var(--b);border-radius:8px;overflow:hidden}
@@ -78,73 +56,6 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .pb{font-family:var(--mono);font-size:8px;letter-spacing:1px;padding:2px 8px;border-radius:3px;background:var(--cy2);color:var(--cy);border:1px solid rgba(0,220,255,.2)}
 .pb.go{background:var(--go2);color:var(--go);border-color:rgba(212,160,32,.2)}
 .pb.vi{background:var(--vi2);color:var(--vi);border-color:rgba(128,64,255,.2)}
-.pb.gr{background:var(--gr2);color:var(--gr);border-color:rgba(0,255,157,.2)}
-#dc,#qc{display:block;width:100%}
-#cs{overflow-x:auto;padding:12px 16px;display:flex;align-items:center;gap:0;min-height:96px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
-#cs::-webkit-scrollbar{height:3px}
-#cs::-webkit-scrollbar-thumb{background:var(--b)}
-.bn{flex-shrink:0;display:flex;flex-direction:column;align-items:center}
-.bco{width:24px;height:2px;flex-shrink:0;background:var(--b2);position:relative;align-self:center}
-.bco::after{content:'';position:absolute;right:-4px;top:-3px;border:4px solid transparent;border-left-color:var(--b2)}
-.bh{width:56px;height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;position:relative;transition:transform .2s}
-.bh:hover{transform:scale(1.12)}
-.bh canvas{position:absolute;inset:0}
-.bnum{font-family:var(--mono);font-size:10px;font-weight:600;color:var(--go);z-index:1}
-.btx{font-family:var(--mono);font-size:8px;color:var(--dim);z-index:1}
-.bl{font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:4px;max-width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
-.bn.fr .bh{animation:bfr .6s cubic-bezier(.34,1.56,.64,1)}
-@keyframes bfr{0%{transform:scale(0);opacity:0}100%{transform:scale(1);opacity:1}}
-.tt{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
-.tt th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);padding:8px 14px;border-bottom:1px solid var(--b);text-align:left;background:rgba(0,0,0,.15);font-family:var(--disp);font-weight:700}
-.tt td{padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.04);color:var(--tx)}
-.tt tr:hover td{background:var(--cy2)}
-.tt tr.fr td{animation:tfr .5s ease-out}
-@keyframes tfr{0%{background:rgba(0,220,255,.15)}100%{background:transparent}}
-.tba{display:inline-block;font-size:8px;padding:2px 7px;border-radius:3px;letter-spacing:.5px;font-family:var(--disp)}
-.tba.pending{background:var(--go2);color:var(--go)}
-.tba.confirmed{background:var(--gr2);color:var(--gr)}
-.tba.coinbase{background:var(--vi2);color:var(--vi)}
-.tba.treasury{background:var(--go2);color:var(--go);border:1px solid rgba(212,160,32,.3)}
-.tba.transfer{background:var(--cy2);color:var(--cy)}
-.txfbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.15);color:var(--dim);font-size:9px;
-  padding:3px 8px;border-radius:3px;cursor:pointer;font-family:var(--disp);letter-spacing:.5px;transition:all .2s}
-.txfbtn:hover,.txfbtn.active{background:rgba(0,220,255,.18);color:var(--cy);border-color:var(--cy)}
-.txfbtn.active.cb{background:rgba(255,0,200,.15);color:var(--vi);border-color:var(--vi)}
-.txfbtn.active.tr{background:rgba(0,220,255,.15);color:var(--cy);border-color:var(--cy)}
-.txpbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.12);color:var(--dim);font-size:10px;
-  padding:3px 12px;border-radius:3px;cursor:pointer;font-family:var(--mono);transition:all .2s}
-.txpbtn:hover:not(:disabled){color:var(--cy);border-color:var(--cy)}
-.txpbtn:disabled{opacity:.3;cursor:default}
-.miner-row{display:flex;flex-direction:column;padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.05);transition:background .15s}
-.miner-row:hover{background:rgba(0,220,255,.04)}
-.miner-row.live .miner-dot{background:var(--gr);box-shadow:0 0 5px var(--gr);animation:pl 1.8s infinite}
-.miner-row.seen .miner-dot{background:var(--go)}
-.miner-row.historic .miner-dot{background:var(--dim)}
-@keyframes p2ppulse{0%,100%{opacity:1;box-shadow:0 0 8px var(--gr),0 0 16px rgba(0,255,157,.3)}50%{opacity:.5;box-shadow:none}}
-.miner-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:3px}
-.miner-addr{font-family:var(--mono);font-size:10px;color:var(--cy);cursor:pointer;user-select:all}
-.miner-addr:hover{color:#fff}
-.miner-stats{display:flex;gap:12px;font-size:9px;margin-top:3px;color:var(--dim)}
-.miner-stat-val{color:var(--tx)}
-.miner-badge{font-size:8px;padding:1px 5px;border-radius:2px;font-family:var(--disp);letter-spacing:.4px}
-.miner-badge.live{background:rgba(0,255,157,.12);color:var(--gr)}
-.miner-badge.seen{background:rgba(255,165,0,.12);color:var(--go)}
-.miner-badge.historic{background:rgba(255,255,255,.06);color:var(--dim)}
-.tx-cb td:first-child{border-left:2px solid var(--vi)}
-.tx-tr td:first-child{border-left:2px solid rgba(0,220,255,.3)}
-.tx-new{animation:tfr .8s ease}
-.or{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--b);transition:background .2s}
-.or:hover{background:var(--vi2)}
-.or:last-child{border-bottom:none}
-.od{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.od.on{background:var(--gr);box-shadow:0 0 6px var(--gr)}
-.od.off{background:var(--re)}
-.on2{font-family:var(--mono);font-size:10px;color:var(--br);flex:1}
-.ort{font-size:8px;color:var(--dim)}
-.of{font-family:var(--mono);font-size:11px;color:var(--vi);font-weight:600}
-.nr{display:flex;justify-content:space-between;padding:7px 16px;border-bottom:1px solid rgba(0,220,255,.05)}
-.nr:last-child{border-bottom:none}
-.nk{font-size:9px;color:var(--dim)}.nv{font-family:var(--mono);font-size:10px;color:var(--vi)}
 .md{padding:16px;display:flex;align-items:center;gap:20px}
 .mb2{font-family:var(--disp);font-size:48px;font-weight:900;line-height:1;flex-shrink:0;transition:color .5s}
 .mb2.q{color:var(--cy);text-shadow:0 0 30px rgba(0,220,255,.4)}
@@ -162,48 +73,6 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .bv:last-child{border-right:none}
 .bvl{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
 .bvn{font-family:var(--mono);font-size:13px;color:var(--vi)}
-#bb{position:sticky;bottom:0;display:flex;align-items:center;height:30px;background:rgba(3,6,16,.99);border-top:1px solid rgba(0,220,255,.22);font-family:var(--mono);font-size:10px;overflow:hidden;flex-shrink:0;gap:0}
-.bi{display:flex;align-items:center;gap:6px;padding:0 14px;white-space:nowrap;border-right:1px solid rgba(0,220,255,.12);height:100%}
-.bl2{color:rgba(90,120,160,.9);font-size:8.5px;letter-spacing:.8px;text-transform:uppercase}.bv2{color:var(--cy);font-size:10.5px}.bvg{color:var(--gr);font-size:10.5px}.bvy{color:var(--go);font-size:10.5px}
-#bt{flex:1;overflow:hidden}
-#bts{display:inline-block;animation:tk 42s linear infinite;white-space:nowrap;color:rgba(150,180,220,.7);font-size:9.5px;letter-spacing:.3px;padding-left:100%}
-@keyframes tk{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
-#bu{padding:0 14px;white-space:nowrap;color:rgba(140,170,210,.85);border-left:1px solid rgba(0,220,255,.12);font-size:9.5px}
-.sy{overflow-y:auto;max-height:280px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
-.sy::-webkit-scrollbar{width:3px}
-.sy::-webkit-scrollbar-thumb{background:var(--b)}
-.fl{animation:fl .4s ease-out}
-@keyframes fl{0%{color:var(--cy);text-shadow:0 0 12px var(--cy)}100%{}}
-.es{padding:24px;text-align:center;font-size:11px;color:var(--dim)}
-/* ── Block detail modal ───────────────────────────────────────────────────── */
-#blk-modal-bg{display:none;position:fixed;inset:0;z-index:9100;background:rgba(0,0,0,.72);backdrop-filter:blur(3px);align-items:center;justify-content:center}
-#blk-modal-bg.open{display:flex}
-#blk-modal{background:var(--card);border:1px solid var(--b2);border-radius:10px;width:min(540px,94vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 0 60px rgba(0,220,255,.1)}
-#blk-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cy),var(--vi));border-radius:10px 10px 0 0;pointer-events:none}
-.bm-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--b);flex-shrink:0}
-.bm-title{font-family:var(--disp);font-size:11px;letter-spacing:2px;color:var(--cy)}
-.bm-meta{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px}
-.bm-close{width:24px;height:24px;border-radius:50%;border:1px solid var(--b2);background:transparent;color:var(--dim);cursor:pointer;font-size:14px;line-height:22px;text-align:center;transition:all .15s}
-.bm-close:hover{border-color:var(--cy);color:var(--cy)}
-.bm-body{overflow-y:auto;flex:1;padding:8px 0;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
-.bm-body::-webkit-scrollbar{width:3px}.bm-body::-webkit-scrollbar-thumb{background:var(--b)}
-.bm-tx{display:flex;align-items:flex-start;gap:10px;padding:10px 16px;border-bottom:1px solid rgba(0,220,255,.05);cursor:pointer;transition:background .15s;position:relative}
-.bm-tx:last-child{border-bottom:none}
-.bm-tx:hover{background:rgba(0,220,255,.05)}
-.bm-tx:active{background:rgba(0,220,255,.1)}
-.bm-tx-icon{flex-shrink:0;width:28px;height:28px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:12px;margin-top:1px}
-.bm-tx-icon.coinbase{background:rgba(128,64,255,.15);border:1px solid rgba(128,64,255,.25)}
-.bm-tx-icon.transfer{background:rgba(0,220,255,.08);border:1px solid rgba(0,220,255,.15)}
-.bm-tx-info{flex:1;min-width:0}
-.bm-tx-hash{font-family:var(--mono);font-size:10px;color:var(--cy);word-break:break-all;line-height:1.4}
-.bm-tx-sub{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap}
-.bm-tx-amt{font-family:var(--mono);font-size:11px;font-weight:600;flex-shrink:0;margin-top:1px}
-.bm-tx-amt.coinbase{color:var(--vi)}.bm-tx-amt.transfer{color:var(--go)}
-.bm-copy-hint{position:absolute;right:14px;bottom:8px;font-size:8px;color:var(--dim);opacity:0;transition:opacity .2s;font-family:var(--disp);letter-spacing:.5px}
-.bm-tx:hover .bm-copy-hint{opacity:1}
-.bm-copied{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,255,157,.15);border:1px solid var(--gr);color:var(--gr);font-family:var(--mono);font-size:11px;padding:8px 20px;border-radius:6px;pointer-events:none;z-index:9200;opacity:0;transition:opacity .2s}
-.bm-copied.show{opacity:1}
-.bm-loading{padding:32px;text-align:center;font-family:var(--mono);font-size:10px;color:var(--dim)}
 </style>
 </head>
 <body>
@@ -212,1132 +81,442 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
     <canvas id="lc" width="36" height="36"></canvas>
     <div>
       <div class="ht">QTCL</div>
-      <div class="hs">Quantum Temporal Coherence Ledger &middot; Explorer</div>
-      <div style="font-size:0.85rem; margin-top:4px; color:#00dcff;">Mining client is available at <a href="https://www.github.com/shemshallah/qtcl-miner" target="_blank" style="color:#00dcff; text-decoration:underline;">github.com/shemshallah/qtcl-miner</a></div>
+      <div class="hs">Quantum Temporal Coherence Ledger</div>
     </div>
   </div>
   <div class="hr">
-    <div class="hst"><div class="hstl">Height</div><div class="hstv" id="hh">&mdash;</div></div>
-    <div class="hst"><div class="hstl">W-Fidelity</div><div class="hstv" id="hf">&mdash;</div></div>
-    <div class="hst"><div class="hstl">Mempool</div><div class="hstv" id="hm">&mdash;</div></div>
     <div id="cp"><span class="cd"></span><span id="ct">CONNECTING</span></div>
     <div id="hck"></div>
   </div>
 </header>
 <div id="page">
-  <div>
-    <div class="st">Chain Metrics</div>
-    <div class="mg">
-      <div class="mc go"><div class="ml">Block Height</div><div class="mv go dm" id="mh">&mdash;</div><div class="ms" id="mhs">hash: &mdash;</div></div>
-      <div class="mc"><div class="ml">W-State Fidelity</div><div class="mv dm" id="mf">&mdash;</div><div class="mb"><div class="mbf" id="mfb" style="width:0"></div></div><div class="ms" id="mfs">quantum confidence</div></div>
-      <div class="mc vi"><div class="ml">Coherence</div><div class="mv vi dm" id="mc2">&mdash;</div><div class="mb"><div class="mbf" id="mcb" style="width:0;background:linear-gradient(90deg,var(--vi),var(--cy))"></div></div></div>
-      <div class="mc gr"><div class="ml">Avg Block Time</div><div class="mv gr dm" id="mbt">&mdash;</div><div class="ms">seconds</div></div>
-      <div class="mc"><div class="ml">Total Transactions</div><div class="mv dm" id="mtx">&mdash;</div><div class="ms">on-chain</div></div>
-      <div class="mc"><div class="ml">Difficulty</div><div class="mv dm" id="mdf">&mdash;</div><div class="ms">leading hex zeros</div></div>
-      <div class="mc go"><div class="ml">Block Reward</div><div class="mv go dm" id="mrew">8.00 Q</div><div class="ms" id="mrew-depth">tessellation depth &mdash;</div></div>
-      <div class="mc"><div class="ml">Treasury / Block</div><div class="mv dm" id="mtrew">&mdash;</div><div class="ms" id="mtrew-pct">&mdash;% of block</div></div>
-      <div class="mc"><div class="ml">Purity</div><div class="mv vi dm" id="mpu">&mdash;</div><div class="ms" id="mng">negativity: &mdash;</div></div>
-      <div class="mc"><div class="ml">SSE</div><div class="mv dm" id="msse">&mdash;</div><div class="ms">sum of squared entropies</div></div>
-      <div class="mc"><div class="ml">QFI</div><div class="mv dm" id="mqf">&mdash;</div><div class="ms" id="mdc">discord: &mdash;</div></div>
-    </div>
-  </div>
   <div class="tc">
-    <div class="pn">
-      <div class="ph"><span class="pht">Density Matrix · 8×8 complex128</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
+    <!-- DENSITY MATRIX MODULE (Sandboxed) -->
+    <div class="pn" id="dm-module">
+      <div class="ph"><span class="pht">Density Matrix · 8×8 complex128</span><span class="pb vi" id="dm-status">INIT</span></div>
       <div id="dm-panel" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;">
         <canvas id="dm-canvas" width="640" height="340" style="width:100%;height:100%;display:block"></canvas>
-        <!-- pq HUD strip -->
         <div id="pq-hud" style="position:absolute;left:0;bottom:0;right:0;height:28px;pointer-events:none;z-index:11;display:flex;align-items:center;padding:0 10px;gap:14px;background:linear-gradient(0deg,rgba(0,5,8,.92) 0%,transparent 100%)">
           <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.55);letter-spacing:1.5px">BLOCK FIELD</span>
           <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_last=<span id="pqh-last" style="color:#8040ff">—</span></span>
           <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_curr=<span id="pqh-curr" style="color:#d4a020">—</span></span>
           <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">&Delta;=<span id="pqh-delta" style="color:#00ff9d">—</span></span>
           <span style="flex:1"></span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">&psi; —</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">ψ —</span>
         </div>
       </div>
       <div class="bs">
-        <div class="bv"><div class="bvl">|W₃| Fidelity</div><div class="bvn" id="bfi">&mdash;</div></div>
-        <div class="bv"><div class="bvl">pq_curr</div><div class="bvn" id="ben" style="color:var(--go)">&mdash;</div></div>
-        <div class="bv"><div class="bvl">pq_last</div><div class="bvn" id="bcn">&mdash;</div></div>
-        <div class="bv"><div class="bvl">Field Fidelity</div><div class="bvn" id="bte">&mdash;</div></div>
+        <div class="bv"><div class="bvl">|W₃| Fidelity</div><div class="bvn" id="dm-fidelity">—</div></div>
+        <div class="bv"><div class="bvl">pq_curr</div><div class="bvn" id="dm-pq-curr" style="color:var(--go)">—</div></div>
+        <div class="bv"><div class="bvl">pq_last</div><div class="bvn" id="dm-pq-last">—</div></div>
+        <div class="bv"><div class="bvl">Purity</div><div class="bvn" id="dm-purity">—</div></div>
       </div>
     </div>
-    <div class="pn">
-      <div class="ph"><span class="pht">Mermin Inequality Test</span><span class="pb" id="mb3">M &mdash;</span><span class="pb vi" id="mcy" style="font-size:.72em;opacity:.6">cycle —</span></div>
+
+    <!-- MERMIN MODULE (Sandboxed, separate from DM) -->
+    <div class="pn" id="mermin-module">
+      <div class="ph"><span class="pht">Mermin Inequality Test</span><span class="pb" id="mermin-status">INIT</span><span class="pb vi" id="mermin-cycle" style="font-size:.72em;opacity:.6">cycle —</span></div>
       <div class="md">
-        <div class="mb2 c" id="mM">&mdash;</div>
+        <div class="mb2 c" id="mermin-M">—</div>
         <div class="mi">
-          <div class="mv2" id="mvd">Awaiting oracle measurement&hellip;</div>
-          <div class="ms2">Classical bound: 2.0 &middot; W-max: 3.046 &middot; GHZ-max: 4.0</div>
-          <div class="mba"><div class="mbaf" id="mbar" style="width:0"></div></div>
+          <div class="mv2" id="mermin-verdict">Awaiting oracle measurement…</div>
+          <div class="ms2">Classical bound: 2.0 · W-max: 3.046 · GHZ-max: 4.0</div>
+          <div class="mba"><div class="mbaf" id="mermin-bar" style="width:0"></div></div>
           <div class="mbl"><span>0</span><span>2.0</span><span>3.046</span><span>4.0</span></div>
         </div>
       </div>
-      <div class="mac" id="mac"></div>
-      <div class="ph"><span class="pht">GKSL Noise Bath</span><span class="pb">LIVE</span></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr">
-        <div>
-          <div class="nr"><span class="nk">gamma1 (amp)</span><span class="nv" id="ng1">&mdash;</span></div>
-          <div class="nr"><span class="nk">gammaphi (deph)</span><span class="nv" id="ngp">&mdash;</span></div>
-          <div class="nr"><span class="nk">omega</span><span class="nv" id="nom">&mdash;</span></div>
-          <div class="nr"><span class="nk">QRNG health</span><span class="nv" id="nqr">&mdash;</span></div>
-        </div>
-        <div>
-          <div class="nr"><span class="nk">discord</span><span class="nv" id="ndi">&mdash;</span></div>
-          <div class="nr"><span class="nk">ou_mem</span><span class="nv" id="nou">&mdash;</span></div>
-          <div class="nr"><span class="nk">phase_drift</span><span class="nv" id="npd">&mdash;</span></div>
-          <div class="nr"><span class="nk">sector_occ</span><span class="nv" id="nso">&mdash;</span></div>
-        </div>
-      </div>
+      <div class="mac" id="mermin-angles"></div>
     </div>
-  </div>
-  <div class="pn">
-    <div class="ph"><span class="pht">Block Stream &mdash; Live</span><span class="pb go" id="bcc">0 blocks</span></div>
-    <div id="cs"></div>
-  </div>
-  <div class="tc">
-    <div class="pn">
-      <div class="ph">
-        <span class="pht">Transaction Explorer</span>
-        <span style="display:flex;gap:8px;align-items:center">
-          <span class="pb vi" id="txb">0 txs</span>
-          <button class="txfbtn active" id="txf-all" onclick="txFilter('all')">ALL</button>
-          <button class="txfbtn" id="txf-coinbase" onclick="txFilter('coinbase')">COINBASE</button>
-          <button class="txfbtn" id="txf-transfer" onclick="txFilter('transfer')">TRANSFER</button>
-          <button class="txfbtn" id="txf-treasury" onclick="txFilter('treasury')">🏛 TREASURY</button>
-        </span>
-      </div>
-      <div style="padding:6px 16px 2px;display:flex;align-items:center;gap:8px">
-        <input id="txsearch" placeholder="Search address or hash…" oninput="txSearch(this.value)"
-          style="flex:1;background:rgba(0,220,255,.05);border:1px solid rgba(0,220,255,.15);color:var(--tx);
-                 font-family:var(--mono);font-size:11px;padding:5px 10px;border-radius:4px;outline:none"/>
-        <span id="tx-live" style="font-size:9px;color:var(--gr);letter-spacing:.5px">● LIVE</span>
-      </div>
-      <div id="txwrap" style="height:340px;overflow-y:auto;overflow-x:hidden">
-        <table class="tt" style="width:100%;table-layout:fixed">
-          <thead><tr>
-            <th style="width:80px">Type</th>
-            <th style="width:130px">Hash</th>
-            <th style="width:90px">From</th>
-            <th style="width:90px">To</th>
-            <th style="width:80px">Amount</th>
-            <th style="width:60px">Block</th>
-            <th style="width:65px">Status</th>
-          </tr></thead>
-          <tbody id="ttb"><tr><td colspan="7" class="es">Loading&hellip;</td></tr></tbody>
-        </table>
-      </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 16px;border-top:1px solid var(--b)">
-        <button class="txpbtn" onclick="txPage(-1)" id="txprev">◀ Prev</button>
-        <span id="txpageinfo" style="font-size:10px;color:var(--dim)">Page 1</span>
-        <button class="txpbtn" onclick="txPage(1)" id="txnext">Next ▶</button>
-      </div>
-    </div>
-    <div class="pn">
-      <div class="ph"><span class="pht">Oracle Network (5 nodes)</span><span class="pb vi">3-of-5 Byzantine</span></div>
-      <div id="ol"><div class="es">Loading&hellip;</div></div>
-      <div class="ph"><span class="pht">Validation</span><span class="pb gr" id="vb">&mdash;</span></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr">
-        <div style="padding:12px 14px;border-right:1px solid var(--b)"><div class="ml" style="margin-bottom:4px">Quantum</div><div class="mv dm" id="vq" style="font-size:10px;word-break:break-all">&mdash;</div></div>
-        <div style="padding:12px 14px;border-right:1px solid var(--b)"><div class="ml" style="margin-bottom:4px">PQ-Lattice</div><div class="mv dm" id="vp" style="font-size:10px">&mdash;</div></div>
-        <div style="padding:12px 14px"><div class="ml" style="margin-bottom:4px">Oracle Con.</div><div class="mv dm" id="vo" style="font-size:10px">&mdash;</div></div>
-      </div>
-      <div class="ph">
-        <span class="pht">⛏ Miner Network</span>
-        <span style="display:flex;gap:6px;align-items:center">
-          <span class="pb gr" id="pcb">0 miners</span>
-          <button id="p2p-hist-btn" class="txfbtn" onclick="p2pToggleHist()" title="Show historic miners" style="font-size:8px;padding:2px 7px">LIVE</button>
-          <span id="p2p-live-dot" style="width:7px;height:7px;border-radius:50%;background:var(--dim);display:inline-block"></span>
-        </span>
-      </div>
-      <div id="pl" style="max-height:280px;overflow-y:auto;overflow-x:hidden"></div>
-      <div style="padding:4px 16px 6px;border-top:1px solid var(--b);display:flex;justify-content:space-between;font-size:9px;color:var(--dim)">
-        <span id="p2p-live-count">● <span id="p2plc">0</span> live</span>
-        <span id="p2p-seen-count">◎ <span id="p2psc">0</span> seen today</span>
-        <span id="p2p-total-count">◌ <span id="p2ptc">0</span> historic</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── System Description ─────────────────────────────────────── -->
-  <div class="pn" style="border:1px solid rgba(0,220,255,.12);border-radius:8px;overflow:hidden">
-    <div class="ph" style="background:rgba(128,64,255,.07)"><span class="pht" style="color:var(--vi)">⬡ System Architecture</span><span class="pb vi">QTCL-1 Production</span></div>
-    <div style="padding:18px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px">
-      <div>
-        <div class="ml" style="color:var(--cy);margin-bottom:8px;font-size:9px;letter-spacing:2px">CONSENSUS LAYER</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">QTCL deploys a <span style="color:var(--cy)">five-node Byzantine-fault-tolerant oracle network</span> whose consensus is certified by the <span style="color:var(--vi)">Mermin M₃ inequality</span> — a tripartite extension of Bell's theorem with classical bound 2.0 and W-state maximum ≈ 3.046. Block finality requires M₃ &gt; 2.0, providing information-theoretic proof of genuine quantum entanglement at the consensus layer rather than classical simulation.</p>
-      </div>
-      <div>
-        <div class="ml" style="color:var(--go);margin-bottom:8px;font-size:9px;letter-spacing:2px">SPATIAL STRUCTURE</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">Blocks tile a <span style="color:var(--go)">{8,3} hyperbolic tessellation</span> (Poincaré ball model, H³) — 8 octagons meeting at every vertex, curvature κ = −1. Exponential volume growth V(R) ~ e^R supports a node density that scales with network participation without topology collapse. Each spatial tile is a block; the chain is a geodesic path through hyperbolic space, not a linear sequence.</p>
-      </div>
-      <div>
-        <div class="ml" style="color:var(--gr);margin-bottom:8px;font-size:9px;letter-spacing:2px">CRYPTOGRAPHIC BACKBONE</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">All signatures use <span style="color:var(--gr)">HLWE — Hyperbolic Learning With Errors</span> post-quantum cryptography, hardened over PSL(2,ℝ) lattices. Block entropy is seeded by a <span style="color:var(--cy)">QRNG ensemble</span> — four independent quantum sources XOR-hedged for information-theoretic security: <span style="color:var(--cy)">ANU QRNG</span> (quantum vacuum fluctuations, Australian National University), <span style="color:var(--cy)">QBICK</span> (ID Quantique Quantis hardware, Quantum Blockchains Inc.), <span style="color:var(--cy)">Outshift</span> (PaloAlto), and <span style="color:var(--cy)">Random.org</span> (atmospheric noise) — then mixed via RFC 5869 HKDF. Mining is memory-hard (4 MB SHA3-256 matrix) defeating ASICs while the tessellation depth parameter scales block reward with network-proven work.</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── HLWE Micro-Whitepaper ────────────────────────────────────── -->
-  <div class="pn" style="border:1px solid rgba(212,160,32,.15);border-radius:8px;overflow:hidden">
-    <div class="ph" style="background:rgba(212,160,32,.06)"><span class="pht" style="color:var(--go)">◈ HLWE · Hyperbolic Learning With Errors</span><span class="pb go">Micro-Whitepaper</span></div>
-    <div style="padding:18px 20px;display:grid;grid-template-columns:1fr 1fr;gap:24px">
-      <div style="display:flex;flex-direction:column;gap:14px">
-        <div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§1 · Hardness Foundation</div>
-          <p style="font-size:11px;line-height:1.8;color:var(--tx)">HLWE is a post-quantum lattice scheme whose security reduces to the hardness of the <em style="color:var(--cy)">Learning With Errors (LWE)</em> problem instantiated over the isometry group PSL(2,ℝ) acting on the hyperbolic plane H². Standard LWE asks: given (A, b = As + e) over Z_q^n, recover secret vector <strong style="color:var(--go)">s</strong>, where <strong>e</strong> is Gaussian noise. HLWE replaces the Euclidean lattice Z^n with a <span style="color:var(--vi)">hyperbolic lattice Λ_H</span> whose shortest-vector problem (SVP) is strictly harder due to the exponential volume growth of H² balls: |B(r)| ~ sinh(r) ≫ e^{n/2} for large r, collapsing the approximation ratio that lattice sieving algorithms exploit.</p>
-        </div>
-        <div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§2 · Key Generation</div>
-          <p style="font-size:11px;line-height:1.8;color:var(--tx)">A keypair is a pair (pk, sk) = (A·s + e mod q, s) where <strong style="color:var(--go)">A ∈ Λ_H^{n×m}</strong> is a public H²-lattice basis sampled from the <span style="color:var(--cy)">QRNG ensemble</span>, <strong>s</strong> is the secret drawn from a hyperbolic Gaussian centered at the Poincaré origin, and <strong>e</strong> is sub-Gaussian noise with variance bounded by the injectivity radius of the tessellation tile. In QTCL, oracle keypairs are delegated from wallet keys via <code style="color:var(--vi);font-family:var(--mono);font-size:10px">oracle_priv = SHA3-256(wallet_priv ‖ "QTCL_ORACLE_DELEGATE_v1")</code>, chaining on-chain accountability without exposing the root key.</p>
-        </div>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:14px">
-        <div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§3 · Sign &amp; Verify</div>
-          <p style="font-size:11px;line-height:1.8;color:var(--tx)">Signing a message <em>m</em>: sample a masking vector <strong>y</strong> ~ D_Λ (discrete Gaussian over Λ_H), compute commitment <strong>c</strong> = H(A·y mod q, m) ∈ {0,1}^κ, then release <strong>z</strong> = y + c·s if z passes a <span style="color:var(--gr)">rejection-sampling gate</span> that guarantees z is statistically independent of s (Lyubashevsky's technique, adapted to H² geometry). Verification checks A·z − c·pk mod q is short in the hyperbolic metric. No random oracle strength is lost; security tightness is O(1/q) under HLWE assumption.</p>
-        </div>
-        <div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§4 · Quantum Resistance &amp; NIST Alignment</div>
-          <p style="font-size:11px;line-height:1.8;color:var(--tx)">Shor's algorithm provides no advantage against LWE variants — no hidden subgroup structure exists to exploit. Grover's search applies only to the pre-image search over H², which the hyperbolic SVP hardness elevates to <span style="color:var(--re)">superpolynomial</span> even for a fault-tolerant quantum computer. HLWE targets NIST security category III (≥ 2^192 classical / 2^128 quantum). The PSL(2,ℝ) symmetry further provides <em style="color:var(--cy)">algebraic noise amplification</em>: small errors grow exponentially under the group action, making lattice-reduction attacks require exponentially many oracle queries as the hyperbolic radius increases.</p>
-        </div>
-      </div>
-    </div>
-    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="99caf1fcf4eaf1f8f5f5f8f1d9fef4f8f0f5b7faf6f4">[email&#160;protected]</a>. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
-  </div>
-
-</div>
-<div id="bb">
-  <div class="bi"><span class="bl2">NET</span><span class="bv2">QTCL-1</span></div>
-  <div class="bi"><span class="bl2">DIFF</span><span class="bvy" id="bbd">&mdash;</span></div>
-  <div class="bi"><span class="bl2">PEERS</span><span class="bvg" id="bbp">&mdash;</span></div>
-  <div class="bi"><span class="bl2">N_PEERS</span><span class="bv2" id="bbn">&mdash;</span></div>
-  <div class="bi"><span class="bl2">QRNG</span><span class="bv2" id="bbq">&mdash;</span></div>
-  <div id="bt"><span id="bts">QTCL &middot; Post-quantum blockchain &middot; HLWE cryptography &middot; W-state entangled mining &middot; 5-oracle Byzantine consensus &middot; Mermin inequality certified &middot; Poincare disk topology &middot; Memory-hard QTCL-PoW &middot; QRNG-seeded oracles</span></div>
-  <div id="bu">Updated &mdash;</div>
-</div>
-<div id="blk-modal-bg" onclick="if(event.target===this)closeBlockModal()">
-  <div id="blk-modal">
-    <div class="bm-hdr">
-      <div>
-        <div class="bm-title" id="bm-title">BLOCK #—</div>
-        <div class="bm-meta" id="bm-meta">Loading…</div>
-      </div>
-      <button class="bm-close" onclick="closeBlockModal()">✕</button>
-    </div>
-    <div class="bm-body" id="bm-body"><div class="bm-loading">Fetching transactions…</div></div>
   </div>
 </div>
-<div class="bm-copied" id="bm-copied">✓ Copied</div>
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
+<div id="blk-modal-bg" style="display:none;position:fixed;inset:0;z-index:9100;background:rgba(0,0,0,.72);backdrop-filter:blur(3px);align-items:center;justify-content:center">
+  <div id="blk-modal" style="background:var(--card);border:1px solid var(--b2);border-radius:10px;width:min(540px,94vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--b)">
+      <div><div style="font-family:var(--disp);font-size:11px;letter-spacing:2px;color:var(--cy)" id="bm-title">BLOCK #—</div></div>
+      <button style="width:24px;height:24px;border-radius:50%;border:1px solid var(--b2);background:transparent;color:var(--dim);cursor:pointer" onclick="document.getElementById('blk-modal-bg').style.display='none'">✕</button>
+    </div>
+    <div style="padding:24px;text-align:center;color:var(--dim)">Loading…</div>
+  </div>
+</div>
+
 <script>
 'use strict';
-var BASE = window.location.origin;
-
-// ─── STATE ───────────────────────────────────────────────────────────────────
-var S = {
-  height:0, tip_hash:'',
-  fidelity:0.9, coherence:0.7, purity:0.8, entropy:0, sse:0,
-  lattice_fidelity:0.9, lattice_coherence:0.7, w_state_strength:0, cycle:0,
-  negativity:0, concurrence:0, entanglement:0.65,
-  qfi:6.5, discord:0, tele_fidelity:0.6,
-  phase_drift:0.02, gamma1:0.04, gammaphi:0.12,
-  omega:0.5, ou_mem:0.03, sector_occ:0.9, qrng_health:1,
-  mempool_size:0, n_peers:0,
-  total_transactions:0, avg_block_time_s:0, difficulty_bits:4,
-  pq_curr:0, pq_last:0, pq0:0,
-  oracle_data:{}, mermin:null,
-  miner_reward_qtcl:7.20, treasury_reward_qtcl:0.80,
-  tessellation_depth:5, treasury_pct:10.0,
-  oracle_consensus_reached:false,
-  quantum_validation_status:'--', pq_validation_status:'--',
-};
-
-// ─── REWARD SCHEDULE ─────────────────────────────────────────────────────────
-var REWARD_SCHEDULE={depths:[
-  {boundary:106496,   depth:5,miner:720,treasury:80},
-  {boundary:958464,   depth:6,miner:760,treasury:40},
-  {boundary:7774208,  depth:7,miner:780,treasury:20},
-  {boundary:62300160, depth:8,miner:790,treasury:10},
-],forHeight:function(h){
-  for(var i=0;i<this.depths.length;i++) if(h<this.depths[i].boundary) return this.depths[i];
-  return this.depths[this.depths.length-1];
-}};
-function applyRewards(h){
-  var r=REWARD_SCHEDULE.forHeight(h);
-  S.miner_reward_qtcl=r.miner/100; S.treasury_reward_qtcl=r.treasury/100;
-  S.tessellation_depth=r.depth; S.treasury_pct=r.treasury/(r.miner+r.treasury)*100;
-}
-
-// ─── RPC ─────────────────────────────────────────────────────────────────────
-var _rpcId=1;
-async function rpc(method,params){
-  var timeouts={
-    'qtcl_getQuantumMetrics': 30000,
-    'qtcl_getBlockRange': 12000,
-    'qtcl_getTransactions': 12000,
-    'qtcl_getPeers': 6000,
-    'qtcl_getMerminTest': 25000,
-  };
-  var to=(timeouts[method]||8000);
-  try{
-    var r=await fetch(BASE+'/rpc',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({jsonrpc:'2.0',id:_rpcId++,method:method,params:params||[]}),
-      signal:AbortSignal.timeout(to)});
-    if(!r.ok) return null;
-    var j=await r.json();
-    if(j.error){console.warn('[RPC]',method,j.error.message);return null;}
-    return j.result;
-  }catch(e){return null;}
-}
-async function rpcBatch(calls){
-  try{
-    var base=_rpcId, batch=calls.map(function(c,i){
-      return{jsonrpc:'2.0',id:base+i,method:c[0],params:c[1]||[]};
-    });
-    _rpcId+=calls.length;
-    var r=await fetch(BASE+'/rpc',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(batch),signal:AbortSignal.timeout(30000)});
-    if(!r.ok) return calls.map(function(){return null;});
-    var arr=await r.json();
-    if(!Array.isArray(arr)) return calls.map(function(_,i){return i===0&&arr&&!arr.error?arr.result:null;});
-    return calls.map(function(_,i){
-      var res=arr.find(function(a){return a&&a.id===(base+i);});
-      return(res&&!res.error)?res.result:null;
-    });
-  }catch(e){return calls.map(function(){return null;});}
-}
-
-// ─── CLOCK ───────────────────────────────────────────────────────────────────
 (function(){
-  var el=document.getElementById('hck'); if(!el) return;
-  function _t(){el.textContent=new Date().toISOString().replace('T',' ').slice(0,19)+' UTC';}
-  setInterval(_t,1000); _t();
-})();
-
-// ─── LOGO RAF ────────────────────────────────────────────────────────────────
-(function(){
-  var c=document.getElementById('lc'),ctx=c?c.getContext('2d'):null,t=0;
-  if(!ctx) return;
-  function fr(){
-    ctx.clearRect(0,0,36,36);
-    var cx=18,cy=18,r=13,ri=7;
-    ctx.strokeStyle='rgba(0,220,255,.2)';ctx.lineWidth=1;
-    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
-    ctx.strokeStyle='rgba(128,64,255,.18)';ctx.lineWidth=0.8;
-    ctx.beginPath();ctx.arc(cx,cy,ri,0,Math.PI*2);ctx.stroke();
-    for(var i=0;i<4;i++){
-      var a=i*Math.PI/2-t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
-      ctx.strokeStyle='rgba(0,220,255,'+(0.3+0.25*Math.sin(t*2+i))+')';ctx.lineWidth=1;
-      ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();
-      ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
-      ctx.beginPath();ctx.arc(x,y,2.2,0,Math.PI*2);ctx.fill();
-      var ix=cx+ri*Math.cos(a),iy=cy+ri*Math.sin(a);
-      ctx.fillStyle='rgba(128,64,255,'+(0.5+0.3*Math.sin(t*2.5+i))+')';
-      ctx.beginPath();ctx.arc(ix,iy,1.5,0,Math.PI*2);ctx.fill();
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // MODULE 1: DENSITY MATRIX RENDERER (Completely Sandboxed)
+  // ═══════════════════════════════════════════════════════════════════════════════
+  var DM = (function(){
+    var STATE = {fidelity:0,purity:0,pq_curr:0,pq_last:0,pq0:0,cycle:0,hex:''};
+    var worker=null, parsed=null, dirty=false, ctx=null, canvas=null;
+    
+    // Phase → RGB converter
+    function p2rgb(phase,mag,mx){
+      var np=(phase+Math.PI)/(2*Math.PI);
+      var h=160+np*160, l=Math.min(0.9,0.1+(mag/(mx||1))*0.8), s=0.8;
+      var c2=(1-Math.abs(2*l-1))*s, x2=c2*(1-Math.abs((h/60)%2-1)), m2=l-c2/2;
+      var r1,g1,b1;
+      if(h<60){r1=c2;g1=x2;b1=0;}else if(h<120){r1=x2;g1=c2;b1=0;}
+      else if(h<180){r1=0;g1=c2;b1=x2;}else if(h<240){r1=0;g1=x2;b1=c2;}
+      else if(h<300){r1=x2;g1=0;b1=c2;}else{r1=c2;g1=0;b1=x2;}
+      return[(r1+m2)*255|0,(g1+m2)*255|0,(b1+m2)*255|0];
     }
-    ctx.fillStyle='rgba(212,160,32,.95)';
-    ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
-    t+=0.02; requestAnimationFrame(fr);
-  }
-  fr();
-})();
-
-// ─── DM WEB WORKER (blob, off main thread) ───────────────────────────────────
-// Cathedral-grade DM Processor: Decodes, Mirrors (Hermitian ρ=ρ†), and calculates SSE
-// Handles all 4 quadrants: Q1↔Q3 and Q2↔Q4 conjugate symmetry for proper ρ=ρ†
-var _DM_WORKER_SRC=[
-'self.onmessage=function(e){',
-'  var d=e.data; if(!d||!d.hex) return;',
-'  var hex=d.hex, N=d.N||64, n2=N*N;',
-'  var HEX=new Uint8Array(256);',
-'  for(var c=0;c<10;c++) HEX[48+c]=c;',
-'  for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}',
-'  var re=new Float64Array(n2), im=new Float64Array(n2);',
-'  var mag=new Float64Array(n2), ph=new Float64Array(n2);',
-'  var dv=new DataView(new ArrayBuffer(8));',
-'  var u8=new Uint8Array(dv.buffer);',
-'  var mx=0;',
-'  for(var i=0;i<n2;i++){',
-'    var off=i*32; if(off+31>=hex.length) break;',
-'    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];',
-'    re[i]=dv.getFloat64(0,true);',
-'    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];',
-'    im[i]=dv.getFloat64(0,true);',
-'  }',
-'  // ══════════════════════════════════════════════════════════════════════════',
-'  // HERMITIAN MIRRORING (ρ = ρ†) — All 4 quadrants',
-'  // Q1↔Q3: (r,c) ↔ (c,r) with conjugate',
-'  // Q2↔Q4: reflect across anti-diagonal (r,c) ↔ (N-1-c, N-1-r)',
-'  // ══════════════════════════════════════════════════════════════════════════',
-'  for(var r=0;r<N;r++){',
-'    // Diagonal: make real (populations)',
-'    re[r*N+r]=Math.abs(re[r*N+r]); im[r*N+r]=0;',
-'    for(var c=r+1;c<N;c++){',
-'      var ij=r*N+c; // Q1 (upper triangle)',
-'      var ji=c*N+r; // Q3 (lower triangle, conjugate)',
-'      var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
-'      re[ij]=are; im[ij]=aim;',
-'      re[ji]=are; im[ji]=-aim;',
-'    }',
-'  }',
-'  // Anti-diagonal mirror: Q2↔Q4 (upper-left ↔ lower-right)',
-'  for(var r=0;r<N;r++){',
-'    for(var c=0;c<N-r-1;c++){',
-'      var ij=r*N+c; // Q2 region',
-'      var ji=(N-1-c)*(N-1-r); // reflected position in Q4',
-'      if(ji>=0&&ji<n2){',
-'        var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
-'        re[ij]=are; im[ij]=aim;',
-'        re[ji]=are; im[ji]=-aim;',
-'      }',
-'    }',
-'  }',
-'  // SSE (Sum of Squared Entropies) & Visual Polish',
-'  var rho_sq=0; for(var i=0;i<n2;i++){',
-'    var m=Math.sqrt(re[i]*re[i]+im[i]*im[i]); mag[i]=m; ph[i]=Math.atan2(im[i],re[i]);',
-'    if(m>mx) mx=m; rho_sq+=m*m;',
-'  }',
-'  var purity=Math.min(1,Math.sqrt(rho_sq));',
-'  var entropy=purity>0.001&&purity<0.9999?(function(){var ev=purity*purity;return -ev*Math.log2(ev)-(1-ev)*Math.log2(1-ev+1e-10);})():(purity>=0.9999?0:Math.log2(N));',
-'  var sse=entropy*entropy;',
-'  var rb=re.buffer.slice(0), ib=im.buffer.slice(0), mb=mag.buffer.slice(0), pb=ph.buffer.slice(0);',
-'  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:mx,N:N,purity:purity,entropy:entropy,sse:sse},[rb,ib,mb,pb]);',
-'};'
-].join('\n');
-
-var _dmW=(function(){
-  try{
-    var b=new Blob([_DM_WORKER_SRC],{type:'application/javascript'});
-    var w=new Worker(URL.createObjectURL(b));
-    w.onmessage=function(e){
-      if(!e.data){_dmParsed=null;return;}
-      _dmParsed={
-        re:new Float64Array(e.data.re),im:new Float64Array(e.data.im),
-        mag:new Float64Array(e.data.mag),ph:new Float64Array(e.data.ph),
-        maxMag:e.data.maxMag, N:e.data.N,
-        purity:e.data.purity||0, entropy:e.data.entropy||0, sse:e.data.sse||0
+    
+    // Web Worker source (inline blob)
+    var WORKER_SRC = [
+      'self.onmessage=function(e){',
+      '  var d=e.data; if(!d||!d.hex) return;',
+      '  var hex=d.hex, N=d.N||64, n2=N*N;',
+      '  var HEX=new Uint8Array(256);',
+      '  for(var c=0;c<10;c++) HEX[48+c]=c;',
+      '  for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}',
+      '  var re=new Float64Array(n2), im=new Float64Array(n2);',
+      '  var mag=new Float64Array(n2), ph=new Float64Array(n2);',
+      '  var dv=new DataView(new ArrayBuffer(8));',
+      '  var u8=new Uint8Array(dv.buffer);',
+      '  var mx=0;',
+      '  for(var i=0;i<n2;i++){',
+      '    var off=i*32; if(off+31>=hex.length) break;',
+      '    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];',
+      '    re[i]=dv.getFloat64(0,true);',
+      '    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];',
+      '    im[i]=dv.getFloat64(0,true);',
+      '  }',
+      '  // Hermitian mirroring (ρ = ρ†)',
+      '  for(var r=0;r<N;r++){',
+      '    re[r*N+r]=Math.abs(re[r*N+r]); im[r*N+r]=0;',
+      '    for(var c=r+1;c<N;c++){',
+      '      var ij=r*N+c, ji=c*N+r;',
+      '      var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
+      '      re[ij]=are; im[ij]=aim;',
+      '      re[ji]=are; im[ji]=-aim;',
+      '    }',
+      '  }',
+      '  for(var r=0;r<N;r++){',
+      '    for(var c=0;c<N-r-1;c++){',
+      '      var ij=r*N+c, ji=(N-1-c)*(N-1-r);',
+      '      if(ji>=0&&ji<n2){',
+      '        var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
+      '        re[ij]=are; im[ij]=aim;',
+      '        re[ji]=are; im[ji]=-aim;',
+      '      }',
+      '    }',
+      '  }',
+      '  // SSE & Purity',
+      '  var rho_sq=0; for(var i=0;i<n2;i++){',
+      '    var m=Math.sqrt(re[i]*re[i]+im[i]*im[i]); mag[i]=m; ph[i]=Math.atan2(im[i],re[i]);',
+      '    if(m>mx) mx=m; rho_sq+=m*m;',
+      '  }',
+      '  var purity=Math.min(1,Math.sqrt(rho_sq));',
+      '  var rb=re.buffer.slice(0), ib=im.buffer.slice(0), mb=mag.buffer.slice(0), pb=ph.buffer.slice(0);',
+      '  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:mx,N:N,purity:purity},[rb,ib,mb,pb]);',
+      '};'
+    ].join('\n');
+    
+    // Init worker
+    try{
+      var blob=new Blob([WORKER_SRC],{type:'application/javascript'});
+      worker=new Worker(URL.createObjectURL(blob));
+      worker.onmessage=function(e){
+        if(!e.data){parsed=null;return;}
+        parsed={
+          re:new Float64Array(e.data.re),im:new Float64Array(e.data.im),
+          mag:new Float64Array(e.data.mag),ph:new Float64Array(e.data.ph),
+          maxMag:e.data.maxMag,N:e.data.N,purity:e.data.purity
+        };
+        STATE.purity=e.data.purity||0;
+        dirty=true;
       };
-      if(e.data.purity!=null) S.purity=e.data.purity;
-      if(e.data.entropy!=null) S.entropy=e.data.entropy;
-      if(e.data.sse!=null) S.sse=e.data.sse;
-      _dmDirty=true;
-    };
-    return w;
-  }catch(x){return null;}
-})();
-
-var _dmParsed=null,_dmDirty=false,_dmLastHex='',_dmCanvas=null,_dmCtx=null;
-
-function _dmSubmit(hex,N){
-  if(!hex||hex===_dmLastHex) return;
-  _dmLastHex=hex;
-  var targetN=N||64;
-  
-  if(_dmW){_dmW.postMessage({hex:hex,N:targetN});
-  } else {
-    // sync fallback with Hermitian + SSE
-    var n2=N*N,HEX=new Uint8Array(256);
-    for(var c=0;c<10;c++) HEX[48+c]=c;
-    for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}
-    var re=new Float64Array(n2),im=new Float64Array(n2),mag=new Float64Array(n2),ph=new Float64Array(n2);
-    var u8=new Uint8Array(8),dv=new DataView(u8.buffer),mx=0;
-    for(var i=0;i<n2;i++){
-      var off=i*32;
-      for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
-      re[i]=dv.getFloat64(0,true);
-      var o2=off+16;
-      for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(o2+b*2)]<<4)|HEX[hex.charCodeAt(o2+b*2+1)];
-      im[i]=dv.getFloat64(0,true);
-      mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);
-      ph[i]=Math.atan2(im[i],re[i]);
-      if(mag[i]>mx) mx=mag[i];
+    }catch(x){console.warn('[DM] Worker init failed',x);}
+    
+    function submit(hex,N){
+      if(!hex||hex===STATE.hex) return;
+      STATE.hex=hex;
+      if(worker){worker.postMessage({hex:hex,N:N||64});}
+      dirty=true;
     }
-    // Hermitian enforcement (all 4 quadrants)
-    // Q1↔Q3: conjugate symmetry across main diagonal
-    for(var r=0;r<N;r++){
-      re[r*N+r]=Math.abs(re[r*N+r]);im[r*N+r]=0;mag[r*N+r]=Math.abs(re[r*N+r]);ph[r*N+r]=0;
-      for(var c=r+1;c<N;c++){
-        var ij=r*N+c,ji=c*N+r,re_up=re[ij],im_up=im[ij];
-        re[ji]=re_up;im[ji]=-im_up;mag[ji]=mag[ij];ph[ji]=-ph[ij];
+    
+    // Render loop (RAF)
+    function render(){
+      requestAnimationFrame(render);
+      if(!canvas){
+        canvas=document.getElementById('dm-canvas');
+        if(!canvas) return;
+        ctx=canvas.getContext('2d',{alpha:false});
       }
-    }
-    // Q2↔Q4: anti-diagonal mirror (reflect across anti-diagonal)
-    for(var r=0;r<N;r++){
-      for(var c=0;c<N-r-1;c++){
-        var ij=r*N+c, ji=(N-1-c)*(N-1-r);
-        if(ji>=0&&ji<n2){
-          var re_up=re[ij],im_up=im[ij],re_dn=re[ji],im_dn=im[ji];
-          var are=0.5*(re_up+re_dn), aim=0.5*(im_up-im_dn);
-          re[ij]=are;im[ij]=aim;mag[ij]=Math.sqrt(are*are+aim*aim);ph[ij]=Math.atan2(aim,are);
-          re[ji]=are;im[ji]=-aim;mag[ji]=mag[ij];ph[ji]=-ph[ij];
-        }
+      if(!dirty&&parsed) return;
+      dirty=false;
+      
+      var W=canvas.width,H=canvas.height;
+      var pad={l:8,t:8,r:8,b:28}, gW=W-pad.l-pad.r, gH=H-pad.t-pad.b;
+      
+      ctx.fillStyle='#000508'; ctx.fillRect(0,0,W,H);
+      
+      if(!parsed){
+        ctx.fillStyle='rgba(0,220,255,.18)';ctx.font='10px JetBrains Mono,monospace';
+        ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText('Awaiting DM…',W/2,H/2);
+        return;
       }
-    }
-    // SSE
-    var rho_sq=0;for(var i=0;i<n2;i++) rho_sq+=re[i]*re[i]+im[i]*im[i];
-    var purity=Math.min(1,Math.sqrt(rho_sq));
-    var entropy=purity>0.001&&purity<0.9999?(function(){var ev=purity*purity;return ev>1e-10?-ev*Math.log(ev)/Math.LN2-(1-ev)*Math.log(1-ev+1e-10)/Math.LN2:0;})():(purity>=0.9999?0:Math.log(N)/Math.LN2);
-    var sse=entropy*entropy;
-    _dmParsed={re:re,im:im,mag:mag,ph:ph,maxMag:mx,N:N,purity:purity,entropy:entropy,sse:sse};
-    S.purity=purity;S.entropy=entropy;S.sse=sse;
-    _dmDirty=true;
-  }
-}
-
-// ─── PHASE→RGB ───────────────────────────────────────────────────────────────
-function _p2rgb(phase,mag,mx){
-  var np=(phase+Math.PI)/(2*Math.PI);
-  var h=160+np*160, l=Math.min(0.9,0.1+(mag/(mx||1))*0.8), s=0.8;
-  var c2=(1-Math.abs(2*l-1))*s, x2=c2*(1-Math.abs((h/60)%2-1)), m2=l-c2/2;
-  var r1,g1,b1;
-  if(h<60){r1=c2;g1=x2;b1=0;}else if(h<120){r1=x2;g1=c2;b1=0;}
-  else if(h<180){r1=0;g1=c2;b1=x2;}else if(h<240){r1=0;g1=x2;b1=c2;}
-  else if(h<300){r1=x2;g1=0;b1=c2;}else{r1=c2;g1=0;b1=x2;}
-  return[(r1+m2)*255|0,(g1+m2)*255|0,(b1+m2)*255|0];
-}
-
-// ─── DM RAF RENDERER ─────────────────────────────────────────────────────────
-// Renders 64×64 (or 8×8 fallback) via ImageData — single putImageData/frame
-// Only repaints when _dmDirty. Zero layout work on main thread between frames.
-function _dmRaf(){
-  requestAnimationFrame(_dmRaf);
-  if(!_dmCanvas){
-    _dmCanvas=document.getElementById('dm-canvas');
-    if(!_dmCanvas) return;
-    _dmCtx=_dmCanvas.getContext('2d',{alpha:false});
-  }
-  if(!_dmDirty&&_dmParsed) return;
-  _dmDirty=false;
-
-  var ctx=_dmCtx, W=_dmCanvas.width, H=_dmCanvas.height;
-  var pad={l:8,t:8,r:8,b:28};
-  var gW=W-pad.l-pad.r, gH=H-pad.t-pad.b;
-
-  ctx.fillStyle='#000508'; ctx.fillRect(0,0,W,H);
-
-  if(!_dmParsed){
-    ctx.fillStyle='rgba(0,220,255,.18)';ctx.font='10px JetBrains Mono,monospace';
-    ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.fillText('Awaiting 256\u00D7256\u2192 64\u00D764 DM\u2026',W/2,H/2);
-    return;
-  }
-
-  var dm=_dmParsed, N=dm.N, n2=N*N, mx=dm.maxMag;
-  var cW=gW/N, cH=gH/N;
-
-  // ImageData pixel fill — one allocation, one GPU upload
-  var img=ctx.getImageData(0,0,W,H), px=img.data;
-  for(var row=0;row<N;row++){
-    for(var col=0;col<N;col++){
-      var idx=row*N+col;
-      var rgb=_p2rgb(dm.ph[idx],dm.mag[idx],mx);
-      var x0=(pad.l+col*cW)|0, y0=(pad.t+row*cH)|0;
-      var x1=(pad.l+(col+1)*cW)|0, y1=(pad.t+(row+1)*cH)|0;
-      for(var py=y0;py<y1;py++){
-        var ro=py*W*4;
-        for(var px2=x0;px2<x1;px2++){
-          var p=ro+px2*4; px[p]=rgb[0];px[p+1]=rgb[1];px[p+2]=rgb[2];px[p+3]=255;
-        }
-      }
-    }
-  }
-  ctx.putImageData(img,0,0);
-
-  // Diagonal glow — Hermitian ρ[i,i] are real population terms
-  for(var i=0;i<N;i++){
-    var dx=(pad.l+i*cW)|0, dy=(pad.t+i*cH)|0;
-    ctx.strokeStyle='rgba(0,255,255,0.5)';ctx.lineWidth=1;
-    ctx.strokeRect(dx,dy,cW|0,cH|0);
-  }
-
-  // Colorbar
-  var cbY=H-20,cbH=6;
-  for(var p2=0;p2<gW;p2++){
-    var ph2=-Math.PI+(p2/gW)*2*Math.PI;
-    var crgb=_p2rgb(ph2,mx*0.7,mx);
-    ctx.fillStyle='rgb('+crgb[0]+','+crgb[1]+','+crgb[2]+')';
-    ctx.fillRect(pad.l+p2,cbY,1,cbH);
-  }
-  ctx.font='7px JetBrains Mono,monospace';ctx.fillStyle='rgba(0,220,255,.45)';
-  ctx.textAlign='left';ctx.textBaseline='top';ctx.fillText('-\u03C0',pad.l,cbY+cbH+1);
-  ctx.textAlign='center';ctx.fillText('PHASE',pad.l+gW/2,cbY+cbH+1);
-  ctx.textAlign='right';ctx.fillText('+\u03C0',pad.l+gW,cbY+cbH+1);
-
-  // HUD — purity / fidelity / coherence / SSE top-right
-  ctx.font='8px JetBrains Mono,monospace';ctx.textAlign='right';ctx.textBaseline='top';
-  ctx.fillStyle='rgba(212,160,32,.8)';
-  ctx.fillText('Tr\u03C1\u00B2='+(S.purity||0).toFixed(4),W-pad.r-2,pad.t+2);
-  ctx.fillStyle='rgba(0,220,255,.7)';
-  ctx.fillText('F='+(S.fidelity||0).toFixed(4),W-pad.r-2,pad.t+12);
-  ctx.fillStyle='rgba(128,64,255,.7)';
-  ctx.fillText('C='+(S.coherence||0).toFixed(4),W-pad.r-2,pad.t+22);
-  ctx.fillStyle='rgba(0,255,157,.65)';
-  ctx.fillText('SSE='+(S.sse||0).toFixed(4),W-pad.r-2,pad.t+32);
-  // dim label
-  ctx.fillStyle='rgba(0,220,255,.3)';ctx.textAlign='left';
-  ctx.fillText('\u03C1 '+N+'\u00D7'+N+' \u03C1=\u03C1\u2020',pad.l+2,pad.t+2);
-}
-(function _dmBoot(){
-  if(!document.getElementById('dm-panel')){setTimeout(_dmBoot,80);return;}
-  _dmRaf();
-})();
-
-// ─── BLOCK HEX RENDERER ──────────────────────────────────────────────────────
-var blocks=[],_blocksById={};
-function drawHex(canvas,fid,fresh){
-  var ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=w/2-3;
-  ctx.clearRect(0,0,w,h);ctx.beginPath();
-  for(var i=0;i<6;i++){var a=i*Math.PI/3-Math.PI/6;i===0?ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a)):ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));}
-  ctx.closePath();
-  var col=fresh?'212,160,32':'0,220,255';
-  var g=ctx.createRadialGradient(cx,cy,0,cx,cy,r);
-  g.addColorStop(0,'rgba('+col+',.14)');g.addColorStop(1,'rgba('+col+',.03)');
-  ctx.fillStyle=g;ctx.fill();
-  ctx.strokeStyle='rgba('+col+','+(fresh?.9:.45)+')';ctx.lineWidth=1.5;ctx.stroke();
-  if(fid>0){ctx.beginPath();ctx.arc(cx,cy,r*.35,0,Math.PI*2*fid);ctx.strokeStyle='rgba(128,64,255,.6)';ctx.lineWidth=2;ctx.stroke();}
-}
-function renderChain(){
-  var el=document.getElementById('cs');if(!el) return;
-  if(!blocks.length){el.innerHTML='<div style="color:var(--dim);font-family:var(--mono);font-size:10px;padding:8px;opacity:.6">Awaiting blocks\u2026</div>';return;}
-  el.innerHTML='';
-  var ft=blocks.length-3;
-  blocks.forEach(function(b,i){
-    if(i>0){var co=document.createElement('div');co.className='bco';el.appendChild(co);}
-    var fr=i>=ft||b._fr;
-    var nd=document.createElement('div');nd.className='bn'+(fr?' fr':'');
-    var hx=document.createElement('div');hx.className='bh';
-    hx.onclick=(function(blk){return function(e){e.stopPropagation();openBlockModal(blk);};})(b);
-    var cv=document.createElement('canvas');cv.width=56;cv.height=56;
-    drawHex(cv,b.w_state_fidelity||.9,fr);hx.appendChild(cv);
-    var nu=document.createElement('div');nu.className='bnum';nu.textContent='#'+b.height;
-    var tx2=document.createElement('div');tx2.className='btx';tx2.textContent=(b.tx_count||0)+' txs';
-    hx.appendChild(nu);hx.appendChild(tx2);
-    var lb=document.createElement('div');lb.className='bl';lb.textContent=(b.block_hash||b.hash||'').slice(0,10)+'...';
-    nd.appendChild(hx);nd.appendChild(lb);el.appendChild(nd);
-  });
-  el.scrollLeft=el.scrollWidth;
-  var bcc=document.getElementById('bcc');if(bcc) bcc.textContent=blocks.length+' blocks';
-}
-
-// ─── BLOCK MODAL ─────────────────────────────────────────────────────────────
-var _TREASURY_ADDR='qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d';
-var _bmT=null;
-function _bmCopy(t){
-  try{navigator.clipboard.writeText(t);}catch(e){var ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);}
-  var el=document.getElementById('bm-copied');el.classList.add('show');clearTimeout(_bmT);
-  _bmT=setTimeout(function(){el.classList.remove('show');},1200);
-}
-function openBlockModal(blk){
-  var bg=document.getElementById('blk-modal-bg'),body=document.getElementById('bm-body');
-  document.getElementById('bm-title').textContent='BLOCK #'+blk.height;
-  document.getElementById('bm-meta').textContent='hash: '+(blk.block_hash||blk.hash||'').slice(0,22)+'\u2026  \u00B7  '+(blk.tx_count||0)+' txs  \u00B7  fidelity: '+((blk.w_state_fidelity||0)*100).toFixed(2)+'%';
-  body.innerHTML='<div class="bm-loading">Fetching via RPC\u2026</div>';
-  bg.classList.add('open');document.body.style.overflow='hidden';
-  rpc('qtcl_getBlock',[blk.height]).then(function(d){
-    if(!d||!Array.isArray(d.transactions)||!d.transactions.length){
-      body.innerHTML='<div class="bm-loading" style="color:var(--re)">No transactions for block #'+blk.height+'</div>';return;
-    }
-    var tl=d.transactions.slice().sort(function(a,b){var at=a.tx_type||a.type||'',bt=b.tx_type||b.type||'';return at==='coinbase'?-1:bt==='coinbase'?1:0;});
-    body.innerHTML=tl.map(function(tx){
-      var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
-      var hash=tx.tx_id||tx.tx_hash||tx.hash||'';
-      var from=tx.from_addr||tx.from_address||tx.sender||'';
-      var to=tx.to_addr||tx.to_address||tx.receiver||'';
-      var amt=parseFloat(tx.amount||0)/100;
-      var isTr=(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
-      var icon=isTr?'🏛':cb?'⛏':'⇄';
-      var fromS=from.length>20?from.slice(0,10)+'\u2026'+from.slice(-8):from||'\u2014';
-      var toS=to.length>20?to.slice(0,10)+'\u2026'+to.slice(-8):to||'\u2014';
-      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')">'
-        +'<div class="bm-tx-icon '+(isTr?'treasury':tp)+'">'+icon+'</div>'
-        +'<div class="bm-tx-info">'
-        +'<div class="bm-tx-hash">'+hash+'</div>'
-        +'<div class="bm-tx-sub"><span style="color:var(--dim)">from:</span> <span>'+fromS+'</span>'
-        +' <span style="color:var(--dim)">\u2192</span> <span style="color:'+(isTr?'var(--go)':'var(--gr)')+'">'+toS+'</span>'
-        +(cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px">\u26CF COINBASE</span>':'')+'</div>'
-        +'</div>'
-        +'<div class="bm-tx-amt '+(isTr?'transfer':tp)+'">'+amt.toFixed(2)+' Q</div>'
-        +'<div class="bm-copy-hint">CLICK TO COPY</div>'
-        +'</div>';
-    }).join('');
-  }).catch(function(){body.innerHTML='<div class="bm-loading" style="color:var(--re)">RPC error</div>';});
-}
-function closeBlockModal(){document.getElementById('blk-modal-bg').classList.remove('open');document.body.style.overflow='';}
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeBlockModal();});
-
-// ─── TX EXPLORER ─────────────────────────────────────────────────────────────
-var txs=[],txPage_n=0,txPerPage=50,txTotal=0,txPages=1;
-var txFilterMode='all',txSearchQ='',txLoading=false,_txSearchTimer=null;
-function txFilter(mode){
-  txFilterMode=mode;txPage_n=0;
-  if(mode==='treasury'){txSearchQ=_TREASURY_ADDR;var si=document.getElementById('txsearch');if(si)si.value=_TREASURY_ADDR;}
-  else if(txSearchQ===_TREASURY_ADDR){txSearchQ='';var si=document.getElementById('txsearch');if(si)si.value='';}
-  ['all','coinbase','transfer','treasury'].forEach(function(m){
-    var b=document.getElementById('txf-'+m);if(b){b.className='txfbtn'+(m===mode?' active'+(m==='coinbase'?' cb':m==='transfer'?' tr':''):'');}
-  });
-  if(!txLoading) loadTxPage();
-}
-function txPage(d){txPage_n=Math.max(0,Math.min(txPages-1,txPage_n+d));if(!txLoading) loadTxPage();}
-function txSearch(v){txSearchQ=v;txPage_n=0;clearTimeout(_txSearchTimer);_txSearchTimer=setTimeout(function(){if(!txLoading)loadTxPage();},400);}
-function _shortHash(h,n){if(!h) return '\u2014';return h.length>n?h.slice(0,n>>1)+'\u2026'+h.slice(-(n>>1)):h;}
-function renderTxRow(tx,isNew){
-  var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
-  var hash=tx.tx_id||tx.tx_hash||tx.hash||'';
-  var from=tx.from_addr||tx.from_address||tx.sender||'';
-  var to=tx.to_addr||tx.to_address||tx.receiver||'';
-  var amt=parseFloat(tx.amount||0)/100;
-  var blk=tx.block_height||tx.block||'\u2014';
-  var st=tx.status||'confirmed';
-  var isTr=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
-  var isPend=isTr&&st==='pending';
-  var typeClass=isPend?'pending':isTr?'treasury':cb?'coinbase':'transfer';
-  var typeLabel=isPend?'\u23F3 PENDING':isTr?'\uD83C\uDFDB TREASURY':cb?'\u26CF COINBASE':'\u21C4 TRANSFER';
-  return '<tr class="'+(isNew?'tx-new ':'')+( cb?'tx-cb':'tx-tr')+'" style="'+(isPend?'opacity:.6':'')+'"><td><span class="tba '+typeClass+'">'+typeLabel+'</span></td>'
-    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:var(--cy)" title="'+hash+'" onclick="_bmCopy(this.title)">'+_shortHash(hash,18)+' <span style="font-size:7px;opacity:.5">\u29CA</span></td>'
-    +'<td style="font-family:var(--mono);font-size:9px;color:var(--dim)" title="'+from+'">'+_shortHash(from,14)+'</td>'
-    +'<td style="font-family:var(--mono);font-size:9px;color:'+(isTr?'var(--go)':'var(--gr)')+'" title="'+to+'">'+_shortHash(to,14)+'</td>'
-    +'<td style="font-size:11px">'+amt.toFixed(2)+' Q</td>'
-    +'<td style="color:var(--dim);font-size:10px">'+blk+'</td>'
-    +'<td><span class="tba '+st+'">'+st.toUpperCase()+'</span></td>'
-    +'</tr>';
-}
-async function loadTxPage(){
-  if(txLoading) return; txLoading=true;
-  var _wd=setTimeout(function(){txLoading=false;},5000);  // reduced timeout
-  var tb=document.getElementById('ttb');
-  if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading\u2026</td></tr>';
-  try{
-    var req={page:txPage_n,per_page:Math.min(txPerPage,25)};  // limit page size
-    if(txFilterMode&&txFilterMode!=='all') req.type=txFilterMode;
-    if(txSearchQ) req.address=txSearchQ;
-    var d=await rpc('qtcl_getTransactions',[req],8000);  // 8s RPC timeout
-    if(!d){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Server not responding</td></tr>';return;}
-    if(!Array.isArray(d.transactions)){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';return;}
-    txs=d.transactions;txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
-    var tb2=document.getElementById('ttb'),txb=document.getElementById('txb');
-    var pi=document.getElementById('txpageinfo');
-    if(txb) txb.textContent=txTotal+' txs';
-    if(pi) pi.textContent='Page '+(txPage_n+1)+' / '+txPages+' ('+txTotal+' total)';
-    var prev=document.getElementById('txprev'),next=document.getElementById('txnext');
-    if(prev) prev.disabled=txPage_n===0;if(next) next.disabled=txPage_n>=txPages-1;
-    if(tb2) tb2.innerHTML=txs.length?txs.map(function(tx){return renderTxRow(tx,tx._fresh);}).join(''):'<tr><td colspan="7" class="es">No transactions</td></tr>';
-  }catch(e){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+e.message+'</td></tr>';}
-  finally{clearTimeout(_wd);txLoading=false;}
-}
-
-// ─── ORACLE PANEL ─────────────────────────────────────────────────────────────
-function renderOracles(){
-  var defs=[{id:'oracle_1',role:'PRIMARY_LATTICE'},{id:'oracle_2',role:'SECONDARY_LATTICE'},
-    {id:'oracle_3',role:'VALIDATION'},{id:'oracle_4',role:'ARBITER'},{id:'oracle_5',role:'METRICS'}];
-  var el=document.getElementById('ol');if(!el) return;
-  var data=S.oracle_data||{};
-  el.innerHTML=defs.map(function(o){
-    var m=data[o.id]||{};
-    var fid=m.w_state_fidelity!=null?m.w_state_fidelity:null;
-    var on=fid!=null&&fid>0.5;
-    return '<div class="or" style="flex-direction:column;gap:4px;padding:10px 14px;border-bottom:1px solid var(--b)">'
-      +'<div style="display:flex;align-items:center;gap:8px">'
-      +'<div class="od '+(on?'on':'off')+'"></div>'
-      +'<div style="flex:1"><div class="on2">'+o.id.toUpperCase()+(m.in_consensus?'<span style="margin-left:6px;font-size:8px;color:var(--gr)">\u2713BYZ</span>':'')+'</div>'
-      +'<div class="ort">'+o.role+' \u00B7 '+(on?'ONLINE':'AWAITING')+'</div></div>'
-      +'<div class="of">'+(fid!=null?(fid*100).toFixed(2)+'%':'\u2014')+'</div>'
-      +'</div>'
-      +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;font-size:9px;font-family:var(--mono)">'
-      +'<div style="color:var(--dim)">coh: <span style="color:var(--vi)">'+(m.coherence!=null?(m.coherence*100).toFixed(2)+'%':'\u2014')+'</span></div>'
-      +'<div style="color:var(--dim)">pq0: <span style="color:var(--cy)">'+(m.pq0_oracle_fidelity!=null?m.pq0_oracle_fidelity.toFixed(4):'\u2014')+'</span></div>'
-      +'<div style="color:var(--dim)">IV: <span style="color:var(--cy)">'+(m.pq0_IV_fidelity!=null?m.pq0_IV_fidelity.toFixed(4):'\u2014')+'</span></div>'
-      +'<div style="color:var(--dim)">V: <span style="color:var(--cy)">'+(m.pq0_V_fidelity!=null?m.pq0_V_fidelity.toFixed(4):'\u2014')+'</span></div>'
-      +'</div></div>';
-  }).join('');
-}
-
-// ─── MERMIN PANEL ─────────────────────────────────────────────────────────────
-function renderMermin(m){
-  if(!m) return;
-  var M=parseFloat(m.M_value||m.M||m.mermin_value||0),isQ=M>2.0;
-  var el=document.getElementById('mM');if(el){el.textContent=M.toFixed(3);el.className='mb2 '+(isQ?'q':'c');}
-  var mvd=document.getElementById('mvd');if(mvd) mvd.textContent=m.verdict||m.interpretation||'--';
-  var mb3=document.getElementById('mb3');if(mb3) mb3.textContent='M='+M.toFixed(3);
-  var mbar=document.getElementById('mbar');if(mbar) mbar.style.width=Math.min(100,M/4*100)+'%';
-  var mcy=document.getElementById('mcy');
-  if(mcy){var sig=(S.cycle%8===0)?'\u00B7 REVIVAL':(S.cycle%8===4)?'\u00B7 ANTI-REV':'';mcy.textContent='cycle '+S.cycle+' '+sig;}
-  var angles=m.angle_degrees||m.angles||[],labels=m.angle_labels||['θA1','φA1','θA2','φA2','θA3','φA3','θB1','φB1','θB2','φB2','θB3','φB3'];
-  var mac=document.getElementById('mac');if(mac) mac.innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'\u00B0</span>';}).join('');
-}
-
-// ─── MINER NETWORK ───────────────────────────────────────────────────────────
-var _miners=[],_p2pShowHist=false;
-function p2pToggleHist(){
-  _p2pShowHist=!_p2pShowHist;
-  var btn=document.getElementById('p2p-hist-btn');
-  if(btn){btn.textContent=_p2pShowHist?'ALL':'LIVE';btn.className='txfbtn'+(_p2pShowHist?' active':'');}
-  renderMiners(_miners);
-}
-function _age(s){if(!s&&s!==0) return '\u2014';if(s<60) return s+'s ago';if(s<3600) return Math.floor(s/60)+'m ago';if(s<86400) return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
-function renderMiners(miners){
-  var el=document.getElementById('pl');if(!el) return;
-  if(!miners||!miners.length){el.innerHTML='<div class="es" style="padding:20px">No miners in registry</div>';return;}
-  _miners=miners;
-  var live=miners.filter(function(m){return m.status==='live';});
-  var seen=miners.filter(function(m){return m.status==='seen';});
-  var hist=miners.filter(function(m){return m.status==='historic';});
-  var pcb=document.getElementById('pcb');if(pcb)pcb.textContent=miners.length+' miners';
-  var p2plc=document.getElementById('p2plc');if(p2plc)p2plc.textContent=live.length;
-  var p2psc=document.getElementById('p2psc');if(p2psc)p2psc.textContent=seen.length;
-  var p2ptc=document.getElementById('p2ptc');if(p2ptc)p2ptc.textContent=hist.length;
-  var dot=document.getElementById('p2p-live-dot');
-  if(dot){dot.style.background=live.length?'var(--gr)':'var(--dim)';dot.style.animation=live.length?'p2ppulse 1.6s infinite':'none';}
-  var visible=_p2pShowHist?miners:miners.filter(function(m){return m.status!=='historic';});
-  if(!visible.length&&miners.length) visible=miners.slice(0,5);
-  el.innerHTML=visible.map(function(m){
-    var addr=m.miner_address||m.address||'';
-    var short=addr.length>20?addr.slice(0,10)+'\u2026'+addr.slice(-10):addr||'(no address)';
-    var bks=m.block_count||0,earned=parseFloat(m.total_earned_qtcl||0).toFixed(2);
-    var h=m.last_height||0,age=_age(m.last_seen_age_s),st=m.status||'historic';
-    return '<div class="miner-row '+st+'">'
-      +'<div style="display:flex;align-items:flex-start;gap:8px">'
-      +'<div class="miner-dot" style="margin-top:4px"></div>'
-      +'<div style="flex:1;min-width:0">'
-      +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
-      +'<span class="miner-addr" title="'+addr+'" onclick="try{navigator.clipboard.writeText(\''+addr+'\');}catch(e){}">'+short+'</span>'
-      +'<span class="miner-badge '+st+'">'+st.toUpperCase()+'</span>'
-      +'</div>'
-      +'<div class="miner-stats">'
-      +(bks?'<span>\u26CF <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
-      +(parseFloat(earned)>0?'<span>\uD83D\uDCB0 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
-      +(h?'<span>h=<span class="miner-stat-val">'+h+'</span></span>':'')
-      +(age!=='\u2014'?'<span class="miner-stat-val">'+age+'</span>':'')
-      +'</div></div></div></div>';
-  }).join('');
-}
-
-// ─── DOM UPDATE — throttled, NO FLASH ───────────────────────────────
-var _domThrottle=0;
-function st(id,v){
-  var e=document.getElementById(id);
-  if(!e) return;
-  var s=String(v);
-  if(e.textContent!==s){
-    e.textContent=s;  // NO flash animation - just update
-  }
-}
-function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
-function fmt4(v){return v==null?'--':parseFloat(v).toFixed(4);}
-
-function updateDOM(){
-  var now=Date.now();
-  if(now-_domThrottle<100) return;  // throttle: max 10 updates/sec
-  _domThrottle=now;
-  
-  // Only update DM+Mermin related elements
-  st('bfi',fmt4(S.fidelity));
-  st('ben',S.pq_curr);
-  st('bcn',S.pq_last);
-  st('bte',fmt4(S.tele_fidelity));
-  st('dkb','pq0='+S.pq0+' pq_last='+S.pq_last+' \u2192 pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' \u0394='+(S.pq_curr-S.pq_last):''));
-  
-  // pq HUD
-  var pqC=S.pq_curr||0,pqL=S.pq_last||0;
-  var hl=document.getElementById('pqh-last');if(hl) hl.textContent=pqL;
-  var hc=document.getElementById('pqh-curr');if(hc) hc.textContent=pqC;
-  var hd=document.getElementById('pqh-delta');if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
-  var hcy=document.getElementById('pqh-cycle');if(hcy) hcy.textContent='\u03C8 cyc='+S.cycle+(S.cycle>0&&S.cycle%8===0?' \u2191REVIVAL':S.cycle>0&&S.cycle%8===4?' \u2193ANTI':'');
-  
-  // Mermin
-  if(S.mermin) renderMermin(S.mermin);
-}
-function setOnline(ok){var p=document.getElementById('cp'),t=document.getElementById('ct');if(!p||!t) return;ok?p.classList.remove('off'):p.classList.add('off');t.textContent=ok?'LIVE':'OFFLINE';}
-var _lu=0;
-function stamp(){_lu=Date.now();var bu=document.getElementById('bu');if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8);}
-
-// ─── SNAPSHOT STATE MERGE ────────────────────────────────────────────────────
-// Splitting logic: Pulls DM hex for the Worker and distributes metrics to the UI
-function _applySnapshot(dm){
-  if(!dm) return;
-  // 1. High-priority DM extraction for specialized worker
-  if(dm.density_matrix_hex) _dmSubmit(dm.density_matrix_hex, dm.dm_dim||64);
-  
-  // 2. Metric distribution
-  if(dm.w_state_fidelity!=null) S.fidelity=dm.w_state_fidelity;
-  if(dm.purity!=null) S.purity=dm.purity;
-  if(dm.coherence_l1!=null) S.coherence=dm.coherence_l1;
-  if(dm.von_neumann_entropy!=null) S.entropy=dm.von_neumann_entropy;
-  if(dm.sse!=null) S.sse=dm.sse;
-  
-  if(dm.lattice_refresh_counter!=null&&dm.lattice_refresh_counter>S.cycle) S.cycle=dm.lattice_refresh_counter;
-  
-  var aer=dm.aer_noise_state||{};
-  if(aer.gamma1!=null) S.gamma1=aer.gamma1;
-  if(aer.gammaphi!=null) S.gammaphi=aer.gammaphi;
-  if(aer.omega!=null) S.omega=aer.omega;
-  if(aer.ou_mem!=null) S.ou_mem=aer.ou_mem;
-  if(aer.sector_occ!=null) S.sector_occ=aer.sector_occ;
-  if(dm.phase_drift!=null) S.phase_drift=dm.phase_drift;
-  if(dm.phase_coherence!=null) S.phase_coherence=dm.phase_coherence;
-  if(dm.qrng_health!=null) S.qrng_health=dm.qrng_health;
-  
-  var bf=aer.block_field||{};
-  if(bf.pq_curr!=null){S.pq_curr=bf.pq_curr; S.pq_last=bf.pq_last||(bf.pq_curr-1); S.pq0=bf.pq0||S.pq0;}
-  
-  var perNode=bf.per_node||[];
-  if(perNode.length>0){
-    perNode.forEach(function(n){
-      var key='oracle_'+(n.oracle_id!=null?n.oracle_id:1);
-      if(!S.oracle_data[key]) S.oracle_data[key]={};
-      var od=S.oracle_data[key];
-      if(n.fidelity!=null) od.w_state_fidelity=n.fidelity;
-      if(n.coherence!=null) od.coherence=n.coherence;
-      if(n.entropy!=null) od.entropy=n.entropy;
-      if(n.pq0_oracle_fidelity!=null) od.pq0_oracle_fidelity=n.pq0_oracle_fidelity;
-      od.in_consensus=!!n.in_consensus;
-    });
-    S.oracle_consensus_reached=perNode.filter(function(n){return n.in_consensus;}).length>=3;
-    S.quantum_validation_status=S.oracle_consensus_reached?'VALIDATED':'PENDING';
-    S.pq_validation_status=S.oracle_consensus_reached?'HLWE_OK':'PENDING';
-  }
-  
-  // Derived metrics distribution
-  var _p=dm.purity||S.purity||0.8, _f=dm.w_state_fidelity||S.fidelity||0;
-  S.negativity=Math.max(0,(_p-0.5)*0.8);
-  S.concurrence=Math.max(0,(_p-0.333)*1.2);
-  S.entanglement=Math.max(0,_f*0.9);
-  S.qfi=Math.max(0,_f*8.0);
-  S.discord=Math.max(0,(1-_p)*2.0);
-  S.tele_fidelity=Math.max(0,_f*0.95);
-  
-  if(dm.mermin_test) S.mermin=dm.mermin_test;
-}
-
-// ════════════════════════════════════════════════════════════════════════════════
-// ENTERPRISE WORKER ARCHITECTURE — Full async partition for zero UI blocking
-// ════════════════════════════════════════════════════════════════════════════════
-var _lastEventTs=Date.now()/1000-60,_lastBlockHeight=0;
-
-// W0: Block Height Poller (foundation, minimal footprint)
-async function _workerBlockHeight(){
-  try{
-    var hr=await rpc('qtcl_getBlockHeight',[]);
-    if(hr&&hr.height!=null){
-      var nh=parseInt(hr.height);
-      if(nh>S.height){_lastBlockHeight=S.height;S.height=nh;S.tip_hash=hr.tip_hash||S.tip_hash;applyRewards(S.height);}
-    }
-    updateDOM();setOnline(true);stamp();
-  }catch(e){}
-  finally{setTimeout(_workerBlockHeight, 4000);}
-}
-
-// W1: Metrics Worker — DISABLED (DM+Mermin only)
-var _w1RPCPushES=null,_w1RPCReconnT=null;
-function _workerMetricsPush(){
-  // DISABLED - metrics streaming disabled, only DM+Mermin active
-  console.log('[W1-Metrics] disabled');
-  return;
-  /* OLD CODE DISABLED
-  if(_w1RPCPushES){_w1RPCPushES.close();_w1RPCPushES=null;}
-  try{
-    _w1RPCPushES=new EventSource(BASE+'/rpc/metrics/push');
-    ...
-  */
-}
-
-// W2: Density Matrix Worker — SSE stream for 64x64 DM rendering
-var _w2ES=null,_w2ReconnT=null;
-var _w2MsgCount=0;
-function _workerDM(){
-  if(_w2ES){_w2ES.close();_w2ES=null;}
-  try{
-    _w2ES=new EventSource(BASE+'/rpc/oracle/snapshot');
-    _w2ES.onmessage=function(e){
-      _w2MsgCount++;
-      try{
-        var d=JSON.parse(e.data);
-        var r=d.result;
-        if(!r) return;
-        
-        var pktype=r.packet_type||'dm';
-        console.log('[W2-DM] msg#'+_w2MsgCount+' type='+pktype+' dim='+(r.dm_dim||'?'));
-        
-        // DM packet - render density matrix heatmap
-        if(pktype==='dm'&&r.density_matrix_hex){
-          console.log('[W2-DM] submitting DM, hex len='+r.density_matrix_hex.length);
-          _dmSubmit(r.density_matrix_hex, r.dm_dim||64);
-          console.log('[W2-DM] DM submitted, _dmDirty='+_dmDirty);
-        }
-        // Metrics also come through same stream for Mermin display
-        if(r.w_state_fidelity!=null) S.fidelity=r.w_state_fidelity;
-        if(r.purity!=null) S.purity=r.purity;
-        if(r.lattice_refresh_counter!=null) S.cycle=r.lattice_refresh_counter;
-        if(r.mermin_test){ 
-          console.log('[W2-DM] mermin_test received:', JSON.stringify(r.mermin_test).slice(0,100));
-          S.mermin=r.mermin_test;
-        }
-        if(r.mermin){ 
-          console.log('[W2-DM] mermin field:', JSON.stringify(r.mermin).slice(0,100));
-          S.mermin=r.mermin;
-        }
-        updateDOM();
-        setOnline(true);
-      }catch(x){console.warn('[W2-DM] parse error',x.message);}
-    };
-    _w2ES.onerror=function(){
-      console.warn('[W2-DM] connection lost, reconnecting...');
-      if(_w2ES){_w2ES.close();_w2ES=null;}
-      clearTimeout(_w2ReconnT);
-      _w2ReconnT=setTimeout(_workerDM, 3000);
-    };
-  }catch(e){console.warn('[W2-DM] init failed',e.message);
-    clearTimeout(_w2ReconnT);
-    _w2ReconnT=setTimeout(_workerDM, 5000);
-  }
-}
-
-// W3: Blocks Worker — Dedicated SSE stream for chain blocks (UNBLOCKABLE)
-var _w3ES=null,_w3ReconnT=null;
-var _w3LastHeight=0;
-var _blocksLoaded=false;
-
-async function _loadInitialBlocks(){
-  if(_blocksLoaded) return;
-  _blocksLoaded=true;
-  try{
-    // First get chain height
-    var bh=await rpc('qtcl_getBlockHeight',[],3000);
-    if(bh&&bh.result){
-      S.height=bh.result.height||0;
-      console.log('[W3-Blocks] Chain height='+S.height);
-    }
-    // Then load recent blocks (last 30)
-    if(S.height>0){
-      var startH=Math.max(1,S.height-29);
-      var blks=await rpc('qtcl_getBlockRange',[startH,S.height],5000);
-      if(blks&&blks.result&&blks.result.blocks){
-        blks.result.blocks.forEach(function(b){
-          var h=parseInt(b.height||0);
-          if(h>0&&!_blocksById[h]){
-            _blocksById[h]={height:h,hash:b.block_hash||b.hash||'',tx_count:b.tx_count||b.transaction_count||0,w_state_fidelity:b.w_state_fidelity||S.fidelity,_fr:false};
-          }
-        });
-        blocks=Object.values(_blocksById).sort(function(a,b){return a.height-b.height;});
-        if(blocks.length>30) blocks=blocks.slice(-30);
-        renderChain();
-        console.log('[W3-Blocks] Loaded '+blocks.length+' blocks, height='+S.height);
-      }
-    }
-  }catch(e){console.warn('[W3-Blocks] init load failed:',e.message);}
-}
-
-function _workerBlocks(){
-  if(_w3ES){_w3ES.close();_w3ES=null;}
-  try{
-    _w3ES=new EventSource(BASE+'/rpc/events/blocks');
-    _w3ES.onmessage=function(e){
-      try{
-        var d=JSON.parse(e.data);
-        var r=d.result;
-        if(!r) return;
-        
-        console.log('[W3-Blocks] SSE event, height='+(r.height||r.block_height||'?'));
-        
-        var h=parseInt(r.height||r.block_height||0);
-        if(h>0&&h!==_w3LastHeight){
-          _w3LastHeight=h;
-          if(h>S.height){S.height=h;applyRewards(h);}
-          if(!_blocksById[h]){
-            var nb={
-              height:h,
-              hash:r.block_hash||r.hash||'',
-              tx_count:r.tx_count||r.transaction_count||0,
-              w_state_fidelity:r.w_state_fidelity||S.fidelity,
-              _fr:true
-            };
-            _blocksById[h]=nb;
-            blocks.push(nb);
-            blocks.sort(function(a,b){return a.height-b.height;});
-            if(blocks.length>30) blocks=blocks.slice(-30);
-            renderChain();
+      
+      var dm=parsed,N=dm.N,mx=dm.maxMag,cW=gW/N,cH=gH/N;
+      var img=ctx.getImageData(0,0,W,H),px=img.data;
+      
+      for(var row=0;row<N;row++){
+        for(var col=0;col<N;col++){
+          var idx=row*N+col;
+          var rgb=p2rgb(dm.ph[idx],dm.mag[idx],mx);
+          var x0=(pad.l+col*cW)|0, y0=(pad.t+row*cH)|0;
+          var x1=(pad.l+(col+1)*cW)|0, y1=(pad.t+(row+1)*cH)|0;
+          for(var py=y0;py<y1;py++){
+            var ro=py*W*4;
+            for(var px2=x0;px2<x1;px2++){
+              var p=ro+px2*4; px[p]=rgb[0];px[p+1]=rgb[1];px[p+2]=rgb[2];px[p+3]=255;
+            }
           }
         }
-        setOnline(true);
-      }catch(x){console.warn('[W3-Blocks] parse error',x.message);}
-    };
-    _w3ES.onerror=function(){
-      console.warn('[W3-Blocks] SSE lost, reconnecting...');
-      if(_w3ES){_w3ES.close();_w3ES=null;}
-      clearTimeout(_w3ReconnT);
-      _w3ReconnT=setTimeout(_workerBlocks, 3000);
-    };
-  }catch(e){console.warn('[W3-Blocks] init failed',e.message);
-    clearTimeout(_w3ReconnT);
-    _w3ReconnT=setTimeout(_workerBlocks, 5000);
-  }
-}
-
-// W4: Mempool Worker — Independent polling for mempool state
-var _w4Running=false;
-async function _workerMempool(){
-  if(_w4Running) return; _w4Running=true;
-  try{
-    var mp=await rpc('qtcl_getMempoolStats',[]);
-    if(mp){S.mempool_size=mp.depth||mp.pending||0;st('hm',S.mempool_size+' tx');}
-  }catch(e){}
-  finally{_w4Running=false; setTimeout(_workerMempool, 6000);}
-}
-
-// W5: Peers Worker — Independent miner network state
-var _w5Running=false;
-async function _workerPeers(){
-  if(_w5Running) return; _w5Running=true;
-  try{
-    var peers=await rpc('qtcl_getPeers',[]);
-    if(peers){
-      var raw=Array.isArray(peers.peers)?peers.peers:[];
-      S.n_peers=peers.count||raw.length;
-      var miners=raw.map(function(p){
-        var addr=p.miner_address||p.address||p.node_id||'';
-        var ls=p.last_seen?new Date(p.last_seen).getTime()/1000:0;
-        var age=ls>0?Math.round(Date.now()/1000-ls):999999;
-        return{miner_address:addr,last_height:p.block_height||0,status:age<300?'live':(age<86400?'seen':'historic'),last_seen_age_s:age};
-      });
-      renderMiners(miners);
+      }
+      ctx.putImageData(img,0,0);
+      
+      // Diagonal
+      for(var i=0;i<N;i++){
+        var dx=(pad.l+i*cW)|0, dy=(pad.t+i*cH)|0;
+        ctx.strokeStyle='rgba(0,255,255,0.5)';ctx.lineWidth=1;
+        ctx.strokeRect(dx,dy,cW|0,cH|0);
+      }
+      
+      // Colorbar
+      var cbY=H-20,cbH=6;
+      for(var p2=0;p2<gW;p2++){
+        var ph2=-Math.PI+(p2/gW)*2*Math.PI;
+        var crgb=p2rgb(ph2,mx*0.7,mx);
+        ctx.fillStyle='rgb('+crgb[0]+','+crgb[1]+','+crgb[2]+')';
+        ctx.fillRect(pad.l+p2,cbY,1,cbH);
+      }
+      ctx.font='7px JetBrains Mono,monospace';ctx.fillStyle='rgba(0,220,255,.45)';
+      ctx.textAlign='left';ctx.textBaseline='top';ctx.fillText('-π',pad.l,cbY+cbH+1);
+      ctx.textAlign='center';ctx.fillText('PHASE',pad.l+gW/2,cbY+cbH+1);
+      ctx.textAlign='right';ctx.fillText('+π',pad.l+gW,cbY+cbH+1);
+      
+      // HUD
+      ctx.font='8px JetBrains Mono,monospace';ctx.textAlign='right';ctx.textBaseline='top';
+      ctx.fillStyle='rgba(212,160,32,.8)';
+      ctx.fillText('Trρ²='+(STATE.purity||0).toFixed(4),W-pad.r-2,pad.t+2);
+      ctx.fillStyle='rgba(0,220,255,.7)';
+      ctx.fillText('F='+(STATE.fidelity||0).toFixed(4),W-pad.r-2,pad.t+12);
+      ctx.fillStyle='rgba(0,220,255,.3)';ctx.textAlign='left';
+      ctx.fillText('ρ '+N+'×'+N,pad.l+2,pad.t+2);
     }
-  }catch(e){}
-  finally{_w5Running=false; setTimeout(_workerPeers, 12000);}
-}
+    
+    // DOM updater
+    function updateDOM(){
+      var f=document.getElementById('dm-fidelity');
+      if(f)f.textContent=STATE.fidelity.toFixed(4);
+      var pc=document.getElementById('dm-pq-curr');
+      if(pc)pc.textContent=STATE.pq_curr;
+      var pl=document.getElementById('dm-pq-last');
+      if(pl)pl.textContent=STATE.pq_last;
+      var pu=document.getElementById('dm-purity');
+      if(pu)pu.textContent=STATE.purity.toFixed(4);
+      
+      // HUD
+      var pqC=STATE.pq_curr||0,pqL=STATE.pq_last||0;
+      var hl=document.getElementById('pqh-last');if(hl)hl.textContent=pqL;
+      var hc=document.getElementById('pqh-curr');if(hc)hc.textContent=pqC;
+      var hd=document.getElementById('pqh-delta');if(hd)hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
+      var hcy=document.getElementById('pqh-cycle');if(hcy)hcy.textContent='ψ cyc='+STATE.cycle;
+      
+      var st=document.getElementById('dm-status');
+      if(st)st.textContent='LIVE';
+    }
+    
+    // SSE stream handler (DEDICATED to DM only, ignores Mermin)
+    var es=null, reconn=null, msgCount=0;
+    function startStream(){
+      if(es){es.close();es=null;}
+      try{
+        es=new EventSource(window.location.origin+'/rpc/oracle/snapshot');
+        es.onmessage=function(e){
+          msgCount++;
+          try{
+            var d=JSON.parse(e.data);
+            var r=d.result;
+            if(!r) return;
+            
+            // ONLY process DM data - ignore Mermin entirely
+            if(r.density_matrix_hex){
+              submit(r.density_matrix_hex,r.dm_dim||64);
+            }
+            if(r.w_state_fidelity!=null) STATE.fidelity=r.w_state_fidelity;
+            if(r.purity!=null) STATE.purity=r.purity;
+            if(r.lattice_refresh_counter!=null) STATE.cycle=r.lattice_refresh_counter;
+            
+            var bf=r.block_field||{};
+            if(bf.pq_curr!=null){STATE.pq_curr=bf.pq_curr; STATE.pq_last=bf.pq_last||(bf.pq_curr-1); STATE.pq0=bf.pq0||STATE.pq0;}
+            
+            updateDOM();
+            document.getElementById('dm-status').textContent='LIVE '+msgCount;
+          }catch(x){console.warn('[DM-SSE]',x.message);}
+        };
+        es.onerror=function(){
+          if(es){es.close();es=null;}
+          clearTimeout(reconn);
+          reconn=setTimeout(startStream,3000);
+        };
+      }catch(e){
+        clearTimeout(reconn);
+        reconn=setTimeout(startStream,5000);
+      }
+    }
+    
+    // Start
+    render();
+    setTimeout(startStream,100);
+    
+    return {getState:function(){return STATE;}};
+  })();
 
-// W6: Transactions Worker — DEDICATED independent worker (ISOLATED from all other data streams)
-// This runs in complete isolation - separate from DM, blocks, peers - to prevent ANY hanging
-var _w6Running=false;
-async function _workerTransactions(){
-  if(_w6Running) return; _w6Running=true;
-  try{
-    if(!txLoading) await loadTxPage();
-  }catch(e){console.warn('[W6-Transactions]',e.message);}
-  finally{_w6Running=false; setTimeout(_workerTransactions, 8000);}
-}
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // MODULE 2: MERMIN INEQUALITY (Completely Sandboxed, Separate SSE Stream)
+  // ═══════════════════════════════════════════════════════════════════════════════
+  var MERMIN = (function(){
+    var STATE = {M:0,verdict:'',cycle:0,angles:[],anglesLabels:[]};
+    var es=null, reconn=null, msgCount=0;
+    
+    function updateDOM(){
+      var M=STATE.M, isQ=M>2.0;
+      var el=document.getElementById('mermin-M');
+      if(el){el.textContent=M.toFixed(3);el.className='mb2 '+(isQ?'q':'c');}
+      var vd=document.getElementById('mermin-verdict');
+      if(vd)vd.textContent=STATE.verdict||'--';
+      var mb=document.getElementById('mermin-status');
+      if(mb)mb.textContent='M='+M.toFixed(3);
+      var bar=document.getElementById('mermin-bar');
+      if(bar)bar.style.width=Math.min(100,M/4*100)+'%';
+      var cy=document.getElementById('mermin-cycle');
+      if(cy){var sig=(STATE.cycle%8===0)?'· REVIVAL':(STATE.cycle%8===4)?'· ANTI-REV':'';cy.textContent='cycle '+STATE.cycle+' '+sig;}
+      
+      var mac=document.getElementById('mermin-angles');
+      if(mac)mac.innerHTML=STATE.angles.map(function(a,i){
+        return '<span class="ac">'+(STATE.anglesLabels[i]||('a'+i))+'='+a.toFixed(1)+'°</span>';
+      }).join('');
+    }
+    
+    // Separate SSE stream - ONLY for Mermin, completely ignores DM
+    function startStream(){
+      if(es){es.close();es=null;}
+      try{
+        es=new EventSource(window.location.origin+'/rpc/events/mermin');  // DEDICATED endpoint
+        es.onmessage=function(e){
+          msgCount++;
+          try{
+            var d=JSON.parse(e.data);
+            var r=d.result||d;
+            if(!r) return;
+            
+            // ONLY process Mermin - ignore all DM data
+            var mval=r.M_value||r.M||r.mermin_value||0;
+            STATE.M=parseFloat(mval);
+            STATE.verdict=r.verdict||r.interpretation||(STATE.M>2.0?'Quantum violation detected':'Classical bound');
+            if(r.cycle!=null) STATE.cycle=r.cycle;
+            if(r.angle_degrees) STATE.angles=r.angle_degrees;
+            if(r.angle_labels) STATE.anglesLabels=r.angle_labels;
+            
+            updateDOM();
+            document.getElementById('mermin-status').textContent='LIVE '+msgCount;
+          }catch(x){console.warn('[MERMIN-SSE]',x.message);}
+        };
+        es.onerror=function(){
+          if(es){es.close();es=null;}
+          clearTimeout(reconn);
+          reconn=setTimeout(startStream,3000);
+        };
+      }catch(e){
+        clearTimeout(reconn);
+        reconn=setTimeout(startStream,5000);
+      }
+    }
+    
+    // Fallback: also listen on general oracle snapshot but ONLY extract Mermin
+    function startFallbackStream(){
+      try{
+        var fallES=new EventSource(window.location.origin+'/rpc/oracle/snapshot');
+        fallES.onmessage=function(e){
+          try{
+            var d=JSON.parse(e.data);
+            var r=d.result;
+            if(!r) return;
+            
+            // Only extract Mermin - ignore DM completely
+            if(r.mermin_test||r.mermin){
+              var m=(r.mermin_test||r.mermin);
+              var mval=m.M_value||m.M||m.mermin_value||0;
+              STATE.M=parseFloat(mval)||STATE.M;
+              STATE.verdict=m.verdict||m.interpretation||(STATE.M>2.0?'Quantum violation detected':'Classical bound');
+              if(m.angle_degrees) STATE.angles=m.angle_degrees;
+              if(m.cycle!=null) STATE.cycle=m.cycle;
+              updateDOM();
+            }
+          }catch(x){}
+        };
+      }catch(x){}
+    }
+    
+    // Start
+    setTimeout(startStream,150);
+    setTimeout(startFallbackStream,300);
+    
+    return {getState:function(){return STATE;}};
+  })();
 
-// ════════════════════════════════════════════════════════════════════════════════
-// BOOT SEQUENCE — Phase-isolated enterprise launch
-// ════════════════════════════════════════════════════════════════════════════════
-function _boot(){
-  console.log('[QTCL] DENSITY STREAM ONLY - all other UI metrics frozen');
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // SHARED: Clock & Logo (No Effect on DM/Mermin)
+  // ═══════════════════════════════════════════════════════════════════════════════
+  (function(){
+    var el=document.getElementById('hck');
+    if(el){
+      function _t(){el.textContent=new Date().toISOString().replace('T',' ').slice(0,19)+' UTC';}
+      setInterval(_t,1000); _t();
+    }
+  })();
   
-  // ONLY: Density Matrix stream (W2) - all else disabled for hanging isolation
-  setTimeout(_workerDM, 100);  // DM + Mermin via /rpc/oracle/snapshot
-  
-  // ALL OTHER WORKERS DISABLED for hanging debug
-  // _workerBlockHeight disabled
-  // _workerMetricsPush disabled
-  // _workerTransactions disabled  
-  // _loadInitialBlocks disabled
-  // _workerBlocks disabled
-  // _workerMempool disabled
-  // _workerPeers disabled
-}
-_boot();
+  (function(){
+    var c=document.getElementById('lc'),ctx=c?c.getContext('2d'):null,t=0;
+    if(!ctx) return;
+    function fr(){
+      ctx.clearRect(0,0,36,36);
+      var cx=18,cy=18,r=13,ri=7;
+      ctx.strokeStyle='rgba(0,220,255,.2)';ctx.lineWidth=1;
+      ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+      ctx.strokeStyle='rgba(128,64,255,.18)';ctx.lineWidth=0.8;
+      ctx.beginPath();ctx.arc(cx,cy,ri,0,Math.PI*2);ctx.stroke();
+      for(var i=0;i<4;i++){
+        var a=i*Math.PI/2-t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
+        ctx.strokeStyle='rgba(0,220,255,'+(0.3+0.25*Math.sin(t*2+i))+')';ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();
+        ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
+        ctx.beginPath();ctx.arc(x,y,2.2,0,Math.PI*2);ctx.fill();
+        var ix=cx+ri*Math.cos(a),iy=cy+ri*Math.sin(a);
+        ctx.fillStyle='rgba(128,64,255,'+(0.5+0.3*Math.sin(t*2.5+i))+')';
+        ctx.beginPath();ctx.arc(ix,iy,1.5,0,Math.PI*2);ctx.fill();
+      }
+      ctx.fillStyle='rgba(212,160,32,.95)';
+      ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
+      t+=0.02; requestAnimationFrame(fr);
+    }
+    fr();
+  })();
+
+  // Online status
+  function setOnline(ok){
+    var p=document.getElementById('cp'),t=document.getElementById('ct');
+    if(p&&t){
+      if(ok)p.classList.remove('off');else p.classList.add('off');
+      t.textContent=ok?'LIVE':'OFFLINE';
+    }
+  }
+  setOnline(true);
+  console.log('[QTCL] Modularized: DM and Mermin sandboxed');
+})();
 </script>
 </body>
 </html>
