@@ -4985,8 +4985,14 @@ def _oracle_snapshot_puller():
             from globals import LATTICE as _LAT
             if _LAT is not None and hasattr(_LAT, 'current_density_matrix'):
                 dm = _LAT.current_density_matrix
-                if dm is not None and hasattr(dm, 'tobytes'):
-                    dm_hex = dm.tobytes().hex() if dm.shape == (8, 8) else ''
+                dm_hex = ''
+                dm_dim = 0
+                if dm is not None and hasattr(dm, 'tobytes') and hasattr(dm, 'shape'):
+                    # Accept any square matrix shape
+                    shape = dm.shape
+                    if len(shape) == 2 and shape[0] == shape[1]:
+                        dm_hex = dm.tobytes().hex()
+                        dm_dim = shape[0]
                     
                     # Pull metrics from LATTICE
                     fidelity = getattr(_LAT, 'fidelity', None)
@@ -4994,13 +5000,25 @@ def _oracle_snapshot_puller():
                     coherence = getattr(_LAT, 'coherence', None)
                     cycle = getattr(_LAT, 'cycle_count', None)
                     
-                    # Pull mermin from LATTICE
-                    mermin = getattr(_LAT, 'mermin_test', None)
+                    # Pull mermin from LATTICE - clamp to valid range
+                    raw_mermin = getattr(_LAT, 'mermin_test', None)
+                    if raw_mermin is not None:
+                        # Normalize mermin value
+                        if isinstance(raw_mermin, dict):
+                            M = raw_mermin.get('M', raw_mermin.get('value', 0.0))
+                        else:
+                            M = float(raw_mermin)
+                        # Mermin-CHSH valid range: -2*sqrt(2) to 2*sqrt(2)
+                        if abs(M) > 2.83:
+                            M = 2.83 if M > 0 else -2.83
+                        mermin = {'M': M}
+                    else:
+                        mermin = None
                     
                     # Update snapshot cache
                     snap = {
                         'density_matrix_hex': dm_hex,
-                        'dm_dim': 8,
+                        'dm_dim': dm_dim,
                         'w_state_fidelity': fidelity,
                         'purity': purity,
                         'coherence_l1': coherence,
@@ -5010,7 +5028,7 @@ def _oracle_snapshot_puller():
                         'ready': True,
                     }
                     _cache_snapshot(snap)
-                    logger.debug(f"[ORACLE-PULL] Updated snapshot cycle={cycle} fid={fidelity}")
+                    logger.debug(f"[ORACLE-PULL] Updated snapshot cycle={cycle} fid={fidelity} dm_dim={dm_dim} M={M if raw_mermin else 'N/A'}")
         except Exception as e:
             logger.debug(f"[ORACLE-PULL] error: {e}")
         _time.sleep(0.3)

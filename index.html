@@ -167,10 +167,10 @@ document.querySelectorAll('.tab').forEach(tab => {
   const hck = document.getElementById('hck');
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
-  // RENDER FUNCTION - handles 8x8 oracle matrix expanded to full canvas
+  // RENDER FUNCTION - handles oracle matrix expanded to full 64x64 canvas
   function renderMatrix(hex, fidelity, purity, cycle){
     const canvas = document.getElementById('dm-canvas');
-    if(!canvas || !hex) return;
+    if(!canvas || !hex || hex.length < 32) return;
     const ctx = canvas.getContext('2d');
     if(!ctx) return;
     
@@ -181,14 +181,15 @@ document.querySelectorAll('.tab').forEach(tab => {
       const dv = new DataView(new ArrayBuffer(8));
       const u8 = new Uint8Array(dv.buffer);
       
-      // Parse source matrix - detect size from hex length
-      // 8x8 = 2048 hex, 64x64 = 131072 hex
+      // Parse source matrix - auto-detect size from hex length
       const hexLen = hex.length;
-      let srcN = 8;
-      if(hexLen >= 131072) srcN = 64;
-      else if(hexLen >= 8192) srcN = 16;
+      const srcLen = Math.floor(hexLen / 32); // 32 hex chars per complex128
+      const srcN = Math.round(Math.sqrt(srcLen));
+      const N = 64;
       
-      const srcLen = srcN * srcN;
+      if(srcN < 1) return;
+      
+      // Parse all available source elements
       const srcRe = new Float64Array(srcLen);
       const srcIm = new Float64Array(srcLen);
       
@@ -201,8 +202,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         srcIm[i]=dv.getFloat64(0,true);
       }
       
-      // Build 64x64 display by tiling the NxN source
-      const N = 64;
+      // Tile NxN source onto 64x64 output grid
       const outRe = new Float64Array(N*N);
       const outIm = new Float64Array(N*N);
       const tile = Math.floor(N / srcN);
@@ -211,7 +211,6 @@ document.querySelectorAll('.tab').forEach(tab => {
         for(let sj=0;sj<srcN;sj++){
           const val = srcRe[si*srcN+sj];
           const valIm = srcIm[si*srcN+sj];
-          // Tile this value across tile x tile area
           for(let ti=0;ti<tile;ti++){
             for(let tj=0;tj<tile;tj++){
               const oi = si*tile + ti;
@@ -225,7 +224,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         }
       }
       
-      // Hermitian mirror upper to lower
+      // Hermitian mirror upper to lower triangle
       for(let i=0;i<N;i++){
         for(let j=i+1;j<N;j++){
           const ui = i*N+j;
@@ -260,7 +259,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         px[p]=(r+m)*255;px[p+1]=(g+m)*255;px[p+2]=(b+m)*255;px[p+3]=255;
       }
       
-      // Draw full 64x64 image scaled to canvas
+      // Draw 64x64 image scaled to canvas
       const img = new ImageData(px, N, N);
       const tc = document.createElement('canvas');
       tc.width=N;tc.height=N;
