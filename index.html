@@ -367,7 +367,8 @@ function showPage(id) {
     if(el){
       setInterval(() => { el.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
     }
-    const c=document.getElementById('lc'), ctx=c?c.getContext('2d'):null, t=0;
+    const c=document.getElementById('lc'), ctx=c?c.getContext('2d'):null;
+    let t=0; // Properly declared t
     if(ctx){
       function fr(){
         ctx.clearRect(0,0,36,36);
