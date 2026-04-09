@@ -142,352 +142,333 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
 <script>
 'use strict';
 (function(){
-  // ═══════════════════════════════════════════════════════════════════════════════
-  // MODULE 1: DENSITY MATRIX RENDERER (Completely Sandboxed)
-  // ═══════════════════════════════════════════════════════════════════════════════
-  var DM = (function(){
-    var STATE = {fidelity:0,purity:0,pq_curr:0,pq_last:0,pq0:0,cycle:0,hex:''};
-    var worker=null, parsed=null, dirty=false, ctx=null, canvas=null;
-    
-    // Phase → RGB converter
-    function p2rgb(phase,mag,mx){
-      var np=(phase+Math.PI)/(2*Math.PI);
-      var h=160+np*160, l=Math.min(0.9,0.1+(mag/(mx||1))*0.8), s=0.8;
-      var c2=(1-Math.abs(2*l-1))*s, x2=c2*(1-Math.abs((h/60)%2-1)), m2=l-c2/2;
-      var r1,g1,b1;
-      if(h<60){r1=c2;g1=x2;b1=0;}else if(h<120){r1=x2;g1=c2;b1=0;}
-      else if(h<180){r1=0;g1=c2;b1=x2;}else if(h<240){r1=0;g1=x2;b1=c2;}
-      else if(h<300){r1=x2;g1=0;b1=c2;}else{r1=c2;g1=0;b1=x2;}
-      return[(r1+m2)*255|0,(g1+m2)*255|0,(b1+m2)*255|0];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QTCL_BUS — Single SSE → Ring Buffer → CustomEvent fanout to ALL modules
+// Architecture: one EventSource, pointer-based ring drain, zero polling loops.
+// All modules subscribe via document.addEventListener('qtcl:snap', handler).
+// ═══════════════════════════════════════════════════════════════════════════════
+var QTCL_BUS = (function(){
+  // 64-frame ring buffer — keep recent frames for late subscribers + rate display
+  var RING = [], RING_MAX = 64, ptr = 0;
+  var es = null, reconn = null;
+  var frameCount = 0, lastFrameTs = 0;
+  var fps = 0, _fpsAccum = 0, _fpsLast = Date.now();
+  var connected = false;
+
+  function _push(snap) {
+    RING[ptr % RING_MAX] = snap;
+    ptr++;
+    frameCount++;
+    // FPS calc — rolling 1s window
+    var now = Date.now();
+    _fpsAccum++;
+    if(now - _fpsLast >= 1000) {
+      fps = _fpsAccum;
+      _fpsAccum = 0;
+      _fpsLast = now;
     }
-    
-    // Web Worker source (inline blob)
-    var WORKER_SRC = [
-      'self.onmessage=function(e){',
-      '  var d=e.data; if(!d||!d.hex) return;',
-      '  var hex=d.hex, N=d.N||64, n2=N*N;',
-      '  var HEX=new Uint8Array(256);',
-      '  for(var c=0;c<10;c++) HEX[48+c]=c;',
-      '  for(var c=0;c<6;c++){HEX[65+c]=10+c;HEX[97+c]=10+c;}',
-      '  var re=new Float64Array(n2), im=new Float64Array(n2);',
-      '  var mag=new Float64Array(n2), ph=new Float64Array(n2);',
-      '  var dv=new DataView(new ArrayBuffer(8));',
-      '  var u8=new Uint8Array(dv.buffer);',
-      '  var mx=0;',
-      '  for(var i=0;i<n2;i++){',
-      '    var off=i*32; if(off+31>=hex.length) break;',
-      '    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];',
-      '    re[i]=dv.getFloat64(0,true);',
-      '    for(var b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];',
-      '    im[i]=dv.getFloat64(0,true);',
-      '  }',
-      '  // Hermitian mirroring (ρ = ρ†)',
-      '  for(var r=0;r<N;r++){',
-      '    re[r*N+r]=Math.abs(re[r*N+r]); im[r*N+r]=0;',
-      '    for(var c=r+1;c<N;c++){',
-      '      var ij=r*N+c, ji=c*N+r;',
-      '      var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
-      '      re[ij]=are; im[ij]=aim;',
-      '      re[ji]=are; im[ji]=-aim;',
-      '    }',
-      '  }',
-      '  for(var r=0;r<N;r++){',
-      '    for(var c=0;c<N-r-1;c++){',
-      '      var ij=r*N+c, ji=(N-1-c)*(N-1-r);',
-      '      if(ji>=0&&ji<n2){',
-      '        var are=0.5*(re[ij]+re[ji]), aim=0.5*(im[ij]-im[ji]);',
-      '        re[ij]=are; im[ij]=aim;',
-      '        re[ji]=are; im[ji]=-aim;',
-      '      }',
-      '    }',
-      '  }',
-      '  // SSE & Purity',
-      '  var rho_sq=0; for(var i=0;i<n2;i++){',
-      '    var m=Math.sqrt(re[i]*re[i]+im[i]*im[i]); mag[i]=m; ph[i]=Math.atan2(im[i],re[i]);',
-      '    if(m>mx) mx=m; rho_sq+=m*m;',
-      '  }',
-      '  var purity=Math.min(1,Math.sqrt(rho_sq));',
-      '  var rb=re.buffer.slice(0), ib=im.buffer.slice(0), mb=mag.buffer.slice(0), pb=ph.buffer.slice(0);',
-      '  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:mx,N:N,purity:purity},[rb,ib,mb,pb]);',
-      '};'
-    ].join('\n');
-    
-    // Init worker
-    try{
-      var blob=new Blob([WORKER_SRC],{type:'application/javascript'});
-      worker=new Worker(URL.createObjectURL(blob));
-      worker.onmessage=function(e){
-        if(!e.data){parsed=null;return;}
-        parsed={
-          re:new Float64Array(e.data.re),im:new Float64Array(e.data.im),
-          mag:new Float64Array(e.data.mag),ph:new Float64Array(e.data.ph),
-          maxMag:e.data.maxMag,N:e.data.N,purity:e.data.purity
-        };
-        STATE.purity=e.data.purity||0;
-        dirty=true;
-      };
-    }catch(x){console.warn('[DM] Worker init failed',x);}
-    
-    function submit(hex,N){
-      if(!hex||hex===STATE.hex) return;
-      STATE.hex=hex;
-      if(worker){worker.postMessage({hex:hex,N:N||64});}
-      dirty=true;
-    }
-    
-    // Render loop (RAF)
-    function render(){
-      requestAnimationFrame(render);
-      if(!canvas){
-        canvas=document.getElementById('dm-canvas');
-        if(!canvas) return;
-        ctx=canvas.getContext('2d',{alpha:false});
-      }
-      if(!dirty&&parsed) return;
-      dirty=false;
-      
-      var W=canvas.width,H=canvas.height;
-      var pad={l:8,t:8,r:8,b:28}, gW=W-pad.l-pad.r, gH=H-pad.t-pad.b;
-      
-      ctx.fillStyle='#000508'; ctx.fillRect(0,0,W,H);
-      
-      if(!parsed){
-        ctx.fillStyle='rgba(0,220,255,.18)';ctx.font='10px JetBrains Mono,monospace';
-        ctx.textAlign='center';ctx.textBaseline='middle';
-        ctx.fillText('Awaiting DM…',W/2,H/2);
-        return;
-      }
-      
-      var dm=parsed,N=dm.N,mx=dm.maxMag,cW=gW/N,cH=gH/N;
-      var img=ctx.getImageData(0,0,W,H),px=img.data;
-      
-      for(var row=0;row<N;row++){
-        for(var col=0;col<N;col++){
-          var idx=row*N+col;
-          var rgb=p2rgb(dm.ph[idx],dm.mag[idx],mx);
-          var x0=(pad.l+col*cW)|0, y0=(pad.t+row*cH)|0;
-          var x1=(pad.l+(col+1)*cW)|0, y1=(pad.t+(row+1)*cH)|0;
-          for(var py=y0;py<y1;py++){
-            var ro=py*W*4;
-            for(var px2=x0;px2<x1;px2++){
-              var p=ro+px2*4; px[p]=rgb[0];px[p+1]=rgb[1];px[p+2]=rgb[2];px[p+3]=255;
-            }
-          }
-        }
-      }
-      ctx.putImageData(img,0,0);
-      
-      // Diagonal
-      for(var i=0;i<N;i++){
-        var dx=(pad.l+i*cW)|0, dy=(pad.t+i*cH)|0;
-        ctx.strokeStyle='rgba(0,255,255,0.5)';ctx.lineWidth=1;
-        ctx.strokeRect(dx,dy,cW|0,cH|0);
-      }
-      
-      // Colorbar
-      var cbY=H-20,cbH=6;
-      for(var p2=0;p2<gW;p2++){
-        var ph2=-Math.PI+(p2/gW)*2*Math.PI;
-        var crgb=p2rgb(ph2,mx*0.7,mx);
-        ctx.fillStyle='rgb('+crgb[0]+','+crgb[1]+','+crgb[2]+')';
-        ctx.fillRect(pad.l+p2,cbY,1,cbH);
-      }
-      ctx.font='7px JetBrains Mono,monospace';ctx.fillStyle='rgba(0,220,255,.45)';
-      ctx.textAlign='left';ctx.textBaseline='top';ctx.fillText('-π',pad.l,cbY+cbH+1);
-      ctx.textAlign='center';ctx.fillText('PHASE',pad.l+gW/2,cbY+cbH+1);
-      ctx.textAlign='right';ctx.fillText('+π',pad.l+gW,cbY+cbH+1);
-      
-      // HUD
-      ctx.font='8px JetBrains Mono,monospace';ctx.textAlign='right';ctx.textBaseline='top';
-      ctx.fillStyle='rgba(212,160,32,.8)';
-      ctx.fillText('Trρ²='+(STATE.purity||0).toFixed(4),W-pad.r-2,pad.t+2);
-      ctx.fillStyle='rgba(0,220,255,.7)';
-      ctx.fillText('F='+(STATE.fidelity||0).toFixed(4),W-pad.r-2,pad.t+12);
-      ctx.fillStyle='rgba(0,220,255,.3)';ctx.textAlign='left';
-      ctx.fillText('ρ '+N+'×'+N,pad.l+2,pad.t+2);
-    }
-    
-    // DOM updater
-    function updateDOM(){
-      var f=document.getElementById('dm-fidelity');
-      if(f)f.textContent=STATE.fidelity.toFixed(4);
-      var pc=document.getElementById('dm-pq-curr');
-      if(pc)pc.textContent=STATE.pq_curr;
-      var pl=document.getElementById('dm-pq-last');
-      if(pl)pl.textContent=STATE.pq_last;
-      var pu=document.getElementById('dm-purity');
-      if(pu)pu.textContent=STATE.purity.toFixed(4);
-      
-      // HUD
-      var pqC=STATE.pq_curr||0,pqL=STATE.pq_last||0;
-      var hl=document.getElementById('pqh-last');if(hl)hl.textContent=pqL;
-      var hc=document.getElementById('pqh-curr');if(hc)hc.textContent=pqC;
-      var hd=document.getElementById('pqh-delta');if(hd)hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
-      var hcy=document.getElementById('pqh-cycle');if(hcy)hcy.textContent='ψ cyc='+STATE.cycle;
-      
-      var st=document.getElementById('dm-status');
-      if(st)st.textContent='LIVE';
-    }
-    
-    // SSE stream handler (DEDICATED to DM only, ignores Mermin)
-    var es=null, reconn=null, msgCount=0;
-    function startStream(){
-      if(es){es.close();es=null;}
-      try{
-        es=new EventSource(window.location.origin+'/rpc/oracle/snapshot');
-        es.onmessage=function(e){
-          msgCount++;
-          try{
-            var d=JSON.parse(e.data);
-            var r=d.result;
-            if(!r) return;
-            
-            // ONLY process DM data - ignore Mermin entirely
-            if(r.density_matrix_hex){
-              submit(r.density_matrix_hex,r.dm_dim||64);
-            }
-            if(r.w_state_fidelity!=null) STATE.fidelity=r.w_state_fidelity;
-            if(r.purity!=null) STATE.purity=r.purity;
-            if(r.lattice_refresh_counter!=null) STATE.cycle=r.lattice_refresh_counter;
-            
-            var bf=r.block_field||{};
-            if(bf.pq_curr!=null){STATE.pq_curr=bf.pq_curr; STATE.pq_last=bf.pq_last||(bf.pq_curr-1); STATE.pq0=bf.pq0||STATE.pq0;}
-            
-            updateDOM();
-            document.getElementById('dm-status').textContent='LIVE '+msgCount;
-          }catch(x){console.warn('[DM-SSE]',x.message);}
-        };
-        es.onerror=function(){
-          if(es){es.close();es=null;}
-          clearTimeout(reconn);
-          reconn=setTimeout(startStream,3000);
-        };
-      }catch(e){
+    lastFrameTs = now;
+    // Dispatch to all registered module handlers — synchronous, zero-copy ref
+    document.dispatchEvent(new CustomEvent('qtcl:snap', {detail: snap}));
+  }
+
+  function _onMsg(e) {
+    try {
+      var d = JSON.parse(e.data);
+      var r = d.result || d;
+      if(!r || !r.ready) return;
+      // Gate: must have at least one meaningful field — filter pure comment pings
+      if(!r.density_matrix_hex && !r.w_state_fidelity && !r.mermin_test) return;
+      _push(r);
+      if(!connected) { connected = true; _setOnline(true); }
+    } catch(x) { /* malformed — skip */ }
+  }
+
+  function connect() {
+    if(es) { try{es.close();}catch(x){} es = null; }
+    try {
+      es = new EventSource(window.location.origin + '/rpc/oracle/snapshot');
+      es.onmessage = _onMsg;
+      es.onerror = function() {
+        connected = false; _setOnline(false);
+        if(es){try{es.close();}catch(x){} es=null;}
         clearTimeout(reconn);
-        reconn=setTimeout(startStream,5000);
-      }
-    }
-    
-    // Start
-    render();
-    setTimeout(startStream,100);
-    
-    return {getState:function(){return STATE;}};
-  })();
-
-  // ═══════════════════════════════════════════════════════════════════════════════
-  // MODULE 2: MERMIN INEQUALITY (Completely Sandboxed - POLLING ONLY, no SSE)
-  // ═══════════════════════════════════════════════════════════════════════════════
-  var MERMIN = (function(){
-    var STATE = {M:0,verdict:'',cycle:0,angles:[],anglesLabels:[]};
-    var msgCount=0, pollInterval=null, polling=false;
-    
-    function updateDOM(){
-      var M=STATE.M, isQ=M>2.0;
-      var el=document.getElementById('mermin-M');
-      if(el){el.textContent=M.toFixed(3);el.className='mb2 '+(isQ?'q':'c');}
-      var vd=document.getElementById('mermin-verdict');
-      if(vd)vd.textContent=STATE.verdict||'--';
-      var mb=document.getElementById('mermin-status');
-      if(mb)mb.textContent='M='+M.toFixed(3);
-      var bar=document.getElementById('mermin-bar');
-      if(bar)bar.style.width=Math.min(100,M/4*100)+'%';
-      var cy=document.getElementById('mermin-cycle');
-      if(cy){var sig=(STATE.cycle%8===0)?'· REVIVAL':(STATE.cycle%8===4)?'· ANTI-REV':'';cy.textContent='cycle '+STATE.cycle+' '+sig;}
-      
-      var mac=document.getElementById('mermin-angles');
-      if(mac)mac.innerHTML=STATE.angles.map(function(a,i){
-        return '<span class="ac">'+(STATE.anglesLabels[i]||('a'+i))+'='+a.toFixed(1)+'°</span>';
-      }).join('');
-    }
-    
-    // Polling ONLY - fetch mermin data via RPC (no SSE at all)
-    async function pollMermin(){
-      if(polling) return;
-      polling=true;
-      try{
-        var r=await fetch(window.location.origin+'/rpc',{
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({jsonrpc:'2.0',id:Date.now(),method:'qtcl_getMerminTest',params:[]}),
-          signal:AbortSignal.timeout(5000)
-        });
-        if(!r.ok){polling=false;return;}
-        var j=await r.json();
-        var m=j.result||j;
-        if(!m){polling=false;return;}
-        
-        var mval=m.M_value||m.M||m.mermin_value||0;
-        if(mval){
-          STATE.M=parseFloat(mval);
-          STATE.verdict=m.verdict||m.interpretation||(STATE.M>2.0?'Quantum violation detected':'Classical bound');
-          if(m.cycle!=null) STATE.cycle=m.cycle;
-          if(m.angle_degrees) STATE.angles=m.angle_degrees;
-          if(m.angle_labels) STATE.anglesLabels=m.angle_labels;
-          msgCount++;
-          updateDOM();
-          var st=document.getElementById('mermin-status');
-          if(st)st.textContent='POLL '+msgCount;
-        }
-      }catch(x){/* silent fail */}
-      polling=false;
-    }
-    
-    // Start polling - NO SSE at all
-    setTimeout(pollMermin,200);
-    pollInterval=setInterval(pollMermin, 4000);
-    
-    return {getState:function(){return STATE;}};
-  })();
-
-  // ═══════════════════════════════════════════════════════════════════════════════
-  // SHARED: Clock & Logo (No Effect on DM/Mermin)
-  // ═══════════════════════════════════════════════════════════════════════════════
-  (function(){
-    var el=document.getElementById('hck');
-    if(el){
-      function _t(){el.textContent=new Date().toISOString().replace('T',' ').slice(0,19)+' UTC';}
-      setInterval(_t,1000); _t();
-    }
-  })();
-  
-  (function(){
-    var c=document.getElementById('lc'),ctx=c?c.getContext('2d'):null,t=0;
-    if(!ctx) return;
-    function fr(){
-      ctx.clearRect(0,0,36,36);
-      var cx=18,cy=18,r=13,ri=7;
-      ctx.strokeStyle='rgba(0,220,255,.2)';ctx.lineWidth=1;
-      ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
-      ctx.strokeStyle='rgba(128,64,255,.18)';ctx.lineWidth=0.8;
-      ctx.beginPath();ctx.arc(cx,cy,ri,0,Math.PI*2);ctx.stroke();
-      for(var i=0;i<4;i++){
-        var a=i*Math.PI/2-t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
-        ctx.strokeStyle='rgba(0,220,255,'+(0.3+0.25*Math.sin(t*2+i))+')';ctx.lineWidth=1;
-        ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();
-        ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
-        ctx.beginPath();ctx.arc(x,y,2.2,0,Math.PI*2);ctx.fill();
-        var ix=cx+ri*Math.cos(a),iy=cy+ri*Math.sin(a);
-        ctx.fillStyle='rgba(128,64,255,'+(0.5+0.3*Math.sin(t*2.5+i))+')';
-        ctx.beginPath();ctx.arc(ix,iy,1.5,0,Math.PI*2);ctx.fill();
-      }
-      ctx.fillStyle='rgba(212,160,32,.95)';
-      ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
-      t+=0.02; requestAnimationFrame(fr);
-    }
-    fr();
-  })();
-
-  // Online status
-  function setOnline(ok){
-    var p=document.getElementById('cp'),t=document.getElementById('ct');
-    if(p&&t){
-      if(ok)p.classList.remove('off');else p.classList.add('off');
-      t.textContent=ok?'LIVE':'OFFLINE';
+        reconn = setTimeout(connect, 3000);
+      };
+      es.onopen = function() { connected = true; _setOnline(true); };
+    } catch(x) {
+      clearTimeout(reconn);
+      reconn = setTimeout(connect, 5000);
     }
   }
-  setOnline(true);
-  console.log('[QTCL] Modularized: DM and Mermin sandboxed');
+
+  function _setOnline(ok) {
+    var p=document.getElementById('cp'), t=document.getElementById('ct');
+    if(p&&t){ ok?p.classList.remove('off'):p.classList.add('off'); t.textContent=ok?'LIVE':'OFFLINE'; }
+  }
+
+  // Expose: latest(), ring(), stats()
+  return {
+    start: connect,
+    latest: function(){ return ptr>0 ? RING[(ptr-1)%RING_MAX] : null; },
+    ring: function(n){ var out=[],n2=Math.min(n||RING_MAX,ptr,RING_MAX); for(var i=0;i<n2;i++) out.push(RING[(ptr-1-i+RING_MAX)%RING_MAX]); return out; },
+    stats: function(){ return {frames:frameCount, fps:fps, connected:connected, lastFrameTs:lastFrameTs}; }
+  };
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE 1: DENSITY MATRIX RENDERER — subscribes to QTCL_BUS via qtcl:snap
+// ═══════════════════════════════════════════════════════════════════════════════
+var DM = (function(){
+  var S = {fidelity:0, purity:0, pq_curr:0, pq_last:0, cycle:0, hex:''};
+  var worker=null, parsed=null, dirty=false, ctx=null, canvas=null, msgCount=0;
+
+  // Phase → RGB — HSL hue mapped to cyan→violet phase space
+  function p2rgb(ph,mag,mx){
+    var np=(ph+Math.PI)/(2*Math.PI);
+    var h=160+np*160, l=Math.min(0.9,0.1+(mag/(mx||1))*0.8), s=0.8;
+    var c2=(1-Math.abs(2*l-1))*s, x2=c2*(1-Math.abs((h/60)%2-1)), m2=l-c2/2;
+    var r1,g1,b1;
+    if(h<60){r1=c2;g1=x2;b1=0;}else if(h<120){r1=x2;g1=c2;b1=0;}
+    else if(h<180){r1=0;g1=c2;b1=x2;}else if(h<240){r1=0;g1=x2;b1=c2;}
+    else if(h<300){r1=x2;g1=0;b1=c2;}else{r1=c2;g1=0;b1=x2;}
+    return[(r1+m2)*255|0,(g1+m2)*255|0,(b1+m2)*255|0];
+  }
+
+  // Inline Web Worker — runs off main thread, no jank during hex→Float64 parse
+  var WSRC=[
+    'self.onmessage=function(e){',
+    '  var d=e.data; if(!d||!d.hex) return;',
+    '  var hex=d.hex,N=d.N||8,n2=N*N;',
+    '  var H=new Uint8Array(256);',
+    '  for(var c=0;c<10;c++) H[48+c]=c;',
+    '  for(var c=0;c<6;c++){H[65+c]=10+c;H[97+c]=10+c;}',
+    '  var re=new Float64Array(n2),im=new Float64Array(n2);',
+    '  var mag=new Float64Array(n2),ph=new Float64Array(n2);',
+    '  var dv=new DataView(new ArrayBuffer(8)),u8=new Uint8Array(dv.buffer),mx=0;',
+    '  for(var i=0;i<n2;i++){',
+    '    var off=i*32; if(off+31>=hex.length) break;',
+    '    for(var b=0;b<8;b++) u8[b]=(H[hex.charCodeAt(off+b*2)]<<4)|H[hex.charCodeAt(off+b*2+1)];',
+    '    re[i]=dv.getFloat64(0,true);',
+    '    for(var b=0;b<8;b++) u8[b]=(H[hex.charCodeAt(off+16+b*2)]<<4)|H[hex.charCodeAt(off+16+b*2+1)];',
+    '    im[i]=dv.getFloat64(0,true);',
+    '  }',
+    // Hermitian symmetrize ρ = (ρ + ρ†)/2
+    '  for(var r=0;r<N;r++){',
+    '    re[r*N+r]=Math.abs(re[r*N+r]); im[r*N+r]=0;',
+    '    for(var c=r+1;c<N;c++){',
+    '      var ij=r*N+c,ji=c*N+r;',
+    '      var ar=0.5*(re[ij]+re[ji]),ai=0.5*(im[ij]-im[ji]);',
+    '      re[ij]=ar;im[ij]=ai;re[ji]=ar;im[ji]=-ai;',
+    '    }',
+    '  }',
+    // Mag, phase, max, purity Tr(ρ²) = Σ|ρ_ij|²
+    '  var rho_sq=0;',
+    '  for(var i=0;i<n2;i++){',
+    '    var m=Math.sqrt(re[i]*re[i]+im[i]*im[i]);',
+    '    mag[i]=m; ph[i]=Math.atan2(im[i],re[i]);',
+    '    if(m>mx) mx=m; rho_sq+=m*m;',
+    '  }',
+    '  var purity=Math.min(1,Math.sqrt(rho_sq));',
+    '  var rb=re.buffer.slice(0),ib=im.buffer.slice(0),mb=mag.buffer.slice(0),pb=ph.buffer.slice(0);',
+    '  self.postMessage({re:rb,im:ib,mag:mb,ph:pb,maxMag:mx,N:N,purity:purity},[rb,ib,mb,pb]);',
+    '};'
+  ].join('\n');
+
+  try{
+    var blob=new Blob([WSRC],{type:'application/javascript'});
+    worker=new Worker(URL.createObjectURL(blob));
+    worker.onmessage=function(e){
+      if(!e.data){parsed=null;return;}
+      parsed={re:new Float64Array(e.data.re),im:new Float64Array(e.data.im),
+               mag:new Float64Array(e.data.mag),ph:new Float64Array(e.data.ph),
+               maxMag:e.data.maxMag,N:e.data.N,purity:e.data.purity};
+      S.purity=e.data.purity||0; dirty=true;
+    };
+  }catch(x){console.warn('[DM] Worker init failed',x);}
+
+  function submit(hex,N){
+    if(!hex||hex===S.hex) return;
+    S.hex=hex;
+    if(worker) worker.postMessage({hex:hex,N:N||8});
+    dirty=true;
+  }
+
+  function updateDOM(){
+    var el;
+    el=document.getElementById('dm-fidelity');    if(el) el.textContent=S.fidelity.toFixed(4);
+    el=document.getElementById('dm-pq-curr');     if(el) el.textContent=S.pq_curr;
+    el=document.getElementById('dm-pq-last');     if(el) el.textContent=S.pq_last;
+    el=document.getElementById('dm-purity');      if(el) el.textContent=S.purity.toFixed(4);
+    el=document.getElementById('pqh-last');       if(el) el.textContent=S.pq_last;
+    el=document.getElementById('pqh-curr');       if(el) el.textContent=S.pq_curr;
+    el=document.getElementById('pqh-delta');      if(el) el.textContent=(S.pq_curr-S.pq_last>=0?'+':'')+(S.pq_curr-S.pq_last);
+    el=document.getElementById('pqh-cycle');      if(el) el.textContent='ψ cyc='+S.cycle;
+    el=document.getElementById('dm-status');
+    if(el){ var st=QTCL_BUS.stats(); el.textContent='LIVE '+frameCount+' · '+st.fps+'fps'; }
+  }
+
+  // RAF render loop — only repaints when dirty flag set by worker postMessage
+  function render(){
+    requestAnimationFrame(render);
+    if(!canvas){
+      canvas=document.getElementById('dm-canvas');
+      if(!canvas) return;
+      ctx=canvas.getContext('2d',{alpha:false});
+    }
+    if(!dirty&&parsed) return;
+    dirty=false;
+    var W=canvas.width,H=canvas.height;
+    var pad={l:8,t:8,r:8,b:28},gW=W-pad.l-pad.r,gH=H-pad.t-pad.b;
+    ctx.fillStyle='#000508'; ctx.fillRect(0,0,W,H);
+    if(!parsed){
+      ctx.fillStyle='rgba(0,220,255,.18)';ctx.font='10px JetBrains Mono,monospace';
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText('Awaiting oracle DM…',W/2,H/2); return;
+    }
+    var dm=parsed,N=dm.N,mx=dm.maxMag,cW=gW/N,cH=gH/N;
+    var img=ctx.getImageData(0,0,W,H),px=img.data;
+    for(var row=0;row<N;row++){
+      for(var col=0;col<N;col++){
+        var idx=row*N+col, rgb=p2rgb(dm.ph[idx],dm.mag[idx],mx);
+        var x0=(pad.l+col*cW)|0,y0=(pad.t+row*cH)|0,x1=(pad.l+(col+1)*cW)|0,y1=(pad.t+(row+1)*cH)|0;
+        for(var py=y0;py<y1;py++){
+          var ro=py*W*4;
+          for(var px2=x0;px2<x1;px2++){var p=ro+px2*4;px[p]=rgb[0];px[p+1]=rgb[1];px[p+2]=rgb[2];px[p+3]=255;}
+        }
+      }
+    }
+    ctx.putImageData(img,0,0);
+    // Diagonal glow
+    for(var i=0;i<N;i++){
+      var dx=(pad.l+i*cW)|0,dy=(pad.t+i*cH)|0;
+      ctx.strokeStyle='rgba(0,255,255,0.5)';ctx.lineWidth=1;ctx.strokeRect(dx,dy,cW|0,cH|0);
+    }
+    // Phase colorbar
+    var cbY=H-20,cbH=6;
+    for(var p2=0;p2<gW;p2++){
+      var ph2=-Math.PI+(p2/gW)*2*Math.PI, crgb=p2rgb(ph2,mx*0.7,mx);
+      ctx.fillStyle='rgb('+crgb[0]+','+crgb[1]+','+crgb[2]+')';ctx.fillRect(pad.l+p2,cbY,1,cbH);
+    }
+    ctx.font='7px JetBrains Mono,monospace';ctx.fillStyle='rgba(0,220,255,.45)';
+    ctx.textAlign='left';ctx.textBaseline='top';ctx.fillText('-π',pad.l,cbY+cbH+1);
+    ctx.textAlign='center';ctx.fillText('PHASE',pad.l+gW/2,cbY+cbH+1);
+    ctx.textAlign='right';ctx.fillText('+π',pad.l+gW,cbY+cbH+1);
+    // HUD overlay
+    ctx.font='8px JetBrains Mono,monospace';ctx.textAlign='right';ctx.textBaseline='top';
+    ctx.fillStyle='rgba(212,160,32,.8)';ctx.fillText('Trρ²='+S.purity.toFixed(4),W-pad.r-2,pad.t+2);
+    ctx.fillStyle='rgba(0,220,255,.7)';ctx.fillText('F='+S.fidelity.toFixed(4),W-pad.r-2,pad.t+12);
+    ctx.fillStyle='rgba(0,220,255,.3)';ctx.textAlign='left';ctx.fillText('ρ '+N+'×'+N,pad.l+2,pad.t+2);
+  }
+
+  // Bus subscription — fires on every omnibus packet from SSE ring drain
+  var frameCount = 0;
+  document.addEventListener('qtcl:snap', function(e){
+    var r = e.detail;
+    if(r.density_matrix_hex) submit(r.density_matrix_hex, r.dm_dim||8);
+    if(r.w_state_fidelity != null) S.fidelity = +r.w_state_fidelity;
+    if(r.purity != null)           S.purity   = +r.purity;
+    if(r.lattice_refresh_counter != null) S.cycle = +r.lattice_refresh_counter;
+    var bf = r.aer_noise_state&&r.aer_noise_state.block_field ? r.aer_noise_state.block_field : (r.block_field||{});
+    if(bf.pq_curr != null){ S.pq_curr = +bf.pq_curr; S.pq_last = bf.pq_last != null ? +bf.pq_last : S.pq_curr-1; }
+    frameCount++;
+    updateDOM();
+  });
+
+  render();
+  return {getState:function(){return S;}};
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE 2: MERMIN INEQUALITY — pure bus subscriber, zero independent polling
+// Mermin data arrives in omnibus SSE packet via mermin_test field every oracle
+// tick. setInterval completely eliminated — no 4-second hang vector.
+// ═══════════════════════════════════════════════════════════════════════════════
+var MERMIN = (function(){
+  var S = {M:0, verdict:'', cycle:0, angles:[], anglesLabels:[]};
+  var frameCount = 0, lastUpdate = 0;
+
+  function updateDOM(){
+    var M=S.M, isQ=M>2.0, el;
+    el=document.getElementById('mermin-M');
+    if(el){el.textContent=M.toFixed(3);el.className='mb2 '+(isQ?'q':'c');}
+    el=document.getElementById('mermin-verdict');
+    if(el) el.textContent=S.verdict||'--';
+    el=document.getElementById('mermin-status');
+    if(el) el.textContent='M='+M.toFixed(3)+' ·'+frameCount;
+    el=document.getElementById('mermin-bar');
+    if(el) el.style.width=Math.min(100,M/4*100)+'%';
+    el=document.getElementById('mermin-cycle');
+    if(el){
+      var sig=(S.cycle%8===0)?'· REVIVAL':(S.cycle%8===4)?'· ANTI-REV':'';
+      el.textContent='cycle '+S.cycle+' '+sig;
+    }
+    el=document.getElementById('mermin-angles');
+    if(el) el.innerHTML=S.angles.map(function(a,i){
+      return '<span class="ac">'+(S.anglesLabels[i]||('a'+i))+'='+a.toFixed(1)+'°</span>';
+    }).join('');
+  }
+
+  // Bus subscription — mermin_test arrives embedded in omnibus SSE packet
+  document.addEventListener('qtcl:snap', function(e){
+    var r = e.detail;
+    // mermin_test may be nested under mermin_test or bell_test (backward compat)
+    var m = r.mermin_test || r.bell_test;
+    if(!m) return;
+    var mval = +(m.M_value || m.M || m.mermin_value || 0);
+    if(!mval && mval !== 0) return;
+    S.M      = mval;
+    S.verdict= m.verdict || m.interpretation || (mval>2.0?'Quantum violation detected':'Classical bound');
+    if(m.cycle != null) S.cycle = +m.cycle;
+    if(m.angle_degrees && m.angle_degrees.length) S.angles = m.angle_degrees;
+    if(m.angle_labels  && m.angle_labels.length)  S.anglesLabels = m.angle_labels;
+    // Stale-guard: if mermin fields are all zero (oracle not computing), hold last good value
+    var now = Date.now();
+    if(mval > 0 || now - lastUpdate > 8000) { lastUpdate = now; frameCount++; updateDOM(); }
+  });
+
+  return {getState:function(){return S;}};
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SHARED: Clock, Logo, Online indicator — no changes to behaviour
+// ═══════════════════════════════════════════════════════════════════════════════
+(function(){
+  var el=document.getElementById('hck');
+  if(el){function _t(){el.textContent=new Date().toISOString().replace('T',' ').slice(0,19)+' UTC';}setInterval(_t,1000);_t();}
+})();
+
+(function(){
+  var c=document.getElementById('lc'),ctx=c?c.getContext('2d'):null,t=0;
+  if(!ctx) return;
+  function fr(){
+    ctx.clearRect(0,0,36,36);
+    var cx=18,cy=18,r=13,ri=7;
+    ctx.strokeStyle='rgba(0,220,255,.2)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+    ctx.strokeStyle='rgba(128,64,255,.18)';ctx.lineWidth=0.8;
+    ctx.beginPath();ctx.arc(cx,cy,ri,0,Math.PI*2);ctx.stroke();
+    for(var i=0;i<4;i++){
+      var a=i*Math.PI/2-t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
+      ctx.strokeStyle='rgba(0,220,255,'+(0.3+0.25*Math.sin(t*2+i))+')';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();
+      ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';
+      ctx.beginPath();ctx.arc(x,y,2.2,0,Math.PI*2);ctx.fill();
+      var ix=cx+ri*Math.cos(a),iy=cy+ri*Math.sin(a);
+      ctx.fillStyle='rgba(128,64,255,'+(0.5+0.3*Math.sin(t*2.5+i))+')';
+      ctx.beginPath();ctx.arc(ix,iy,1.5,0,Math.PI*2);ctx.fill();
+    }
+    ctx.fillStyle='rgba(212,160,32,.95)';ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
+    t+=0.02; requestAnimationFrame(fr);
+  }
+  fr();
+})();
+
+// ─── BOOT ────────────────────────────────────────────────────────────────────
+QTCL_BUS.start();
+console.log('[QTCL] Bus architecture: 1×SSE → 64-frame ring → CustomEvent → DM + MERMIN. Zero polling loops.');
+
 })();
 </script>
 </body>
