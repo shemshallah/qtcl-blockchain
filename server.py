@@ -4251,14 +4251,10 @@ def _p2p_broadcast_loop():
     logger.info("[P2P] Broadcast loop exited")
 
 def _start_p2p_broadcast():
-    """Start the P2P broadcast daemon."""
+    """Start the P2P broadcast daemon - DISABLED to reduce DB egress."""
     global _p2p_running, _p2p_broadcast_thread
-    if _p2p_running:
-        return
-    _p2p_running = True
-    _p2p_broadcast_thread = threading.Thread(target=_p2p_broadcast_loop, daemon=True, name="P2PBroadcast")
-    _p2p_broadcast_thread.start()
-    logger.info(f"[P2P] ✅ DHT broadcaster started (30s interval)")
+    logger.info("[P2P] Broadcast disabled to reduce database egress")
+    return
 
 @app.route("/rpc", methods=["POST"])
 def rpc_endpoint():
@@ -4962,7 +4958,7 @@ def rpc_oracle_snapshot():
                 payload = json.dumps({"result": result_data, "id": 1})
                 yield f"data: {payload}\n\n"
                 
-                time.sleep(0.3)
+                time.sleep(0.1)
             except Exception as e:
                 logger.debug(f"[SSE-SNAPSHOT] error: {e}")
                 yield f": heartbeat\n\n"
@@ -4976,66 +4972,85 @@ def rpc_oracle_snapshot():
 # ════════════════════════════════════════════════════════════════════════════════
 
 def _oracle_snapshot_puller():
-    """Pulls fresh snapshot from oracle every 300ms and updates _latest_snapshot."""
+    """Pulls fresh snapshot from oracle every 100ms and updates _latest_snapshot."""
     import time as _time
     logger.info("[ORACLE-PULL] Oracle snapshot puller started")
     while True:
         try:
-            # Pull from LATTICE
             from globals import LATTICE as _LAT
-            if _LAT is not None and hasattr(_LAT, 'current_density_matrix'):
-                dm = _LAT.current_density_matrix
+            if _LAT is not None:
                 dm_hex = ''
-                dm_dim = 0
-                if dm is not None and hasattr(dm, 'tobytes') and hasattr(dm, 'shape'):
-                    # Accept any square matrix shape
-                    shape = dm.shape
-                    if len(shape) == 2 and shape[0] == shape[1]:
-                        dm_hex = dm.tobytes().hex()
-                        dm_dim = shape[0]
+                # Try to get DM from LATTICE's current_density_matrix (DensityMatrixSnapshot or ndarray)
+                cdm = getattr(_LAT, 'current_density_matrix', None)
+                if cdm is not None:
+                    # Check if it's a DensityMatrixSnapshot (has density_matrix attr)
+                    if hasattr(cdm, 'density_matrix'):
+                        dm_arr = cdm.density_matrix
+                        if dm_arr is not None and hasattr(dm_arr, 'tobytes') and hasattr(dm_arr, 'shape'):
+                            dm_hex, _ = _lattice_dm_to_64x64_hex(dm_arr)
+                    # Or if it's a raw numpy array
+                    elif hasattr(cdm, 'tobytes') and hasattr(cdm, 'shape'):
+                        dm_hex, _ = _lattice_dm_to_64x64_hex(cdm)
+                    # Or use the pre-computed hex
+                    elif hasattr(cdm, 'density_matrix_hex'):
+                        raw_hex = cdm.density_matrix_hex
+                        if raw_hex:
+                            # Parse raw hex and expand to 64x64
+                            import numpy as np
+                            raw_bytes = bytes.fromhex(raw_hex)
+                            raw_dim = int(np.sqrt(len(raw_bytes) // 16))
+                            raw_dm = np.frombuffer(raw_bytes, dtype=np.complex128).reshape(raw_dim, raw_dim)
+                            dm_hex, _ = _lattice_dm_to_64x64_hex(raw_dm)
                     
-                    # Pull metrics from LATTICE
+                    # Pull metrics
+                    if hasattr(cdm, 'w_state_fidelity'):
+                        fidelity = cdm.w_state_fidelity
+                        purity = cdm.purity
+                        coherence = cdm.coherence_l1
+                        cycle = cdm.lattice_refresh_counter
+                        mermin = cdm.bell_test
+                    else:
+                        fidelity = getattr(_LAT, 'fidelity', None)
+                        purity = getattr(_LAT, 'purity', None)
+                        coherence = getattr(_LAT, 'coherence', None)
+                        cycle = getattr(_LAT, 'cycle_count', None)
+                        mermin = getattr(_LAT, 'mermin_test', None)
+                else:
                     fidelity = getattr(_LAT, 'fidelity', None)
                     purity = getattr(_LAT, 'purity', None)
                     coherence = getattr(_LAT, 'coherence', None)
                     cycle = getattr(_LAT, 'cycle_count', None)
-                    
-                    # Pull mermin from LATTICE - clamp to valid range
-                    raw_mermin = getattr(_LAT, 'mermin_test', None)
-                    if raw_mermin is not None:
-                        # Normalize mermin value
-                        if isinstance(raw_mermin, dict):
-                            M = raw_mermin.get('M', raw_mermin.get('value', 0.0))
-                        else:
-                            M = float(raw_mermin)
-                        # Mermin-CHSH valid range: -2*sqrt(2) to 2*sqrt(2)
-                        if abs(M) > 2.83:
-                            M = 2.83 if M > 0 else -2.83
-                        mermin = {'M': M}
+                    mermin = getattr(_LAT, 'mermin_test', None)
+                
+                # Clamp mermin
+                if mermin is not None:
+                    if isinstance(mermin, dict):
+                        M = mermin.get('M', mermin.get('value', 0.0))
                     else:
-                        mermin = None
-                    
-                    # Update snapshot cache
-                    snap = {
-                        'density_matrix_hex': dm_hex,
-                        'dm_dim': dm_dim,
-                        'w_state_fidelity': fidelity,
-                        'purity': purity,
-                        'coherence_l1': coherence,
-                        'lattice_refresh_counter': cycle,
-                        'mermin_test': mermin,
-                        'timestamp_ns': int(_time.time() * 1e9),
-                        'ready': True,
-                    }
-                    _cache_snapshot(snap)
-                    logger.debug(f"[ORACLE-PULL] Updated snapshot cycle={cycle} fid={fidelity} dm_dim={dm_dim} M={M if raw_mermin else 'N/A'}")
+                        M = float(mermin)
+                    if abs(M) > 2.83:
+                        M = 2.83 if M > 0 else -2.83
+                    mermin = {'M': M}
+                
+                snap = {
+                    'density_matrix_hex': dm_hex,
+                    'dm_dim': 64 if dm_hex else 0,
+                    'w_state_fidelity': fidelity,
+                    'purity': purity,
+                    'coherence_l1': coherence,
+                    'lattice_refresh_counter': cycle,
+                    'mermin_test': mermin,
+                    'timestamp_ns': int(_time.time() * 1e9),
+                    'ready': True,
+                }
+                _cache_snapshot(snap)
         except Exception as e:
             logger.debug(f"[ORACLE-PULL] error: {e}")
-        _time.sleep(0.3)
+        _time.sleep(0.1)
 
 _oracle_puller_thread = threading.Thread(target=_oracle_snapshot_puller, daemon=True, name="OraclePuller")
 _oracle_puller_thread.start()
-logger.info("[ORACLE-PULL] Oracle snapshot puller started (300ms interval)")
+logger.info("[ORACLE-PULL] Oracle snapshot puller started (100ms interval)")
 _blocks_sse_queue = _queue_module.Queue(maxsize=50)
 _connected_blocks_clients = []
 _blocks_multicast_lock = _threading_module.Lock()
@@ -5140,31 +5155,29 @@ def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
     """
     Collapse 256×256 complex128 DM → 64×64 by block-averaging 4×4 tiles,
     then enforce ρ = (ρ + ρ†)/2 and renormalise Tr(ρ)=1.
-
-    Each output element [I,J] = mean of the 4×4 subblock dm256[4I:4I+4, 4J:4J+4].
-    Hermitian step: rho64[I,J] = (rho64[I,J] + conj(rho64[J,I])) / 2  ∀ I≤J,
-    then mirror lower triangle.  This preserves physical validity.
-
-    Serialised as row-major little-endian float64 pairs (re, im) — same convention
-    as numpy .tobytes() — 64×64×16 bytes = 65536 bytes = 131072 hex chars.
-    dm_dim=64 flag injected so the client knows the grid size.
+    Always returns 64x64.
     """
     try:
         dm = np.asarray(dm256, dtype=np.complex128)
-        if dm.shape != (256, 256):
-            # Graceful: if it's already 8×8 or some other size, just pass through
-            if dm.shape == (8, 8):
-                return dm.tobytes().hex(), 8
-            return dm.tobytes().hex(), dm.shape[0]
-
-        N = 64
-        B = 4  # block size
-        rho = np.zeros((N, N), dtype=np.complex128)
-
-        # Block-average: rho[I,J] = mean of dm[4I:4I+4, 4J:4J+4]
-        for I in range(N):
-            for J in range(N):
-                rho[I, J] = np.mean(dm256[I*B:(I+1)*B, J*B:(J+1)*B])
+        if dm.shape == (256, 256):
+            N = 64
+            B = 4  # block size
+            rho = np.zeros((N, N), dtype=np.complex128)
+            for I in range(N):
+                for J in range(N):
+                    rho[I, J] = np.mean(dm256[I*B:(I+1)*B, J*B:(J+1)*B])
+        elif dm.shape[0] == dm.shape[1]:
+            # Expand any NxN to 64x64 via nearest-neighbor
+            srcN = dm.shape[0]
+            N = 64
+            rho = np.zeros((N, N), dtype=np.complex128)
+            for i in range(N):
+                for j in range(N):
+                    si = min(i * srcN // N, srcN - 1)
+                    sj = min(j * srcN // N, srcN - 1)
+                    rho[i, j] = dm[si, sj]
+        else:
+            return '', 0
 
         # Enforce Hermitian: ρ = (ρ + ρ†) / 2
         rho = 0.5 * (rho + rho.conj().T)
@@ -5174,10 +5187,10 @@ def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
         if tr > 1e-12:
             rho /= tr
 
-        return rho.tobytes().hex(), N
+        return rho.tobytes().hex(), 64
 
     except Exception as e:
-        logger.warning(f"[DM-REDUCE] 256→64 failed: {e}")
+        logger.warning(f"[DM-REDUCE] DM→64x64 failed: {e}")
         return '', 0
 
 

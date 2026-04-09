@@ -3110,15 +3110,9 @@ class RpcBroadcastController:
         logger.info("[RPC-BROADCAST] 🚀 RpcBroadcastController initialized")
 
     def start(self) -> None:
-        """Start async persistence thread."""
-        if self._running:
-            return
-        self._running = True
-        self._persist_thread = threading.Thread(
-            target=self._persist_worker, name="RpcBroadcast-PersistWorker", daemon=True
-        )
-        self._persist_thread.start()
-        logger.info("[RPC-BROADCAST] ✅ Async persistence worker started")
+        """Start async persistence thread - DISABLED to reduce DB egress."""
+        logger.info("[RPC-BROADCAST] DB persistence disabled")
+        return
 
     def stop(self) -> None:
         """Stop async persistence thread."""
@@ -3336,21 +3330,8 @@ class RpcBroadcastController:
                 time.sleep(0.1)
 
     def _persist_snapshot_to_db(self, event: Dict[str, Any]) -> bool:
-        """Write one snapshot event to quantum_snapshots table via _persist_chirp_snapshot."""
-        try:
-            from server import _persist_chirp_snapshot
-            snap = event.get('snapshot_data', {})
-            snap['timestamp_ns'] = event.get('timestamp_ns', time.time_ns())
-            snap['chirp_number'] = event.get('cycle', 0)
-            snap['snapshot_json'] = event.get('snapshot_json', '{}')
-            _persist_chirp_snapshot(snap)
-            return True
-        except ImportError:
-            logger.debug("[RPC-BROADCAST] server module not available for DB persistence")
-            return False
-        except Exception as e:
-            logger.error(f"[RPC-BROADCAST] DB persistence failed: {e}", exc_info=False)
-            return False
+        """DB persistence DISABLED."""
+        return False
 
     def get_ring_buffer(self, max_events: int = 10) -> List[Dict[str, Any]]:
         """Get latest N events from ring buffer for /api/oracle/snapshot polling."""

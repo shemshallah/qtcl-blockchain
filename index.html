@@ -167,7 +167,7 @@ document.querySelectorAll('.tab').forEach(tab => {
   const hck = document.getElementById('hck');
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
-  // RENDER FUNCTION - handles oracle matrix expanded to full 64x64 canvas
+  // RENDER FUNCTION - 64x64 direct display, no translation, yellow/red gradient
   function renderMatrix(hex, fidelity, purity, cycle){
     const canvas = document.getElementById('dm-canvas');
     if(!canvas || !hex || hex.length < 32) return;
@@ -175,88 +175,52 @@ document.querySelectorAll('.tab').forEach(tab => {
     if(!ctx) return;
     
     try {
+      const N = 64;
+      const re = new Float64Array(N*N);
+      const im = new Float64Array(N*N);
       const HEX = new Uint8Array(256);
       for(let i=0;i<10;i++)HEX[48+i]=i;
       for(let i=0;i<6;i++){HEX[65+i]=10+i;HEX[97+i]=10+i;}
       const dv = new DataView(new ArrayBuffer(8));
       const u8 = new Uint8Array(dv.buffer);
       
-      // Parse source matrix - auto-detect size from hex length
-      const hexLen = hex.length;
-      const srcLen = Math.floor(hexLen / 32); // 32 hex chars per complex128
-      const srcN = Math.round(Math.sqrt(srcLen));
-      const N = 64;
-      
-      if(srcN < 1) return;
-      
-      // Parse all available source elements
-      const srcRe = new Float64Array(srcLen);
-      const srcIm = new Float64Array(srcLen);
-      
-      for(let i=0;i<srcLen;i++){
+      // Parse 64x64 complex matrix (server always sends 64x64)
+      for(let i=0;i<N*N;i++){
         const off = i*32;
-        if(off+31>=hexLen) break;
+        if(off+31>=hex.length) break;
         for(let b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+b*2)]<<4)|HEX[hex.charCodeAt(off+b*2+1)];
-        srcRe[i]=dv.getFloat64(0,true);
+        re[i]=dv.getFloat64(0,true);
         for(let b=0;b<8;b++) u8[b]=(HEX[hex.charCodeAt(off+16+b*2)]<<4)|HEX[hex.charCodeAt(off+16+b*2+1)];
-        srcIm[i]=dv.getFloat64(0,true);
-      }
-      
-      // Tile NxN source onto 64x64 output grid
-      const outRe = new Float64Array(N*N);
-      const outIm = new Float64Array(N*N);
-      const tile = Math.floor(N / srcN);
-      
-      for(let si=0;si<srcN;si++){
-        for(let sj=0;sj<srcN;sj++){
-          const val = srcRe[si*srcN+sj];
-          const valIm = srcIm[si*srcN+sj];
-          for(let ti=0;ti<tile;ti++){
-            for(let tj=0;tj<tile;tj++){
-              const oi = si*tile + ti;
-              const oj = sj*tile + tj;
-              if(oi<N && oj<N){
-                outRe[oi*N+oj] = val;
-                outIm[oi*N+oj] = valIm;
-              }
-            }
-          }
-        }
-      }
-      
-      // Hermitian mirror upper to lower triangle
-      for(let i=0;i<N;i++){
-        for(let j=i+1;j<N;j++){
-          const ui = i*N+j;
-          const li = j*N+i;
-          outRe[li]=outRe[ui]; 
-          outIm[li]=outIm[ui];
-        }
+        im[i]=dv.getFloat64(0,true);
       }
       
       // Compute magnitude
       const mag = new Float64Array(N*N);
       let maxMag=0;
       for(let i=0;i<N*N;i++){
-        mag[i]=Math.sqrt(outRe[i]*outRe[i]+outIm[i]*outIm[i]);
+        mag[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);
         if(mag[i]>maxMag) maxMag=mag[i];
       }
       
-      // Render pixels
+      // Render with yellow/red gradient
       const px = new Uint8ClampedArray(N*N*4);
       for(let i=0;i<N*N;i++){
-        const ph = Math.atan2(outIm[i],outRe[i]);
-        const normP = (ph+Math.PI)/(2*Math.PI);
-        const hue = 160 + normP * 160;
-        const lig = Math.min(0.9, 0.1 + (mag[i]/(maxMag||1))*0.8);
-        const sat = 0.8;
-        const c = (1-Math.abs(2*lig-1))*sat;
-        const x = c*(1-Math.abs((hue/60)%2-1));
-        const m = lig-c/2;
-        let r,g,b;
-        if(hue<60){r=c;g=x;b=0}else if(hue<120){r=x;g=c;b=0}else if(hue<180){r=0;g=c;b=x}else if(hue<240){r=0;g=x;b=c}else if(hue<300){r=x;g=0;b=c}else{r=c;g=0;b=0}
+        const t = mag[i] / (maxMag || 1); // 0..1 normalized magnitude
+        // Gradient: dark blue (0) → red (0.5) → yellow (1.0)
+        let r, g, b;
+        if(t < 0.5){
+          // Dark blue to red
+          r = Math.floor(t * 2 * 255);
+          g = 0;
+          b = Math.floor((1 - t * 2) * 80);
+        } else {
+          // Red to yellow
+          r = 255;
+          g = Math.floor((t - 0.5) * 2 * 255);
+          b = 0;
+        }
         const p=i*4;
-        px[p]=(r+m)*255;px[p+1]=(g+m)*255;px[p+2]=(b+m)*255;px[p+3]=255;
+        px[p]=r; px[p+1]=g; px[p+2]=b; px[p+3]=255;
       }
       
       // Draw 64x64 image scaled to canvas
