@@ -252,52 +252,72 @@ function showPage(id) {
       const canvas = document.getElementById('dm-canvas');
       if(!canvas) return;
       const ctx = canvas.getContext('2d');
-      const img = ctx.createImageData(data.N, data.N);
-      img.data.set(data.pixelBuffer);
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = data.N; tempCanvas.height = data.N;
-      tempCanvas.getContext('2d').putImageData(img, 0, 0);
-      ctx.fillStyle = '#000508'; ctx.fillRect(0,0,canvas.width, canvas.height);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(tempCanvas, 8, 8, canvas.width-16, canvas.height-44);
-      document.getElementById('dm-fidelity').textContent = data.fidelity?.toFixed(4) || '—';
-      document.getElementById('dm-purity').textContent = data.purity?.toFixed(4) || '—';
-      document.getElementById('dm-status').textContent = 'LIVE';
+      if(!ctx) return;
+      try {
+        const img = ctx.createImageData(data.N || 64, data.N || 64);
+        img.data.set(data.pixelBuffer);
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = data.N || 64; tempCanvas.height = data.N || 64;
+        tempCanvas.getContext('2d').putImageData(img, 0, 0);
+        ctx.fillStyle = '#000508'; ctx.fillRect(0,0,canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(tempCanvas, 8, 8, canvas.width-16, canvas.height-44);
+      } catch(e) { console.warn('Matrix render error:', e); }
+      const el = document.getElementById('dm-fidelity');
+      if(el) el.textContent = data.fidelity?.toFixed(4) || '—';
+      const el2 = document.getElementById('dm-purity');
+      if(el2) el2.textContent = data.purity?.toFixed(4) || '—';
+      const el3 = document.getElementById('dm-status');
+      if(el3) el3.textContent = 'LIVE';
     },
     mermin: (data) => {
       const elM = document.getElementById('mermin-M');
       if(elM) {
         elM.textContent = data.M?.toFixed(3) || '—';
-        elM.className = 'mb2 ' + (data.M > 2.0 ? 'q' : 'c');
+        elM.className = 'mb2 ' + ((data.M ?? 0) > 2.0 ? 'q' : 'c');
       }
-      document.getElementById('mermin-verdict').textContent = data.verdict || '—';
-      document.getElementById('mermin-status').textContent = 'M=' + (data.M?.toFixed(3) || '—');
-      document.getElementById('mermin-bar').style.width = Math.min(100, (data.M || 0)/4*100) + '%';
-      document.getElementById('mermin-cycle').textContent = 'cycle ' + (data.cycle || '—');
-      document.getElementById('mermin-angles').innerHTML = (data.angles || []).map((a,i) => 
+      const elV = document.getElementById('mermin-verdict');
+      if(elV) elV.textContent = data.verdict || '—';
+      const elS = document.getElementById('mermin-status');
+      if(elS) elS.textContent = 'M=' + (data.M?.toFixed(3) || '—');
+      const elB = document.getElementById('mermin-bar');
+      if(elB) elB.style.width = Math.min(100, ((data.M ?? 0) / 4) * 100) + '%';
+      const elC = document.getElementById('mermin-cycle');
+      if(elC) elC.textContent = 'cycle ' + (data.cycle || '—');
+      const elA = document.getElementById('mermin-angles');
+      if(elA) elA.innerHTML = (data.angles || []).map((a,i) => 
         `<span class="ac">${data.labels?.[i] || 'a'+i}=${a.toFixed(1)}°</span>`
       ).join('');
     },
     chain: (data) => {
-      const s = data.state;
-      document.getElementById('chain-height').textContent = s.block_height;
-      document.getElementById('chain-tx').textContent = s.tx_count;
-      document.getElementById('chain-peers').textContent = s.peer_count;
-      document.getElementById('dm-pq-curr').textContent = s.pq_curr;
-      document.getElementById('dm-pq-last').textContent = s.pq_last;
-      document.getElementById('pqh-curr').textContent = s.pq_curr;
-      document.getElementById('pqh-last').textContent = s.pq_last;
-      document.getElementById('pqh-delta').textContent = (s.pq_curr - s.pq_last >= 0 ? '+' : '') + (s.pq_curr - s.pq_last);
+      const s = data?.state || {};
+      document.getElementById('chain-height').textContent = s.block_height ?? '—';
+      document.getElementById('chain-tx').textContent = s.tx_count ?? '—';
+      document.getElementById('chain-peers').textContent = s.peer_count ?? '—';
+      const el = document.getElementById('dm-pq-curr');
+      if(el) el.textContent = s.pq_curr ?? '—';
+      const el2 = document.getElementById('dm-pq-last');
+      if(el2) el2.textContent = s.pq_last ?? '—';
+      const el3 = document.getElementById('pqh-curr');
+      if(el3) el3.textContent = s.pq_curr ?? '—';
+      const el4 = document.getElementById('pqh-last');
+      if(el4) el4.textContent = s.pq_last ?? '—';
+      const el5 = document.getElementById('pqh-delta');
+      if(el5) el5.textContent = ((s.pq_curr ?? 0) - (s.pq_last ?? 0) >= 0 ? '+' : '') + ((s.pq_curr ?? 0) - (s.pq_last ?? 0));
     },
     telemetry: (data) => {
-      document.getElementById('tel-cycle').textContent = data.cycle;
-      document.getElementById('tel-lat').textContent = data.jitter + 'ms';
-      document.getElementById('pqh-cycle').textContent = 'ψ cyc=' + data.cycle;
+      const el = document.getElementById('tel-cycle');
+      if(el) el.textContent = data?.cycle ?? '—';
+      const el2 = document.getElementById('tel-lat');
+      if(el2) el2.textContent = (data?.jitter ?? 0) + 'ms';
+      const el3 = document.getElementById('pqh-cycle');
+      if(el3) el3.textContent = 'ψ cyc=' + (data?.cycle ?? '—');
     },
     peers: (data) => {
-      document.getElementById('peer-count').textContent = data.count + ' Peers';
+      const el = document.getElementById('peer-count');
+      if(el) el.textContent = (data?.count ?? 0) + ' Peers';
       const tbody = document.querySelector('#peer-table tbody');
-      tbody.innerHTML = data.peers.map(p => `
+      if(tbody) tbody.innerHTML = (data?.peers ?? []).map(p => `
         <tr>
           <td>${p.id}</td>
           <td>${p.addr}:${p.port}</td>
@@ -309,13 +329,13 @@ function showPage(id) {
     },
     tx: (data) => {
       const tbody = document.querySelector('#tx-table tbody');
-      tbody.innerHTML = data.transactions.map(tx => `
+      if(tbody) tbody.innerHTML = (data?.transactions ?? []).map(tx => `
         <tr>
-          <td>${tx.id.slice(0,8)}...</td>
-          <td>${tx.from.slice(0,6)}...</td>
-          <td>${tx.to.slice(0,6)}...</td>
-          <td style="color:var(--cy)">${tx.amount}</td>
-          <td style="color:${tx.status==='confirmed'?'var(--gr)':'var(--go)'}">${tx.status}</td>
+          <td>${(tx.id ?? '').slice(0,8)}...</td>
+          <td>${(tx.from ?? '').slice(0,6)}...</td>
+          <td>${(tx.to ?? '').slice(0,6)}...</td>
+          <td style="color:var(--cy)">${tx.amount ?? '—'}</td>
+          <td style="color:${tx.status==='confirmed'?'var(--gr)':'var(--go)'}">${tx.status ?? 'pending'}</td>
         </tr>
       `).join('');
     }

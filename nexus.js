@@ -1,4 +1,3 @@
-
 /**
  * StreamNexus: The High-Performance Event Orchestrator
  * Designed for Zero-Lag Quantum Data Distribution
@@ -96,7 +95,7 @@ class StreamNexus {
             }
 
             // Chain State Routing - Handle a variety of block field shapes
-            const blockField = result.block_field || result.block_height !== undefined ? {
+            const blockField = (result.block_field || result.block_height !== undefined) ? {
                 height: result.block_height || result.height,
                 pq_curr: result.pq_curr,
                 pq_last: result.pq_last
@@ -138,59 +137,6 @@ class StreamNexus {
                     block: result.latest_block
                 });
             }
-
-        } catch (e) {
-            console.warn('[StreamNexus] Packet Corruption:', e);
-        }
-    }
-
-
-            // Mermin Routing
-            if (result.mermin_data && this.workers.has('mermin')) {
-                this.workers.get('mermin').postMessage({
-                    type: 'UPDATE_MERMIN',
-                    data: result.mermin_data
-                });
-            }
-
-            // Chain State Routing
-            if (result.block_field || result.chain_stats) {
-                if (this.workers.has('chain')) {
-                    this.workers.get('chain').postMessage({
-                        type: 'UPDATE_CHAIN',
-                        blockField: result.block_field,
-                        stats: result.chain_stats
-                    });
-                }
-            }
-
-        // Telemetry Routing
-        if (result.lattice_refresh_counter !== undefined && this.workers.has('telemetry')) {
-            this.workers.get('telemetry').postMessage({
-                type: 'UPDATE_METRICS',
-                cycle: result.lattice_refresh_counter,
-                timestamp: Date.now()
-            });
-        }
-
-        // Peer Routing
-        if (result.peers && this.workers.has('peers')) {
-            this.workers.get('peers').postMessage({
-                type: 'UPDATE_PEERS',
-                peers: result.peers,
-                status: result.network_status
-            });
-        }
-
-        // Transaction Routing
-        if (result.transactions && this.workers.has('tx')) {
-            this.workers.get('tx').postMessage({
-                type: 'UPDATE_TXS',
-                txs: result.transactions,
-                block: result.latest_block
-            });
-        }
-
 
         } catch (e) {
             console.warn('[StreamNexus] Packet Corruption:', e);
