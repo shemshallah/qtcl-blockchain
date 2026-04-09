@@ -4650,61 +4650,242 @@ import queue as _queue_module
 import threading as _threading_module
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# SNAPSHOT MULTIPLEXER — Streams to ring buffer for real-time display workers
+# SNAPSHOT MULTIPLEXER — Ingests RPC, splits by component type, sends to display workers
 # ═══════════════════════════════════════════════════════════════════════════════════════
-_snapshot_ring_buffer = _queue_module.Queue(maxsize=100)
-_snapshot_buffer_lock = _threading_module.Lock()
 
-def _enqueue_snapshot(snapshot: dict) -> None:
-    """Enqueue snapshot for distribution to display workers."""
+# Component-specific queues for display workers
+_dm_queue = _queue_module.Queue(maxsize=50)
+_metrics_queue = _queue_module.Queue(maxsize=50)
+_mermin_queue = _queue_module.Queue(maxsize=50)
+
+# Connected SSE clients per component
+_connected_dm_clients = []
+_connected_metrics_clients = []
+_connected_mermin_clients = []
+_client_lock = _threading_module.Lock()
+
+def _split_and_distribute_snapshot(snapshot: dict) -> None:
+    """Ingest snapshot from RPC, split into components, queue to display workers."""
+    timestamp_ns = snapshot.get('timestamp_ns', int(time.time() * 1e9))
+    cycle = snapshot.get('lattice_refresh_counter')
+    
+    # DM component
+    dm_packet = {
+        'packet_type': 'dm',
+        'timestamp_ns': timestamp_ns,
+        'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
+        'dm_dim': snapshot.get('dm_dim', 64),
+        'lattice_refresh_counter': cycle,
+    }
     try:
-        _snapshot_ring_buffer.put_nowait(snapshot)
+        _dm_queue.put_nowait(dm_packet)
     except _queue_module.Full:
-        try:
-            _snapshot_ring_buffer.get_nowait()
-            _snapshot_ring_buffer.put_nowait(snapshot)
-        except Exception:
-            pass
+        try: _dm_queue.get_nowait()
+        except: pass
+        try: _dm_queue.put_nowait(dm_packet)
+        except: pass
+    
+    # Metrics component
+    metrics_packet = {
+        'packet_type': 'metrics',
+        'timestamp_ns': timestamp_ns,
+        'w_state_fidelity': snapshot.get('w_state_fidelity'),
+        'purity': snapshot.get('purity'),
+        'coherence_l1': snapshot.get('coherence_l1'),
+        'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
+        'lattice_refresh_counter': cycle,
+        'aer_noise_state': snapshot.get('aer_noise_state', {}),
+        'phase_coherence': snapshot.get('phase_coherence'),
+        'w_state_strength': snapshot.get('w_state_strength'),
+        'entanglement_witness': snapshot.get('entanglement_witness'),
+    }
+    try:
+        _metrics_queue.put_nowait(metrics_packet)
+    except _queue_module.Full:
+        try: _metrics_queue.get_nowait()
+        except: pass
+        try: _metrics_queue.put_nowait(metrics_packet)
+        except: pass
+    
+    # Mermin component
+    mermin_packet = {
+        'packet_type': 'mermin',
+        'timestamp_ns': timestamp_ns,
+        'mermin_test': snapshot.get('mermin_test'),
+        'bell_test': snapshot.get('bell_test'),
+        'lattice_refresh_counter': cycle,
+    }
+    try:
+        _mermin_queue.put_nowait(mermin_packet)
+    except _queue_module.Full:
+        try: _mermin_queue.get_nowait()
+        except: pass
+        try: _mermin_queue.put_nowait(mermin_packet)
+        except: pass
+    
+    logger.debug(f"[SNAP-DIST] Split snapshot cycle={cycle} → DM/MM/MT queued")
 
-def _drain_and_distribute_worker():
-    """Drains ring buffer, breaks up snapshot, distributes to workers."""
-    logger.info("[SNAP-DIST] Snapshot distribution worker started")
+
+def _dm_sse_worker():
+    """SSE worker: sends density matrix data to heatmap clients."""
+    logger.info("[SNAP-DIST] DM SSE worker started")
     while True:
         try:
-            snap = _snapshot_ring_buffer.get(timeout=0.5)
-            if not snap:
+            packet = _dm_queue.get(timeout=1.0)
+            if not packet:
                 continue
-            
-            packet = {
-                'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
-                'density_matrix_hex': snap.get('density_matrix_hex', ''),
-                'dm_dim': snap.get('dm_dim', 64),
-                'w_state_fidelity': snap.get('w_state_fidelity'),
-                'purity': snap.get('purity'),
-                'coherence_l1': snap.get('coherence_l1'),
-                'von_neumann_entropy': snap.get('von_neumann_entropy'),
-                'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
-                'mermin_test': snap.get('mermin_test'),
-                'aer_noise_state': snap.get('aer_noise_state', {}),
-                'phase_coherence': snap.get('phase_coherence'),
-                'w_state_strength': snap.get('w_state_strength'),
-                'entanglement_witness': snap.get('entanglement_witness'),
-            }
-            
-            with _snapshot_buffer_lock:
-                _DM_SNAPSHOT_RING.append(packet)
-            
-            logger.debug(f"[SNAP-DIST] Distributed snapshot cycle={snap.get('lattice_refresh_counter')}")
-            
+            with _client_lock:
+                dead = []
+                for client_q in _connected_dm_clients:
+                    try:
+                        client_q.put_nowait(packet)
+                    except _queue_module.Full:
+                        dead.append(client_q)
+                for d in dead:
+                    try: _connected_dm_clients.remove(d)
+                    except: pass
         except _queue_module.Empty:
             continue
         except Exception as e:
-            logger.debug(f"[SNAP-DIST] error: {e}")
+            logger.debug(f"[DM-SSE] error: {e}")
             time.sleep(0.1)
 
-_snap_dist_thread = _threading_module.Thread(target=_drain_and_distribute_worker, daemon=True)
-_snap_dist_thread.start()
-logger.info("[SNAP-DIST] Snapshot distribution worker running")
+
+def _metrics_sse_worker():
+    """SSE worker: sends metrics data to gauges/metrics clients."""
+    logger.info("[SNAP-DIST] Metrics SSE worker started")
+    while True:
+        try:
+            packet = _metrics_queue.get(timeout=1.0)
+            if not packet:
+                continue
+            with _client_lock:
+                dead = []
+                for client_q in _connected_metrics_clients:
+                    try:
+                        client_q.put_nowait(packet)
+                    except _queue_module.Full:
+                        dead.append(client_q)
+                for d in dead:
+                    try: _connected_metrics_clients.remove(d)
+                    except: pass
+        except _queue_module.Empty:
+            continue
+        except Exception as e:
+            logger.debug(f"[METRICS-SSE] error: {e}")
+            time.sleep(0.1)
+
+
+def _mermin_sse_worker():
+    """SSE worker: sends mermin test data to Mermin display clients."""
+    logger.info("[SNAP-DIST] Mermin SSE worker started")
+    while True:
+        try:
+            packet = _mermin_queue.get(timeout=1.0)
+            if not packet:
+                continue
+            with _client_lock:
+                dead = []
+                for client_q in _connected_mermin_clients:
+                    try:
+                        client_q.put_nowait(packet)
+                    except _queue_module.Full:
+                        dead.append(client_q)
+                for d in dead:
+                    try: _connected_mermin_clients.remove(d)
+                    except: pass
+        except _queue_module.Empty:
+            continue
+        except Exception as e:
+            logger.debug(f"[MERMIN-SSE] error: {e}")
+            time.sleep(0.1)
+
+
+# Start display worker threads
+_snap_dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="DM-SSE")
+_snap_dm_thread.start()
+_snap_metrics_thread = _threading_module.Thread(target=_metrics_sse_worker, daemon=True, name="Metrics-SSE")
+_snap_metrics_thread.start()
+_snap_mermin_thread = _threading_module.Thread(target=_mermin_sse_worker, daemon=True, name="Mermin-SSE")
+_snap_mermin_thread.start()
+logger.info("[SNAP-DIST] DM/Metrics/Mermin SSE workers started")
+
+# ── SSE ENDPOINTS PER COMPONENT ──────────────────────────────────────────────────
+
+@app.route("/rpc/oracle/snapshot/dm", methods=["GET", "OPTIONS"])
+def rpc_oracle_snapshot_dm():
+    """SSE stream: density matrix data for heatmap display."""
+    if request.method == "OPTIONS":
+        return "", 204
+    client_q = _queue_module.Queue(maxsize=20)
+    with _client_lock:
+        _connected_dm_clients.append(client_q)
+    def generate():
+        import itertools
+        for _ in itertools.count():
+            try:
+                packet = client_q.get(timeout=5.0)
+                if packet:
+                    yield f"data: {json.dumps(packet)}\n\n"
+            except _queue_module.Empty:
+                yield f": heartbeat\n\n"
+            except GeneratorExit:
+                break
+        with _client_lock:
+            try: _connected_dm_clients.remove(client_q)
+            except: pass
+    return Response(generate(), headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Content-Type': 'text/event-stream'})
+
+
+@app.route("/rpc/oracle/snapshot/metrics", methods=["GET", "OPTIONS"])
+def rpc_oracle_snapshot_metrics():
+    """SSE stream: metrics data for gauges display."""
+    if request.method == "OPTIONS":
+        return "", 204
+    client_q = _queue_module.Queue(maxsize=20)
+    with _client_lock:
+        _connected_metrics_clients.append(client_q)
+    def generate():
+        import itertools
+        for _ in itertools.count():
+            try:
+                packet = client_q.get(timeout=5.0)
+                if packet:
+                    yield f"data: {json.dumps(packet)}\n\n"
+            except _queue_module.Empty:
+                yield f": heartbeat\n\n"
+            except GeneratorExit:
+                break
+        with _client_lock:
+            try: _connected_metrics_clients.remove(client_q)
+            except: pass
+    return Response(generate(), headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Content-Type': 'text/event-stream'})
+
+
+@app.route("/rpc/oracle/snapshot/mermin", methods=["GET", "OPTIONS"])
+def rpc_oracle_snapshot_mermin():
+    """SSE stream: mermin test data for display."""
+    if request.method == "OPTIONS":
+        return "", 204
+    client_q = _queue_module.Queue(maxsize=20)
+    with _client_lock:
+        _connected_mermin_clients.append(client_q)
+    def generate():
+        import itertools
+        for _ in itertools.count():
+            try:
+                packet = client_q.get(timeout=5.0)
+                if packet:
+                    yield f"data: {json.dumps(packet)}\n\n"
+            except _queue_module.Empty:
+                yield f": heartbeat\n\n"
+            except GeneratorExit:
+                break
+        with _client_lock:
+            try: _connected_mermin_clients.remove(client_q)
+            except: pass
+    return Response(generate(), headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Content-Type': 'text/event-stream'})
+
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
@@ -4748,8 +4929,8 @@ def rpc_oracle_snapshot():
                 if 'mermin_test' in _snap:
                     result_data['mermin_test'] = _snap.get('mermin_test')
                 
-                # Enqueue for distribution workers
-                _enqueue_snapshot(result_data)
+                # Split and distribute to display workers
+                _split_and_distribute_snapshot(result_data)
                 
                 # SSE format
                 payload = json.dumps({"result": result_data, "id": 1})
@@ -4862,99 +5043,6 @@ def rpc_oracle_snapshots():
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
 logger.info("[RPC-SNAP] ✅ Snapshot streaming endpoint mounted — /rpc/oracle/snapshot (SSE)")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
-
-# ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
-# ═════════════════════════════════════════════════════════════════════════════════
-
-def _broadcast_snapshot_to_database(snapshot: dict) -> None:
-    """
-    RPC-based snapshot broadcast: queue to ring buffer + persist to SQLite for P2P sync.
-    
-    Architecture:
-    - In-memory ring buffer (latest 1000) for fast /rpc polling
-    - Async SQLite write to dm_pool table for P2P replication & miners
-    - Dual persistence: Supabase (cloud) + SQLite (local mesh)
-    """
-    try:
-        # 1. Update in-memory RPC cache
-        _cache_snapshot(snapshot)
-        
-        # 2. Queue into DM snapshot ring buffer for streaming
-        if 'density_matrix_hex' in snapshot:
-            dm_snap = {
-                'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
-                'oracle_id': snapshot.get('oracle_id'),
-                'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
-                'purity': snapshot.get('purity'),
-                'w_state_fidelity': snapshot.get('w_state_fidelity'),
-                'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
-                'coherence_l1': snapshot.get('coherence_l1'),
-                'coherence_renyi': snapshot.get('coherence_renyi'),
-                'coherence_geometric': snapshot.get('coherence_geometric'),
-                'quantum_discord': snapshot.get('quantum_discord'),
-                'w_state_strength': snapshot.get('w_state_strength'),
-                'phase_coherence': snapshot.get('phase_coherence'),
-                'entanglement_witness': snapshot.get('entanglement_witness'),
-                'trace_purity': snapshot.get('trace_purity'),
-                'hlwe_signature': snapshot.get('hlwe_signature'),
-                'signature_valid': snapshot.get('signature_valid', False),
-                'oracle_address': snapshot.get('oracle_address'),
-                'aer_noise_state': snapshot.get('aer_noise_state', {}),
-                'measurement_counts': snapshot.get('measurement_counts', {}),
-                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),  # Client expects mermin_test
-                'bell_test': snapshot.get('bell_test'),  # Backward compatibility
-                'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
-            }
-            with _DM_SNAPSHOT_LOCK:
-                _DM_SNAPSHOT_RING.append(dm_snap)
-            logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
-        
-        # 3. Persist to SQLite asynchronously (P2P replication)
-        def async_sqlite():
-            try:
-                import sqlite3
-                from pathlib import Path
-                db = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
-                db.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(db), timeout=5.0)
-                cur = conn.cursor()
-                cur.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
-                    id INTEGER PRIMARY KEY, timestamp_ns INTEGER, oracle_id INTEGER,
-                    density_matrix_hex TEXT, purity REAL, w_state_fidelity REAL,
-                    von_neumann_entropy REAL, coherence_l1 REAL, hlwe_signature TEXT,
-                    signature_valid INTEGER, oracle_address TEXT, aer_noise_state TEXT,
-                    measurement_counts TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-                cur.execute("""INSERT INTO dm_pool (
-                    timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
-                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
-                    oracle_address, aer_noise_state, measurement_counts
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
-                    snapshot.get('timestamp_ns'), snapshot.get('oracle_id'),
-                    snapshot.get('density_matrix_hex', ''),
-                    snapshot.get('purity'), snapshot.get('w_state_fidelity'),
-                    snapshot.get('von_neumann_entropy'), snapshot.get('coherence_l1'),
-                    json.dumps(snapshot.get('hlwe_signature')),
-                    1 if snapshot.get('signature_valid') else 0,
-                    snapshot.get('oracle_address'),
-                    json.dumps(snapshot.get('aer_noise_state', {})),
-                    json.dumps(snapshot.get('measurement_counts', {}))
-                ))
-                conn.commit()
-                conn.close()
-                logger.debug("[RPC-BROADCAST] ✅ DM → SQLite dm_pool")
-            except Exception as e:
-                logger.warning(f"[RPC-BROADCAST] SQLite write: {e}")
-        
-        threading.Thread(target=async_sqlite, daemon=True).start()
-        
-        # 4. Persist to Supabase (cloud backup, non-blocking)
-        try:
-            _persist_chirp_snapshot(snapshot)
-        except Exception as e:
-            logger.debug(f"[RPC-BROADCAST] Supabase skipped: {e}")
-    except Exception as e:
-        logger.error(f"[RPC-BROADCAST] Error: {e}")
-
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # 256×256 → 64×64 HERMITIAN-PRESERVING DENSITY MATRIX REDUCER
