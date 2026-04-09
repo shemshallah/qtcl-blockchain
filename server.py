@@ -4693,7 +4693,7 @@ def _dm_sse_worker():
     """Dedicated thread for DM→SSE stream only"""
     logger.info("[MUX-DM] DM SSE worker started")
     last_dm_send_ts = 0
-    dm_send_interval = 0.5
+    dm_send_interval = 0.1  # 10x/sec for faster updates
     
     while True:
         try:
@@ -4707,6 +4707,7 @@ def _dm_sse_worker():
                 last_dm_send_ts = now_ts
                 
                 if dm_hex:
+                    mermin = snap.get('mermin_test') or snap.get('bell_test')
                     dm_snap = {
                         'packet_type': 'dm',
                         'density_matrix_hex': dm_hex,
@@ -4714,6 +4715,7 @@ def _dm_sse_worker():
                         'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                         'w_state_fidelity': snap.get('w_state_fidelity'),
                         'purity': snap.get('purity'),
+                        'mermin_test': mermin,
                         'ready': True
                     }
                     try:
@@ -4794,7 +4796,7 @@ def _multiplexer_worker():
     metric_push_interval = 0.2  # 5 metrics/sec instead of 20
     _mux_loop_count = 0
     last_dm_send_ts = 0
-    dm_send_interval = 0.5  # DM 2x/sec - real-time density matrix
+    dm_send_interval = 0.1  # 10x/sec for faster updates
     
     while True:
         _mux_loop_count += 1
@@ -4805,7 +4807,7 @@ def _multiplexer_worker():
             
             now_ts = time.time()
             
-            # Only send DM once per second to reduce browser load
+            # Send DM at faster interval (100ms)
             dm_hex = ''
             dm_dim = 0
             if now_ts - last_dm_send_ts >= dm_send_interval:
@@ -4816,6 +4818,7 @@ def _multiplexer_worker():
             
             # Send DM to SSE queue (only if we got new DM this cycle)
             if dm_hex:
+                mermin = snap.get('mermin_test') or snap.get('bell_test')
                 dm_snap = {
                     'packet_type': 'dm',
                     'density_matrix_hex': dm_hex,
@@ -4823,6 +4826,7 @@ def _multiplexer_worker():
                     'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                     'w_state_fidelity': snap.get('w_state_fidelity'),
                     'purity': snap.get('purity'),
+                    'mermin_test': mermin,
                     'ready': True
                 }
                 try:

@@ -1171,7 +1171,14 @@ function _workerDM(){
         if(r.w_state_fidelity!=null) S.fidelity=r.w_state_fidelity;
         if(r.purity!=null) S.purity=r.purity;
         if(r.lattice_refresh_counter!=null) S.cycle=r.lattice_refresh_counter;
-        if(r.mermin_test) S.mermin=r.mermin_test;
+        if(r.mermin_test){ 
+          console.log('[W2-DM] mermin_test received:', JSON.stringify(r.mermin_test).slice(0,100));
+          S.mermin=r.mermin_test;
+        }
+        if(r.mermin){ 
+          console.log('[W2-DM] mermin field:', JSON.stringify(r.mermin).slice(0,100));
+          S.mermin=r.mermin;
+        }
         updateDOM();
         setOnline(true);
       }catch(x){console.warn('[W2-DM] parse error',x.message);}
