@@ -236,16 +236,18 @@ document.querySelectorAll('.tab').forEach(tab => {
         ctx.fillStyle='#000508'; ctx.fillRect(0,0,canvas.width,canvas.height);
         ctx.imageSmoothingEnabled=false;
         
-        // Draw original - fixed position to prevent "blowing up" / off-screen shift
-        const viewW = canvas.width - 16;
+        // Calculate relative dimensions to fit exactly
+        const viewW = (canvas.width - 16) / 2;
         const viewH = canvas.height - 44;
+        
+        // Draw original - fit to half width
         ctx.drawImage(tc, 8, 8, viewW, viewH);
         
-        // Mirror horizontally for "tunnel" symmetry - precisely aligned to the right edge
+        // Mirror horizontally - fit to other half width
         ctx.save();
-        ctx.translate(canvas.width, 0);
+        ctx.translate(canvas.width - 8, 0);
         ctx.scale(-1, 1);
-        ctx.drawImage(tc, -viewW - 16, 8, viewW, viewH);
+        ctx.drawImage(tc, 0, 8, viewW, viewH);
         ctx.restore();
         
         document.getElementById('dm-status').textContent = 'LIVE';
