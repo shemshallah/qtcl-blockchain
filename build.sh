@@ -33,5 +33,9 @@ pip install --quiet --force-reinstall "cffi>=1.15.1,<2.0.0" || {
     echo "[BUILD] WARNING: cffi re-pin failed"
 }
 
+echo "Installing secp256k1..." 
+pip install secp256k1 || {
+    echo "[BUILD} WARNING: secp256k1 build failed."
+
 echo "[BUILD] cffi version: $(python3 -c 'import cffi; print(cffi.__version__)')"
 echo "[BUILD] ✅ Build complete"
