@@ -167,7 +167,7 @@ document.querySelectorAll('.tab').forEach(tab => {
   const hck = document.getElementById('hck');
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
-  // RENDER FUNCTION - 64x64 direct display, no translation, yellow/red gradient
+  // RENDER FUNCTION - 64x64 with phase-based coloring and magnitude brightness
   function renderMatrix(hex, fidelity, purity, cycle){
     const canvas = document.getElementById('dm-canvas');
     if(!canvas || !hex || hex.length < 32) return;
@@ -184,7 +184,7 @@ document.querySelectorAll('.tab').forEach(tab => {
       const dv = new DataView(new ArrayBuffer(8));
       const u8 = new Uint8Array(dv.buffer);
       
-      // Parse 64x64 complex matrix (server always sends 64x64)
+      // Parse 64x64 complex matrix
       for(let i=0;i<N*N;i++){
         const off = i*32;
         if(off+31>=hex.length) break;
@@ -194,7 +194,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         im[i]=dv.getFloat64(0,true);
       }
       
-      // Compute magnitude
+      // Compute magnitude and find max
       const mag = new Float64Array(N*N);
       let maxMag=0;
       for(let i=0;i<N*N;i++){
@@ -202,25 +202,27 @@ document.querySelectorAll('.tab').forEach(tab => {
         if(mag[i]>maxMag) maxMag=mag[i];
       }
       
-      // Render with yellow/red gradient
+      // Render with phase-based hue and magnitude brightness
       const px = new Uint8ClampedArray(N*N*4);
       for(let i=0;i<N*N;i++){
-        const t = mag[i] / (maxMag || 1); // 0..1 normalized magnitude
-        // Gradient: dark blue (0) → red (0.5) → yellow (1.0)
-        let r, g, b;
-        if(t < 0.5){
-          // Dark blue to red
-          r = Math.floor(t * 2 * 255);
-          g = 0;
-          b = Math.floor((1 - t * 2) * 80);
-        } else {
-          // Red to yellow
-          r = 255;
-          g = Math.floor((t - 0.5) * 2 * 255);
-          b = 0;
-        }
+        const ph = Math.atan2(im[i],re[i]);
+        const normP = (ph+Math.PI)/(2*Math.PI); // 0..1
+        // Hue: yellow(60) → red(0) → magenta(300) → blue(240) based on phase
+        const hue = normP * 300; // 0-300 degree range
+        const lig = Math.min(0.85, 0.05 + (mag[i]/(maxMag||1))*0.8);
+        const sat = 0.9;
+        // HSL to RGB
+        const c = (1-Math.abs(2*lig-1))*sat;
+        const x = c*(1-Math.abs((hue/60)%2-1));
+        const m = lig-c/2;
+        let r,g,b;
+        if(hue<60){r=c;g=x;b=0}
+        else if(hue<120){r=x;g=c;b=0}
+        else if(hue<180){r=0;g=c;b=x}
+        else if(hue<240){r=0;g=x;b=c}
+        else{r=x;g=0;b=c}
         const p=i*4;
-        px[p]=r; px[p+1]=g; px[p+2]=b; px[p+3]=255;
+        px[p]=(r+m)*255; px[p+1]=(g+m)*255; px[p+2]=(b+m)*255; px[p+3]=255;
       }
       
       // Draw 64x64 image scaled to canvas

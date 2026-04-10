@@ -4925,31 +4925,21 @@ def rpc_oracle_snapshot():
             try:
                 result_data = {}
                 
-                # Get lattice state
-                try:
-                    lat = sys.modules[__name__].__dict__.get('LATTICE')
-                    if lat is not None:
-                        result_data['w_state_fidelity'] = getattr(lat, 'fidelity', None)
-                        result_data['purity'] = getattr(lat, 'purity', None)
-                        result_data['coherence_l1'] = getattr(lat, 'coherence', None)
-                        result_data['lattice_refresh_counter'] = getattr(lat, 'cycle_count', None)
-                except Exception:
-                    pass
-                
-                # Get DM hex (no cache - fresh every call)
-                dm_hex, dm_dim = _get_lattice_dm_hex()
-                if dm_hex:
-                    result_data['density_matrix_hex'] = dm_hex
-                    result_data['dm_dim'] = dm_dim
-                    logger.debug(f"[SSE-SNAPSHOT] DM hex len={len(dm_hex)} dim={dm_dim}")
-                else:
-                    logger.debug(f"[SSE-SNAPSHOT] DM hex empty")
-                
-                # Get mermin test
+                # Get DM and metrics from snapshot cache (populated by oracle puller)
                 with _snapshot_lock:
                     _snap = dict(_latest_snapshot) if _latest_snapshot else {}
-                if 'mermin_test' in _snap:
-                    result_data['mermin_test'] = _snap.get('mermin_test')
+                
+                if _snap.get('density_matrix_hex'):
+                    result_data['density_matrix_hex'] = _snap['density_matrix_hex']
+                    result_data['dm_dim'] = _snap.get('dm_dim', 64)
+                if _snap.get('w_state_fidelity') is not None:
+                    result_data['w_state_fidelity'] = _snap['w_state_fidelity']
+                if _snap.get('purity') is not None:
+                    result_data['purity'] = _snap['purity']
+                if _snap.get('lattice_refresh_counter') is not None:
+                    result_data['lattice_refresh_counter'] = _snap['lattice_refresh_counter']
+                if _snap.get('mermin_test') is not None:
+                    result_data['mermin_test'] = _snap['mermin_test']
                 
                 # Split and distribute to display workers
                 _split_and_distribute_snapshot(result_data)
