@@ -235,10 +235,6 @@ document.querySelectorAll('.tab').forEach(tab => {
         px[idx+2] = b * 255; 
         px[idx+3] = 255;
       }
-        
-        const p=i*4;
-        px[p]=(r+m)*255; px[p+1]=(g+m)*255; px[p+2]=(b+m)*255; px[p+3]=255;
-      }
       
       // Draw 64x64 image scaled to canvas with mirroring
       const img = new ImageData(px, N, N);
