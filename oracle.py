@@ -821,12 +821,12 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 MEASUREMENT_TIMEOUT          = 2    # 2s cap — fast for AER single shot
 
-W_STATE_STREAM_INTERVAL_MS   = 10  # Original - true quantum takes time
+W_STATE_STREAM_INTERVAL_MS   = 1000  # 1/sec — sufficient for consensus; was 10ms (100x/sec = ~800KB/s egress)
 LATTICE_REFRESH_INTERVAL_MS  = 50
 AER_NOISE_KAPPA              = 0.005
 NUM_QUBITS_WSTATE            = 3
 W_STATE_FIDELITY_THRESHOLD   = 0.85
-BUFFER_SIZE_METRICS_WSTATE   = 10  # Reduced to 10, rest persisted to Supabase
+BUFFER_SIZE_METRICS_WSTATE   = 2    # last 2 only — mirrors _DM_SNAPSHOT_RING maxlen
 
 QTCL_PURPOSE      = 838
 QTCL_COIN         = 0
@@ -3190,9 +3190,9 @@ class RpcBroadcastController:
     def __init__(self):
         self._subscribers: Dict[str, MeasurementSubscriber] = {}
         self._sub_lock = threading.RLock()
-        self._ring_buffer: deque = deque(maxlen=100)
+        self._ring_buffer: deque = deque(maxlen=2)     # only last 2 — miner compat, auto-evict
         self._ring_lock = threading.RLock()
-        self._persist_queue: queue_module.Queue = queue_module.Queue(maxsize=1000)
+        self._persist_queue: queue_module.Queue = queue_module.Queue(maxsize=8)  # tight — drop flood, never OOM
         self._persist_thread: Optional[threading.Thread] = None
         self._running = False
         self._metrics = {
@@ -3430,17 +3430,23 @@ class RpcBroadcastController:
                 time.sleep(0.1)
 
     def _persist_snapshot_to_db(self, event: Dict[str, Any]) -> bool:
-        """Write one snapshot event to quantum_snapshots table via _persist_chirp_snapshot."""
+        """Write one snapshot event via server._broadcast_snapshot_to_database (throttled, DM-local)."""
         try:
-            from server import _persist_chirp_snapshot
+            from server import _broadcast_snapshot_to_database
             snap = event.get('snapshot_data', {})
             snap['timestamp_ns'] = event.get('timestamp_ns', time.time_ns())
             snap['chirp_number'] = event.get('cycle', 0)
-            snap['snapshot_json'] = event.get('snapshot_json', '{}')
-            _persist_chirp_snapshot(snap)
+            # Restore density_matrix_hex from snapshot_json if present (snapshot_data strips it)
+            if not snap.get('density_matrix_hex'):
+                try:
+                    sj = json.loads(event.get('snapshot_json', '{}'))
+                    snap['density_matrix_hex'] = sj.get('density_matrix_hex', '')
+                except Exception:
+                    pass
+            _broadcast_snapshot_to_database(snap)
             return True
         except ImportError:
-            logger.debug("[RPC-BROADCAST] server module not available for DB persistence")
+            logger.debug("[RPC-BROADCAST] server not importable — DB persistence skipped")
             return False
         except Exception as e:
             logger.error(f"[RPC-BROADCAST] DB persistence failed: {e}", exc_info=False)

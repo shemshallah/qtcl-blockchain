@@ -83,9 +83,102 @@ _verbose_p2p_logging = False
 _last_snapshot_log_time = 0
 _snapshot_log_interval = 10
 
-# ═══ DENSITY MATRIX SNAPSHOT RING BUFFER (1000 snapshots, LRU eviction) ═══
-_DM_SNAPSHOT_RING = deque(maxlen=1000)
+# ═══ DENSITY MATRIX SNAPSHOT RING BUFFER (2 snapshots — miner compat, auto-eviction) ═══
+# Only last 2 needed: current (latest consensus for miners) + previous (gossip delta).
+# DM hex lives here in-memory and streams via SSE; Supabase only gets scalar metrics.
+_DM_SNAPSHOT_RING = deque(maxlen=2)
 _DM_SNAPSHOT_LOCK = threading.RLock()
+
+# ═══ SUPABASE WRITE THROTTLE — max 1 scalar write/60s, never write DM hex to cloud ═══
+_supabase_last_write_ts: float = 0.0
+_SUPABASE_WRITE_INTERVAL: float = 60.0   # 1 write/minute to Supabase
+
+# ═══ SQLITE dm_pool PERSISTENT WRITER THREAD (single thread, not per-call) ════
+_sqlite_dm_queue: 'queue_module.Queue' = None  # initialised lazily after queue import
+_sqlite_dm_thread: Optional[threading.Thread] = None
+_sqlite_dm_thread_lock = threading.Lock()
+
+def _sqlite_dm_writer_thread() -> None:
+    """Persistent SQLite dm_pool writer — single daemon thread, not per-broadcast spawn."""
+    import sqlite3
+    from pathlib import Path
+    db_path = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn: Optional[sqlite3.Connection] = None
+
+    def _connect():
+        nonlocal conn
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=10.0, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_ns INTEGER, oracle_id INTEGER,
+                density_matrix_hex TEXT, purity REAL, w_state_fidelity REAL,
+                von_neumann_entropy REAL, coherence_l1 REAL,
+                hlwe_signature TEXT, signature_valid INTEGER,
+                oracle_address TEXT, aer_noise_state TEXT,
+                measurement_counts TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+            # Keep only last 2 rows — enforced after every INSERT
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"[DM-SQLITE] connect error: {e}")
+            conn = None
+
+    _connect()
+    while True:
+        try:
+            snap = _sqlite_dm_queue.get(timeout=5.0)
+            if snap is None:            # poison pill — thread exit
+                break
+            if conn is None:
+                _connect()
+            if conn is None:
+                continue
+            try:
+                conn.execute("""INSERT INTO dm_pool (
+                    timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
+                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
+                    oracle_address, aer_noise_state, measurement_counts
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    snap.get('timestamp_ns'), snap.get('oracle_id'),
+                    snap.get('density_matrix_hex', ''),
+                    snap.get('purity'), snap.get('w_state_fidelity'),
+                    snap.get('von_neumann_entropy'), snap.get('coherence_l1'),
+                    json.dumps(snap.get('hlwe_signature')),
+                    1 if snap.get('signature_valid') else 0,
+                    snap.get('oracle_address'),
+                    json.dumps(snap.get('aer_noise_state', {})),
+                    json.dumps(snap.get('measurement_counts', {}))
+                ))
+                # Auto-cleanup: retain only last 2 rows for miner compat
+                conn.execute("""DELETE FROM dm_pool WHERE id NOT IN (
+                    SELECT id FROM dm_pool ORDER BY timestamp_ns DESC LIMIT 2)""")
+                conn.commit()
+                logger.debug("[DM-SQLITE] ✅ dm_pool write+prune OK")
+            except Exception as e:
+                logger.warning(f"[DM-SQLITE] write error: {e}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn = None   # force reconnect next cycle
+        except Exception:
+            pass   # queue.Empty or shutdown — continue
+
+
+def _ensure_sqlite_dm_thread() -> None:
+    """Lazily start the single persistent SQLite DM writer thread."""
+    global _sqlite_dm_queue, _sqlite_dm_thread
+    with _sqlite_dm_thread_lock:
+        if _sqlite_dm_thread is not None and _sqlite_dm_thread.is_alive():
+            return
+        _sqlite_dm_queue = _queue_module.Queue(maxsize=4)   # small — drop old, never queue-flood
+        _sqlite_dm_thread = threading.Thread(
+            target=_sqlite_dm_writer_thread, name="SQLiteDMWriter", daemon=True)
+        _sqlite_dm_thread.start()
+        logger.info("[DM-SQLITE] ✅ Persistent dm_pool writer thread started")
 
 # ═══ CLIENT TRIPARTITE ORACLE POOL ═══════════════════════════════════════════
 # Receives fused DMs pushed by trusted client oracle nodes (qtcl_pushOracleDM).
@@ -1743,6 +1836,100 @@ def _lazy_ensure_peer_registry():
         logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
 
 
+# ═══ SUPABASE STARTUP PRUNER — run once on first DB-connected request ═════════
+_SUPABASE_PRUNED_ONCE = False
+_SUPABASE_PRUNE_LOCK  = threading.Lock()
+
+def _run_supabase_startup_pruner() -> None:
+    """
+    One-shot: called lazily on first oracle write after pool init.
+    1. Ensure oracle_snapshot_json table exists (scalar-only, no DM hex column)
+    2. Prune any existing rows down to last 2 — evicts the accumulated GB+ of DM blobs
+    3. If quantum_snapshots / dm_pool Postgres table exists, prune to last 2 rows there too
+    Non-fatal: any failure logged, never raises.
+    """
+    global _SUPABASE_PRUNED_ONCE
+    if _SUPABASE_PRUNED_ONCE:
+        return
+    with _SUPABASE_PRUNE_LOCK:
+        if _SUPABASE_PRUNED_ONCE:
+            return
+        try:
+            with get_db_cursor() as cur:
+                # 1. Create oracle_snapshot_json with scalar schema only — NO density_matrix_hex
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS oracle_snapshot_json (
+                        id                    BIGSERIAL PRIMARY KEY,
+                        timestamp_ns          BIGINT,
+                        oracle_id             INTEGER,
+                        purity                DOUBLE PRECISION,
+                        w_state_fidelity      DOUBLE PRECISION,
+                        von_neumann_entropy   DOUBLE PRECISION,
+                        coherence_l1          DOUBLE PRECISION,
+                        coherence_renyi       DOUBLE PRECISION,
+                        coherence_geometric   DOUBLE PRECISION,
+                        quantum_discord       DOUBLE PRECISION,
+                        w_state_strength      DOUBLE PRECISION,
+                        phase_coherence       DOUBLE PRECISION,
+                        entanglement_witness  DOUBLE PRECISION,
+                        trace_purity          DOUBLE PRECISION,
+                        signature_valid       BOOLEAN,
+                        oracle_address        TEXT,
+                        mermin_M              DOUBLE PRECISION,
+                        mermin_quantum        BOOLEAN,
+                        pq_curr               BIGINT,
+                        pq_last               BIGINT,
+                        lattice_refresh_counter BIGINT,
+                        snapshot_source       TEXT DEFAULT 'koyeb-primary',
+                        created_at            TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                # 2. Prune oracle_snapshot_json to last 2 rows
+                cur.execute("""
+                    DELETE FROM oracle_snapshot_json
+                    WHERE id NOT IN (
+                        SELECT id FROM oracle_snapshot_json
+                        ORDER BY id DESC LIMIT 2
+                    )
+                """)
+                # 3. If quantum_snapshots exists (legacy DM blob table), nuke it entirely — it's the GB killer
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.tables
+                            WHERE table_name = 'quantum_snapshots'
+                        ) THEN
+                            DELETE FROM quantum_snapshots
+                            WHERE id NOT IN (
+                                SELECT id FROM quantum_snapshots ORDER BY id DESC LIMIT 2
+                            );
+                        END IF;
+                    END $$;
+                """)
+                # 4. If pq0_entanglement_log exists, prune aggressively — only keep last 100
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.tables
+                            WHERE table_name = 'pq0_entanglement_log'
+                        ) THEN
+                            DELETE FROM pq0_entanglement_log
+                            WHERE id NOT IN (
+                                SELECT id FROM pq0_entanglement_log ORDER BY id DESC LIMIT 100
+                            );
+                        END IF;
+                    END $$;
+                """)
+            logger.info("[SUPABASE-PRUNER] ✅ Startup prune complete — oracle_snapshot_json + legacy tables pruned")
+            _SUPABASE_PRUNED_ONCE = True
+        except Exception as e:
+            logger.warning(f"[SUPABASE-PRUNER] Prune failed (non-fatal): {e}")
+            # Still mark done to avoid hammering on every write if schema doesn't match
+            _SUPABASE_PRUNED_ONCE = True
+
+
 
 _dht_manager: Optional[DHTManager] = None
 _dht_lock = threading.RLock()
@@ -1766,7 +1953,7 @@ def get_dht_manager() -> DHTManager:
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 # RPC snapshot cache + event log (no SSE infrastructure)
-_rpc_event_log: Deque = Deque(maxlen=1000)           # Ring buffer of recent RPC events
+_rpc_event_log: Deque = Deque(maxlen=50)             # Ring buffer of recent RPC events — 50 enough for polling
 _rpc_event_lock = threading.RLock()                  # Guards _rpc_event_log writes
 _latest_snapshot: Optional[dict] = None              # Last cached snapshot (poll endpoint)
 _latest_snapshot_ts: int = 0                         # Timestamp of latest snapshot
@@ -3772,23 +3959,19 @@ def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshots — fetch last N DM snapshots (default 10, max 100)."""
+    """qtcl_getLatestDMSnapshots — fetch last N DM snapshots (max 2 — ring is maxlen=2)."""
     try:
-        limit = 10
+        limit = 2
         if isinstance(params, list) and params:
-            try:
-                limit = min(int(params[0]), 100)
-            except (ValueError, TypeError):
-                pass
+            try: limit = min(int(params[0]), 2)
+            except (ValueError, TypeError): pass
         elif isinstance(params, dict):
-            try:
-                limit = min(int(params.get("limit", 10)), 100)
-            except (ValueError, TypeError):
-                pass
-        
+            try: limit = min(int(params.get("limit", 2)), 2)
+            except (ValueError, TypeError): pass
+
         with _DM_SNAPSHOT_LOCK:
             snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
-        
+
         logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: returned {len(snaps)} snapshots")
         return _rpc_ok({"snapshots": snaps, "count": len(snaps)}, rpc_id)
     except Exception as e:
@@ -4700,10 +4883,10 @@ _connected_metric_clients = []
 
 # SEPARATE THREADS FOR DM AND METRICS - prevents race condition
 def _dm_sse_worker():
-    """Dedicated thread for DM→SSE stream only"""
+    """Dedicated thread for DM→SSE stream only — 1/sec cadence matches oracle cycle."""
     logger.info("[MUX-DM] DM SSE worker started")
     last_dm_send_ts = 0
-    dm_send_interval = 0.05  # 20x/sec for real-time updates
+    dm_send_interval = 1.0  # 1/sec — matches W_STATE_STREAM_INTERVAL_MS=1000; was 50ms (20x/sec)
     
     while True:
         try:
@@ -4742,10 +4925,10 @@ def _dm_sse_worker():
             time.sleep(0.01)
 
 def _metrics_rpc_worker():
-    """Dedicated thread for Metrics→RPC PUSH only"""
+    """Dedicated thread for Metrics→RPC PUSH only — 1/sec cadence."""
     logger.info("[MUX-METRICS] Metrics RPC worker started")
     last_metric_push_ts = 0
-    metric_push_interval = 0.05  # 20x/sec
+    metric_push_interval = 1.0  # 1/sec — was 50ms (20x/sec flooding)
     
     while True:
         try:
@@ -4801,14 +4984,14 @@ def _enqueue_snapshot_for_streaming(snapshot: dict) -> None:
             pass
 
 def _multiplexer_worker():
-    """Forks snapshots: DM→SSE, Metrics→RPC PUSH."""
+    """Forks snapshots: DM→SSE, Metrics→RPC PUSH — 1/sec cadence."""
     logger.info("[MUX] Snapshot multiplexer started")
     last_metric_push_ts = 0
-    metric_push_interval = 0.05  # 20 metrics/sec - real-time
+    metric_push_interval = 1.0  # 1/sec — was 50ms
     _mux_loop_count = 0
     last_dm_send_ts = 0
-    dm_send_interval = 0.05  # 20x/sec for real-time updates
-    
+    dm_send_interval = 1.0  # 1/sec — was 50ms
+
     while True:
         _mux_loop_count += 1
         try:
@@ -4816,10 +4999,10 @@ def _multiplexer_worker():
             if not snap:
                 time.sleep(0.005)
                 continue
-            
+
             now_ts = time.time()
-            
-            # Send DM at faster interval (50ms)
+
+            # Send DM at 1/sec
             dm_hex = ''
             dm_dim = 0
             if now_ts - last_dm_send_ts >= dm_send_interval:
@@ -4879,42 +5062,7 @@ def _multiplexer_worker():
         except GeneratorExit:
             break
         except Exception as e:
-            logger.error(f"[MUX] error: {e}")
-            time.sleep(0.1)
-            
-            # Fork 2: Metrics (no DM) → RPC PUSH
-            now_ts = time.time()
-            if now_ts - last_metric_push_ts >= metric_push_interval:
-                metrics_snap = {
-                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
-                    'w_state_fidelity': snap.get('w_state_fidelity'),
-                    'purity': snap.get('purity'),
-                    'coherence_l1': snap.get('coherence_l1'),
-                    'von_neumann_entropy': snap.get('von_neumann_entropy'),
-                    'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
-                    'aer_noise_state': snap.get('aer_noise_state', {}),
-                    'block_field': snap.get('block_field', {}),
-                    'phase_drift': snap.get('phase_drift'),
-                    'phase_coherence': snap.get('phase_coherence'),
-                    'qrng_health': snap.get('qrng_health'),
-                    'mermin_test': snap.get('mermin_test'),
-                }
-                
-                with _snapshot_multiplexer_lock:
-                    for client_q in _connected_metric_clients[:]:
-                        try:
-                            client_q.put_nowait(metrics_snap)
-                        except _queue_module.Full:
-                            _connected_metric_clients.remove(client_q)
-                
-                last_metric_push_ts = now_ts
-        
-        except _queue_module.Empty:
-            continue
-        except GeneratorExit:
-            break
-        except Exception as e:
-            logger.error(f"[MUX-METRICS] error: {e}", exc_info=False)
+            logger.error(f"[MUX] error: {e}", exc_info=False)
             time.sleep(0.1)
 
 # Start SEPARATE THREADS for DM and Metrics - eliminates race condition
@@ -5067,21 +5215,18 @@ _blocks_broadcaster_thread.start()
 
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():
-    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N DM snapshots.
-    
-    Returns snapshots from _DM_SNAPSHOT_RING which contains authoritative oracle data
-    including per_node measurements from all 5 oracle nodes.
+    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N DM snapshots (max 2).
+    Full DM hex included — gossip/miner consumption via SSE-RPC hybrid.
+    Ring is maxlen=2: [prev, latest]. Clients gossip latest, miners use latest.
     """
     if request.method == "OPTIONS":
         return "", 204
     try:
-        limit = int(request.args.get('limit', 10))
-        limit = min(limit, 100)  # cap at 100
-        
-        # Read from DM snapshot ring buffer (authoritative oracle data with per_node)
+        limit = min(int(request.args.get('limit', 2)), 2)
+
         with _DM_SNAPSHOT_LOCK:
             snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
-        
+
         logger.debug(f"[RPC-ORACLE] /rpc/oracle/snapshots: returning {len(snaps)} snapshots")
         return jsonify({"jsonrpc": "2.0", "result": {"snapshots": snaps, "count": len(snaps)}, "id": request.args.get('id', 1)}), 200
     except Exception as e:
@@ -5095,94 +5240,127 @@ logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
 # ═════════════════════════════════════════════════════════════════════════════════
 
+def _persist_chirp_snapshot(snapshot: dict) -> None:
+    """
+    THROTTLED Supabase scalar write — max 1/minute, NEVER writes density_matrix_hex.
+    Only persists scalar consensus metrics to oracle_snapshot_json table.
+    DM hex remains local-only (SSE ring + SQLite dm_pool).
+    """
+    global _supabase_last_write_ts
+    # One-shot startup pruner — runs on first ever call, creates table, evicts GB of old DM blobs
+    _run_supabase_startup_pruner()
+
+    now = time.time()
+    if now - _supabase_last_write_ts < _SUPABASE_WRITE_INTERVAL:
+        return   # throttle — skip this write
+    _supabase_last_write_ts = now
+
+    # Scalar-only payload — zero DM hex, zero aer_noise_state blob
+    scalar = {
+        'timestamp_ns':        snapshot.get('timestamp_ns'),
+        'oracle_id':           snapshot.get('oracle_id'),
+        'purity':              snapshot.get('purity'),
+        'w_state_fidelity':    snapshot.get('w_state_fidelity'),
+        'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
+        'coherence_l1':        snapshot.get('coherence_l1'),
+        'coherence_renyi':     snapshot.get('coherence_renyi'),
+        'coherence_geometric': snapshot.get('coherence_geometric'),
+        'quantum_discord':     snapshot.get('quantum_discord'),
+        'w_state_strength':    snapshot.get('w_state_strength'),
+        'phase_coherence':     snapshot.get('phase_coherence'),
+        'entanglement_witness':snapshot.get('entanglement_witness'),
+        'trace_purity':        snapshot.get('trace_purity'),
+        'signature_valid':     snapshot.get('signature_valid', False),
+        'oracle_address':      snapshot.get('oracle_address'),
+        'mermin_M':            (snapshot.get('mermin_test') or {}).get('M_value'),
+        'mermin_quantum':      (snapshot.get('mermin_test') or {}).get('is_quantum'),
+        'pq_curr':             snapshot.get('pq_curr'),
+        'pq_last':             snapshot.get('pq_last'),
+        'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
+        'snapshot_source':     'koyeb-primary',
+    }
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""INSERT INTO oracle_snapshot_json (
+                timestamp_ns, oracle_id, purity, w_state_fidelity,
+                von_neumann_entropy, coherence_l1, coherence_renyi, coherence_geometric,
+                quantum_discord, w_state_strength, phase_coherence, entanglement_witness,
+                trace_purity, signature_valid, oracle_address,
+                mermin_M, mermin_quantum, pq_curr, pq_last, lattice_refresh_counter, snapshot_source
+            ) VALUES (
+                %(timestamp_ns)s, %(oracle_id)s, %(purity)s, %(w_state_fidelity)s,
+                %(von_neumann_entropy)s, %(coherence_l1)s, %(coherence_renyi)s, %(coherence_geometric)s,
+                %(quantum_discord)s, %(w_state_strength)s, %(phase_coherence)s, %(entanglement_witness)s,
+                %(trace_purity)s, %(signature_valid)s, %(oracle_address)s,
+                %(mermin_M)s, %(mermin_quantum)s, %(pq_curr)s, %(pq_last)s,
+                %(lattice_refresh_counter)s, %(snapshot_source)s
+            ) ON CONFLICT DO NOTHING""", scalar)
+        logger.debug(f"[SUPABASE-THROTTLED] ✅ scalar metrics written ts={scalar.get('timestamp_ns')} (next in {_SUPABASE_WRITE_INTERVAL:.0f}s)")
+    except Exception as e:
+        logger.debug(f"[SUPABASE-THROTTLED] write skipped: {e}")
+
+
 def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     """
-    RPC-based snapshot broadcast: queue to ring buffer + persist to SQLite for P2P sync.
-    
-    Architecture:
-    - In-memory ring buffer (latest 1000) for fast /rpc polling
-    - Async SQLite write to dm_pool table for P2P replication & miners
-    - Dual persistence: Supabase (cloud) + SQLite (local mesh)
+    RPC-based snapshot broadcast:
+      1. Update in-memory RPC cache (_latest_snapshot)
+      2. Push full DM snapshot (with hex) into _DM_SNAPSHOT_RING[2] for SSE+RPC polling
+      3. Queue to persistent SQLite dm_pool writer (single thread, auto-prunes to 2 rows)
+      4. THROTTLED Supabase write — scalar metrics only, max 1/60s, NO DM hex to cloud
+
+    Egress budget: ~300 bytes/minute to Supabase vs previous ~800 KB/second.
+    Full DM hex available locally via SSE /rpc/oracle/snapshot + RPC qtcl_getLatestDMSnapshot.
     """
+    global _supabase_last_write_ts
     try:
-        # 1. Update in-memory RPC cache
+        # 1. RPC cache — full snapshot with DM hex for SSE/RPC delivery
         _cache_snapshot(snapshot)
-        
-        # 2. Queue into DM snapshot ring buffer for streaming
+
+        # 2. Ring buffer — maxlen=2, auto-evicts oldest; DM hex preserved for gossip/miners
         if 'density_matrix_hex' in snapshot:
             dm_snap = {
-                'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
-                'oracle_id': snapshot.get('oracle_id'),
-                'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
-                'purity': snapshot.get('purity'),
-                'w_state_fidelity': snapshot.get('w_state_fidelity'),
-                'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
-                'coherence_l1': snapshot.get('coherence_l1'),
-                'coherence_renyi': snapshot.get('coherence_renyi'),
-                'coherence_geometric': snapshot.get('coherence_geometric'),
-                'quantum_discord': snapshot.get('quantum_discord'),
-                'w_state_strength': snapshot.get('w_state_strength'),
-                'phase_coherence': snapshot.get('phase_coherence'),
-                'entanglement_witness': snapshot.get('entanglement_witness'),
-                'trace_purity': snapshot.get('trace_purity'),
-                'hlwe_signature': snapshot.get('hlwe_signature'),
-                'signature_valid': snapshot.get('signature_valid', False),
-                'oracle_address': snapshot.get('oracle_address'),
-                'aer_noise_state': snapshot.get('aer_noise_state', {}),
-                'measurement_counts': snapshot.get('measurement_counts', {}),
-                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),  # Client expects mermin_test
-                'bell_test': snapshot.get('bell_test'),  # Backward compatibility
+                'timestamp_ns':          snapshot.get('timestamp_ns', int(time.time() * 1e9)),
+                'oracle_id':             snapshot.get('oracle_id'),
+                'density_matrix_hex':    snapshot.get('density_matrix_hex', ''),
+                'purity':                snapshot.get('purity'),
+                'w_state_fidelity':      snapshot.get('w_state_fidelity'),
+                'von_neumann_entropy':   snapshot.get('von_neumann_entropy'),
+                'coherence_l1':          snapshot.get('coherence_l1'),
+                'coherence_renyi':       snapshot.get('coherence_renyi'),
+                'coherence_geometric':   snapshot.get('coherence_geometric'),
+                'quantum_discord':       snapshot.get('quantum_discord'),
+                'w_state_strength':      snapshot.get('w_state_strength'),
+                'phase_coherence':       snapshot.get('phase_coherence'),
+                'entanglement_witness':  snapshot.get('entanglement_witness'),
+                'trace_purity':          snapshot.get('trace_purity'),
+                'hlwe_signature':        snapshot.get('hlwe_signature'),
+                'signature_valid':       snapshot.get('signature_valid', False),
+                'oracle_address':        snapshot.get('oracle_address'),
+                'aer_noise_state':       snapshot.get('aer_noise_state', {}),
+                'measurement_counts':    snapshot.get('measurement_counts', {}),
+                'mermin_test':           snapshot.get('mermin_test') or snapshot.get('bell_test'),
+                'bell_test':             snapshot.get('bell_test'),
                 'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
             }
             with _DM_SNAPSHOT_LOCK:
-                _DM_SNAPSHOT_RING.append(dm_snap)
-            logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
-        
-        # 3. Persist to SQLite asynchronously (P2P replication)
-        def async_sqlite():
+                _DM_SNAPSHOT_RING.append(dm_snap)   # deque(maxlen=2) auto-evicts
+            logger.debug(f"[RPC-BROADCAST] ✅ DM ring updated (ring={len(_DM_SNAPSHOT_RING)}/2)")
+
+            # 3. SQLite dm_pool — persistent single thread, auto-prunes to last 2 rows
+            _ensure_sqlite_dm_thread()
             try:
-                import sqlite3
-                from pathlib import Path
-                db = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
-                db.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(db), timeout=5.0)
-                cur = conn.cursor()
-                cur.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
-                    id INTEGER PRIMARY KEY, timestamp_ns INTEGER, oracle_id INTEGER,
-                    density_matrix_hex TEXT, purity REAL, w_state_fidelity REAL,
-                    von_neumann_entropy REAL, coherence_l1 REAL, hlwe_signature TEXT,
-                    signature_valid INTEGER, oracle_address TEXT, aer_noise_state TEXT,
-                    measurement_counts TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-                cur.execute("""INSERT INTO dm_pool (
-                    timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
-                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
-                    oracle_address, aer_noise_state, measurement_counts
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
-                    snapshot.get('timestamp_ns'), snapshot.get('oracle_id'),
-                    snapshot.get('density_matrix_hex', ''),
-                    snapshot.get('purity'), snapshot.get('w_state_fidelity'),
-                    snapshot.get('von_neumann_entropy'), snapshot.get('coherence_l1'),
-                    json.dumps(snapshot.get('hlwe_signature')),
-                    1 if snapshot.get('signature_valid') else 0,
-                    snapshot.get('oracle_address'),
-                    json.dumps(snapshot.get('aer_noise_state', {})),
-                    json.dumps(snapshot.get('measurement_counts', {}))
-                ))
-                conn.commit()
-                conn.close()
-                logger.debug("[RPC-BROADCAST] ✅ DM → SQLite dm_pool")
-            except Exception as e:
-                logger.warning(f"[RPC-BROADCAST] SQLite write: {e}")
-        
-        threading.Thread(target=async_sqlite, daemon=True).start()
-        
-        # 4. Persist to Supabase (cloud backup, non-blocking)
+                _sqlite_dm_queue.put_nowait(dm_snap)
+            except Exception:
+                pass   # queue full — oldest already evicted, newest wins
+
+        # 4. Supabase — throttled scalar-only, never DM hex
         try:
             _persist_chirp_snapshot(snapshot)
         except Exception as e:
-            logger.debug(f"[RPC-BROADCAST] Supabase skipped: {e}")
+            logger.debug(f"[RPC-BROADCAST] Supabase throttle-write skipped: {e}")
+
     except Exception as e:
-        logger.error(f"[RPC-BROADCAST] Error: {e}")
+        logger.error(f"[RPC-BROADCAST] _broadcast_snapshot_to_database error: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
