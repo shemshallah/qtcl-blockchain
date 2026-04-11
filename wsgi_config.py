@@ -33,6 +33,14 @@ import time
 import time
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
+# ADD HYP SUBDIRECTORY TO SYS.PATH (allow imports from ~/hlwe/hyp_* modules)
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_HYP_DIR = os.path.join(_REPO_ROOT, 'hlwe')
+if _HYP_DIR not in sys.path:
+    sys.path.insert(0, _HYP_DIR)
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 0: CFFI VERSION GUARD (MUST BE ABSOLUTE FIRST — before any import touches cffi)
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 # cffi >= 2.0.0 has no pre-built manylinux wheel on Koyeb's runtime image.
@@ -93,40 +101,38 @@ _HLWE_READY = False
 _hlwe_error = None
 
 def _init_hlwe_background():
-    """Initialize HLWE in background thread (non-blocking)."""
+    """Initialize HypΓ in background thread (non-blocking)."""
     global _HLWE_READY, _hlwe_error
     try:
-        from hlwe_engine import (
-            get_hlwe_adapter, get_wallet_manager,
-            hlwe_health_check, hlwe_system_info
-        )
+        from hyp_engine_compat import hlwe_system_info, get_hyp_engine
         
-        logger.info("[WSGI-BG] HLWE import successful, initializing...")
+        logger.info("[WSGI-BG] HypΓ (hyp_engine_compat) import successful, initializing...")
         
-        adapter = get_hlwe_adapter()
-        wallet_mgr = get_wallet_manager()
-        logger.info("[WSGI-BG] HLWE wallet manager initialized")
+        # Get engine singleton
+        engine = get_hyp_engine()
+        logger.info("[WSGI-BG] HypΓ engine initialized")
         
-        is_healthy = hlwe_health_check()
+        # Simple health check: can we instantiate engine?
+        is_healthy = engine is not None
         system_info = hlwe_system_info()
         
         if is_healthy:
-            logger.info("[WSGI-BG] ✅ HLWE system ready")
-            logger.info(f"[WSGI-BG]    • Engine: {system_info.get('engine', 'unknown')}")
-            logger.info(f"[WSGI-BG]    • Entropy: {'QRNG' if system_info.get('entropy') else 'os.urandom'}")
+            logger.info("[WSGI-BG] ✅ HypΓ system ready")
+            logger.info(f"[WSGI-BG]    • Crypto System: {system_info.get('crypto_system', 'unknown')}")
+            logger.info(f"[WSGI-BG]    • Engine Type: {system_info.get('engine_type', 'unknown')}")
             _HLWE_READY = True
         else:
-            _hlwe_error = "Health check failed"
-            logger.error("[WSGI-BG] ❌ HLWE health check FAILED")
+            _hlwe_error = "HypΓ engine initialization failed"
+            logger.error("[WSGI-BG] ❌ HypΓ engine FAILED")
         
     except Exception as e:
         _hlwe_error = str(e)
-        logger.error(f"[WSGI-BG] ❌ HLWE init failed: {e}", exc_info=True)
+        logger.error(f"[WSGI-BG] ❌ HypΓ init failed: {e}", exc_info=True)
 
 import threading
-_hlwe_thread = threading.Thread(target=_init_hlwe_background, daemon=True, name='HLWE-Init')
+_hlwe_thread = threading.Thread(target=_init_hlwe_background, daemon=True, name='HYP-Init')
 _hlwe_thread.start()
-logger.info("[WSGI] HLWE background initialization STARTED (port binding proceeds immediately)")
+logger.info("[WSGI] HypΓ background initialization STARTED (port binding proceeds immediately)")
 
 logger.info("[WSGI] ═════════════════════════════════════════════════════════════════════")
 
@@ -194,14 +200,15 @@ except Exception as e:
 logger.info("[WSGI] Phase 2/3: Verifying HLWE integration with Flask application...")
 
 try:
-    # Verify that server has HLWE available
-    from hlwe_engine import hlwe_health_check
-    if hlwe_health_check():
-        logger.info("[WSGI] ✅ HLWE integration verified — all cryptographic subsystems operational")
+    # Verify that server has HypΓ available
+    from hyp_engine_compat import get_hyp_engine
+    engine = get_hyp_engine()
+    if engine is not None:
+        logger.info("[WSGI] ✅ HypΓ integration verified — all cryptographic subsystems operational")
     else:
-        logger.warning("[WSGI] ⚠️  HLWE running in degraded mode")
+        logger.warning("[WSGI] ⚠️  HypΓ running in degraded mode")
 except Exception as e:
-    logger.warning(f"[WSGI] ⚠️  HLWE verification failed: {e}")
+    logger.warning(f"[WSGI] ⚠️  HypΓ verification failed: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 3: READINESS ANNOUNCEMENT

@@ -48,6 +48,15 @@ from __future__ import annotations
 
 import os
 import sys
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ADD HYP SUBDIRECTORY TO SYS.PATH (allow imports from ~/hlwe/hyp_* modules)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_HYP_DIR = os.path.join(_REPO_ROOT, 'hlwe')
+if _HYP_DIR not in sys.path:
+    sys.path.insert(0, _HYP_DIR)
+
 import json
 import time
 import hmac
@@ -104,20 +113,20 @@ ADDRESS_PREFIX            = "qtcl1"       # canonical address prefix
 # DEPENDENCY RESOLUTION — ALL SOFT IMPORTS, ZERO HARD FAILURES AT BOOT
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Oracle (HLWE verification + W-state entropy)
+# Oracle (HypΓ verification + W-state entropy)
 try:
     from oracle import ORACLE, HLWESignature, HLWEVerifier, ADDRESS_PREFIX as _ORACLE_PREFIX
-    from hlwe_engine import HLWEEngine
+    from hyp_engine_compat import get_hyp_engine
     ADDRESS_PREFIX = _ORACLE_PREFIX
     _ORACLE_AVAILABLE = True
     _VERIFIER = HLWEVerifier()
-    _HLWE_ENGINE = HLWEEngine()
-    logger.info("[MEMPOOL] ✅ Oracle / HLWE engine loaded")
+    _HLWE_ENGINE = get_hyp_engine()
+    logger.info("[MEMPOOL] ✅ Oracle / HypΓ engine loaded")
 except ImportError:
     _ORACLE_AVAILABLE = False
     _VERIFIER = None
     _HLWE_ENGINE = None
-    logger.warning("[MEMPOOL] ⚠️  oracle.py or hlwe_engine.py not found — HLWE verification in advisory mode")
+    logger.warning("[MEMPOOL] ⚠️  oracle.py or hyp_engine_compat.py not found — HypΓ verification in advisory mode")
 
 # Block field entropy (W-state quantum entropy pool)
 try:

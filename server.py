@@ -35,6 +35,15 @@ import sys
 import json
 import time
 _SERVER_START_TIME = time.time()   # set once at module import — never drifts
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ADD HYP SUBDIRECTORY TO SYS.PATH (allow imports from ~/hlwe/hyp_* modules)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_HYP_DIR = os.path.join(_REPO_ROOT, 'hlwe')
+if _HYP_DIR not in sys.path:
+    sys.path.insert(0, _HYP_DIR)
+
 import socket
 import struct
 import hashlib
@@ -78,19 +87,11 @@ _snapshot_log_interval = 10
 _DM_SNAPSHOT_RING = deque(maxlen=1000)
 _DM_SNAPSHOT_LOCK = threading.RLock()
 
-def _cache_snapshot(snapshot: dict) -> None:
-    """Cache snapshot for RPC polling (no SSE push)."""
-    global _latest_snapshot
-    with _snapshot_lock:
-        _latest_snapshot = snapshot
-
-
-
 # ═══ CLIENT TRIPARTITE ORACLE POOL ═══════════════════════════════════════════
 # Receives fused DMs pushed by trusted client oracle nodes (qtcl_pushOracleDM).
 # Keyed by oracle_addr → {dm_re, dm_im, fidelity, ts, node_ip, oracle_type}
-# Pool is Hermitian-averaged every push into _client_consensus_dm.
-
+# Pool is Hermitian-averaged every push into _client_consensus_dm which then
+# enriches the server's own 5-oracle snapshot on /rpc/oracle/snapshot.
 _CLIENT_DM_POOL: Dict[str, dict] = {}
 _CLIENT_DM_POOL_LOCK = threading.RLock()
 _CLIENT_POOL_MAX    = 64          # cap pool size — evict oldest on overflow
@@ -238,7 +239,7 @@ def _init_qrng_ensemble():
             raise RuntimeError(f"[INIT-QRNG] Cannot initialize Quantum RNG. Error: {e}")
 
 def _init_hlwe_engine():
-    """Lazy init HLWE_ENGINE on first demand."""
+    """Lazy init HypΓ engine (via hyp_engine_compat) on first demand."""
     global HLWE_ENGINE
     if HLWE_ENGINE is not None:
         return HLWE_ENGINE
@@ -246,13 +247,13 @@ def _init_hlwe_engine():
         if HLWE_ENGINE is not None:  # double-check
             return HLWE_ENGINE
         try:
-            from hlwe_engine import HLWEEngine
-            HLWE_ENGINE = HLWEEngine()
-            logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized on first use")
+            from hyp_engine_compat import get_hyp_engine
+            HLWE_ENGINE = get_hyp_engine()
+            logger.info("[INIT-HYP] ✅ HypΓ Post-Quantum Cryptography initialized (via compat layer)")
             return HLWE_ENGINE
         except Exception as e:
-            logger.critical(f"[INIT-HLWE] ❌ FATAL: Cannot initialize HLWE_ENGINE: {e}")
-            raise RuntimeError(f"[INIT-HLWE] Cannot initialize HLWE cryptography. Error: {e}")
+            logger.critical(f"[INIT-HYP] ❌ FATAL: Cannot initialize HypΓ: {e}")
+            raise RuntimeError(f"[INIT-HYP] Cannot initialize HypΓ cryptography. Error: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
@@ -3689,36 +3690,52 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
             _srv_snap = {}
 
         # Build a composite snapshot and push it into the ring + cache
-        try:
-            with _snapshot_lock:
-                _srv_snap = dict(_latest_snapshot) if _latest_snapshot else {}
-        except Exception:
-            _srv_snap = {}
-        
-        # Update _latest_snapshot with client DM data
+        _srv_fid  = float(_srv_snap.get('w_state_fidelity') or
+                          (_srv_snap.get('w_state') or {}).get('fidelity') or 0.0)
+        _srv_dm_hex = _srv_snap.get('density_matrix_hex', '')
+
+        # Weighted fuse: client contribution scales with _cons_fid, max 35%
         if _client_consensus_dm_re and any(v != 0.0 for v in _client_consensus_dm_re):
             try:
-                # Rebuild DM hex from client consensus
-                fused_re = _client_consensus_dm_re
-                fused_im = _client_consensus_dm_im
-                fused_hex = b''.join(struct.pack('>dd', fused_re[i], fused_im[i]) for i in range(64)).hex()
-                
+                _w_client = min(_cons_fid * 0.35, 0.35)
+                _w_server = 1.0 - _w_client
+
+                if _srv_dm_hex and len(_srv_dm_hex) == 2048:
+                    _sd = bytes.fromhex(_srv_dm_hex)
+                    _sre = [0.0]*64; _sim = [0.0]*64
+                    for _i in range(64):
+                        _sre[_i], _sim[_i] = struct.unpack_from('>dd', _sd, _i*16)
+                    fused_re = [_w_server*_sre[i] + _w_client*_client_consensus_dm_re[i] for i in range(64)]
+                    fused_im = [_w_server*_sim[i] + _w_client*_client_consensus_dm_im[i] for i in range(64)]
+                    ftr = sum(fused_re[i*8+i] for i in range(8))
+                    if ftr > 1e-12:
+                        fused_re = [x/ftr for x in fused_re]
+                        fused_im = [x/ftr for x in fused_im]
+                    fused_hex = b''.join(struct.pack('>dd', fused_re[i], fused_im[i])
+                                         for i in range(64)).hex()
+                    fused_fid = _w_server*_srv_fid + _w_client*_cons_fid
+                else:
+                    fused_hex = dm_hex   # fallback: just use what client sent
+                    fused_fid = fidelity
+
                 composite = {
                     **_srv_snap,
-                    'density_matrix_hex': fused_hex,
-                    'dm_dim': 8,
-                    'w_state_fidelity': _cons_fid,
-                    'purity': _cons_fid,
-                    'lattice_refresh_counter': _srv_snap.get('lattice_refresh_counter'),
-                    'mermin_test': _srv_snap.get('mermin_test'),
-                    'source': 'client_tripartite',
-                    'timestamp_ns': int(time.time() * 1e9),
+                    'density_matrix_hex':    fused_hex,
+                    'w_state_fidelity':      fused_fid,
+                    'fidelity':              fused_fid,
+                    'client_fused_fidelity': _cons_fid,
+                    'client_oracle_count':   _pool_size,
+                    'pq0_oracle_fidelity':   params.get('pq0_oracle_fidelity', fidelity),
+                    'pq0_IV_fidelity':       params.get('pq0_IV_fidelity', fidelity),
+                    'pq0_V_fidelity':        params.get('pq0_V_fidelity', fidelity),
+                    'source':                'server+client_tripartite',
+                    'ready':                 True,
+                    'timestamp_ns':          int(time.time() * 1e9),
                 }
-                _cache_snapshot(composite)
-                logger.debug(f"[PUSH-DM] Updated _latest_snapshot with client DM")
-            except Exception as fe:
-                logger.debug(f"[PUSH-DM] fuse error: {fe}")
-        
+                _broadcast_snapshot_to_database(composite)
+            except Exception as _fe:
+                logger.debug(f"[PUSH-DM] fuse error: {_fe}")
+
         logger.debug(
             f"[PUSH-DM] ✅ oracle_addr={oracle_addr[:16]} fid={fidelity:.4f} "
             f"pool={_pool_size} cons_fid={_cons_fid:.4f}"
@@ -4251,10 +4268,14 @@ def _p2p_broadcast_loop():
     logger.info("[P2P] Broadcast loop exited")
 
 def _start_p2p_broadcast():
-    """Start the P2P broadcast daemon - DISABLED to reduce DB egress."""
+    """Start the P2P broadcast daemon."""
     global _p2p_running, _p2p_broadcast_thread
-    logger.info("[P2P] Broadcast disabled to reduce database egress")
-    return
+    if _p2p_running:
+        return
+    _p2p_running = True
+    _p2p_broadcast_thread = threading.Thread(target=_p2p_broadcast_loop, daemon=True, name="P2PBroadcast")
+    _p2p_broadcast_thread.start()
+    logger.info(f"[P2P] ✅ DHT broadcaster started (30s interval)")
 
 @app.route("/rpc", methods=["POST"])
 def rpc_endpoint():
@@ -4440,21 +4461,22 @@ def serve_root():
 
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
 def rpc_hlwe_system_info():
-    """GET /rpc/hlwe/system-info — HLWE cryptographic system information.
+    """GET /rpc/hlwe/system-info — HypΓ cryptographic system information.
     
-    This endpoint is called by wsgi_config.py to verify HLWE is available
+    This endpoint is called by wsgi_config.py to verify HypΓ is available
     without requiring direct imports at module load time.
+    Endpoint name kept as 'hlwe' for backward compatibility.
     """
     try:
-        from hlwe_engine import hlwe_system_info
+        from hyp_engine_compat import hlwe_system_info
         info = hlwe_system_info()
         return jsonify({
             "status": "ok",
-            "hlwe_info": info,
+            "hyp_info": info,
             "timestamp": time.time(),
         }), 200
     except Exception as e:
-        logger.error(f"[RPC-HLWE] Failed to get system info: {e}", exc_info=True)
+        logger.error(f"[RPC-HYP] Failed to get system info: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "error": str(e),
@@ -4668,253 +4690,247 @@ def _build_snapshot_payload() -> dict:
 import queue as _queue_module
 import threading as _threading_module
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# SNAPSHOT MULTIPLEXER — Ingests RPC, splits by component type, sends to display workers
-# ═══════════════════════════════════════════════════════════════════════════════════════
+# ──────────────────────────────────────────────────────────────────────────────
+# SNAPSHOT MULTIPLEXER — Non-blocking 50ms DM stream + RPC PUSH metrics
+# ════════════════════════════════════════════════════════════════════════════════
+_snapshot_sse_queue = _queue_module.Queue(maxsize=50)
+_snapshot_multiplexer_queue = _queue_module.Queue(maxsize=100)
+_snapshot_multiplexer_lock = _threading_module.Lock()
+_connected_metric_clients = []
 
-# Component-specific queues for display workers
-_dm_queue = _queue_module.Queue(maxsize=50)
-_metrics_queue = _queue_module.Queue(maxsize=50)
-_mermin_queue = _queue_module.Queue(maxsize=50)
-
-# Connected SSE clients per component
-_connected_dm_clients = []
-_connected_metrics_clients = []
-_connected_mermin_clients = []
-_client_lock = _threading_module.Lock()
-
-def _split_and_distribute_snapshot(snapshot: dict) -> None:
-    """Ingest snapshot from RPC, split into components, queue to display workers."""
-    timestamp_ns = snapshot.get('timestamp_ns', int(time.time() * 1e9))
-    cycle = snapshot.get('lattice_refresh_counter')
-    
-    # DM component
-    dm_packet = {
-        'packet_type': 'dm',
-        'timestamp_ns': timestamp_ns,
-        'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
-        'dm_dim': snapshot.get('dm_dim', 64),
-        'lattice_refresh_counter': cycle,
-    }
-    try:
-        _dm_queue.put_nowait(dm_packet)
-    except _queue_module.Full:
-        try: _dm_queue.get_nowait()
-        except: pass
-        try: _dm_queue.put_nowait(dm_packet)
-        except: pass
-    
-    # Metrics component
-    metrics_packet = {
-        'packet_type': 'metrics',
-        'timestamp_ns': timestamp_ns,
-        'w_state_fidelity': snapshot.get('w_state_fidelity'),
-        'purity': snapshot.get('purity'),
-        'coherence_l1': snapshot.get('coherence_l1'),
-        'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
-        'lattice_refresh_counter': cycle,
-        'aer_noise_state': snapshot.get('aer_noise_state', {}),
-        'phase_coherence': snapshot.get('phase_coherence'),
-        'w_state_strength': snapshot.get('w_state_strength'),
-        'entanglement_witness': snapshot.get('entanglement_witness'),
-    }
-    try:
-        _metrics_queue.put_nowait(metrics_packet)
-    except _queue_module.Full:
-        try: _metrics_queue.get_nowait()
-        except: pass
-        try: _metrics_queue.put_nowait(metrics_packet)
-        except: pass
-    
-    # Mermin component
-    mermin_packet = {
-        'packet_type': 'mermin',
-        'timestamp_ns': timestamp_ns,
-        'mermin_test': snapshot.get('mermin_test'),
-        'bell_test': snapshot.get('bell_test'),
-        'lattice_refresh_counter': cycle,
-    }
-    try:
-        _mermin_queue.put_nowait(mermin_packet)
-    except _queue_module.Full:
-        try: _mermin_queue.get_nowait()
-        except: pass
-        try: _mermin_queue.put_nowait(mermin_packet)
-        except: pass
-    
-    logger.debug(f"[SNAP-DIST] Split snapshot cycle={cycle} → DM/MM/MT queued")
-
-
+# SEPARATE THREADS FOR DM AND METRICS - prevents race condition
 def _dm_sse_worker():
-    """SSE worker: sends density matrix data to heatmap clients."""
-    logger.info("[SNAP-DIST] DM SSE worker started")
+    """Dedicated thread for DM→SSE stream only"""
+    logger.info("[MUX-DM] DM SSE worker started")
+    last_dm_send_ts = 0
+    dm_send_interval = 0.05  # 20x/sec for real-time updates
+    
     while True:
         try:
-            packet = _dm_queue.get(timeout=1.0)
-            if not packet:
+            snap = _snapshot_multiplexer_queue.get(timeout=0.01)  # Non-blocking, check more often
+            if not snap:
                 continue
-            with _client_lock:
-                dead = []
-                for client_q in _connected_dm_clients:
+            
+            now_ts = time.time()
+            if now_ts - last_dm_send_ts >= dm_send_interval:
+                dm_hex, dm_dim = _get_lattice_dm_hex()
+                last_dm_send_ts = now_ts
+                
+                if dm_hex:
+                    mermin = snap.get('mermin_test') or snap.get('bell_test')
+                    dm_snap = {
+                        'packet_type': 'dm',
+                        'density_matrix_hex': dm_hex,
+                        'dm_dim': dm_dim or 64,
+                        'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                        'w_state_fidelity': snap.get('w_state_fidelity'),
+                        'purity': snap.get('purity'),
+                        'mermin_test': mermin,
+                        'ready': True
+                    }
                     try:
-                        client_q.put_nowait(packet)
+                        _snapshot_sse_queue.put_nowait(dm_snap)
                     except _queue_module.Full:
-                        dead.append(client_q)
-                for d in dead:
-                    try: _connected_dm_clients.remove(d)
-                    except: pass
+                        pass
+                    
         except _queue_module.Empty:
-            continue
+            time.sleep(0.005)  # Brief pause before retry
+        except GeneratorExit:
+            break
         except Exception as e:
-            logger.debug(f"[DM-SSE] error: {e}")
-            time.sleep(0.1)
+            logger.error(f"[MUX-DM] error: {e}")
+            time.sleep(0.01)
 
-
-def _metrics_sse_worker():
-    """SSE worker: sends metrics data to gauges/metrics clients."""
-    logger.info("[SNAP-DIST] Metrics SSE worker started")
+def _metrics_rpc_worker():
+    """Dedicated thread for Metrics→RPC PUSH only"""
+    logger.info("[MUX-METRICS] Metrics RPC worker started")
+    last_metric_push_ts = 0
+    metric_push_interval = 0.05  # 20x/sec
+    
     while True:
         try:
-            packet = _metrics_queue.get(timeout=1.0)
-            if not packet:
+            snap = _snapshot_multiplexer_queue.get(timeout=0.01)  # Non-blocking
+            if not snap:
+                time.sleep(0.005)
                 continue
-            with _client_lock:
-                dead = []
-                for client_q in _connected_metrics_clients:
-                    try:
-                        client_q.put_nowait(packet)
-                    except _queue_module.Full:
-                        dead.append(client_q)
-                for d in dead:
-                    try: _connected_metrics_clients.remove(d)
-                    except: pass
+            
+            now_ts = time.time()
+            if now_ts - last_metric_push_ts >= metric_push_interval:
+                metrics_snap = {
+                    'packet_type': 'metrics',
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'coherence_l1': snap.get('coherence_l1'),
+                    'von_neumann_entropy': snap.get('von_neumann_entropy'),
+                    'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
+                    'aer_noise_state': snap.get('aer_noise_state', {}),
+                    'block_field': snap.get('block_field', {}),
+                    'phase_drift': snap.get('phase_drift'),
+                    'phase_coherence': snap.get('phase_coherence'),
+                    'qrng_health': snap.get('qrng_health'),
+                    'mermin_test': snap.get('mermin_test'),
+                }
+                
+                with _snapshot_multiplexer_lock:
+                    for client_q in _connected_metric_clients[:]:
+                        try:
+                            client_q.put_nowait(metrics_snap)
+                        except _queue_module.Full:
+                            _connected_metric_clients.remove(client_q)
+                
+                last_metric_push_ts = now_ts
+                    
         except _queue_module.Empty:
             continue
+        except GeneratorExit:
+            break
         except Exception as e:
-            logger.debug(f"[METRICS-SSE] error: {e}")
+            logger.error(f"[MUX-METRICS] error: {e}")
             time.sleep(0.1)
 
-
-def _mermin_sse_worker():
-    """SSE worker: sends mermin test data to Mermin display clients."""
-    logger.info("[SNAP-DIST] Mermin SSE worker started")
-    while True:
+def _enqueue_snapshot_for_streaming(snapshot: dict) -> None:
+    """Called by oracle.py/lattice_controller.py every ~50ms."""
+    try:
+        _snapshot_multiplexer_queue.put_nowait(snapshot)
+    except _queue_module.Full:
         try:
-            packet = _mermin_queue.get(timeout=1.0)
-            if not packet:
+            _snapshot_multiplexer_queue.get_nowait()
+            _snapshot_multiplexer_queue.put_nowait(snapshot)
+        except Exception:
+            pass
+
+def _multiplexer_worker():
+    """Forks snapshots: DM→SSE, Metrics→RPC PUSH."""
+    logger.info("[MUX] Snapshot multiplexer started")
+    last_metric_push_ts = 0
+    metric_push_interval = 0.05  # 20 metrics/sec - real-time
+    _mux_loop_count = 0
+    last_dm_send_ts = 0
+    dm_send_interval = 0.05  # 20x/sec for real-time updates
+    
+    while True:
+        _mux_loop_count += 1
+        try:
+            snap = _snapshot_multiplexer_queue.get(timeout=0.01)  # Non-blocking
+            if not snap:
+                time.sleep(0.005)
                 continue
-            with _client_lock:
-                dead = []
-                for client_q in _connected_mermin_clients:
-                    try:
-                        client_q.put_nowait(packet)
-                    except _queue_module.Full:
-                        dead.append(client_q)
-                for d in dead:
-                    try: _connected_mermin_clients.remove(d)
-                    except: pass
+            
+            now_ts = time.time()
+            
+            # Send DM at faster interval (50ms)
+            dm_hex = ''
+            dm_dim = 0
+            if now_ts - last_dm_send_ts >= dm_send_interval:
+                dm_hex, dm_dim = _get_lattice_dm_hex()
+                last_dm_send_ts = now_ts
+                if _mux_loop_count % 20 == 0:
+                    logger.info(f"[MUX] cycle={_mux_loop_count} DM: {len(dm_hex) if dm_hex else 0} chars, dim={dm_dim}")
+            
+            # Send DM to SSE queue (only if we got new DM this cycle)
+            if dm_hex:
+                mermin = snap.get('mermin_test') or snap.get('bell_test')
+                dm_snap = {
+                    'packet_type': 'dm',
+                    'density_matrix_hex': dm_hex,
+                    'dm_dim': dm_dim or 64,
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'mermin_test': mermin,
+                    'ready': True
+                }
+                try:
+                    _snapshot_sse_queue.put_nowait(dm_snap)
+                except _queue_module.Full:
+                    pass
+            
+            # Metrics push
+            now_ts = time.time()
+            if now_ts - last_metric_push_ts >= metric_push_interval:
+                metrics_snap = {
+                    'packet_type': 'metrics',
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'coherence_l1': snap.get('coherence_l1'),
+                    'von_neumann_entropy': snap.get('von_neumann_entropy'),
+                    'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
+                    'aer_noise_state': snap.get('aer_noise_state', {}),
+                    'block_field': snap.get('block_field', {}),
+                    'phase_drift': snap.get('phase_drift'),
+                    'phase_coherence': snap.get('phase_coherence'),
+                    'qrng_health': snap.get('qrng_health'),
+                    'mermin_test': snap.get('mermin_test'),
+                }
+                
+                with _snapshot_multiplexer_lock:
+                    for client_q in _connected_metric_clients[:]:
+                        try:
+                            client_q.put_nowait(metrics_snap)
+                        except _queue_module.Full:
+                            _connected_metric_clients.remove(client_q)
+                
+                last_metric_push_ts = now_ts
+        
         except _queue_module.Empty:
             continue
+        except GeneratorExit:
+            break
         except Exception as e:
-            logger.debug(f"[MERMIN-SSE] error: {e}")
+            logger.error(f"[MUX] error: {e}")
+            time.sleep(0.1)
+            
+            # Fork 2: Metrics (no DM) → RPC PUSH
+            now_ts = time.time()
+            if now_ts - last_metric_push_ts >= metric_push_interval:
+                metrics_snap = {
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'coherence_l1': snap.get('coherence_l1'),
+                    'von_neumann_entropy': snap.get('von_neumann_entropy'),
+                    'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
+                    'aer_noise_state': snap.get('aer_noise_state', {}),
+                    'block_field': snap.get('block_field', {}),
+                    'phase_drift': snap.get('phase_drift'),
+                    'phase_coherence': snap.get('phase_coherence'),
+                    'qrng_health': snap.get('qrng_health'),
+                    'mermin_test': snap.get('mermin_test'),
+                }
+                
+                with _snapshot_multiplexer_lock:
+                    for client_q in _connected_metric_clients[:]:
+                        try:
+                            client_q.put_nowait(metrics_snap)
+                        except _queue_module.Full:
+                            _connected_metric_clients.remove(client_q)
+                
+                last_metric_push_ts = now_ts
+        
+        except _queue_module.Empty:
+            continue
+        except GeneratorExit:
+            break
+        except Exception as e:
+            logger.error(f"[MUX-METRICS] error: {e}", exc_info=False)
             time.sleep(0.1)
 
+# Start SEPARATE THREADS for DM and Metrics - eliminates race condition
+_dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="MUX-DM")
+_dm_thread.start()
 
-# Start display worker threads
-_snap_dm_thread = _threading_module.Thread(target=_dm_sse_worker, daemon=True, name="DM-SSE")
-_snap_dm_thread.start()
-_snap_metrics_thread = _threading_module.Thread(target=_metrics_sse_worker, daemon=True, name="Metrics-SSE")
-_snap_metrics_thread.start()
-_snap_mermin_thread = _threading_module.Thread(target=_mermin_sse_worker, daemon=True, name="Mermin-SSE")
-_snap_mermin_thread.start()
-logger.info("[SNAP-DIST] DM/Metrics/Mermin SSE workers started")
-
-# ── SSE ENDPOINTS PER COMPONENT ──────────────────────────────────────────────────
-
-@app.route("/rpc/oracle/snapshot/dm", methods=["GET", "OPTIONS"])
-def rpc_oracle_snapshot_dm():
-    """SSE stream: density matrix data for heatmap display."""
-    if request.method == "OPTIONS":
-        return "", 204
-    client_q = _queue_module.Queue(maxsize=20)
-    with _client_lock:
-        _connected_dm_clients.append(client_q)
-    def generate():
-        import itertools
-        for _ in itertools.count():
-            try:
-                packet = client_q.get(timeout=5.0)
-                if packet:
-                    yield f"data: {json.dumps(packet)}\n\n"
-            except _queue_module.Empty:
-                yield f": heartbeat\n\n"
-            except GeneratorExit:
-                break
-        with _client_lock:
-            try: _connected_dm_clients.remove(client_q)
-            except: pass
-    return Response(generate(), headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Content-Type': 'text/event-stream'})
-
-
-@app.route("/rpc/oracle/snapshot/metrics", methods=["GET", "OPTIONS"])
-def rpc_oracle_snapshot_metrics():
-    """SSE stream: metrics data for gauges display."""
-    if request.method == "OPTIONS":
-        return "", 204
-    client_q = _queue_module.Queue(maxsize=20)
-    with _client_lock:
-        _connected_metrics_clients.append(client_q)
-    def generate():
-        import itertools
-        for _ in itertools.count():
-            try:
-                packet = client_q.get(timeout=5.0)
-                if packet:
-                    yield f"data: {json.dumps(packet)}\n\n"
-            except _queue_module.Empty:
-                yield f": heartbeat\n\n"
-            except GeneratorExit:
-                break
-        with _client_lock:
-            try: _connected_metrics_clients.remove(client_q)
-            except: pass
-    return Response(generate(), headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Content-Type': 'text/event-stream'})
-
-
-@app.route("/rpc/oracle/snapshot/mermin", methods=["GET", "OPTIONS"])
-def rpc_oracle_snapshot_mermin():
-    """SSE stream: mermin test data for display."""
-    if request.method == "OPTIONS":
-        return "", 204
-    client_q = _queue_module.Queue(maxsize=20)
-    with _client_lock:
-        _connected_mermin_clients.append(client_q)
-    def generate():
-        import itertools
-        for _ in itertools.count():
-            try:
-                packet = client_q.get(timeout=5.0)
-                if packet:
-                    yield f"data: {json.dumps(packet)}\n\n"
-            except _queue_module.Empty:
-                yield f": heartbeat\n\n"
-            except GeneratorExit:
-                break
-        with _client_lock:
-            try: _connected_mermin_clients.remove(client_q)
-            except: pass
-    return Response(generate(), headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Content-Type': 'text/event-stream'})
-
+# TEMPORARILY DISABLED - focusing on Mermin + Density Matrix only
+# _metrics_thread = _threading_module.Thread(target=_metrics_rpc_worker, daemon=True, name="MUX-METRICS")
+# _metrics_thread.start()
+logger.info("[MUX] DM thread only - metrics disabled for now")
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """
-    RPC/SSE HYBRID — Streams density matrix snapshots for real-time display.
-    Snapshot packet format easy to break up for distribution to workers:
-    - DM component (density_matrix_hex, dm_dim)
-    - Metrics component (fidelity, purity, coherence, entropy)
-    - Test component (mermin_test, bell_test)
-    - Noise component (aer_noise_state, phase_coherence)
+    SSE STREAM — HIGH-FREQUENCY (50ms) DENSITY MATRIX ONLY.
+    Multiplexer forks DM (here) from metrics (RPC PUSH).
     """
     if request.method == "OPTIONS":
         return "", 204
@@ -4923,124 +4939,63 @@ def rpc_oracle_snapshot():
         import itertools
         for _ in itertools.count():
             try:
-                result_data = {}
-                
-                # Get DM and metrics from snapshot cache (populated by oracle puller)
-                with _snapshot_lock:
-                    _snap = dict(_latest_snapshot) if _latest_snapshot else {}
-                
-                if _snap.get('density_matrix_hex'):
-                    result_data['density_matrix_hex'] = _snap['density_matrix_hex']
-                    result_data['dm_dim'] = _snap.get('dm_dim', 64)
-                if _snap.get('w_state_fidelity') is not None:
-                    result_data['w_state_fidelity'] = _snap['w_state_fidelity']
-                if _snap.get('purity') is not None:
-                    result_data['purity'] = _snap['purity']
-                if _snap.get('lattice_refresh_counter') is not None:
-                    result_data['lattice_refresh_counter'] = _snap['lattice_refresh_counter']
-                if _snap.get('mermin_test') is not None:
-                    result_data['mermin_test'] = _snap['mermin_test']
-                
-                # Split and distribute to display workers
-                _split_and_distribute_snapshot(result_data)
-                
-                # SSE format
-                payload = json.dumps({"result": result_data, "id": 1})
-                yield f"data: {payload}\n\n"
-                
-                time.sleep(0.1)
+                snap = _snapshot_sse_queue.get(timeout=2.0)
+                if snap and snap.get('density_matrix_hex'):
+                    payload = json.dumps({"result": snap, "id": 1})
+                    yield f"data: {payload}\n\n"
+            except _queue_module.Empty:
+                yield f": heartbeat\n\n"
+            except GeneratorExit:
+                break
             except Exception as e:
                 logger.debug(f"[SSE-SNAPSHOT] error: {e}")
+                break
+
+    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
+    return Response(generate(), mimetype='text/event-stream', headers=headers)
+
+@app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
+def rpc_metrics_push():
+    """
+    SSE STREAM — RPC PUSH metrics (50ms cadence, no density matrix).
+    Server pushes metrics to all connected clients in real-time.
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+
+    client_queue = _queue_module.Queue(maxsize=50)
+    with _snapshot_multiplexer_lock:
+        _connected_metric_clients.append(client_queue)
+
+    def generate():
+        import itertools
+        for _ in itertools.count():
+            try:
+                metrics = client_queue.get(timeout=2.0)
+                if metrics:
+                    payload = json.dumps({"result": metrics, "id": 1})
+                    yield f"data: {payload}\n\n"
+            except _queue_module.Empty:
                 yield f": heartbeat\n\n"
-                time.sleep(1)
+            except GeneratorExit:
+                break
+            except Exception as e:
+                logger.debug(f"[RPC-PUSH-METRICS] error: {e}")
+                break
+        
+        # Cleanup on disconnect
+        with _snapshot_multiplexer_lock:
+            try:
+                _connected_metric_clients.remove(client_queue)
+            except ValueError:
+                pass
 
-    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Content-Type': 'text/event-stream'}
-    return Response(generate(), headers=headers)
+    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
+    return Response(generate(), mimetype='text/event-stream', headers=headers)
 
 # ════════════════════════════════════════════════════════════════════════════════
-# ORACLE SNAPSHOT PULLER — Background worker to keep _latest_snapshot fresh
+# BLOCKS SSE STREAM — Dedicated unblockable real-time block events
 # ════════════════════════════════════════════════════════════════════════════════
-
-def _oracle_snapshot_puller():
-    """Pulls fresh snapshot from oracle every 100ms and updates _latest_snapshot."""
-    import time as _time
-    logger.info("[ORACLE-PULL] Oracle snapshot puller started")
-    while True:
-        try:
-            from globals import LATTICE as _LAT
-            if _LAT is not None:
-                dm_hex = ''
-                # Try to get DM from LATTICE's current_density_matrix (DensityMatrixSnapshot or ndarray)
-                cdm = getattr(_LAT, 'current_density_matrix', None)
-                if cdm is not None:
-                    # Check if it's a DensityMatrixSnapshot (has density_matrix attr)
-                    if hasattr(cdm, 'density_matrix'):
-                        dm_arr = cdm.density_matrix
-                        if dm_arr is not None and hasattr(dm_arr, 'tobytes') and hasattr(dm_arr, 'shape'):
-                            dm_hex, _ = _lattice_dm_to_64x64_hex(dm_arr)
-                    # Or if it's a raw numpy array
-                    elif hasattr(cdm, 'tobytes') and hasattr(cdm, 'shape'):
-                        dm_hex, _ = _lattice_dm_to_64x64_hex(cdm)
-                    # Or use the pre-computed hex
-                    elif hasattr(cdm, 'density_matrix_hex'):
-                        raw_hex = cdm.density_matrix_hex
-                        if raw_hex:
-                            # Parse raw hex and expand to 64x64
-                            import numpy as np
-                            raw_bytes = bytes.fromhex(raw_hex)
-                            raw_dim = int(np.sqrt(len(raw_bytes) // 16))
-                            raw_dm = np.frombuffer(raw_bytes, dtype=np.complex128).reshape(raw_dim, raw_dim)
-                            dm_hex, _ = _lattice_dm_to_64x64_hex(raw_dm)
-                    
-                    # Pull metrics
-                    if hasattr(cdm, 'w_state_fidelity'):
-                        fidelity = cdm.w_state_fidelity
-                        purity = cdm.purity
-                        coherence = cdm.coherence_l1
-                        cycle = cdm.lattice_refresh_counter
-                        mermin = cdm.bell_test
-                    else:
-                        fidelity = getattr(_LAT, 'fidelity', None)
-                        purity = getattr(_LAT, 'purity', None)
-                        coherence = getattr(_LAT, 'coherence', None)
-                        cycle = getattr(_LAT, 'cycle_count', None)
-                        mermin = getattr(_LAT, 'mermin_test', None)
-                else:
-                    fidelity = getattr(_LAT, 'fidelity', None)
-                    purity = getattr(_LAT, 'purity', None)
-                    coherence = getattr(_LAT, 'coherence', None)
-                    cycle = getattr(_LAT, 'cycle_count', None)
-                    mermin = getattr(_LAT, 'mermin_test', None)
-                
-                # Clamp mermin
-                if mermin is not None:
-                    if isinstance(mermin, dict):
-                        M = mermin.get('M', mermin.get('value', 0.0))
-                    else:
-                        M = float(mermin)
-                    if abs(M) > 2.83:
-                        M = 2.83 if M > 0 else -2.83
-                    mermin = {'M': M}
-                
-                snap = {
-                    'density_matrix_hex': dm_hex,
-                    'dm_dim': 64 if dm_hex else 0,
-                    'w_state_fidelity': fidelity,
-                    'purity': purity,
-                    'coherence_l1': coherence,
-                    'lattice_refresh_counter': cycle,
-                    'mermin_test': mermin,
-                    'timestamp_ns': int(_time.time() * 1e9),
-                    'ready': True,
-                }
-                _cache_snapshot(snap)
-        except Exception as e:
-            logger.debug(f"[ORACLE-PULL] error: {e}")
-        _time.sleep(0.1)
-
-_oracle_puller_thread = threading.Thread(target=_oracle_snapshot_puller, daemon=True, name="OraclePuller")
-_oracle_puller_thread.start()
-logger.info("[ORACLE-PULL] Oracle snapshot puller started (100ms interval)")
 _blocks_sse_queue = _queue_module.Queue(maxsize=50)
 _connected_blocks_clients = []
 _blocks_multicast_lock = _threading_module.Lock()
@@ -5134,8 +5089,101 @@ def rpc_oracle_snapshots():
         return jsonify({"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}), 500
 
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
-logger.info("[RPC-SNAP] ✅ Snapshot streaming endpoint mounted — /rpc/oracle/snapshot (SSE)")
+logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshot/full,snapshots}")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
+
+# ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+def _broadcast_snapshot_to_database(snapshot: dict) -> None:
+    """
+    RPC-based snapshot broadcast: queue to ring buffer + persist to SQLite for P2P sync.
+    
+    Architecture:
+    - In-memory ring buffer (latest 1000) for fast /rpc polling
+    - Async SQLite write to dm_pool table for P2P replication & miners
+    - Dual persistence: Supabase (cloud) + SQLite (local mesh)
+    """
+    try:
+        # 1. Update in-memory RPC cache
+        _cache_snapshot(snapshot)
+        
+        # 2. Queue into DM snapshot ring buffer for streaming
+        if 'density_matrix_hex' in snapshot:
+            dm_snap = {
+                'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
+                'oracle_id': snapshot.get('oracle_id'),
+                'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
+                'purity': snapshot.get('purity'),
+                'w_state_fidelity': snapshot.get('w_state_fidelity'),
+                'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
+                'coherence_l1': snapshot.get('coherence_l1'),
+                'coherence_renyi': snapshot.get('coherence_renyi'),
+                'coherence_geometric': snapshot.get('coherence_geometric'),
+                'quantum_discord': snapshot.get('quantum_discord'),
+                'w_state_strength': snapshot.get('w_state_strength'),
+                'phase_coherence': snapshot.get('phase_coherence'),
+                'entanglement_witness': snapshot.get('entanglement_witness'),
+                'trace_purity': snapshot.get('trace_purity'),
+                'hlwe_signature': snapshot.get('hlwe_signature'),
+                'signature_valid': snapshot.get('signature_valid', False),
+                'oracle_address': snapshot.get('oracle_address'),
+                'aer_noise_state': snapshot.get('aer_noise_state', {}),
+                'measurement_counts': snapshot.get('measurement_counts', {}),
+                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),  # Client expects mermin_test
+                'bell_test': snapshot.get('bell_test'),  # Backward compatibility
+                'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
+            }
+            with _DM_SNAPSHOT_LOCK:
+                _DM_SNAPSHOT_RING.append(dm_snap)
+            logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
+        
+        # 3. Persist to SQLite asynchronously (P2P replication)
+        def async_sqlite():
+            try:
+                import sqlite3
+                from pathlib import Path
+                db = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
+                db.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(db), timeout=5.0)
+                cur = conn.cursor()
+                cur.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
+                    id INTEGER PRIMARY KEY, timestamp_ns INTEGER, oracle_id INTEGER,
+                    density_matrix_hex TEXT, purity REAL, w_state_fidelity REAL,
+                    von_neumann_entropy REAL, coherence_l1 REAL, hlwe_signature TEXT,
+                    signature_valid INTEGER, oracle_address TEXT, aer_noise_state TEXT,
+                    measurement_counts TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+                cur.execute("""INSERT INTO dm_pool (
+                    timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
+                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
+                    oracle_address, aer_noise_state, measurement_counts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                    snapshot.get('timestamp_ns'), snapshot.get('oracle_id'),
+                    snapshot.get('density_matrix_hex', ''),
+                    snapshot.get('purity'), snapshot.get('w_state_fidelity'),
+                    snapshot.get('von_neumann_entropy'), snapshot.get('coherence_l1'),
+                    json.dumps(snapshot.get('hlwe_signature')),
+                    1 if snapshot.get('signature_valid') else 0,
+                    snapshot.get('oracle_address'),
+                    json.dumps(snapshot.get('aer_noise_state', {})),
+                    json.dumps(snapshot.get('measurement_counts', {}))
+                ))
+                conn.commit()
+                conn.close()
+                logger.debug("[RPC-BROADCAST] ✅ DM → SQLite dm_pool")
+            except Exception as e:
+                logger.warning(f"[RPC-BROADCAST] SQLite write: {e}")
+        
+        threading.Thread(target=async_sqlite, daemon=True).start()
+        
+        # 4. Persist to Supabase (cloud backup, non-blocking)
+        try:
+            _persist_chirp_snapshot(snapshot)
+        except Exception as e:
+            logger.debug(f"[RPC-BROADCAST] Supabase skipped: {e}")
+    except Exception as e:
+        logger.error(f"[RPC-BROADCAST] Error: {e}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # 256×256 → 64×64 HERMITIAN-PRESERVING DENSITY MATRIX REDUCER
@@ -5145,29 +5193,31 @@ def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
     """
     Collapse 256×256 complex128 DM → 64×64 by block-averaging 4×4 tiles,
     then enforce ρ = (ρ + ρ†)/2 and renormalise Tr(ρ)=1.
-    Always returns 64x64.
+
+    Each output element [I,J] = mean of the 4×4 subblock dm256[4I:4I+4, 4J:4J+4].
+    Hermitian step: rho64[I,J] = (rho64[I,J] + conj(rho64[J,I])) / 2  ∀ I≤J,
+    then mirror lower triangle.  This preserves physical validity.
+
+    Serialised as row-major little-endian float64 pairs (re, im) — same convention
+    as numpy .tobytes() — 64×64×16 bytes = 65536 bytes = 131072 hex chars.
+    dm_dim=64 flag injected so the client knows the grid size.
     """
     try:
         dm = np.asarray(dm256, dtype=np.complex128)
-        if dm.shape == (256, 256):
-            N = 64
-            B = 4  # block size
-            rho = np.zeros((N, N), dtype=np.complex128)
-            for I in range(N):
-                for J in range(N):
-                    rho[I, J] = np.mean(dm256[I*B:(I+1)*B, J*B:(J+1)*B])
-        elif dm.shape[0] == dm.shape[1]:
-            # Expand any NxN to 64x64 via nearest-neighbor
-            srcN = dm.shape[0]
-            N = 64
-            rho = np.zeros((N, N), dtype=np.complex128)
-            for i in range(N):
-                for j in range(N):
-                    si = min(i * srcN // N, srcN - 1)
-                    sj = min(j * srcN // N, srcN - 1)
-                    rho[i, j] = dm[si, sj]
-        else:
-            return '', 0
+        if dm.shape != (256, 256):
+            # Graceful: if it's already 8×8 or some other size, just pass through
+            if dm.shape == (8, 8):
+                return dm.tobytes().hex(), 8
+            return dm.tobytes().hex(), dm.shape[0]
+
+        N = 64
+        B = 4  # block size
+        rho = np.zeros((N, N), dtype=np.complex128)
+
+        # Block-average: rho[I,J] = mean of dm[4I:4I+4, 4J:4J+4]
+        for I in range(N):
+            for J in range(N):
+                rho[I, J] = np.mean(dm256[I*B:(I+1)*B, J*B:(J+1)*B])
 
         # Enforce Hermitian: ρ = (ρ + ρ†) / 2
         rho = 0.5 * (rho + rho.conj().T)
@@ -5177,29 +5227,37 @@ def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
         if tr > 1e-12:
             rho /= tr
 
-        return rho.tobytes().hex(), 64
+        return rho.tobytes().hex(), N
 
     except Exception as e:
-        logger.warning(f"[DM-REDUCE] DM→64x64 failed: {e}")
+        logger.warning(f"[DM-REDUCE] 256→64 failed: {e}")
         return '', 0
 
 
 _dm_hex_cache = ('', 0, 0)  # (hex, dim, timestamp)
 
 def _get_lattice_dm_hex() -> tuple:
-    """Pull current_density_matrix from LATTICE, return 64x64 reduced hex.
+    """Pull current_density_matrix from LATTICE, return 64x64 reduced hex (cached).
     
-    No server-side caching - oracle runs at ~10ms, SSE at 300ms.
+    NOTE: This is server-side caching ONLY - does NOT affect oracle quantum simulation.
+    The oracle still runs true AER with real noise every cycle. This just caches
+    the 256→64 reduction for the frontend to avoid repeated CPU work.
     """
     global _dm_hex_cache
-    from globals import LATTICE as _LAT
+    from globals import LATTICE
+    
+    now = time.time()
+    # Cache for 1s - oracle runs at ~10ms so this is safe
+    if now - _dm_hex_cache[2] < 1.0 and _dm_hex_cache[0]:
+        return _dm_hex_cache[0], _dm_hex_cache[1]
     
     try:
-        lat = _LAT
+        lat = LATTICE
         if lat is not None and hasattr(lat, 'current_density_matrix'):
             dm = lat.current_density_matrix
             if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
                 hex_val, dim = _lattice_dm_to_64x64_hex(dm)
+                _dm_hex_cache = (hex_val, dim, now)
                 return hex_val, dim
     except Exception as e:
         logger.debug(f"[DM] LATTICE access: {e}")
@@ -5210,7 +5268,8 @@ def _get_lattice_dm_hex() -> tuple:
             snap = _latest_snapshot
         if snap:
             h = snap.get('density_matrix_hex', '')
-            if h:
+            if h and len(h) == 2048:
+                _dm_hex_cache = (h, 8, now)
                 return h, 8
     except Exception:
         pass

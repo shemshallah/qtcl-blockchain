@@ -24,6 +24,15 @@ Key fix applied here
 
 import os
 import sys
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ADD HYP SUBDIRECTORY TO SYS.PATH (allow imports from ~/hlwe/hyp_* modules)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_HYP_DIR = os.path.join(_REPO_ROOT, 'hlwe')
+if _HYP_DIR not in sys.path:
+    sys.path.insert(0, _HYP_DIR)
+
 import json
 import time
 import hmac
@@ -45,7 +54,8 @@ from collections import deque, OrderedDict
 from decimal import Decimal, getcontext
 from enum import Enum
 try:
-    from hlwe_engine import HLWEEngine
+    from hyp_engine_compat import get_hyp_engine
+    HLWEEngine = get_hyp_engine  # Alias for backward compat
 except ImportError:
     HLWEEngine = None
 
@@ -809,7 +819,7 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-MEASUREMENT_TIMEOUT          = 10   # Increased from 2s to handle slow AER readings
+MEASUREMENT_TIMEOUT          = 2    # 2s cap — fast for AER single shot
 
 W_STATE_STREAM_INTERVAL_MS   = 10  # Original - true quantum takes time
 LATTICE_REFRESH_INTERVAL_MS  = 50
@@ -1189,7 +1199,11 @@ class HDKeyring:
 class HLWESigner:
     def __init__(self, keyring: HDKeyring):
         self._keyring = keyring
-        self._engine = HLWEEngine() if HLWEEngine else None
+        try:
+            from hyp_engine_compat import get_hyp_engine
+            self._engine = get_hyp_engine() if HLWEEngine else None
+        except:
+            self._engine = None
 
     def sign_message(self, msg_hash: str, kp: OracleKeyPair, w_entropy: Optional[bytes] = None) -> HLWESignature:
         if w_entropy is None:
@@ -1239,7 +1253,11 @@ class HLWESigner:
 
 class HLWEVerifier:
     def __init__(self):
-        self._engine = HLWEEngine() if HLWEEngine else None
+        try:
+            from hyp_engine_compat import get_hyp_engine
+            self._engine = get_hyp_engine() if HLWEEngine else None
+        except:
+            self._engine = None
 
     def verify_signature(self, msg_hash: str, sig: HLWESignature,
                          expected_address: Optional[str] = None) -> Tuple[bool, str]:
@@ -2203,7 +2221,83 @@ class OracleWStateManager:
             self.current_density_matrix = snapshot
             self.density_matrix_buffer.append(snapshot)
 
-        # ── Step 8: Sign ──────────────────────────────────────────────────────
+        # ── Step 8: ENQUEUE FOR MULTIPLEXER (CRITICAL: DM + metrics for SSE streams) ──
+        # This is the primary integration point. The server's multiplexer forks this
+        # snapshot into two SSE streams: DM-only for heatmap, metrics-only for gauges.
+        # Called immediately after snapshot construction — non-blocking.
+        try:
+            import sys as _sys
+            _server_mod = _sys.modules.get('server')
+            if _server_mod and hasattr(_server_mod, '_enqueue_snapshot_for_streaming'):
+                # Build the dictionary snapshot for the multiplexer
+                _mux_snapshot = {
+                    'timestamp_ns': snapshot.timestamp_ns,
+                    'lattice_refresh_counter': snapshot.lattice_refresh_counter,
+                    'density_matrix_hex': snapshot.density_matrix_hex,
+                    'dm_dim': 8,  # 8×8 density matrix dimension
+                    'w_state_fidelity': snapshot.w_state_fidelity,
+                    'purity': snapshot.purity,
+                    'coherence_l1': snapshot.coherence_l1,
+                    'von_neumann_entropy': snapshot.von_neumann_entropy,
+                    'coherence_renyi': snapshot.coherence_renyi,
+                    'coherence_geometric': snapshot.coherence_geometric,
+                    'quantum_discord': snapshot.quantum_discord,
+                    'w_state_strength': snapshot.w_state_strength,
+                    'phase_coherence': snapshot.phase_coherence,
+                    'entanglement_witness': snapshot.entanglement_witness,
+                    'trace_purity': snapshot.trace_purity,
+                    'aer_noise_state': snapshot.aer_noise_state,
+                    'measurement_counts': snapshot.measurement_counts,
+                    'bell_test': snapshot.bell_test,
+                    'mermin_test': snapshot.bell_test,
+                    'oracle_id': None,  # Not per-node, consensus snapshot
+                    'hlwe_signature': snapshot.hlwe_signature,
+                    'oracle_address': snapshot.oracle_address,
+                    'signature_valid': snapshot.signature_valid,
+                }
+                _server_mod._enqueue_snapshot_for_streaming(_mux_snapshot)
+                logger.info(f"[ORACLE CLUSTER] ✅ Snapshot enqueued for multiplexer (cycle {current_cycle})")
+            else:
+                logger.debug(f"[ORACLE CLUSTER] ⚠️ server._enqueue_snapshot_for_streaming not available")
+        except Exception as _mux_err:
+            logger.debug(f"[ORACLE CLUSTER] Multiplexer enqueue skipped: {_mux_err}")
+
+        # ── Step 9: Broadcast authoritative snapshot with per_node data ──────────
+        # This ensures the DM ring buffer has oracle-specific per_node readings
+        # which the frontend needs to display individual oracle status
+        try:
+            import sys
+            _mod = sys.modules.get('server')
+            if _mod and hasattr(_mod, '_broadcast_snapshot_to_database'):
+                snapshot_dict = {
+                    'timestamp_ns': snapshot.timestamp_ns,
+                    'oracle_id': snapshot.oracle_id,
+                    'density_matrix_hex': snapshot.density_matrix_hex,
+                    'purity': snapshot.purity,
+                    'w_state_fidelity': snapshot.w_state_fidelity,
+                    'von_neumann_entropy': snapshot.von_neumann_entropy,
+                    'coherence_l1': snapshot.coherence_l1,
+                    'coherence_renyi': getattr(snapshot, 'coherence_renyi', None),
+                    'coherence_geometric': getattr(snapshot, 'coherence_geometric', None),
+                    'quantum_discord': getattr(snapshot, 'quantum_discord', None),
+                    'w_state_strength': snapshot.w_state_strength,
+                    'phase_coherence': snapshot.phase_coherence,
+                    'entanglement_witness': snapshot.entanglement_witness,
+                    'trace_purity': snapshot.trace_purity,
+                    'hlwe_signature': getattr(snapshot, 'hlwe_signature', None),
+                    'signature_valid': getattr(snapshot, 'signature_valid', False),
+                    'oracle_address': getattr(snapshot, 'oracle_address', None),
+                    'aer_noise_state': snapshot.aer_noise_state,
+                    'measurement_counts': snapshot.measurement_counts,
+                    'mermin_test': getattr(snapshot, 'bell_test', None),
+                    'lattice_refresh_counter': snapshot.lattice_refresh_counter,
+                }
+                _mod._broadcast_snapshot_to_database(snapshot_dict)
+                logger.debug(f"[ORACLE] ✅ Broadcasted authoritative snapshot with per_node")
+        except Exception as _bc_err:
+            logger.debug(f"[ORACLE] Broadcast skip: {_bc_err}")
+
+        # ── Step 10: Sign ──────────────────────────────────────────────────────
         if self.oracle_signer:
             try:
                 sig = self.oracle_signer.sign_w_state_snapshot(snapshot)
@@ -3110,9 +3204,15 @@ class RpcBroadcastController:
         logger.info("[RPC-BROADCAST] 🚀 RpcBroadcastController initialized")
 
     def start(self) -> None:
-        """Start async persistence thread - DISABLED to reduce DB egress."""
-        logger.info("[RPC-BROADCAST] DB persistence disabled")
-        return
+        """Start async persistence thread."""
+        if self._running:
+            return
+        self._running = True
+        self._persist_thread = threading.Thread(
+            target=self._persist_worker, name="RpcBroadcast-PersistWorker", daemon=True
+        )
+        self._persist_thread.start()
+        logger.info("[RPC-BROADCAST] ✅ Async persistence worker started")
 
     def stop(self) -> None:
         """Stop async persistence thread."""
@@ -3330,8 +3430,21 @@ class RpcBroadcastController:
                 time.sleep(0.1)
 
     def _persist_snapshot_to_db(self, event: Dict[str, Any]) -> bool:
-        """DB persistence DISABLED."""
-        return False
+        """Write one snapshot event to quantum_snapshots table via _persist_chirp_snapshot."""
+        try:
+            from server import _persist_chirp_snapshot
+            snap = event.get('snapshot_data', {})
+            snap['timestamp_ns'] = event.get('timestamp_ns', time.time_ns())
+            snap['chirp_number'] = event.get('cycle', 0)
+            snap['snapshot_json'] = event.get('snapshot_json', '{}')
+            _persist_chirp_snapshot(snap)
+            return True
+        except ImportError:
+            logger.debug("[RPC-BROADCAST] server module not available for DB persistence")
+            return False
+        except Exception as e:
+            logger.error(f"[RPC-BROADCAST] DB persistence failed: {e}", exc_info=False)
+            return False
 
     def get_ring_buffer(self, max_events: int = 10) -> List[Dict[str, Any]]:
         """Get latest N events from ring buffer for /api/oracle/snapshot polling."""
