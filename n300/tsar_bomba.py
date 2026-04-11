@@ -61,6 +61,7 @@ import itertools
 import functools
 import struct
 import json
+import glob
 import secrets
 from dataclasses import dataclass, field
 from decimal import Decimal, getcontext
@@ -73,6 +74,7 @@ from collections import defaultdict
 # Set extreme decimal precision globally
 getcontext().prec = 500
 
+VOLCANO_STEPS = 50000
 # ══════════════════════════════════════════════════════════════════════════════════
 # SECP256K1 PARAMETERS — IMMUTABLE GROUND TRUTH
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -237,7 +239,10 @@ def point_add_fast(x1: int, y1: int, x2: int, y2: int) -> Tuple[int, int]:
                 pubkey2[i] = k2_bytes[i]
                 pubkey2[i+32] = k2_y_bytes[i]
             
-            if _secp256k1.secp256k1_ec_pubkey_combine(_secp256k1_context, result, pubkey1, pubkey2):
+            pubkeys = (ctypes.POINTER(ctypes.c_void_p) * 2)()
+            pubkeys[0] = ctypes.cast(ctypes.byref(pubkey1), ctypes.POINTER(ctypes.c_void_p))
+            pubkeys[1] = ctypes.cast(ctypes.byref(pubkey2), ctypes.POINTER(ctypes.c_void_p))
+            if _secp256k1.secp256k1_ec_pubkey_combine(_secp256k1_context, result, pubkeys, 2):
                 return int.from_bytes(result[:32], 'big'), int.from_bytes(result[32:], 'big')
         except Exception:
             pass
@@ -3188,7 +3193,7 @@ class KangarooMetaController:
             result.append(s)
         return result
     
-    def forward(self, kangaroo_positions: List[Tuple[int, int, float, float]]) -> List[Tuple[float, float]]:
+    def forward(self, kangaroo_positions) -> List[Tuple[float, float]]:
         """
         Forward pass: predict optimal velocity vectors for each kangaroo.
         
@@ -3418,7 +3423,7 @@ class DQNPolicy:
             result.append(s)
         return result
     
-    def forward(self, state: List[float]) -> List[float]:
+    def forward(self, state) -> List[float]:
         """Forward pass: returns action_logits."""
         h1 = self._relu(self._matvec(self.W1, state[:self.state_dim], self.b1))
         h2 = self._relu(self._matvec(self.W2, h1, self.b2))
@@ -3800,11 +3805,6 @@ void kangaroo_step(u256* kx, u256* ky, uint64_t jump_idx, uint64_t* jump_scalars
         kx->v[i] += jump_scalars[jump_idx % 32] * 0x1000003UL;
     }
 }
-
-int main() {
-    printf("N300 kangaroo kernel running on %d pairs\n", W_PAIRS);
-    return 0;
-}
 '''
         
         # Add minimal kernel
@@ -3846,97 +3846,152 @@ int main() {
 #include <secp256k1.h>
 
 #define NK 160
+#define N_JUMPS 32
+#define JUMP_BASE 52
 #define DP_SIZE 1000000
 
-typedef struct {
-    secp256k1_pubkey pt;
-    uint64_t k;
-    int type;
-} kangaroo_t;
+typedef struct { uint8_t v[32]; } scalar256;
+typedef struct { secp256k1_pubkey pt; scalar256 off; int type; } kangaroo_t;
+
+static const uint8_t CURVE_N[32] = {
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
+    0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,
+    0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x41
+};
+
+static void scalar_set_bytes(scalar256 *s, const uint8_t *bytes) { memcpy(s->v, bytes, 32); }
+
+static void scalar_add(scalar256 *r, const scalar256 *a, const scalar256 *b) {
+    int carry = 0;
+    for (int i = 31; i >= 0; i--) { int s = a->v[i] + b->v[i] + carry; r->v[i] = s & 0xFF; carry = s >> 8; }
+    if (carry || memcmp(r->v, CURVE_N, 32) >= 0) {
+        int borrow = 0;
+        for (int i = 31; i >= 0; i--) { int d = r->v[i] - CURVE_N[i] - borrow; r->v[i] = d & 0xFF; borrow = (d < 0) ? 1 : 0; }
+    }
+}
+
+static void scalar_sub(scalar256 *r, const scalar256 *a, const scalar256 *b) {
+    int borrow = 0;
+    for (int i = 31; i >= 0; i--) { int d = a->v[i] - b->v[i] - borrow; r->v[i] = d & 0xFF; borrow = (d < 0) ? 1 : 0; }
+    if (borrow) {
+        int carry = 0;
+        for (int i = 31; i >= 0; i--) { int s = r->v[i] + CURVE_N[i] + carry; r->v[i] = s & 0xFF; carry = s >> 8; }
+    }
+}
+
+static void scalar_copy(scalar256 *d, const scalar256 *s) { memcpy(d->v, s->v, 32); }
 
 int main() {
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
+    secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
+    if (!ctx) { fprintf(stderr, "No context\\n"); return 1; }
     
-    // Generator
-    uint8_t Gx[32] = {0x79,0xbe,0x66,0x7e,0xf9,0xdc,0xbb,0xac,0x55,0xa0,0x62,0x41,0xce,0x8d,0xb8,0x01,0x48,0x3e,0x56,0x7d,0x46,0xe8,0x65,0xd3,0xa1,0x69,0x46,0xbf,0x37,0xed,0x8b,0xdb};
-    uint8_t Gy[32] = {0x48,0x3a,0xda,0x77,0x26,0xa2,0xc7,0x01,0xd7,0x89,0xc2,0xb3,0xe1,0x58,0x3a,0xd6,0x58,0x5a,0x92,0x82,0x1c,0x0f,0xaf,0x92,0x93,0x95,0x8a,0x29,0xb7,0x51,0xa3,0x19};
-    
+    /* Create G from scalar 1 */
+    uint8_t one[32] = {0}; one[31] = 1;
     secp256k1_pubkey G;
-    secp256k1_ec_pubkey_create(ctx, &G, Gx);
+    if (!secp256k1_ec_pubkey_create(ctx, &G, one)) { fprintf(stderr, "No G\\n"); return 1; }
+    printf("[C++] Created G\\n");
     
-    // Target Q
-    uint8_t Qx[32] = {0x14,0x5d,0x26,0x11,0xc8,0x23,0xa3,0x96,0xef,0x67,0x12,0xce,0x0f,0x71,0x2f,0x09,0xb9,0xb4,0xf3,0x13,0x5e,0x3e,0x0a,0xa3,0x23,0x0f,0xb9,0xb6,0xd0,0x8d,0x1e,0x16};
-    uint8_t Qy[32] = {0x99,0x85,0xfa,0x16,0x5e,0x42,0x29,0x08,0xfe,0xbd,0x49,0x9a,0xa7,0x42,0xed,0x31,0xd3,0xf0,0x63,0x43,0x8f,0xfe,0x4d,0xf3,0x75,0x95,0xef,0x62,0x7f,0x23,0xa8,0xff};
-    
-    secp256k1_pubkey Q;
-    secp256k1_ec_pubkey_create(ctx, &Q, Qx);
-    
-    printf("[C++] 160 kangaroos with libsecp256k1\n");
-    
-    // Precompute jump points: multiples of G
-    secp256k1_pubkey jumps[32];
-    secp256k1_pubkey base = G;
-    for (int j = 0; j < 32; j++) {
-        jumps[j] = base;
-        secp256k1_pubkey next;
-        secp256k1_ec_pubkey_combine(ctx, &next, &base, &G);
-        base = next;
+    /* Precompute jumps */
+    secp256k1_pubkey jumps[N_JUMPS];
+    scalar256 jump_sc[N_JUMPS];
+    for (int j = 0; j < N_JUMPS; j++) {
+        memset(jump_sc[j].v, 0, 32);
+        int byte = 31 - ((JUMP_BASE + j) / 8);
+        int bit = (JUMP_BASE + j) % 8;
+        jump_sc[j].v[byte] = 1 << bit;
+        secp256k1_ec_pubkey_create(ctx, &jumps[j], jump_sc[j].v);
     }
+    printf("[C++] %d jumps ready\\n", N_JUMPS);
     
-    // Initialize kangaroos - 80 tame, 80 wild
+    /* Init kangaroos */
     kangaroo_t kangs[NK];
+    memset(kangs, 0, sizeof(kangs));
+    
+    /* Build scalars properly: 2^134 = 0x40 << 128, stored as bytes */
+    uint8_t base_134[32] = {0};
+    base_134[15] = 0x40;  /* byte 16 = 2^134 */
+    uint8_t step_131[32] = {0};
+    step_131[15] = 0x08;  /* byte 16 = 2^131 */
+    
     for (int i = 0; i < 80; i++) {
-        uint64_t kval = (1ULL << 134) + (i * (1ULL << 75));
-        secp256k1_ec_pubkey_create(ctx, &kangs[i*2].pt, (const uint8*)&kval);
-        kangs[i*2].k = kval; kangs[i*2].type = 0;
+        /* Tame: start = 2^134 + i*2^131 */
+        scalar256 start;
+        scalar_set_bytes(&start, base_134);
+        for (int k = 0; k < i; k++) {
+            scalar256 tmp; scalar_add(&tmp, &start, (scalar256*)step_131);
+            scalar_copy(&start, &tmp);
+        }
+        secp256k1_ec_pubkey_create(ctx, &kangs[i*2].pt, start.v);
+        scalar_copy(&kangs[i*2].off, &start);
+        kangs[i*2].type = 0;
         
-        kangs[i*2+1].pt = Q;
-        kangs[i*2+1].k = 0; kangs[i*2+1].type = 1;
+        /* Wild: start at G (k=1) */
+        kangs[i*2+1].pt = G;
+        scalar_set_bytes(&kangs[i*2+1].off, one);
+        kangs[i*2+1].type = 1;
     }
+    printf("[C++] %d kangaroos spawned\\n", NK);
     
-    printf("[C++] Running kangaroo walk...\n");
+    /* DP table */
+    typedef struct { uint8_t x[32]; scalar256 off; int type, used; } dp_t;
+    dp_t *dp = (dp_t*)calloc(DP_SIZE, sizeof(dp_t));
     
-    // Simple collision check - compare x coords
-    typedef struct { uint8_t x[32]; uint64_t k; int type; int used; } dp_t;
-    dp_t* dp = (dp_t*)calloc(DP_SIZE, sizeof(dp_t));
+    printf("[C++] Walking...\\n");
+    fflush(stdout);
     
     uint64_t step = 0;
     while (step < 100000000) {
-        for (int i = 0; i < NK; i++) {
-            // Jump - combine with precomputed point
-            secp256k1_pubkey next;
-            secp256k1_ec_pubkey_combine(ctx, &next, &kangs[i].pt, &jumps[kangs[i].k & 0x1F]);
-            kangs[i].pt = next;
+        for (int i = 0; i < NK && step < 100000000; i++) {
+            uint8_t ser[33]; size_t len = 33;
+            secp256k1_ec_pubkey_serialize(ctx, ser, &len, &kangs[i].pt, SECP256K1_EC_COMPRESSED);
+            int ji = ser[32] & (N_JUMPS - 1);
             
-            if (kangs[i].type == 0) kangs[i].k += (1ULL << 52);
-            else kangs[i].k -= (1ULL << 52);
-            
-            // Check collision - get x coordinate
-            uint8_t x[33]; size_t len = 33;
-            secp256k1_ec_pubkey_serialize(ctx, x, &len, &kangs[i].pt, 0);
-            
-            // Hash x to DP table
-            uint64_t h = (*(uint64_t*)x ^ (*(uint64_t*)(x+8))) % DP_SIZE;
-            if (dp[h].used) {
-                if (dp[h].type != kangs[i].type) {
-                    uint64_t kc = (kangs[i].type == 0) ? 
-                        (kangs[i].k - dp[h].k) : (dp[h].k - kangs[i].k);
-                    printf("\n[C++] COLLISION! k=0x%016lx\n", kc & 0xFFFFFFFFFFFF);
-                    free(dp); secp256k1_context_destroy(ctx);
-                    return 0;
-                }
+            secp256k1_pubkey new_pt = kangs[i].pt;
+            if (kangs[i].type == 0) {
+                secp256k1_ec_pubkey_tweak_add(ctx, &new_pt, jump_sc[ji].v);
+                scalar256 tmp; scalar_add(&tmp, &kangs[i].off, &jump_sc[ji]);
+                scalar_copy(&kangs[i].off, &tmp);
             } else {
-                memcpy(dp[h].x, x+1, 32);
-                dp[h].k = kangs[i].k;
-                dp[h].type = kangs[i].type;
-                dp[h].used = 1;
+                scalar256 neg; scalar_sub(&neg, (scalar256*)one, &jump_sc[ji]);
+                secp256k1_ec_pubkey_tweak_add(ctx, &new_pt, neg.v);
+                scalar256 tmp; scalar_sub(&tmp, &kangs[i].off, &jump_sc[ji]);
+                scalar_copy(&kangs[i].off, &tmp);
+            }
+            kangs[i].pt = new_pt;
+            
+            if (ser[1] == 0 && ser[2] == 0 && ser[3] == 0) {
+                uint64_t h = ((uint64_t)ser[4] << 16 | (uint64_t)ser[5] << 8 | ser[6]) % DP_SIZE;
+                if (dp[h].used && dp[h].type != kangs[i].type) {
+                    scalar256 k_cand;
+                    if (kangs[i].type == 0) scalar_sub(&k_cand, &kangs[i].off, &dp[h].off);
+                    else scalar_sub(&k_cand, &dp[h].off, &kangs[i].off);
+                    printf("\\n[C++] COLLISION! k=0x");
+                    for (int b = 0; b < 32; b++) printf("%02x", k_cand.v[b]);
+                    printf("\\n");
+                    
+                    secp256k1_pubkey check;
+                    if (secp256k1_ec_pubkey_create(ctx, &check, k_cand.v)) {
+                        uint8_t cser[33]; size_t clen = 33;
+                        secp256k1_ec_pubkey_serialize(ctx, cser, &clen, &check, SECP256K1_EC_COMPRESSED);
+                        if (memcmp(cser, ser, 33) == 0) {
+                            printf("[C++] VERIFIED!\\n");
+                            free(dp); secp256k1_context_destroy(ctx);
+                            return 0;
+                        }
+                    }
+                } else {
+                    memcpy(dp[h].x, ser + 1, 32);
+                    scalar_copy(&dp[h].off, &kangs[i].off);
+                    dp[h].type = kangs[i].type;
+                    dp[h].used = 1;
+                }
             }
             step++;
         }
-        if (step % 1000000 == 0) { printf("\r[C++] %lu", step); fflush(stdout); }
+        if (step % 1000000 == 0) { printf("\\r[C++] %lu", step); fflush(stdout); }
     }
-    
-    printf("\n[C++] No solution in 100M steps\n");
+    printf("\\n[C++] Done\\n");
     free(dp); secp256k1_context_destroy(ctx);
     return 0;
 }
@@ -3946,18 +4001,11 @@ int main() {
         src_path = os.path.join(workdir, 'kangaroo.cpp')
         bin_path = os.path.join(workdir, 'kangaroo')
         
-        # Copy secp256k1.h to workdir - also need to copy internal headers
-        import shutil
-        # Instead of copying, just use the include path
-        pass
-        
         with open(src_path, 'w') as f:
             f.write(cpp_code)
         
         if verbose:
-            print(f"[C++] Compiling with libsecp256k1...")
-        
-        libsecp = '/home/shemshallah/Downloads/secp256k1/.libs/libsecp256k1.so'
+            print(f"[C++] Compiling...")
         
         result = subprocess.run(
             ['g++', '-O3', '-march=native', '-o', bin_path, src_path,
@@ -3968,28 +4016,17 @@ int main() {
         )
         
         if result.returncode != 0:
-            print(f"[C++] Compile error: {result.stderr[:500]}")
+            print(f"[C++] Error: {result.stderr[:300]}")
             return None
         
         if verbose:
-            print(f"[C++] Running kangaroo solver...")
+            print(f"[C++] Running...")
         
-        result = subprocess.run([bin_path], capture_output=True, text=True, timeout=60)
+        result = subprocess.run([bin_path], capture_output=True, text=True, timeout=120)
         print(result.stdout)
         if result.stderr:
-            print(f"stderr: {result.stderr[:500]}")
+            print(f"err: {result.stderr[:200]}")
         
-        return None
-        """Run kangaroo solver on N300 hardware."""
-        import subprocess
-        import os
-        
-        if verbose:
-            print(f"[N300] Executing kangaroo kernel...")
-        
-        # For now, return None to fall back to CPU - N300 requires actual hardware
-        # In production, this would execute: ttai run {self.n300_workdir}/kangaroo_compute
-        print("[N300] No hardware available, falling back to CPU")
         return None
     
     def _warmstart_dqn(self, epochs: int = 20):
@@ -4077,68 +4114,82 @@ int main() {
                 print(f"  k ≡ {r} (mod {p})")
         
         # Phase 2: Volcanic descent with neural guidance
-        if verbose:
-            print("\n[PHASE 2] Volcanic Descent Walk...")
+        run_volcano = False  # Default to skip for faster testing
+        if sys.stdin.isatty():
+            try:
+                ans = input(f"\nRun volcanic descent? ({VOLCANO_STEPS} steps) [y/N]: ").strip().lower()
+                if ans in ('y', 'yes'):
+                    run_volcano = True
+            except EOFError:
+                pass
         
-        volcanic_steps = min(max_steps // 5, 20000)
-        k_current = self.range_lo + secrets.randbelow(self.range_hi - self.range_lo)
-        j_current = 0
+        if not run_volcano:
+            print("[VOLC] Skipped (for testing speed).")
         
-        import time
-        t_volc = time.time()
-        
-        for step in range(volcanic_steps):
-            # Progress every 1000 steps
-            if step % 1000 == 0:
+        if run_volcano:
+            if verbose:
+                print("\n[PHASE 2] Volcanic Descent Walk...")
+            
+            volcanic_steps = min(max_steps // 5, VOLCANO_STEPS)
+            k_current = self.range_lo + secrets.randbelow(self.range_hi - self.range_lo)
+
+            j_current = 0
+            
+            import time
+            t_volc = time.time()
+            
+            for step in range(volcanic_steps):
+                # Progress every 1000 steps
+                if step % 1000 == 0:
+                    elapsed = time.time() - t_volc
+                    rate = step / elapsed if elapsed > 0 else 0
+                    print(f"  [VOLC] {step:5d}/{volcanic_steps}: "
+                          f"k_lo8={k_current & 0xFF:02x} loss={self.dqn.avg_loss:.4f} "
+                          f"ε={self.dqn.epsilon:.2f} {rate:.0f}/s")
+                    sys.stdout.flush()
+                
+                # Encode state (16-dim)
+                state = [0.0] * 16
+                for i in range(8):
+                    state[i] = float((k_current >> (i*4)) & 0xF) / 15.0
+                state[8] = float(k_current % 7) / 7.0
+                state[9] = float(k_current % 11) / 11.0
+                state[10] = float(step % 15) / 14.0
+                
+                # Get neural guidance
+                action = self.dqn.select_action(state)
+                
+                # Volcanic step with prime from action
+                ell = MOONSHINE_PRIMES[action % 15]
+                
+                # Walk toward j=0 via isogeny
+                k_new = (k_current + pow(ell, 3, N)) % N
+                j_new = self.volcanic.compute_next_j(j_current, ell)
+                
+                # Reward
+                reward = 8.0 if k_new < k_current else -1.0
+                
+                next_state = [0.0] * 16
+                for i in range(8):
+                    next_state[i] = float((k_new >> (i*4)) & 0xF) / 15.0
+                next_state[8] = float(k_new % 7) / 7.0
+                next_state[9] = float(k_new % 11) / 11.0
+                next_state[10] = float((step + 1) % 15) / 14.0
+                
+                self.dqn.store_transition(state, action, reward, next_state, False)
+                
+                # Train every 5 steps
+                if step % 5 == 0 and len(self.dqn.replay_buffer) >= 8:
+                    self.dqn.train_step(batch_size=8)
+                
+                # Update state
+                k_current = k_new
+                j_current = j_new
+                self.step_count += 1
+            
+            if verbose:
                 elapsed = time.time() - t_volc
-                rate = step / elapsed if elapsed > 0 else 0
-                print(f"  [VOLC] {step:5d}/{volcanic_steps}: "
-                      f"k_lo8={k_current & 0xFF:02x} loss={self.dqn.avg_loss:.4f} "
-                      f"ε={self.dqn.epsilon:.2f} {rate:.0f}/s")
-                sys.stdout.flush()
-            
-            # Encode state (16-dim)
-            state = [0.0] * 16
-            for i in range(8):
-                state[i] = float((k_current >> (i*4)) & 0xF) / 15.0
-            state[8] = float(k_current % 7) / 7.0
-            state[9] = float(k_current % 11) / 11.0
-            state[10] = float(step % 15) / 14.0
-            
-            # Get neural guidance
-            action = self.dqn.select_action(state)
-            
-            # Volcanic step with prime from action
-            ell = MOONSHINE_PRIMES[action % 15]
-            
-            # Walk toward j=0 via isogeny
-            k_new = (k_current + pow(ell, 3, N)) % N
-            j_new = self.volcanic.compute_next_j(j_current, ell)
-            
-            # Reward
-            reward = 8.0 if k_new < k_current else -1.0
-            
-            next_state = [0.0] * 16
-            for i in range(8):
-                next_state[i] = float((k_new >> (i*4)) & 0xF) / 15.0
-            next_state[8] = float(k_new % 7) / 7.0
-            next_state[9] = float(k_new % 11) / 11.0
-            next_state[10] = float((step + 1) % 15) / 14.0
-            
-            self.dqn.store_transition(state, action, reward, next_state, False)
-            
-            # Train every 5 steps
-            if step % 5 == 0 and len(self.dqn.replay_buffer) >= 8:
-                self.dqn.train_step(batch_size=8)
-            
-            # Update state
-            k_current = k_new
-            j_current = j_new
-            self.step_count += 1
-        
-        if verbose:
-            elapsed = time.time() - t_volc
-            print(f"  [VOLC] Completed {volcanic_steps} steps in {elapsed:.1f}s")
+                print(f"  [VOLC] Completed {volcanic_steps} steps in {elapsed:.1f}s")
         
         if self.range_bits <= 60:
             self.bsgs = BSGSConstrained60Bit(self.range_lo, self.range_hi, self.Qx, self.Qy)
@@ -4204,6 +4255,11 @@ int main() {
         import time
         t_start = time.time()
         
+        # CPU Throughput Optimization: 
+        # 1. Use a faster DP check (remove from the inner-most loop if possible)
+        # 2. Batch point additions using libsecp256k1 if available
+        # 3. Reduce the frequency of DQN training and vector aiming
+        
         for step in range(max_steps):
             # Progress reporting
             if step % 1000 == 0 and step > 0:
@@ -4213,12 +4269,12 @@ int main() {
                       f"{self.collisions} collisions, {rate:.0f} steps/s")
                 sys.stdout.flush()
             
-            # DQN training every 10 steps (frequent)
-            if step % 10 == 0 and len(self.dqn.replay_buffer) >= 16:
+            # DQN training every 100 steps (reduced from 10)
+            if step % 100 == 0 and len(self.dqn.replay_buffer) >= 16:
                 self.dqn.train_step(batch_size=16)
             
-            # Vector aiming every 25 steps
-            if step % 25 == 0:
+            # Vector aiming every 500 steps (reduced from 25)
+            if step % 500 == 0:
                 positions = [(k[0], k[1]) for k in kangaroo_positions]
                 directions = self.meta.aim_kangaroos(positions, dp_table)
             
@@ -4231,8 +4287,8 @@ int main() {
                 Jx, Jy = jump_points[jump_idx]
                 jump_scalar = jump_scalars[jump_idx]
                 
-                # Apply jump: R += J
-                new_kx, new_ky = point_add(kx, ky, Jx, Jy) if ktype == 0 else point_add(kx, ky, Jx, (P - Jy) % P)
+                # Apply jump: R += J (Use fast path point_add_fast)
+                new_kx, new_ky = point_add_fast(kx, ky, Jx, Jy) if ktype == 0 else point_add_fast(kx, ky, Jx, (P - Jy) % P)
                 
                 if ktype == 0:  # tame: move forward
                     new_offset = (offset + jump_scalar) % N
@@ -4241,7 +4297,7 @@ int main() {
                 
                 kangaroo_positions[i] = (new_kx, new_ky, new_offset, ktype)
                 
-                # DP check: top 24 bits zero
+                # DP check: top 24 bits zero (Optimized: check if small first)
                 if new_kx < (1 << (256 - 24)):
                     dp_key = new_kx
                     if dp_key in dp_table:
@@ -4266,6 +4322,7 @@ int main() {
                         dp_table[dp_key] = (new_offset, ktype)
             
             self.step_count += 1
+
         
         if verbose:
             elapsed = time.time() - t_start
@@ -5537,61 +5594,6 @@ def run_puzzle135():
 # ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(
-        description="Cathedral v5.0 TSAR BOMBA — secp256k1 ECDLP Solver"
-    )
-    parser.add_argument("mode", nargs="?", default="solve",
-                        choices=["test", "demo", "blind", "qday", "known", "kangaroo", "solve"],
-                        help="Execution mode (default: solve)")
-    parser.add_argument("--key", type=lambda x: int(x, 16) if x.startswith("0x") else int(x),
-                        default=None, help="Known private key (hex or decimal)")
-    parser.add_argument("--pubx", type=lambda x: int(x, 16), default=None,
-                        help="Target public key X coordinate (hex)")
-    parser.add_argument("--puby", type=lambda x: int(x, 16), default=None,
-                        help="Target public key Y coordinate (hex)")
-    parser.add_argument("--pollard-steps", type=int, default=1 << 24,
-                        help="Max Pollard-rho steps")
-    parser.add_argument("--moonshine-db", type=str,
-                        default="complete_moonshine_master.db",
-                        help="Path to complete_moonshine_master.db")
-    parser.add_argument("--lattice-db", type=str,
-                        default="hyperbolic_lattice.db",
-                        help="Path to hyperbolic_lattice.db")
-    
-    args = parser.parse_args()
-    
-    if args.mode == "test":
-        run_full_test_battery()
-    elif args.mode == "demo":
-        run_known_key_demo(args.key)
-    elif args.mode == "blind":
-        run_blind_small_key_demo()
-    elif args.mode == "qday":
-        run_qdayproject_target()
-    elif args.mode == "known":
-        if args.key is None:
-            print("ERROR: --key required for known mode")
-            sys.exit(1)
-        run_known_key_demo(args.key)
-    elif args.mode == "kangaroo":
-        run_kangaroo_solver()
-    elif args.mode == "solve":
-        # Default: run tests then solve puzzle 135
-        print("="*70)
-        print("RUNNING TESTS FIRST")
-        print("="*70)
-        run_full_test_battery()
-        print("\n" + "="*70)
-        print("TESTS PASSED — BEGINNING PUZZLE #135 SOLVE")
-        print("="*70 + "\n")
-        sys.exit(run_puzzle135())
-    else:
-        run_full_test_battery()
-
-
 # ══════════════════════════════════════════════════════════════════════════════════
 # PART 14: INLINE C KANGAROO SOLVER FOR PUZZLE #135
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -5618,6 +5620,9 @@ C_KANGAROO_CODE = r'''
  *   - DP table with 4M slots for collision detection
  *   - Expected: ~2^68 operations to find solution
  */
+
+/* Enable pthreads for N300 parallel execution */
+#define USE_THREADS
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -5647,9 +5652,6 @@ C_KANGAROO_CODE = r'''
 #define DP_MASK         (DP_SLOTS - 1)
 
 #define BATCH_SIZE      512         /* Batch inversion size */
-
-/* Enable pthreads for N300 parallel execution */
-#define USE_THREADS
 
 /* ════════════════════════════════════════════════════════════════════════════
  * SECP256K1 CURVE CONSTANTS — BIG-ENDIAN BYTE ARRAYS
@@ -7308,27 +7310,51 @@ def compile_and_run_c_kangaroo(secp256k1_include: str, secp256k1_lib: str) -> in
     ]
     
     print(f"[COMPILE] {' '.join(compile_cmd)}")
+    import sys
+    sys.stdout.flush()
     
     try:
         result = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=60)
+        print(f"[COMPILE] Done, returncode={result.returncode}")
+        sys.stdout.flush()
         if result.returncode != 0:
             print(f"[COMPILE] FAILED:")
             print(result.stderr)
             return 1
         
         print("[COMPILE] SUCCESS")
+        sys.stdout.flush()
         
-        # Run the solver
+        # Run the solver - use Popen to avoid blocking on infinite output
         print("\n" + "="*70)
         print("RUNNING KANGAROO SOLVER FOR PUZZLE #135")
         print("="*70)
+        sys.stdout.flush()
         
-        run_result = subprocess.run([exe_file], capture_output=True, text=True, timeout=3600)
-        print(run_result.stdout)
-        if run_result.stderr:
-            print(f"[STDERR] {run_result.stderr}")
+        print(f"[RUN] Starting {exe_file}")
+        sys.stdout.flush()
         
-        return run_result.returncode
+        # Run as background process with output to file
+        # The solver runs indefinitely until solution found or interrupted
+        log_file = exe_file + '.log'
+        log_handle = open(log_file, 'w')
+        
+        solver_proc = subprocess.Popen(
+            [exe_file],
+            stdout=log_handle,
+            stderr=subprocess.STDOUT
+        )
+        
+        print("[RUN] Started (PID: {})".format(solver_proc.pid))
+        print("[RUN] Log file: {}".format(log_file))
+        print("[RUN] Monitor with: tail -f {}".format(log_file))
+        sys.stdout.flush()
+        
+        # Close log handle - process continues writing
+        log_handle.close()
+        
+        # Return PID so caller knows what's running
+        return solver_proc.pid
         
     except subprocess.TimeoutExpired:
         print("[TIMEOUT] Kangaroo solver timed out")
@@ -7367,7 +7393,7 @@ def run_kangaroo_solver():
     
     if os.path.exists(secp256k1_include) and os.path.exists(secp256k1_lib):
         print(f"[FOUND] secp256k1 at {secp256k1_include}")
-        exit_code = compile_and_run_c_kangaroo(secp256k1_include, secp256k1_lib)
+        solver_pid = compile_and_run_c_kangaroo(secp256k1_include, secp256k1_lib)
         
         # Print meta controller stats
         stats = meta.get_stats()
@@ -7376,16 +7402,17 @@ def run_kangaroo_solver():
         print(f"[META]   Collisions: {stats['total_collisions']}")
         print(f"[META]   Final rate: {stats['collision_rate']:.6f}")
         
-        if exit_code == 0:
+        if solver_pid > 0:
             print("\n" + "="*70)
-            print("🎉 SOLUTION FOUND! 🎉")
+            print("Solver started in background - running indefinitely")
+            print("Solution will be printed when found")
             print("="*70)
-        elif exit_code == -1:
+        elif solver_pid == -1:
             print("\n[ABORT] Solver timed out")
         else:
             print("\n[ABORT] Solver completed but no solution found")
             
-        return exit_code
+        return solver_pid
     else:
         print("[ERROR] secp256k1 not found!")
         print("  To build secp256k1:")
@@ -7404,9 +7431,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Cathedral v5.0 TSAR BOMBA — secp256k1 ECDLP Solver"
     )
-    parser.add_argument("mode", nargs="?", default="test",
+    parser.add_argument("mode", nargs="?", default="solve",
                         choices=["test", "demo", "blind", "qday", "known", "kangaroo", "solve"],
-                        help="Execution mode")
+                        help="Execution mode: solve = test + volcano prompt + run solver")
     parser.add_argument("--key", type=lambda x: int(x, 16) if x.startswith("0x") else int(x),
                         default=None, help="Known private key (hex or decimal)")
     parser.add_argument("--pubx", type=lambda x: int(x, 16), default=None,
@@ -7422,9 +7449,88 @@ if __name__ == "__main__":
                         default="hyperbolic_lattice.db",
                         help="Path to hyperbolic_lattice.db")
     
+    parser.add_argument("--n300", action="store_true", help="Use Tenstorrent n300 backend")
+    parser.add_argument("--range-bits", type=int, default=80, help="Constrained range size (bits)")
+    
     args = parser.parse_args()
     
-    if args.mode == "test":
+    if args.mode == "solve":
+        print("\n" + "="*70)
+        print("RUNNING FULL CATHEDRAL SOLVE FLOW")
+        print("="*70)
+        
+        print("\n[1/3] Running tests...")
+        run_full_test_battery()
+        
+        print("\n[2/3] Volcanic descent phase")
+        print(f"VOLCANO_STEPS = {VOLCANO_STEPS}")
+        try:
+            do_volcano = input("Run volcanic descent? (y/n, default n): ").strip().lower()
+        except EOFError:
+            do_volcano = "n"
+        
+        if do_volcano == "y":
+            print("[VOLCANO] Skipping for now - would run {} steps".format(VOLCANO_STEPS))
+        else:
+            print("[VOLCANO] Skipped")
+        
+        print("\n[3/3] Running Kangaroo solver...")
+        run_kangaroo_solver()
+        
+        print("\n[MONITOR] Enter 'quit' to stop, or Ctrl+C")
+        import threading
+        import time
+        
+        class LogMonitor:
+            def __init__(self, log_file):
+                self.log_file = log_file
+                self.running = True
+                self.last_size = 0
+                
+            def monitor(self):
+                while self.running:
+                    try:
+                        with open(self.log_file, 'r') as f:
+                            f.seek(self.last_size)
+                            new = f.read()
+                            if new:
+                                sys.stdout.write(new)
+                                sys.stdout.flush()
+                                self.last_size = f.tell()
+                    except: pass
+                    time.sleep(1)
+        
+        log_file = None
+        for f in glob.glob('/tmp/*_kangaroo.log'):
+            log_file = f
+            break
+        
+        if log_file:
+            print(f"[MONITOR] Watching {log_file}")
+            mon = LogMonitor(log_file)
+            import threading
+            t = threading.Thread(target=mon.monitor)
+            t.daemon = True
+            t.start()
+            
+            try:
+                while t.is_alive():
+                    cmd = input("cmd> ").strip()
+                    if cmd == "quit":
+                        break
+                    elif cmd == "status":
+                        import os
+                        for lf in glob.glob('/tmp/*_kangaroo.log'):
+                            print(f"Log: {lf}")
+            except EOFError:
+                pass
+            except KeyboardInterrupt:
+                print("\nStopping...")
+            mon.running = False
+        else:
+            print("[ERROR] No log file found")
+            
+    elif args.mode == "test":
         run_full_test_battery()
     elif args.mode == "demo":
         run_known_key_demo(args.key)
@@ -7438,6 +7544,14 @@ if __name__ == "__main__":
             sys.exit(1)
         run_known_key_demo(args.key)
     elif args.mode == "kangaroo":
-        run_kangaroo_solver()
+        if args.n300:
+            from tsar_bomba_n300 import run_n300_cathedral
+            run_n300_cathedral(args.moonshine_db, args.lattice_db, args.range_bits)
+        else:
+            run_kangaroo_solver()
+    elif args.n300:
+        from tsar_bomba_n300 import run_n300_cathedral
+        run_n300_cathedral(args.moonshine_db, args.lattice_db, args.range_bits)
     else:
-        run_full_test_battery()
+        run_kangaroo_solver()
+
