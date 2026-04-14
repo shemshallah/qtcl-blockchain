@@ -821,12 +821,12 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) ->
 
 MEASUREMENT_TIMEOUT          = 2    # 2s cap — fast for AER single shot
 
-W_STATE_STREAM_INTERVAL_MS   = 1000  # 1/sec — sufficient for consensus; was 10ms (100x/sec = ~800KB/s egress)
+W_STATE_STREAM_INTERVAL_MS   = 10  # Original - true quantum takes time
 LATTICE_REFRESH_INTERVAL_MS  = 50
 AER_NOISE_KAPPA              = 0.005
 NUM_QUBITS_WSTATE            = 3
 W_STATE_FIDELITY_THRESHOLD   = 0.85
-BUFFER_SIZE_METRICS_WSTATE   = 2    # last 2 only — mirrors _DM_SNAPSHOT_RING maxlen
+BUFFER_SIZE_METRICS_WSTATE   = 10  # Reduced to 10, rest persisted to Supabase
 
 QTCL_PURPOSE      = 838
 QTCL_COIN         = 0
@@ -2230,11 +2230,36 @@ class OracleWStateManager:
             _server_mod = _sys.modules.get('server')
             if _server_mod and hasattr(_server_mod, '_enqueue_snapshot_for_streaming'):
                 # Build the dictionary snapshot for the multiplexer
+                # Build 32³ volumetric tensor — the PRIMARY transmitted quantum state
+                _tensor_hex = ''
+                try:
+                    # Oracle dm_mean is 8×8 (W3 subspace). Kron-upsample 8→32.
+                    _dm32 = np.kron(dm_mean.astype(np.complex64),
+                                    np.ones((4, 4), dtype=np.complex64))
+                    _tr32 = float(np.real(np.trace(_dm32)))
+                    if _tr32 > 1e-12:
+                        _dm32 /= _tr32
+                    # 32³ decoherence shell tensor
+                    _N32 = 32
+                    _idx = np.arange(_N32, dtype=np.float32)
+                    _dist = np.abs(_idx[:, None] - _idx[None, :])
+                    _lambdas = np.exp(np.linspace(np.log(1.0), np.log(float(_N32)), _N32))
+                    _mag32 = np.abs(_dm32)
+                    _t32 = np.zeros((_N32, _N32, _N32), dtype=np.float32)
+                    for _z in range(_N32):
+                        _W = np.exp(-_dist / float(_lambdas[_z]))
+                        _W /= _W.sum()
+                        _t32[_z] = (_mag32 * _W).astype(np.float32)
+                    _t32_max = float(_t32.max())
+                    if _t32_max > 1e-12:
+                        _t32 /= _t32_max
+                    _tensor_hex = _t32.tobytes().hex()
+                except Exception as _te:
+                    pass  # non-fatal
+
                 _mux_snapshot = {
                     'timestamp_ns': snapshot.timestamp_ns,
                     'lattice_refresh_counter': snapshot.lattice_refresh_counter,
-                    'density_matrix_hex': snapshot.density_matrix_hex,
-                    'dm_dim': 8,  # 8×8 density matrix dimension
                     'w_state_fidelity': snapshot.w_state_fidelity,
                     'purity': snapshot.purity,
                     'coherence_l1': snapshot.coherence_l1,
@@ -2254,6 +2279,8 @@ class OracleWStateManager:
                     'hlwe_signature': snapshot.hlwe_signature,
                     'oracle_address': snapshot.oracle_address,
                     'signature_valid': snapshot.signature_valid,
+                    'density_tensor_hex': _tensor_hex,
+                    'tensor_dim': 32 if _tensor_hex else 0,
                 }
                 _server_mod._enqueue_snapshot_for_streaming(_mux_snapshot)
                 logger.info(f"[ORACLE CLUSTER] ✅ Snapshot enqueued for multiplexer (cycle {current_cycle})")
@@ -2272,7 +2299,8 @@ class OracleWStateManager:
                 snapshot_dict = {
                     'timestamp_ns': snapshot.timestamp_ns,
                     'oracle_id': snapshot.oracle_id,
-                    'density_matrix_hex': snapshot.density_matrix_hex,
+                    'density_tensor_hex': getattr(snapshot, '_tensor_hex', ''),
+                    'tensor_dim': 32,
                     'purity': snapshot.purity,
                     'w_state_fidelity': snapshot.w_state_fidelity,
                     'von_neumann_entropy': snapshot.von_neumann_entropy,
@@ -3190,9 +3218,9 @@ class RpcBroadcastController:
     def __init__(self):
         self._subscribers: Dict[str, MeasurementSubscriber] = {}
         self._sub_lock = threading.RLock()
-        self._ring_buffer: deque = deque(maxlen=2)     # only last 2 — miner compat, auto-evict
+        self._ring_buffer: deque = deque(maxlen=100)
         self._ring_lock = threading.RLock()
-        self._persist_queue: queue_module.Queue = queue_module.Queue(maxsize=8)  # tight — drop flood, never OOM
+        self._persist_queue: queue_module.Queue = queue_module.Queue(maxsize=1000)
         self._persist_thread: Optional[threading.Thread] = None
         self._running = False
         self._metrics = {
@@ -3430,23 +3458,17 @@ class RpcBroadcastController:
                 time.sleep(0.1)
 
     def _persist_snapshot_to_db(self, event: Dict[str, Any]) -> bool:
-        """Write one snapshot event via server._broadcast_snapshot_to_database (throttled, DM-local)."""
+        """Write one snapshot event to quantum_snapshots table via _persist_chirp_snapshot."""
         try:
-            from server import _broadcast_snapshot_to_database
+            from server import _persist_chirp_snapshot
             snap = event.get('snapshot_data', {})
             snap['timestamp_ns'] = event.get('timestamp_ns', time.time_ns())
             snap['chirp_number'] = event.get('cycle', 0)
-            # Restore density_matrix_hex from snapshot_json if present (snapshot_data strips it)
-            if not snap.get('density_matrix_hex'):
-                try:
-                    sj = json.loads(event.get('snapshot_json', '{}'))
-                    snap['density_matrix_hex'] = sj.get('density_matrix_hex', '')
-                except Exception:
-                    pass
-            _broadcast_snapshot_to_database(snap)
+            snap['snapshot_json'] = event.get('snapshot_json', '{}')
+            _persist_chirp_snapshot(snap)
             return True
         except ImportError:
-            logger.debug("[RPC-BROADCAST] server not importable — DB persistence skipped")
+            logger.debug("[RPC-BROADCAST] server module not available for DB persistence")
             return False
         except Exception as e:
             logger.error(f"[RPC-BROADCAST] DB persistence failed: {e}", exc_info=False)

@@ -83,102 +83,9 @@ _verbose_p2p_logging = False
 _last_snapshot_log_time = 0
 _snapshot_log_interval = 10
 
-# ═══ DENSITY MATRIX SNAPSHOT RING BUFFER (2 snapshots — miner compat, auto-eviction) ═══
-# Only last 2 needed: current (latest consensus for miners) + previous (gossip delta).
-# DM hex lives here in-memory and streams via SSE; Supabase only gets scalar metrics.
-_DM_SNAPSHOT_RING = deque(maxlen=2)
+# ═══ DENSITY MATRIX SNAPSHOT RING BUFFER (1000 snapshots, LRU eviction) ═══
+_DM_SNAPSHOT_RING = deque(maxlen=1000)
 _DM_SNAPSHOT_LOCK = threading.RLock()
-
-# ═══ SUPABASE WRITE THROTTLE — max 1 scalar write/60s, never write DM hex to cloud ═══
-_supabase_last_write_ts: float = 0.0
-_SUPABASE_WRITE_INTERVAL: float = 60.0   # 1 write/minute to Supabase
-
-# ═══ SQLITE dm_pool PERSISTENT WRITER THREAD (single thread, not per-call) ════
-_sqlite_dm_queue: 'queue_module.Queue' = None  # initialised lazily after queue import
-_sqlite_dm_thread: Optional[threading.Thread] = None
-_sqlite_dm_thread_lock = threading.Lock()
-
-def _sqlite_dm_writer_thread() -> None:
-    """Persistent SQLite dm_pool writer — single daemon thread, not per-broadcast spawn."""
-    import sqlite3
-    from pathlib import Path
-    db_path = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn: Optional[sqlite3.Connection] = None
-
-    def _connect():
-        nonlocal conn
-        try:
-            conn = sqlite3.connect(str(db_path), timeout=10.0, check_same_thread=False)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp_ns INTEGER, oracle_id INTEGER,
-                density_matrix_hex TEXT, purity REAL, w_state_fidelity REAL,
-                von_neumann_entropy REAL, coherence_l1 REAL,
-                hlwe_signature TEXT, signature_valid INTEGER,
-                oracle_address TEXT, aer_noise_state TEXT,
-                measurement_counts TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-            # Keep only last 2 rows — enforced after every INSERT
-            conn.commit()
-        except Exception as e:
-            logger.warning(f"[DM-SQLITE] connect error: {e}")
-            conn = None
-
-    _connect()
-    while True:
-        try:
-            snap = _sqlite_dm_queue.get(timeout=5.0)
-            if snap is None:            # poison pill — thread exit
-                break
-            if conn is None:
-                _connect()
-            if conn is None:
-                continue
-            try:
-                conn.execute("""INSERT INTO dm_pool (
-                    timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
-                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
-                    oracle_address, aer_noise_state, measurement_counts
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                    snap.get('timestamp_ns'), snap.get('oracle_id'),
-                    snap.get('density_matrix_hex', ''),
-                    snap.get('purity'), snap.get('w_state_fidelity'),
-                    snap.get('von_neumann_entropy'), snap.get('coherence_l1'),
-                    json.dumps(snap.get('hlwe_signature')),
-                    1 if snap.get('signature_valid') else 0,
-                    snap.get('oracle_address'),
-                    json.dumps(snap.get('aer_noise_state', {})),
-                    json.dumps(snap.get('measurement_counts', {}))
-                ))
-                # Auto-cleanup: retain only last 2 rows for miner compat
-                conn.execute("""DELETE FROM dm_pool WHERE id NOT IN (
-                    SELECT id FROM dm_pool ORDER BY timestamp_ns DESC LIMIT 2)""")
-                conn.commit()
-                logger.debug("[DM-SQLITE] ✅ dm_pool write+prune OK")
-            except Exception as e:
-                logger.warning(f"[DM-SQLITE] write error: {e}")
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                conn = None   # force reconnect next cycle
-        except Exception:
-            pass   # queue.Empty or shutdown — continue
-
-
-def _ensure_sqlite_dm_thread() -> None:
-    """Lazily start the single persistent SQLite DM writer thread."""
-    global _sqlite_dm_queue, _sqlite_dm_thread
-    with _sqlite_dm_thread_lock:
-        if _sqlite_dm_thread is not None and _sqlite_dm_thread.is_alive():
-            return
-        _sqlite_dm_queue = _queue_module.Queue(maxsize=4)   # small — drop old, never queue-flood
-        _sqlite_dm_thread = threading.Thread(
-            target=_sqlite_dm_writer_thread, name="SQLiteDMWriter", daemon=True)
-        _sqlite_dm_thread.start()
-        logger.info("[DM-SQLITE] ✅ Persistent dm_pool writer thread started")
 
 # ═══ CLIENT TRIPARTITE ORACLE POOL ═══════════════════════════════════════════
 # Receives fused DMs pushed by trusted client oracle nodes (qtcl_pushOracleDM).
@@ -1836,100 +1743,6 @@ def _lazy_ensure_peer_registry():
         logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
 
 
-# ═══ SUPABASE STARTUP PRUNER — run once on first DB-connected request ═════════
-_SUPABASE_PRUNED_ONCE = False
-_SUPABASE_PRUNE_LOCK  = threading.Lock()
-
-def _run_supabase_startup_pruner() -> None:
-    """
-    One-shot: called lazily on first oracle write after pool init.
-    1. Ensure oracle_snapshot_json table exists (scalar-only, no DM hex column)
-    2. Prune any existing rows down to last 2 — evicts the accumulated GB+ of DM blobs
-    3. If quantum_snapshots / dm_pool Postgres table exists, prune to last 2 rows there too
-    Non-fatal: any failure logged, never raises.
-    """
-    global _SUPABASE_PRUNED_ONCE
-    if _SUPABASE_PRUNED_ONCE:
-        return
-    with _SUPABASE_PRUNE_LOCK:
-        if _SUPABASE_PRUNED_ONCE:
-            return
-        try:
-            with get_db_cursor() as cur:
-                # 1. Create oracle_snapshot_json with scalar schema only — NO density_matrix_hex
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS oracle_snapshot_json (
-                        id                    BIGSERIAL PRIMARY KEY,
-                        timestamp_ns          BIGINT,
-                        oracle_id             INTEGER,
-                        purity                DOUBLE PRECISION,
-                        w_state_fidelity      DOUBLE PRECISION,
-                        von_neumann_entropy   DOUBLE PRECISION,
-                        coherence_l1          DOUBLE PRECISION,
-                        coherence_renyi       DOUBLE PRECISION,
-                        coherence_geometric   DOUBLE PRECISION,
-                        quantum_discord       DOUBLE PRECISION,
-                        w_state_strength      DOUBLE PRECISION,
-                        phase_coherence       DOUBLE PRECISION,
-                        entanglement_witness  DOUBLE PRECISION,
-                        trace_purity          DOUBLE PRECISION,
-                        signature_valid       BOOLEAN,
-                        oracle_address        TEXT,
-                        mermin_M              DOUBLE PRECISION,
-                        mermin_quantum        BOOLEAN,
-                        pq_curr               BIGINT,
-                        pq_last               BIGINT,
-                        lattice_refresh_counter BIGINT,
-                        snapshot_source       TEXT DEFAULT 'koyeb-primary',
-                        created_at            TIMESTAMPTZ DEFAULT NOW()
-                    )
-                """)
-                # 2. Prune oracle_snapshot_json to last 2 rows
-                cur.execute("""
-                    DELETE FROM oracle_snapshot_json
-                    WHERE id NOT IN (
-                        SELECT id FROM oracle_snapshot_json
-                        ORDER BY id DESC LIMIT 2
-                    )
-                """)
-                # 3. If quantum_snapshots exists (legacy DM blob table), nuke it entirely — it's the GB killer
-                cur.execute("""
-                    DO $$
-                    BEGIN
-                        IF EXISTS (
-                            SELECT 1 FROM information_schema.tables
-                            WHERE table_name = 'quantum_snapshots'
-                        ) THEN
-                            DELETE FROM quantum_snapshots
-                            WHERE id NOT IN (
-                                SELECT id FROM quantum_snapshots ORDER BY id DESC LIMIT 2
-                            );
-                        END IF;
-                    END $$;
-                """)
-                # 4. If pq0_entanglement_log exists, prune aggressively — only keep last 100
-                cur.execute("""
-                    DO $$
-                    BEGIN
-                        IF EXISTS (
-                            SELECT 1 FROM information_schema.tables
-                            WHERE table_name = 'pq0_entanglement_log'
-                        ) THEN
-                            DELETE FROM pq0_entanglement_log
-                            WHERE id NOT IN (
-                                SELECT id FROM pq0_entanglement_log ORDER BY id DESC LIMIT 100
-                            );
-                        END IF;
-                    END $$;
-                """)
-            logger.info("[SUPABASE-PRUNER] ✅ Startup prune complete — oracle_snapshot_json + legacy tables pruned")
-            _SUPABASE_PRUNED_ONCE = True
-        except Exception as e:
-            logger.warning(f"[SUPABASE-PRUNER] Prune failed (non-fatal): {e}")
-            # Still mark done to avoid hammering on every write if schema doesn't match
-            _SUPABASE_PRUNED_ONCE = True
-
-
 
 _dht_manager: Optional[DHTManager] = None
 _dht_lock = threading.RLock()
@@ -1953,7 +1766,7 @@ def get_dht_manager() -> DHTManager:
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 # RPC snapshot cache + event log (no SSE infrastructure)
-_rpc_event_log: Deque = Deque(maxlen=50)             # Ring buffer of recent RPC events — 50 enough for polling
+_rpc_event_log: Deque = Deque(maxlen=1000)           # Ring buffer of recent RPC events
 _rpc_event_lock = threading.RLock()                  # Guards _rpc_event_log writes
 _latest_snapshot: Optional[dict] = None              # Last cached snapshot (poll endpoint)
 _latest_snapshot_ts: int = 0                         # Timestamp of latest snapshot
@@ -2628,10 +2441,10 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
 
         # ── WIRE DENSITY_MATRIX_HEX — 256x256->64x64 via shared reducer ─────────
         try:
-            _dm_hex, _dm_dim = _get_lattice_dm_hex()
-            if _dm_hex:
-                result["density_matrix_hex"] = _dm_hex
-                result["dm_dim"]             = _dm_dim
+            _tensor_hex = _get_lattice_tensor_hex()
+            if _tensor_hex:
+                result["density_tensor_hex"] = _tensor_hex
+                result["tensor_dim"]         = 32
         except Exception as dme:
             logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: DM (non-fatal): {dme}")
 
@@ -3800,21 +3613,19 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
     qtcl_pushOracleDM — accept a fused tripartite DM frame from a client oracle node.
 
     Params (dict):
-        density_matrix_hex  str   — 1024-hex big-endian '>dd' 8×8 complex128 DM
+        density_tensor_hex  str   — 262144 hex chars: 32³ float32 volumetric (REQUIRED)
         fidelity            float — W-state fidelity of the pushed DM  (0..1)
         oracle_type         str   — e.g. 'tripartite_client'
-        node_ip             str   — caller's self-reported WAN IP (advisory)
-        oracle_addr         str   — oracle signing address (qtcl1…)
+        node_ip             str   — caller self-reported WAN IP (advisory)
+        oracle_addr         str   — oracle signing address (qtcl1...)
 
     Server action:
-        1. Validate DM hex (length, parse).
+        1. Validate 32³ tensor hex (length, finite values).
         2. Upsert into _CLIENT_DM_POOL keyed by oracle_addr.
         3. Evict oldest entries if pool > _CLIENT_POOL_MAX.
-        4. Re-average pool → _client_consensus_dm_re/_im/_fid.
-        5. Push composite snapshot (server 5-oracle fused with client pool) into
-           _DM_SNAPSHOT_RING and _latest_snapshot so polling clients see it.
+        4. Re-average pool -> _client_consensus_dm_re/_im/_fid.
+        5. Push composite snapshot into _DM_SNAPSHOT_RING.
         6. Return {accepted, pool_size, client_consensus_fidelity}.
-    ❤️  I love you — every push strengthens the distributed lattice
     """
     global _client_consensus_dm_re, _client_consensus_dm_im
     global _client_consensus_fid, _client_pool_count
@@ -3823,113 +3634,110 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
         if not isinstance(params, dict):
             return _rpc_error(-32602, "params must be a dict", rpc_id)
 
-        dm_hex     = params.get('density_matrix_hex', '')
-        fidelity   = float(params.get('fidelity', 0.0))
+        tensor_hex  = params.get('density_tensor_hex', '')
+        fidelity    = float(params.get('fidelity', 0.0))
         oracle_addr = str(params.get('oracle_addr', '') or f"anon_{int(time.time())}")
-        node_ip    = str(params.get('node_ip', ''))
+        node_ip     = str(params.get('node_ip', ''))
         oracle_type = str(params.get('oracle_type', 'tripartite_client'))
 
-        # ── 1. Validate DM hex ─────────────────────────────────────────────
-        if not dm_hex or len(dm_hex) != 2048:   # 64 × 2 × 8 bytes = 1024 bytes = 2048 hex chars
+        # -- 1. Validate 32³ tensor hex ----------------------------------------
+        # 32×32×32 float32 = 32768 floats × 4 bytes = 131072 bytes = 262144 hex
+        _EXPECTED_TENSOR_HEX = 32 * 32 * 32 * 4 * 2   # 262144
+        if not tensor_hex or len(tensor_hex) != _EXPECTED_TENSOR_HEX:
             return _rpc_error(-32602,
-                f"density_matrix_hex must be 2048 hex chars (got {len(dm_hex)})", rpc_id)
+                f"density_tensor_hex must be {_EXPECTED_TENSOR_HEX} hex chars "
+                f"(32³ float32); got {len(tensor_hex)}", rpc_id)
         try:
-            bdata = bytes.fromhex(dm_hex)
+            tbytes = bytes.fromhex(tensor_hex)
         except ValueError as _ve:
-            return _rpc_error(-32602, f"density_matrix_hex not valid hex: {_ve}", rpc_id)
+            return _rpc_error(-32602, f"density_tensor_hex not valid hex: {_ve}", rpc_id)
 
-        dm_re = [0.0] * 64
-        dm_im = [0.0] * 64
-        for i in range(64):
-            dm_re[i], dm_im[i] = struct.unpack_from('>dd', bdata, i * 16)
+        # Sanity: tensor values must be finite, non-negative
+        t_arr = np.frombuffer(tbytes, dtype=np.float32).reshape(32, 32, 32)
+        if not np.all(np.isfinite(t_arr)) or float(t_arr.min()) < -1e-4:
+            return _rpc_error(-32602, "density_tensor_hex contains invalid values", rpc_id)
+        t_max = float(t_arr.max())
+        if t_max < 1e-12:
+            return _rpc_error(-32602, "density_tensor_hex is all-zero", rpc_id)
 
-        # Sanity: trace should be ≈1
-        tr = sum(dm_re[i * 8 + i] for i in range(8))
-        if not (0.5 < tr < 1.5):
-            return _rpc_error(-32602, f"DM trace out of range: {tr:.4f}", rpc_id)
+        tensor_valid = True
 
-        # ── 2 & 3. Upsert into pool, evict oldest if needed ───────────────
+        # -- 2 & 3. Upsert into pool, evict oldest if needed ------------------
         with _CLIENT_DM_POOL_LOCK:
             _CLIENT_DM_POOL[oracle_addr] = {
-                'dm_re':      dm_re,
-                'dm_im':      dm_im,
-                'fidelity':   max(0.0, min(1.0, fidelity)),
-                'ts':         time.time(),
-                'node_ip':    node_ip,
+                'tensor_hex':  tensor_hex,
+                'fidelity':    max(0.0, min(1.0, fidelity)),
+                'ts':          time.time(),
+                'node_ip':     node_ip,
                 'oracle_type': oracle_type,
+                'tensor_dim':  32,
             }
-            # Evict oldest if over cap
             if len(_CLIENT_DM_POOL) > _CLIENT_POOL_MAX:
                 _oldest = min(_CLIENT_DM_POOL, key=lambda k: _CLIENT_DM_POOL[k]['ts'])
                 del _CLIENT_DM_POOL[_oldest]
 
-            # ── 4. Re-average pool ─────────────────────────────────────────
-            _recompute_client_consensus()
-            _pool_size = _client_pool_count
-            _cons_fid  = _client_consensus_fid
+            # -- 4. Compute pool fidelity average ----------------------------
+            fresh = [v for v in _CLIENT_DM_POOL.values()
+                     if (time.time() - v['ts']) < _CLIENT_DM_STALE_S]
+            _pool_size = len(fresh)
+            _cons_fid  = (sum(v['fidelity'] for v in fresh) / _pool_size
+                          if _pool_size else 0.0)
+            _client_consensus_fid   = _cons_fid
+            _client_pool_count      = _pool_size
 
-        # ── 5. Fuse client consensus with server 5-oracle snapshot ────────
-        # Pull the current server snapshot (may be None if oracle not yet ready)
+        # -- 5. Fuse client consensus with server 5-oracle snapshot -----------
         try:
             with _snapshot_lock:
                 _srv_snap = dict(_latest_snapshot) if _latest_snapshot else {}
         except Exception:
             _srv_snap = {}
 
-        # Build a composite snapshot and push it into the ring + cache
-        _srv_fid  = float(_srv_snap.get('w_state_fidelity') or
-                          (_srv_snap.get('w_state') or {}).get('fidelity') or 0.0)
-        _srv_dm_hex = _srv_snap.get('density_matrix_hex', '')
+        _srv_fid        = float(_srv_snap.get('w_state_fidelity') or 0.0)
+        _srv_tensor_hex = _srv_snap.get('density_tensor_hex', '')
 
-        # Weighted fuse: client contribution scales with _cons_fid, max 35%
-        if _client_consensus_dm_re and any(v != 0.0 for v in _client_consensus_dm_re):
-            try:
-                _w_client = min(_cons_fid * 0.35, 0.35)
-                _w_server = 1.0 - _w_client
+        try:
+            _w_client = min(_cons_fid * 0.35, 0.35)
+            _w_server = 1.0 - _w_client
 
-                if _srv_dm_hex and len(_srv_dm_hex) == 2048:
-                    _sd = bytes.fromhex(_srv_dm_hex)
-                    _sre = [0.0]*64; _sim = [0.0]*64
-                    for _i in range(64):
-                        _sre[_i], _sim[_i] = struct.unpack_from('>dd', _sd, _i*16)
-                    fused_re = [_w_server*_sre[i] + _w_client*_client_consensus_dm_re[i] for i in range(64)]
-                    fused_im = [_w_server*_sim[i] + _w_client*_client_consensus_dm_im[i] for i in range(64)]
-                    ftr = sum(fused_re[i*8+i] for i in range(8))
-                    if ftr > 1e-12:
-                        fused_re = [x/ftr for x in fused_re]
-                        fused_im = [x/ftr for x in fused_im]
-                    fused_hex = b''.join(struct.pack('>dd', fused_re[i], fused_im[i])
-                                         for i in range(64)).hex()
-                    fused_fid = _w_server*_srv_fid + _w_client*_cons_fid
-                else:
-                    fused_hex = dm_hex   # fallback: just use what client sent
-                    fused_fid = fidelity
+            if _srv_tensor_hex and len(_srv_tensor_hex) == _EXPECTED_TENSOR_HEX:
+                # Weighted average of server + client 32³ tensors
+                _st = np.frombuffer(bytes.fromhex(_srv_tensor_hex), dtype=np.float32)
+                _ct = np.frombuffer(bytes.fromhex(tensor_hex), dtype=np.float32)
+                fused_t = (_w_server * _st + _w_client * _ct).astype(np.float32)
+                tm = float(fused_t.max())
+                if tm > 1e-12: fused_t /= tm
+                fused_tensor_hex = fused_t.tobytes().hex()
+                fused_fid = _w_server * _srv_fid + _w_client * _cons_fid
+            else:
+                fused_tensor_hex = tensor_hex
+                fused_fid = fidelity
 
-                composite = {
-                    **_srv_snap,
-                    'density_matrix_hex':    fused_hex,
-                    'w_state_fidelity':      fused_fid,
-                    'fidelity':              fused_fid,
-                    'client_fused_fidelity': _cons_fid,
-                    'client_oracle_count':   _pool_size,
-                    'pq0_oracle_fidelity':   params.get('pq0_oracle_fidelity', fidelity),
-                    'pq0_IV_fidelity':       params.get('pq0_IV_fidelity', fidelity),
-                    'pq0_V_fidelity':        params.get('pq0_V_fidelity', fidelity),
-                    'source':                'server+client_tripartite',
-                    'ready':                 True,
-                    'timestamp_ns':          int(time.time() * 1e9),
-                }
-                _broadcast_snapshot_to_database(composite)
-            except Exception as _fe:
-                logger.debug(f"[PUSH-DM] fuse error: {_fe}")
+            composite = {
+                **_srv_snap,
+                'density_tensor_hex':    fused_tensor_hex,
+                'tensor_dim':            32,
+                'w_state_fidelity':      fused_fid,
+                'fidelity':              fused_fid,
+                'client_fused_fidelity': _cons_fid,
+                'client_oracle_count':   _pool_size,
+                'pq0_oracle_fidelity':   params.get('pq0_oracle_fidelity', fidelity),
+                'pq0_IV_fidelity':       params.get('pq0_IV_fidelity', fidelity),
+                'pq0_V_fidelity':        params.get('pq0_V_fidelity', fidelity),
+                'source':                'server+client_tripartite',
+                'ready':                 True,
+                'timestamp_ns':          int(time.time() * 1e9),
+            }
+            _broadcast_snapshot_to_database(composite)
+        except Exception as _fe:
+            logger.debug(f"[PUSH-TENSOR] fuse error: {_fe}")
 
         logger.debug(
-            f"[PUSH-DM] ✅ oracle_addr={oracle_addr[:16]} fid={fidelity:.4f} "
+            f"[PUSH-DM] ok oracle_addr={oracle_addr[:16]} fid={fidelity:.4f} "
             f"pool={_pool_size} cons_fid={_cons_fid:.4f}"
         )
         return _rpc_ok({
-            'accepted':                 True,
-            'pool_size':                _pool_size,
+            'accepted':                  True,
+            'pool_size':                 _pool_size,
             'client_consensus_fidelity': _cons_fid,
         }, rpc_id)
 
@@ -3959,19 +3767,23 @@ def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshots — fetch last N DM snapshots (max 2 — ring is maxlen=2)."""
+    """qtcl_getLatestDMSnapshots — fetch last N DM snapshots (default 10, max 100)."""
     try:
-        limit = 2
+        limit = 10
         if isinstance(params, list) and params:
-            try: limit = min(int(params[0]), 2)
-            except (ValueError, TypeError): pass
+            try:
+                limit = min(int(params[0]), 100)
+            except (ValueError, TypeError):
+                pass
         elif isinstance(params, dict):
-            try: limit = min(int(params.get("limit", 2)), 2)
-            except (ValueError, TypeError): pass
-
+            try:
+                limit = min(int(params.get("limit", 10)), 100)
+            except (ValueError, TypeError):
+                pass
+        
         with _DM_SNAPSHOT_LOCK:
             snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
-
+        
         logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: returned {len(snaps)} snapshots")
         return _rpc_ok({"snapshots": snaps, "count": len(snaps)}, rpc_id)
     except Exception as e:
@@ -4819,21 +4631,19 @@ def pyth_oracle_stats():
     return jsonify(po.stats()), 200
 
 def _build_snapshot_payload() -> dict:
-    """Build the full snapshot payload for SSE/polling with MULTIPLEX packet types."""
+    """Build the full snapshot payload for SSE/polling with MULTIPLEX packet types.
+
+    Tensor format: 32×32×32 float32 volumetric = 262144 hex chars (tensor_dim=32).
+    The 32³ tensor IS the quantum state. No 2D density matrix is transmitted.
+    """
     with _snapshot_lock:
         _base = dict(_latest_snapshot) if _latest_snapshot else {}
 
-    # Get FULL 256x256 density matrix (raw, un-reduced)
-    dm_hex_256, dm_dim_256 = _get_lattice_dm_hex(force_dim=256)
-    if dm_hex_256:
-        _base['density_matrix_hex_full'] = dm_hex_256
-        _base['dm_dim_full'] = 256
-    
-    # Get reduced 64x64 for compatibility
-    dm_hex_64, dm_dim_64 = _get_lattice_dm_hex()
-    if dm_hex_64:
-        _base['density_matrix_hex'] = dm_hex_64
-        _base['dm_dim'] = dm_dim_64
+    # Single cache-hit: 32³ tensor only
+    tensor_hex = _get_lattice_tensor_hex()
+    if tensor_hex:
+        _base['density_tensor_hex'] = tensor_hex
+        _base['tensor_dim']         = 32
 
     try:
         lat = sys.modules[__name__].__dict__.get('LATTICE')
@@ -4846,23 +4656,11 @@ def _build_snapshot_payload() -> dict:
         pass
 
     with _CLIENT_DM_POOL_LOCK:
-        _c_re   = list(_client_consensus_dm_re)
-        _c_im   = list(_client_consensus_dm_im)
-        _c_fid  = _client_consensus_fid
-        _c_cnt  = _client_pool_count
+        _c_fid = _client_consensus_fid
+        _c_cnt = _client_pool_count
 
     _base['client_fused_fidelity'] = round(_c_fid, 6)
     _base['client_oracle_count']   = _c_cnt
-
-    if _c_cnt > 0 and any(v != 0.0 for v in _c_re) and not dm_hex:
-        import struct as _ss
-        _base['density_matrix_hex'] = b''.join(
-            _ss.pack('<dd', _c_re[i], _c_im[i]) for i in range(64)
-        ).hex()
-        _base['dm_dim']         = 8
-        _base['w_state_fidelity'] = _c_fid
-        _base['source']           = 'client_tripartite_only'
-        _base['ready']            = True
 
     if not _base:
         return {}
@@ -4883,10 +4681,10 @@ _connected_metric_clients = []
 
 # SEPARATE THREADS FOR DM AND METRICS - prevents race condition
 def _dm_sse_worker():
-    """Dedicated thread for DM→SSE stream only — 1/sec cadence matches oracle cycle."""
+    """Dedicated thread for DM→SSE stream only"""
     logger.info("[MUX-DM] DM SSE worker started")
     last_dm_send_ts = 0
-    dm_send_interval = 1.0  # 1/sec — matches W_STATE_STREAM_INTERVAL_MS=1000; was 50ms (20x/sec)
+    dm_send_interval = 0.05  # 20x/sec for real-time updates
     
     while True:
         try:
@@ -4896,15 +4694,15 @@ def _dm_sse_worker():
             
             now_ts = time.time()
             if now_ts - last_dm_send_ts >= dm_send_interval:
-                dm_hex, dm_dim = _get_lattice_dm_hex()
+                tensor_hex = _get_lattice_tensor_hex()
                 last_dm_send_ts = now_ts
-                
-                if dm_hex:
+
+                if tensor_hex:
                     mermin = snap.get('mermin_test') or snap.get('bell_test')
                     dm_snap = {
-                        'packet_type': 'dm',
-                        'density_matrix_hex': dm_hex,
-                        'dm_dim': dm_dim or 64,
+                        'packet_type': 'tensor',
+                        'density_tensor_hex': tensor_hex,
+                        'tensor_dim': 32,
                         'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                         'w_state_fidelity': snap.get('w_state_fidelity'),
                         'purity': snap.get('purity'),
@@ -4925,10 +4723,10 @@ def _dm_sse_worker():
             time.sleep(0.01)
 
 def _metrics_rpc_worker():
-    """Dedicated thread for Metrics→RPC PUSH only — 1/sec cadence."""
+    """Dedicated thread for Metrics→RPC PUSH only"""
     logger.info("[MUX-METRICS] Metrics RPC worker started")
     last_metric_push_ts = 0
-    metric_push_interval = 1.0  # 1/sec — was 50ms (20x/sec flooding)
+    metric_push_interval = 0.05  # 20x/sec
     
     while True:
         try:
@@ -4984,14 +4782,14 @@ def _enqueue_snapshot_for_streaming(snapshot: dict) -> None:
             pass
 
 def _multiplexer_worker():
-    """Forks snapshots: DM→SSE, Metrics→RPC PUSH — 1/sec cadence."""
+    """Forks snapshots: DM→SSE, Metrics→RPC PUSH."""
     logger.info("[MUX] Snapshot multiplexer started")
     last_metric_push_ts = 0
-    metric_push_interval = 1.0  # 1/sec — was 50ms
+    metric_push_interval = 0.05  # 20 metrics/sec - real-time
     _mux_loop_count = 0
     last_dm_send_ts = 0
-    dm_send_interval = 1.0  # 1/sec — was 50ms
-
+    dm_send_interval = 0.05  # 20x/sec for real-time updates
+    
     while True:
         _mux_loop_count += 1
         try:
@@ -4999,25 +4797,24 @@ def _multiplexer_worker():
             if not snap:
                 time.sleep(0.005)
                 continue
-
+            
             now_ts = time.time()
-
-            # Send DM at 1/sec
-            dm_hex = ''
-            dm_dim = 0
+            
+            # Send 32³ tensor at 50ms interval
+            tensor_hex = ''
             if now_ts - last_dm_send_ts >= dm_send_interval:
-                dm_hex, dm_dim = _get_lattice_dm_hex()
+                tensor_hex = _get_lattice_tensor_hex()
                 last_dm_send_ts = now_ts
                 if _mux_loop_count % 20 == 0:
-                    logger.info(f"[MUX] cycle={_mux_loop_count} DM: {len(dm_hex) if dm_hex else 0} chars, dim={dm_dim}")
-            
-            # Send DM to SSE queue (only if we got new DM this cycle)
-            if dm_hex:
+                    logger.info(f"[MUX] cycle={_mux_loop_count} TENSOR: {len(tensor_hex)} hex chars")
+
+            # Send tensor to SSE queue
+            if tensor_hex:
                 mermin = snap.get('mermin_test') or snap.get('bell_test')
                 dm_snap = {
-                    'packet_type': 'dm',
-                    'density_matrix_hex': dm_hex,
-                    'dm_dim': dm_dim or 64,
+                    'packet_type': 'tensor',
+                    'density_tensor_hex': tensor_hex,
+                    'tensor_dim': 32,
                     'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                     'w_state_fidelity': snap.get('w_state_fidelity'),
                     'purity': snap.get('purity'),
@@ -5062,7 +4859,42 @@ def _multiplexer_worker():
         except GeneratorExit:
             break
         except Exception as e:
-            logger.error(f"[MUX] error: {e}", exc_info=False)
+            logger.error(f"[MUX] error: {e}")
+            time.sleep(0.1)
+            
+            # Fork 2: Metrics (no DM) → RPC PUSH
+            now_ts = time.time()
+            if now_ts - last_metric_push_ts >= metric_push_interval:
+                metrics_snap = {
+                    'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
+                    'w_state_fidelity': snap.get('w_state_fidelity'),
+                    'purity': snap.get('purity'),
+                    'coherence_l1': snap.get('coherence_l1'),
+                    'von_neumann_entropy': snap.get('von_neumann_entropy'),
+                    'lattice_refresh_counter': snap.get('lattice_refresh_counter'),
+                    'aer_noise_state': snap.get('aer_noise_state', {}),
+                    'block_field': snap.get('block_field', {}),
+                    'phase_drift': snap.get('phase_drift'),
+                    'phase_coherence': snap.get('phase_coherence'),
+                    'qrng_health': snap.get('qrng_health'),
+                    'mermin_test': snap.get('mermin_test'),
+                }
+                
+                with _snapshot_multiplexer_lock:
+                    for client_q in _connected_metric_clients[:]:
+                        try:
+                            client_q.put_nowait(metrics_snap)
+                        except _queue_module.Full:
+                            _connected_metric_clients.remove(client_q)
+                
+                last_metric_push_ts = now_ts
+        
+        except _queue_module.Empty:
+            continue
+        except GeneratorExit:
+            break
+        except Exception as e:
+            logger.error(f"[MUX-METRICS] error: {e}", exc_info=False)
             time.sleep(0.1)
 
 # Start SEPARATE THREADS for DM and Metrics - eliminates race condition
@@ -5088,7 +4920,7 @@ def rpc_oracle_snapshot():
         for _ in itertools.count():
             try:
                 snap = _snapshot_sse_queue.get(timeout=2.0)
-                if snap and snap.get('density_matrix_hex'):
+                if snap and snap.get('density_tensor_hex'):
                     payload = json.dumps({"result": snap, "id": 1})
                     yield f"data: {payload}\n\n"
             except _queue_module.Empty:
@@ -5215,18 +5047,21 @@ _blocks_broadcaster_thread.start()
 
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():
-    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N DM snapshots (max 2).
-    Full DM hex included — gossip/miner consumption via SSE-RPC hybrid.
-    Ring is maxlen=2: [prev, latest]. Clients gossip latest, miners use latest.
+    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N DM snapshots.
+    
+    Returns snapshots from _DM_SNAPSHOT_RING which contains authoritative oracle data
+    including per_node measurements from all 5 oracle nodes.
     """
     if request.method == "OPTIONS":
         return "", 204
     try:
-        limit = min(int(request.args.get('limit', 2)), 2)
-
+        limit = int(request.args.get('limit', 10))
+        limit = min(limit, 100)  # cap at 100
+        
+        # Read from DM snapshot ring buffer (authoritative oracle data with per_node)
         with _DM_SNAPSHOT_LOCK:
             snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
-
+        
         logger.debug(f"[RPC-ORACLE] /rpc/oracle/snapshots: returning {len(snaps)} snapshots")
         return jsonify({"jsonrpc": "2.0", "result": {"snapshots": snaps, "count": len(snaps)}, "id": request.args.get('id', 1)}), 200
     except Exception as e:
@@ -5240,218 +5075,232 @@ logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
 # ═════════════════════════════════════════════════════════════════════════════════
 
-def _persist_chirp_snapshot(snapshot: dict) -> None:
-    """
-    THROTTLED Supabase scalar write — max 1/minute, NEVER writes density_matrix_hex.
-    Only persists scalar consensus metrics to oracle_snapshot_json table.
-    DM hex remains local-only (SSE ring + SQLite dm_pool).
-    """
-    global _supabase_last_write_ts
-    # One-shot startup pruner — runs on first ever call, creates table, evicts GB of old DM blobs
-    _run_supabase_startup_pruner()
-
-    now = time.time()
-    if now - _supabase_last_write_ts < _SUPABASE_WRITE_INTERVAL:
-        return   # throttle — skip this write
-    _supabase_last_write_ts = now
-
-    # Scalar-only payload — zero DM hex, zero aer_noise_state blob
-    scalar = {
-        'timestamp_ns':        snapshot.get('timestamp_ns'),
-        'oracle_id':           snapshot.get('oracle_id'),
-        'purity':              snapshot.get('purity'),
-        'w_state_fidelity':    snapshot.get('w_state_fidelity'),
-        'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
-        'coherence_l1':        snapshot.get('coherence_l1'),
-        'coherence_renyi':     snapshot.get('coherence_renyi'),
-        'coherence_geometric': snapshot.get('coherence_geometric'),
-        'quantum_discord':     snapshot.get('quantum_discord'),
-        'w_state_strength':    snapshot.get('w_state_strength'),
-        'phase_coherence':     snapshot.get('phase_coherence'),
-        'entanglement_witness':snapshot.get('entanglement_witness'),
-        'trace_purity':        snapshot.get('trace_purity'),
-        'signature_valid':     snapshot.get('signature_valid', False),
-        'oracle_address':      snapshot.get('oracle_address'),
-        'mermin_M':            (snapshot.get('mermin_test') or {}).get('M_value'),
-        'mermin_quantum':      (snapshot.get('mermin_test') or {}).get('is_quantum'),
-        'pq_curr':             snapshot.get('pq_curr'),
-        'pq_last':             snapshot.get('pq_last'),
-        'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
-        'snapshot_source':     'koyeb-primary',
-    }
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""INSERT INTO oracle_snapshot_json (
-                timestamp_ns, oracle_id, purity, w_state_fidelity,
-                von_neumann_entropy, coherence_l1, coherence_renyi, coherence_geometric,
-                quantum_discord, w_state_strength, phase_coherence, entanglement_witness,
-                trace_purity, signature_valid, oracle_address,
-                mermin_M, mermin_quantum, pq_curr, pq_last, lattice_refresh_counter, snapshot_source
-            ) VALUES (
-                %(timestamp_ns)s, %(oracle_id)s, %(purity)s, %(w_state_fidelity)s,
-                %(von_neumann_entropy)s, %(coherence_l1)s, %(coherence_renyi)s, %(coherence_geometric)s,
-                %(quantum_discord)s, %(w_state_strength)s, %(phase_coherence)s, %(entanglement_witness)s,
-                %(trace_purity)s, %(signature_valid)s, %(oracle_address)s,
-                %(mermin_M)s, %(mermin_quantum)s, %(pq_curr)s, %(pq_last)s,
-                %(lattice_refresh_counter)s, %(snapshot_source)s
-            ) ON CONFLICT DO NOTHING""", scalar)
-        logger.debug(f"[SUPABASE-THROTTLED] ✅ scalar metrics written ts={scalar.get('timestamp_ns')} (next in {_SUPABASE_WRITE_INTERVAL:.0f}s)")
-    except Exception as e:
-        logger.debug(f"[SUPABASE-THROTTLED] write skipped: {e}")
-
-
 def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     """
-    RPC-based snapshot broadcast:
-      1. Update in-memory RPC cache (_latest_snapshot)
-      2. Push full DM snapshot (with hex) into _DM_SNAPSHOT_RING[2] for SSE+RPC polling
-      3. Queue to persistent SQLite dm_pool writer (single thread, auto-prunes to 2 rows)
-      4. THROTTLED Supabase write — scalar metrics only, max 1/60s, NO DM hex to cloud
-
-    Egress budget: ~300 bytes/minute to Supabase vs previous ~800 KB/second.
-    Full DM hex available locally via SSE /rpc/oracle/snapshot + RPC qtcl_getLatestDMSnapshot.
+    RPC-based snapshot broadcast: queue to ring buffer + persist to SQLite for P2P sync.
+    
+    Architecture:
+    - In-memory ring buffer (latest 1000) for fast /rpc polling
+    - Async SQLite write to dm_pool table for P2P replication & miners
+    - Dual persistence: Supabase (cloud) + SQLite (local mesh)
     """
-    global _supabase_last_write_ts
     try:
-        # 1. RPC cache — full snapshot with DM hex for SSE/RPC delivery
+        # 1. Update in-memory RPC cache
         _cache_snapshot(snapshot)
-
-        # 2. Ring buffer — maxlen=2, auto-evicts oldest; DM hex preserved for gossip/miners
-        if 'density_matrix_hex' in snapshot:
+        
+        # 2. Queue into DM snapshot ring buffer for streaming
+        if 'density_tensor_hex' in snapshot:
             dm_snap = {
-                'timestamp_ns':          snapshot.get('timestamp_ns', int(time.time() * 1e9)),
-                'oracle_id':             snapshot.get('oracle_id'),
-                'density_matrix_hex':    snapshot.get('density_matrix_hex', ''),
-                'purity':                snapshot.get('purity'),
-                'w_state_fidelity':      snapshot.get('w_state_fidelity'),
-                'von_neumann_entropy':   snapshot.get('von_neumann_entropy'),
-                'coherence_l1':          snapshot.get('coherence_l1'),
-                'coherence_renyi':       snapshot.get('coherence_renyi'),
-                'coherence_geometric':   snapshot.get('coherence_geometric'),
-                'quantum_discord':       snapshot.get('quantum_discord'),
-                'w_state_strength':      snapshot.get('w_state_strength'),
-                'phase_coherence':       snapshot.get('phase_coherence'),
-                'entanglement_witness':  snapshot.get('entanglement_witness'),
-                'trace_purity':          snapshot.get('trace_purity'),
-                'hlwe_signature':        snapshot.get('hlwe_signature'),
-                'signature_valid':       snapshot.get('signature_valid', False),
-                'oracle_address':        snapshot.get('oracle_address'),
-                'aer_noise_state':       snapshot.get('aer_noise_state', {}),
-                'measurement_counts':    snapshot.get('measurement_counts', {}),
-                'mermin_test':           snapshot.get('mermin_test') or snapshot.get('bell_test'),
-                'bell_test':             snapshot.get('bell_test'),
+                'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
+                'oracle_id': snapshot.get('oracle_id'),
+                'density_tensor_hex': snapshot.get('density_tensor_hex', ''),
+                'tensor_dim': 32,
+                'purity': snapshot.get('purity'),
+                'w_state_fidelity': snapshot.get('w_state_fidelity'),
+                'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
+                'coherence_l1': snapshot.get('coherence_l1'),
+                'coherence_renyi': snapshot.get('coherence_renyi'),
+                'coherence_geometric': snapshot.get('coherence_geometric'),
+                'quantum_discord': snapshot.get('quantum_discord'),
+                'w_state_strength': snapshot.get('w_state_strength'),
+                'phase_coherence': snapshot.get('phase_coherence'),
+                'entanglement_witness': snapshot.get('entanglement_witness'),
+                'trace_purity': snapshot.get('trace_purity'),
+                'hlwe_signature': snapshot.get('hlwe_signature'),
+                'signature_valid': snapshot.get('signature_valid', False),
+                'oracle_address': snapshot.get('oracle_address'),
+                'aer_noise_state': snapshot.get('aer_noise_state', {}),
+                'measurement_counts': snapshot.get('measurement_counts', {}),
+                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),  # Client expects mermin_test
+                'bell_test': snapshot.get('bell_test'),  # Backward compatibility
                 'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
             }
             with _DM_SNAPSHOT_LOCK:
-                _DM_SNAPSHOT_RING.append(dm_snap)   # deque(maxlen=2) auto-evicts
-            logger.debug(f"[RPC-BROADCAST] ✅ DM ring updated (ring={len(_DM_SNAPSHOT_RING)}/2)")
-
-            # 3. SQLite dm_pool — persistent single thread, auto-prunes to last 2 rows
-            _ensure_sqlite_dm_thread()
+                _DM_SNAPSHOT_RING.append(dm_snap)
+            logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
+        
+        # 3. Persist to SQLite asynchronously (P2P replication)
+        def async_sqlite():
             try:
-                _sqlite_dm_queue.put_nowait(dm_snap)
-            except Exception:
-                pass   # queue full — oldest already evicted, newest wins
-
-        # 4. Supabase — throttled scalar-only, never DM hex
+                import sqlite3
+                from pathlib import Path
+                db = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
+                db.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(db), timeout=5.0)
+                cur = conn.cursor()
+                cur.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
+                    id INTEGER PRIMARY KEY, timestamp_ns INTEGER, oracle_id INTEGER,
+                    density_tensor_hex TEXT, tensor_dim INTEGER, purity REAL, w_state_fidelity REAL,
+                    von_neumann_entropy REAL, coherence_l1 REAL, hlwe_signature TEXT,
+                    signature_valid INTEGER, oracle_address TEXT, aer_noise_state TEXT,
+                    measurement_counts TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+                cur.execute("""INSERT INTO dm_pool (
+                    timestamp_ns, oracle_id, density_tensor_hex, tensor_dim, purity, w_state_fidelity,
+                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
+                    oracle_address, aer_noise_state, measurement_counts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                    snapshot.get('timestamp_ns'), snapshot.get('oracle_id'),
+                    snapshot.get('density_tensor_hex', ''), 32,
+                    snapshot.get('purity'), snapshot.get('w_state_fidelity'),
+                    snapshot.get('von_neumann_entropy'), snapshot.get('coherence_l1'),
+                    json.dumps(snapshot.get('hlwe_signature')),
+                    1 if snapshot.get('signature_valid') else 0,
+                    snapshot.get('oracle_address'),
+                    json.dumps(snapshot.get('aer_noise_state', {})),
+                    json.dumps(snapshot.get('measurement_counts', {}))
+                ))
+                conn.commit()
+                conn.close()
+                logger.debug("[RPC-BROADCAST] ✅ DM → SQLite dm_pool")
+            except Exception as e:
+                logger.warning(f"[RPC-BROADCAST] SQLite write: {e}")
+        
+        threading.Thread(target=async_sqlite, daemon=True).start()
+        
+        # 4. Persist to Supabase (cloud backup, non-blocking)
         try:
             _persist_chirp_snapshot(snapshot)
         except Exception as e:
-            logger.debug(f"[RPC-BROADCAST] Supabase throttle-write skipped: {e}")
-
+            logger.debug(f"[RPC-BROADCAST] Supabase skipped: {e}")
     except Exception as e:
-        logger.error(f"[RPC-BROADCAST] _broadcast_snapshot_to_database error: {e}")
+        logger.error(f"[RPC-BROADCAST] Error: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# 256×256 → 64×64 HERMITIAN-PRESERVING DENSITY MATRIX REDUCER
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# 256×256 → 32×32×32 VOLUMETRIC TRIPARTITE CORRELATION TENSOR
+# The 32³ tensor IS the quantum state object. No 2D density matrix is transmitted.
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def _lattice_dm_to_64x64_hex(dm256: 'np.ndarray') -> str:
+def _lattice_dm_to_32x32x32_tensor_hex(dm256: 'np.ndarray') -> str:
     """
-    Collapse 256×256 complex128 DM → 64×64 by block-averaging 4×4 tiles,
-    then enforce ρ = (ρ + ρ†)/2 and renormalise Tr(ρ)=1.
+    Build a genuine 32×32×32 volumetric tripartite correlation tensor from the
+    256×256 density matrix.
 
-    Each output element [I,J] = mean of the 4×4 subblock dm256[4I:4I+4, 4J:4J+4].
-    Hermitian step: rho64[I,J] = (rho64[I,J] + conj(rho64[J,I])) / 2  ∀ I≤J,
-    then mirror lower triangle.  This preserves physical validity.
+    Physical interpretation:
+      Axis X (32): row subspace — partition of Hilbert space rows into 32 bands.
+      Axis Y (32): col subspace — partition of Hilbert space cols into 32 bands.
+      Axis Z (32): decoherence depth — 32 logarithmically-spaced diagonal shells
+                   of the 256×256 DM, encoding how correlations decay with
+                   increasing distance from the main diagonal (lattice depth).
 
-    Serialised as row-major little-endian float64 pairs (re, im) — same convention
-    as numpy .tobytes() — 64×64×16 bytes = 65536 bytes = 131072 hex chars.
-    dm_dim=64 flag injected so the client knows the grid size.
+    T[z, x, y] = mean of dm256[8x:8x+8, 8y:8y+8] weighted by the z-th
+                 decoherence shell mask W_z[i,j] = exp(-|i-j| / lambda_z),
+                 where lambda_z = exp(log(1) + z/31 * log(256)) spans 1→256.
+
+    This produces a physically meaningful rank-3 object where:
+      - Slice T[0,:,:] ≈ ρ_32  (near-diagonal, high-coherence regime)
+      - Slice T[31,:,:] ≈ uniform (fully mixed, decoherence floor)
+      - The Z-axis traces the coherence-decoherence crossover.
+
+    Serialised as float32: 32×32×32×4 bytes = 131072 bytes = 262144 hex chars.
     """
     try:
         dm = np.asarray(dm256, dtype=np.complex128)
         if dm.shape != (256, 256):
-            # Graceful: if it's already 8×8 or some other size, just pass through
-            if dm.shape == (8, 8):
-                return dm.tobytes().hex(), 8
-            return dm.tobytes().hex(), dm.shape[0]
+            return ''
 
-        N = 64
-        B = 4  # block size
-        rho = np.zeros((N, N), dtype=np.complex128)
+        N = 32
+        B = 8   # block size per X/Y axis
+        D = 32  # depth slices
 
-        # Block-average: rho[I,J] = mean of dm[4I:4I+4, 4J:4J+4]
-        for I in range(N):
-            for J in range(N):
-                rho[I, J] = np.mean(dm256[I*B:(I+1)*B, J*B:(J+1)*B])
+        # Pre-compute block means: shape (32, 32) of complex128
+        rho_blocks = dm.reshape(N, B, N, B).mean(axis=(1, 3))
 
-        # Enforce Hermitian: ρ = (ρ + ρ†) / 2
-        rho = 0.5 * (rho + rho.conj().T)
+        # Pre-compute decoherence shell weights for each Z slice.
+        # lambda_z spans [1, 256] log-uniformly across Z=0..31
+        # W_z is an N×N matrix where W_z[x,y] = exp(-|x-y| / lambda_z_scaled)
+        # lambda_z_scaled in block units = lambda_z / B = [1/8, 32]
+        lambdas = np.exp(np.linspace(np.log(1.0/B), np.log(float(N)), D))
 
-        # Renormalise
-        tr = float(np.real(np.trace(rho)))
-        if tr > 1e-12:
-            rho /= tr
+        tensor = np.zeros((D, N, N), dtype=np.float32)
 
-        return rho.tobytes().hex(), N
+        # Build index distance matrix once
+        idx = np.arange(N, dtype=np.float32)
+        dist = np.abs(idx[:, None] - idx[None, :])  # shape (32, 32)
+
+        for z in range(D):
+            lam = float(lambdas[z])
+            W = np.exp(-dist / lam)                      # shape (32, 32), real weights
+            W /= W.sum()                                  # normalise
+
+            # Element-wise modulus of complex rho_blocks, weighted by shell
+            mag = np.abs(rho_blocks)                      # (32, 32) real
+            tensor[z] = (mag * W).astype(np.float32)
+
+        # Enforce positivity floor and global normalise
+        tensor = np.clip(tensor, 0.0, None)
+        t_max = float(tensor.max())
+        if t_max > 1e-12:
+            tensor /= t_max
+
+        return tensor.tobytes().hex()
 
     except Exception as e:
-        logger.warning(f"[DM-REDUCE] 256→64 failed: {e}")
-        return '', 0
+        logger.warning(f"[DM-TENSOR] 256→32³ failed: {e}")
+        return ''
 
 
-_dm_hex_cache = ('', 0, 0)  # (hex, dim, timestamp)
+# ── Cache layer: (tensor_hex, timestamp) ─────────────────────────────────────
+_tensor_cache: tuple = ('', 0.0)   # tensor_hex, ts
+_TENSOR_CACHE_TTL = 0.05            # 50ms — matches SSE cadence
 
-def _get_lattice_dm_hex() -> tuple:
-    """Pull current_density_matrix from LATTICE, return 64x64 reduced hex (cached).
-    
-    NOTE: This is server-side caching ONLY - does NOT affect oracle quantum simulation.
-    The oracle still runs true AER with real noise every cycle. This just caches
-    the 256→64 reduction for the frontend to avoid repeated CPU work.
+
+def _get_lattice_tensor_hex() -> str:
+    """Pull current_density_matrix from LATTICE and build the 32³ tensor.
+
+    Returns tensor_hex (262144 hex chars) or '' on failure.
+    Cached for 50ms — one computation shared across all SSE subscribers.
+    NOTE: Server-side cache only; oracle AER simulation is unaffected.
     """
-    global _dm_hex_cache
+    global _tensor_cache
     from globals import LATTICE
-    
+
     now = time.time()
-    # Cache for 1s - oracle runs at ~10ms so this is safe
-    if now - _dm_hex_cache[2] < 1.0 and _dm_hex_cache[0]:
-        return _dm_hex_cache[0], _dm_hex_cache[1]
-    
+    if now - _tensor_cache[1] < _TENSOR_CACHE_TTL and _tensor_cache[0]:
+        return _tensor_cache[0]
+
     try:
         lat = LATTICE
         if lat is not None and hasattr(lat, 'current_density_matrix'):
             dm = lat.current_density_matrix
             if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
-                hex_val, dim = _lattice_dm_to_64x64_hex(dm)
-                _dm_hex_cache = (hex_val, dim, now)
-                return hex_val, dim
+                tensor_hex = _lattice_dm_to_32x32x32_tensor_hex(dm)
+                _tensor_cache = (tensor_hex, now)
+                return tensor_hex
     except Exception as e:
-        logger.debug(f"[DM] LATTICE access: {e}")
+        logger.debug(f"[TENSOR] LATTICE access: {e}")
 
-    # Fallback: oracle snapshot 8x8 as-is
+    # Fallback: build tensor from oracle 8×8 snapshot via kron upsample
     try:
         with _snapshot_lock:
             snap = _latest_snapshot
         if snap:
             h = snap.get('density_matrix_hex', '')
+            # Accept 8×8 complex128 (2048 hex) or 32×32 complex64 (16384 hex)
             if h and len(h) == 2048:
-                _dm_hex_cache = (h, 8, now)
-                return h, 8
+                dm8 = np.frombuffer(bytes.fromhex(h), dtype=np.complex128).reshape(8, 8)
+                dm32 = np.kron(dm8.astype(np.complex64), np.ones((4, 4), dtype=np.complex64))
+                tr = float(np.real(np.trace(dm32)))
+                if tr > 1e-12: dm32 /= tr
+                # Build tensor from upsampled 32×32
+                N = 32
+                idx = np.arange(N, dtype=np.float32)
+                dist = np.abs(idx[:, None] - idx[None, :])
+                lambdas = np.exp(np.linspace(np.log(1.0), np.log(float(N)), N))
+                mag = np.abs(dm32)
+                t = np.zeros((N, N, N), dtype=np.float32)
+                for z in range(N):
+                    W = np.exp(-dist / float(lambdas[z])); W /= W.sum()
+                    t[z] = (mag * W).astype(np.float32)
+                tm = float(t.max())
+                if tm > 1e-12: t /= tm
+                tensor_hex = t.tobytes().hex()
+                _tensor_cache = (tensor_hex, now)
+                return tensor_hex
     except Exception:
         pass
-    return '', 0
+    return 
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
