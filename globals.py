@@ -543,7 +543,8 @@ def get_global_hyp_engine():
 
 
 def set_hyp_engine(engine_instance) -> None:
-    """Called by server.py to inject a pre-initialized HypGammaEngine."""    global _HYP_ENGINE_INSTANCE
+    """Called by server.py to inject a pre-initialized HypGammaEngine."""
+    global _HYP_ENGINE_INSTANCE
     with _HYP_ENGINE_LOCK:
         _HYP_ENGINE_INSTANCE = engine_instance
     set_state('hyp_engine', engine_instance)
