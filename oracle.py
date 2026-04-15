@@ -2616,6 +2616,8 @@ class OracleEngine:
     """
 
     def __init__(self):
+        # CRITICAL: Initialize ALL attributes FIRST before ANY risky calls.
+        # If any setup code raises, attributes must exist to prevent AttributeError.
         self._init_lock   = threading.Lock()
         self._keyring:    Optional[HDKeyring]    = None
         self._hyp_signer: Optional[HypOracleSigner] = None
@@ -2625,10 +2627,14 @@ class OracleEngine:
         self._next_index = 0
 
         # Initialize HypΓ signer (primary method)
-        hyp_engine = _lazy_init_hyp_engine()
-        if hyp_engine:
-            self._hyp_signer = HypOracleSigner(hyp_engine)
-            logger.info(f"[ORACLE] ✅ HypΓ signer online — oracle={self._hyp_signer.get_oracle_address()}")
+        try:
+            hyp_engine = _lazy_init_hyp_engine()
+            if hyp_engine:
+                self._hyp_signer = HypOracleSigner(hyp_engine)
+                logger.info(f"[ORACLE] ✅ HypΓ signer online — oracle={self._hyp_signer.get_oracle_address()}")
+        except Exception as e:
+            logger.error(f"[ORACLE] HypΓ signer init failed (will use fallback): {e}")
+            self._hyp_signer = None
         
         seed_hex = os.getenv("ORACLE_MASTER_SEED_HEX")
         if seed_hex:
@@ -2685,7 +2691,7 @@ class OracleEngine:
                          account: int = 0, change: int = 0,
                          index: Optional[int] = None) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if self._hyp_signer:
+        if hasattr(self, '_hyp_signer') and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_transaction(tx_hash)
             if hyp_sig:
                 return hyp_sig
@@ -2696,7 +2702,7 @@ class OracleEngine:
                         self._address_index[sender_address] = self._next_index
                         self._next_index += 1
                     index = self._address_index[sender_address]
-            if not self._signer:
+            if not hasattr(self, '_signer') or not self._signer:
                 return None
             return self._signer.sign_transaction(tx_hash, sender_address, account, change, index,
                                                   self._get_w_entropy())
@@ -2706,12 +2712,12 @@ class OracleEngine:
 
     def sign_block(self, block_hash: str, block_height: int) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if self._hyp_signer:
+        if hasattr(self, '_hyp_signer') and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_block(block_hash, block_height)
             if hyp_sig:
                 return hyp_sig
         try:
-            if not self._signer:
+            if not hasattr(self, '_signer') or not self._signer:
                 return None
             return self._signer.sign_message(block_hash, self._keyring.master, self._get_w_entropy())
         except Exception as e:
@@ -2720,12 +2726,12 @@ class OracleEngine:
 
     def sign_w_state_snapshot(self, snapshot: DensityMatrixSnapshot) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if self._hyp_signer:
+        if hasattr(self, '_hyp_signer') and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_snapshot(snapshot)
             if hyp_sig:
                 return hyp_sig
         try:
-            if not self._signer:
+            if not hasattr(self, '_signer') or not self._signer:
                 return None
             h = hashlib.sha3_256(
                 (snapshot.density_matrix_hex + str(snapshot.timestamp_ns)).encode()
