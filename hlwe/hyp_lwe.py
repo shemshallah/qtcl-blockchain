@@ -203,16 +203,39 @@ except ImportError:
     logger.warning("[HYP-LWE] mpmath not installed; GeodesicLWE will not initialize. pip install mpmath")
     MPMATH_AVAILABLE = False
     # Define stubs for graceful degradation
-    class mpf: pass
-    class mpc: pass
-    class mp: dps = 150
+    class mpf(float):
+        def __new__(cls, val=0): return float.__new__(cls, float(val))
+    class mpc(complex):
+        def __new__(cls, r=0, i=0): return complex.__new__(cls, complex(r, i))
+    class mp:
+        dps = 150
     def sqrt(x): return x**0.5
     def exp(x): return 2.718**x
     def log(x): return float('inf')
     def acosh(x): return float('inf')
+    def cos(x): return 0.0
+    def sin(x): return 0.0
+    def cosh(x): return 1.0
+    def sinh(x): return 0.0
+    def tanh(x): return 0.0
+    def atanh(x): return 0.0
+    def fabs(x): return abs(float(x))
+    def acos(x): return 0.0
+    def atan2(y, x): return 0.0
+    def nstr(x, n): return str(x)[:n]
+    def almosteq(a, b, tol): return abs(float(a)-float(b)) < tol
+    def re(z): return float(z) if isinstance(z, (int, float)) else 0.0
+    def im(z): return 0.0
+    def conj(z): return z
+    def fmod(a, b): return 0.0
+    def ceil(x): return int(x) + (1 if x > int(x) else 0)
+    def floor(x): return int(x)
     mpmatrix = None
     mpeye = None
-    arctanh = None
+    arctanh = atanh
+    mpjii = None
+    pi = 3.14159265358979
+    atan2 = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PRECISION ARCHITECTURE — mp.dps = 150 throughout, NEVER reduce
@@ -278,13 +301,19 @@ SIGMA_DEFAULT: float = 2.5
 LDPC_CODE_RATE: float = 5.0 / 8.0
 
 # Poincaré disk upper bound: all coordinates must lie within |z| < 1
-POINCARE_BOUND: mpf = mpf("0.99999")
+try:
+    POINCARE_BOUND: mpf = mpf("0.99999")
+except TypeError:
+    POINCARE_BOUND = 0.99999
 
 # Error margin for decryption tolerance: acceptable rounding error
 DECRYPT_ERROR_MARGIN: float = 0.5
 
 # Overflow detection: reject any ciphertext component with magnitude > bound
-CIPHERTEXT_OVERFLOW_BOUND: mpf = mpf("1e100")
+try:
+    CIPHERTEXT_OVERFLOW_BOUND: mpf = mpf("1e100")
+except TypeError:
+    CIPHERTEXT_OVERFLOW_BOUND = 1e100
 
 # ════════════════════════════════════════════════════════════════════════════
 # §2 DATA STRUCTURES

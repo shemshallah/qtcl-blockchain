@@ -638,6 +638,21 @@ def test_hyp_tessellation():
 HyperbolicTessellation = HypTessellation
 TessellationCell = HypTriangle
 
+def depth_from_file(path: str) -> Optional['HypTessellation']:
+    """Load tessellation from file. Returns None if unavailable."""
+    try:
+        import pickle
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+    except Exception as e:
+        logging.warning(f"[HYP-TESS] depth_from_file({path}) failed: {e}")
+        return None
+
+def load_tessellation_supabase() -> Optional['HypTessellation']:
+    """Load tessellation from Supabase. Returns None if unavailable."""
+    logging.warning("[HYP-TESS] Supabase tessellation load not implemented; returning None")
+    return None
+
 if __name__ == '__main__':
     mp.dps = 150
     success = test_hyp_tessellation()
