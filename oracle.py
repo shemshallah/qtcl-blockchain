@@ -2619,6 +2619,7 @@ class OracleEngine:
         self._init_lock   = threading.Lock()
         self._keyring:    Optional[HDKeyring]    = None
         self._hyp_signer: Optional[HypOracleSigner] = None
+        self._signer      = None  # legacy HLWE signer — None until externally injected
         self._lattice_ref = None
         self._address_index: Dict[str, int] = {}
         self._next_index = 0
@@ -2695,6 +2696,8 @@ class OracleEngine:
                         self._address_index[sender_address] = self._next_index
                         self._next_index += 1
                     index = self._address_index[sender_address]
+            if not self._signer:
+                return None
             return self._signer.sign_transaction(tx_hash, sender_address, account, change, index,
                                                   self._get_w_entropy())
         except Exception as e:
@@ -2708,6 +2711,8 @@ class OracleEngine:
             if hyp_sig:
                 return hyp_sig
         try:
+            if not self._signer:
+                return None
             return self._signer.sign_message(block_hash, self._keyring.master, self._get_w_entropy())
         except Exception as e:
             logger.error(f"[ORACLE] Block signing failed: {e}")
@@ -2720,6 +2725,8 @@ class OracleEngine:
             if hyp_sig:
                 return hyp_sig
         try:
+            if not self._signer:
+                return None
             h = hashlib.sha3_256(
                 (snapshot.density_matrix_hex + str(snapshot.timestamp_ns)).encode()
             ).hexdigest()
