@@ -2,7 +2,7 @@
 """
 ╔════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                ║
-║  QTCL GLOBAL STATE MANAGEMENT v3.2 — QUANTUM-ONLY HARDENED                                   ║
+║  QTCL GLOBAL STATE MANAGEMENT v3.3 — HypΓ INTEGRATED                                   ║
 ║                                                                                                ║
 ║  Thread-safe global state with explicit quantum entropy initialization.                       ║
 ║  Fail-fast if entropy sources unavailable — QUANTUM REAL ONLY.                                ║
@@ -71,6 +71,25 @@ except ImportError as e:
     
     def get_entropy_stats():
         return {'error': 'entropy pool unavailable'}
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# HypΓ ENGINE — post-quantum lattice cryptography
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+try:
+    from hyp_engine import HypGammaEngine, get_hyp_engine
+    HYP_ENGINE_AVAILABLE = True
+    logger.info("[GLOBALS] ✅ HypΓ engine available")
+except ImportError as e:
+    HYP_ENGINE_AVAILABLE = False
+    logger.warning(f"[GLOBALS] ⚠️  HypΓ engine import failed: {e}")
+
+    def get_hyp_engine():
+        raise RuntimeError(
+            "[GLOBALS] HypΓ engine unavailable. "
+            "Cannot perform post-quantum crypto without hyp_engine.py."
+        )
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -218,9 +237,9 @@ _GLOBAL_STATE = {
     'entropy_stats': {},
     'entropy_efficiency': 0.0,
 
-    # HLWE Cryptography
-    'hlwe_system': None,
-    'hlwe_initialized': False,
+    # HypΓ Cryptography
+    'hyp_engine': None,
+    'hyp_initialized': False,
 
     # Quantum Lattice
     'lattice_controller': None,
@@ -495,6 +514,43 @@ def set_lattice(lattice_instance) -> None:
     logger.info(f"[GLOBALS] LATTICE singleton set: {type(lattice_instance).__name__}")
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HypΓ ENGINE SINGLETON
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HYP_ENGINE_INSTANCE = None
+_HYP_ENGINE_LOCK = threading.Lock()
+
+
+def get_global_hyp_engine():
+    """Return the global HypGammaEngine singleton, initializing on first call."""
+    global _HYP_ENGINE_INSTANCE
+    if _HYP_ENGINE_INSTANCE is None:
+        with _HYP_ENGINE_LOCK:
+            if _HYP_ENGINE_INSTANCE is None:
+                if HYP_ENGINE_AVAILABLE:
+                    try:
+                        _HYP_ENGINE_INSTANCE = get_hyp_engine()
+                        set_state('hyp_engine', _HYP_ENGINE_INSTANCE)
+                        set_state('hyp_initialized', True)
+                        logger.info("[GLOBALS] ✅ HypΓ engine singleton created")
+                    except Exception as exc:
+                        logger.error(f"[GLOBALS] HypΓ engine init failed: {exc}")
+                else:
+                    logger.warning("[GLOBALS] HypΓ engine not available")
+    return _HYP_ENGINE_INSTANCE
+
+
+def set_hyp_engine(engine_instance) -> None:
+    """Called by server.py to inject a pre-initialized HypGammaEngine."""    global _HYP_ENGINE_INSTANCE
+    with _HYP_ENGINE_LOCK:
+        _HYP_ENGINE_INSTANCE = engine_instance
+    set_state('hyp_engine', engine_instance)
+    set_state('hyp_initialized', engine_instance is not None)
+    logger.info(f"[GLOBALS] HypΓ engine set: {type(engine_instance).__name__}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSENSUS STATE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -574,4 +630,5 @@ __all__ = [
     'record_quantum_witness', 'register_validator', 'accept_attestation',
     'compute_finality',
     'TessellationRewardSchedule',
+    'HYP_ENGINE_AVAILABLE', 'get_global_hyp_engine', 'set_hyp_engine',
 ]

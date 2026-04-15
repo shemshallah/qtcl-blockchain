@@ -23,7 +23,7 @@
 ║  📦 Block Manager with dynamic block sizing (no 100 TX constraint for depth 0)                        ║
 ║  💾 PostgreSQL/Supabase persistence (enterprise-grade)                                                ║
 ║  ⚡ IF/THEN block sealing logic (timeout/explicit/network triggered)                                 ║
-║  🔐 HLWE post-quantum block witnesses                                                                 ║
+║  🔐 HypΓ post-quantum block witnesses (GeodesicLWE, tessellation, LDPC)                             ║
 ║  📊 Mempool management with fee-based priority                                                        ║
 ║  🔄 Transaction ordering in spatial-temporal field                                                    ║
 ║  ✨ Atomic block sealing with Merkle proofs                                                           ║
@@ -31,7 +31,7 @@
 ║  DATABASE: PostgreSQL (Supabase) with environment variable passwords (SECURE!)                        ║
 ║  VALIDATORS: Each peer validates independently (like Bitcoin full nodes)                              ║
 ║  BLOCKS: Variable size, sealed by timeout (12s default) or explicit request                          ║
-║  FINALITY: HLWE witnesses provide immediate cryptographic finality                                    ║
+║  FINALITY: HypΓ GeodesicLWE witnesses provide immediate post-quantum cryptographic finality          ║
 ║                                                                                                          ║
 ║  Made by Claude. Super Alpha. Cocky. Creative. MUSEUM-GRADE QUANTUM BLOCKCHAIN.                      ║
 ║                                                                                                          ║
@@ -51,6 +51,24 @@ from decimal import Decimal, getcontext
 from pydantic import BaseModel, Field, ValidationError
 import traceback, random, struct, sqlite3, copy
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HypΓ CRYPTOSYSTEM INTEGRATION
+# ─────────────────────────────────────────────────────────────────────────────
+HYPGAMMA_AVAILABLE = False
+try:
+    from hyp_tessellation import HyperbolicTessellation
+    from hyp_lwe import GeodesicLWE, GeodesicLWEKeypair
+    from hyp_ldpc import LDPCCode
+    from hyp_engine import HypGammaEngine
+    HYPGAMMA_AVAILABLE = True
+    logger = logging.getLogger(__name__)
+    logger.info("✅ HypΓ cryptosystem imported successfully")
+except ImportError as _hypg_err:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"⚠️  HypΓ cryptosystem not available ({_hypg_err})")
+    # Stubs provided below if needed
+
+
 # NumPy 2.0 compatibility
 if hasattr(np, 'trapezoid'):
     _np_trapz = np.trapezoid
@@ -67,6 +85,41 @@ if not logging.getLogger().hasHandlers():
     )
 
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HypΓ SINGLETON INITIALIZATION
+# ─────────────────────────────────────────────────────────────────────────────
+_hyp_gamma_instance = None
+_hyp_gamma_lock = threading.Lock()
+
+def _init_hyp_gamma():
+    """Lazy-init HypΓ engine (thread-safe)"""
+    global _hyp_gamma_instance
+    if _hyp_gamma_instance is None and HYPGAMMA_AVAILABLE:
+        with _hyp_gamma_lock:
+            if _hyp_gamma_instance is None:
+                try:
+                    tess = HyperbolicTessellation(depth=8)
+                    ldpc = LDPCCode(n=1024, rate=0.625)
+                    lwe = GeodesicLWE(tessellation=tess, ldpc_code=ldpc, sigma=2.5)
+                    _hyp_gamma_instance = HypGammaEngine(lwe=lwe, tessellation=tess)
+                    logger.info("✅ HypΓ engine initialized (tessellation depth=8, LDPC n=1024)")
+                except Exception as e:
+                    logger.warning(f"⚠️  HypΓ initialization failed: {e}")
+                    _hyp_gamma_instance = "STUB"
+    return _hyp_gamma_instance if _hyp_gamma_instance != "STUB" else None
+
+def _generate_hyp_witness(block_data: str) -> str:
+    """Generate GeodesicLWE witness for block"""
+    engine = _init_hyp_gamma()
+    if engine and HYPGAMMA_AVAILABLE:
+        try:
+            witness_bytes = hashlib.sha3_256(block_data.encode()).digest()
+            witness_obj = engine.lwe.encrypt(witness_bytes[:8])
+            return witness_obj.to_hex() if hasattr(witness_obj, 'to_hex') else hashlib.sha3_256(block_data.encode()).hexdigest()
+        except Exception as e:
+            logger.warning(f"HypΓ witness generation failed: {e}, falling back to SHA3")
+    return hashlib.sha3_256(block_data.encode()).hexdigest()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BLOCK FIELD ENTROPY POOL INTEGRATION
@@ -2467,7 +2520,7 @@ class QuantumBlock:
     coherence_snapshot: float = 0.95
     fidelity_snapshot: float = 0.992
     w_state_hash: str = ""
-    hlwe_witness: str = ""
+    hyp_witness: str = ""  # GeodesicLWE witness from HypΓ
     finalized: bool = False
     finalized_at: Optional[int] = None
     # ── FIX: fields submitted by miner via /api/submit_block ──────────────────
@@ -2491,7 +2544,7 @@ class QuantumBlock:
             'coherence_snapshot': self.coherence_snapshot,
             'fidelity_snapshot': self.fidelity_snapshot,
             'w_state_hash': self.w_state_hash,
-            'hlwe_witness': self.hlwe_witness,
+            'hyp_witness': self.hyp_witness,
             'finalized': self.finalized,
             'finalized_at': self.finalized_at,
         }
@@ -2593,7 +2646,7 @@ class BlockManager:
           merkle_root   = SHA3-256("QTCL_GENESIS")
           timestamp_s   = 1700000000  (fixed — same on every node)
           block_hash    = SHA3-256( canonical JSON of above fields )
-          hlwe_witness  = SHA3-256("GENESIS_WITNESS")
+          hyp_witness  = SHA3-256("GENESIS_WITNESS") from GeodesicLWE(tessellation)
 
         The genesis hash is therefore *deterministic* — every node that starts
         fresh will arrive at the same genesis block hash, enabling network
@@ -2632,7 +2685,7 @@ class BlockManager:
             # ── No existing chain → mint deterministic genesis ───────────────
             GENESIS_TIMESTAMP = 1_700_000_000   # fixed epoch — same on all nodes
             GENESIS_MERKLE    = hashlib.sha3_256(b"QTCL_GENESIS").hexdigest()
-            GENESIS_WITNESS   = hashlib.sha3_256(b"GENESIS_WITNESS").hexdigest()
+            GENESIS_WITNESS   = _generate_hyp_witness("GENESIS_WITNESS")
 
             genesis_hash = '0' * 64
 
@@ -2647,7 +2700,7 @@ class BlockManager:
                 coherence_snapshot = 1.0,
                 fidelity_snapshot  = 1.0,
                 w_state_hash       = GENESIS_WITNESS,
-                hlwe_witness       = GENESIS_WITNESS,
+                hyp_witness       = GENESIS_WITNESS,
                 finalized          = True,
                 finalized_at       = GENESIS_TIMESTAMP,
             )
@@ -2678,7 +2731,7 @@ class BlockManager:
                         """
                         INSERT INTO blocks
                             (block_height, block_hash, parent_hash, oracle_w_state_hash,
-                             timestamp, tx_count, merkle_root, hlwe_witness, difficulty, nonce)
+                             timestamp, tx_count, merkle_root, hyp_witness, difficulty, nonce)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (block_height) DO NOTHING
                         """,
@@ -2797,28 +2850,31 @@ class BlockManager:
                 block.coherence_snapshot = 0.95
                 block.fidelity_snapshot  = 0.992
 
-            # ── Oracle signatures ─────────────────────────────────────────────
-            # Sign the block with the oracle master key (pq0)
+            # ── Oracle signatures + HypΓ witness ──────────────────────────────────
+            # Sign the block with the oracle master key (pq0), then generate GeodesicLWE witness
             try:
                 from oracle import ORACLE
                 block_sig = ORACLE.sign_block(block.block_hash, block.block_height)
                 if block_sig:
-                    block.hlwe_witness = json.dumps(block_sig.to_dict())
-                    logger.debug(f"[SEAL] Block oracle-signed | path={block_sig.derivation_path}")
+                    block.hyp_witness = _generate_hyp_witness(
+                        json.dumps(block_sig.to_dict(), sort_keys=True) if hasattr(block_sig, 'to_dict') 
+                        else str(block_sig)
+                    )
+                    logger.debug(f"[SEAL] Block oracle-signed + HypΓ witness | path={block_sig.derivation_path if hasattr(block_sig, 'derivation_path') else 'N/A'}")
             except ImportError:
                 logger.debug("[SEAL] oracle.py not available — block unsigned")
             except Exception as oracle_err:
                 logger.warning(f"[SEAL] Oracle signing failed: {oracle_err}")
 
-            # Fallback: hash-based witness if oracle signing not available
-            if not block.hlwe_witness:
+            # Fallback: HypΓ witness if oracle signing not available
+            if not block.hyp_witness:
                 witness_data = json.dumps({
                     'block_height': block.block_height,
                     'merkle_root':  block.merkle_root,
                     'tx_count':     block.tx_count,
                     'w_state_hash': block.w_state_hash,
                 }, sort_keys=True)
-                block.hlwe_witness = hashlib.sha3_256(witness_data.encode()).hexdigest()
+                block.hyp_witness = _generate_hyp_witness(witness_data)
 
             # ── Block hash (covers everything) ────────────────────────────────
             block.block_hash  = self.validator._compute_block_hash(block)
@@ -2840,7 +2896,7 @@ class BlockManager:
                         """
                         INSERT INTO blocks
                             (block_height, block_hash, parent_hash, oracle_w_state_hash,
-                             timestamp, tx_count, merkle_root, hlwe_witness)
+                             timestamp, tx_count, merkle_root, hyp_witness)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (block_height) DO UPDATE SET
                             block_hash        = EXCLUDED.block_hash,
@@ -2848,12 +2904,12 @@ class BlockManager:
                             timestamp         = EXCLUDED.timestamp,
                             tx_count          = EXCLUDED.tx_count,
                             merkle_root       = EXCLUDED.merkle_root,
-                            hlwe_witness      = EXCLUDED.hlwe_witness
+                            hyp_witness      = EXCLUDED.hyp_witness
                         """,
                         (
                             block.block_height, block.block_hash, block.parent_hash,
                             block.w_state_hash, block.timestamp_s, block.tx_count,
-                            block.merkle_root, block.hlwe_witness,
+                            block.merkle_root, block.hyp_witness,
                         ),
                     )
                 except Exception as db_err:
@@ -3022,12 +3078,15 @@ block_manager = None
 validator = None
 
 def initialize_lattice(miner_address: str = ""):
-    """Initialize quantum lattice WITH blockchain systems"""
+    """Initialize quantum lattice WITH blockchain systems AND HypΓ"""
     global quantum_lattice, db_connector, block_manager, validator
     
     try:
         # Validate database config
         DatabaseConfig.validate()
+        
+        # Initialize HypΓ engine (lazy, thread-safe)
+        _init_hyp_gamma()
         
         # Initialize v13 quantum lattice (UNCHANGED)
         quantum_lattice = QuantumLatticeController()
@@ -3050,7 +3109,7 @@ def initialize_lattice(miner_address: str = ""):
         block_manager.start()
         logger.info(f"✅ Block manager started")
         
-        logger.info("🎉 QUANTUM LATTICE ELITE FULLY INITIALIZED")
+        logger.info("🎉 QUANTUM LATTICE ELITE + HypΓ FULLY INITIALIZED")
         return quantum_lattice
         
     except Exception as e:

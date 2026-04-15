@@ -1248,14 +1248,107 @@ def run_qrng_tests():
     
     return qrng
 
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# POOL API COMPATIBILITY LAYER (MERGED FROM pool_api.py)
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# Provides drop-in compatibility with pool_api.py: get_entropy(), get_entropy_pool(), etc.
+
+ENTROPY_SIZE_BYTES = 32
+
+class EntropyPoolManager:
+    """Compatibility wrapper: delegates to QuantumEntropyEnsemble singleton."""
+    _instance = None
+    _lock = threading.RLock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+        self._qrng = get_qrng_ensemble()
+    
+    def get_entropy(self) -> bytes:
+        """QUANTUM-ONLY: Get 32 bytes. Raises RuntimeError if unavailable."""
+        try:
+            raw = self._qrng.get_random_bytes(32, min_sources=1)
+            if raw:
+                return raw
+            logger.critical("[POOL] 🚨 ALL QUANTUM SOURCES OFFLINE — SYSTEM CANNOT OPERATE")
+            raise RuntimeError(
+                "[POOL] Quantum entropy pool exhausted. All QRNG sources offline. "
+                "System requires quantum entropy to function securely."
+            )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.critical(f"[POOL] Unexpected error in get_entropy: {e}")
+            raise RuntimeError(f"Entropy pool error: {e}")
+    
+    def get_stats(self) -> dict:
+        """Return pool statistics via ensemble."""
+        return self._qrng.get_entropy_stats()
+
+
+_entropy_pool: Optional[EntropyPoolManager] = None
+_entropy_pool_lock = threading.Lock()
+
+def get_entropy_pool() -> EntropyPoolManager:
+    """Get or create entropy pool singleton (pool_api compat)."""
+    global _entropy_pool
+    if _entropy_pool is None:
+        with _entropy_pool_lock:
+            if _entropy_pool is None:
+                _entropy_pool = EntropyPoolManager()
+    return _entropy_pool
+
+def get_entropy(size: int = ENTROPY_SIZE_BYTES) -> bytes:
+    """Get entropy via quantum pool (pool_api compat). Raises RuntimeError if unavailable."""
+    try:
+        raw = get_entropy_pool().get_entropy()
+        if size <= len(raw):
+            return raw[:size]
+        h = hashlib.shake_256()
+        h.update(b"QTCL_ENT_EXPAND:")
+        h.update(raw)
+        return h.digest(size)
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.critical(f"[POOL] Unexpected error in get_entropy: {e}")
+        raise RuntimeError(f"Entropy pool error: {e}")
+
+def get_entropy_stats() -> dict:
+    """Get pool statistics (pool_api compat)."""
+    try:
+        return get_entropy_pool().get_stats()
+    except Exception as e:
+        return {'error': str(e)}
+
+def get_entropy_pool_manager() -> EntropyPoolManager:
+    """Alias for compatibility."""
+    return get_entropy_pool()
+
+
 __all__ = [
     'QuantumEntropyEnsemble',
     'EntropySample',
     'CircuitBreakerState',
     'QRNGSourceType',
     'get_qrng_ensemble',
+    # Pool API compatibility layer
+    'EntropyPoolManager',
+    'get_entropy_pool',
+    'get_entropy_pool_manager',
+    'get_entropy',
+    'get_entropy_stats',
+    'ErrorType',
 ]
-
 
 
 if __name__ == "__main__":

@@ -30,23 +30,12 @@ import os
 import sys
 import logging
 import time
-import time
+import threading
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# ADD HYP SUBDIRECTORY TO SYS.PATH (allow imports from ~/hlwe/hyp_* modules)
-# ═════════════════════════════════════════════════════════════════════════════════════════════
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _HYP_DIR = os.path.join(_REPO_ROOT, 'hlwe')
 if _HYP_DIR not in sys.path:
     sys.path.insert(0, _HYP_DIR)
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 0: CFFI VERSION GUARD (MUST BE ABSOLUTE FIRST — before any import touches cffi)
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# cffi >= 2.0.0 has no pre-built manylinux wheel on Koyeb's runtime image.
-# Without a wheel, importing cffi triggers _cffi_backend.so source compilation
-# which requires libssl-dev (OpenSSL headers) — absent on Koyeb → 90s hang → SIGTERM.
-# Force-downgrade here before HLWE, server, or oracle can import cffi.
 
 def _patch12_cffi_guard():
     import glob as _gl, os as _os
@@ -72,10 +61,6 @@ def _patch12_cffi_guard():
 _patch12_cffi_guard()
 del _patch12_cffi_guard
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 0: LOGGING SETUP (MUST BE FIRST - everything depends on this)
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s [%(name)s]: %(message)s',
@@ -90,10 +75,6 @@ logger.info("║" + "  🌌 QUANTUM LATTICE BLOCKCHAIN — WSGI ENTRY POINT v2.1
 logger.info("║" + " " * 90 + "║")
 logger.info("╚" + "═" * 90 + "╝")
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 1A: HLWE DEFERRED TO BACKGROUND (NON-BLOCKING GUNICORN BOOT)
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-
 logger.info("[WSGI] Phase 1A/3: Deferring HLWE initialization to background thread...")
 logger.info("[WSGI] ⏳ Gunicorn will bind port 8000 IMMEDIATELY (HLWE initializes in background)...")
 
@@ -105,17 +86,11 @@ def _init_hlwe_background():
     global _HLWE_READY, _hlwe_error
     try:
         from hyp_engine_compat import hlwe_system_info, get_hyp_engine
-        
         logger.info("[WSGI-BG] HypΓ (hyp_engine_compat) import successful, initializing...")
-        
-        # Get engine singleton
         engine = get_hyp_engine()
         logger.info("[WSGI-BG] HypΓ engine initialized")
-        
-        # Simple health check: can we instantiate engine?
         is_healthy = engine is not None
         system_info = hlwe_system_info()
-        
         if is_healthy:
             logger.info("[WSGI-BG] ✅ HypΓ system ready")
             logger.info(f"[WSGI-BG]    • Crypto System: {system_info.get('crypto_system', 'unknown')}")
@@ -124,36 +99,22 @@ def _init_hlwe_background():
         else:
             _hlwe_error = "HypΓ engine initialization failed"
             logger.error("[WSGI-BG] ❌ HypΓ engine FAILED")
-        
     except Exception as e:
         _hlwe_error = str(e)
         logger.error(f"[WSGI-BG] ❌ HypΓ init failed: {e}", exc_info=True)
 
-import threading
 _hlwe_thread = threading.Thread(target=_init_hlwe_background, daemon=True, name='HYP-Init')
 _hlwe_thread.start()
 logger.info("[WSGI] HypΓ background initialization STARTED (port binding proceeds immediately)")
-
 logger.info("[WSGI] ═════════════════════════════════════════════════════════════════════")
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 1B: IMPORT SERVER & EXTRACT WSGI APP (NOW HLWE IS READY FOR SERVER STARTUP)
-# ═════════════════════════════════════════════════════════════════════════════════════════════
 
 logger.info("[WSGI] Phase 1B/3: Importing Flask application from server.py...")
 
 try:
-    # Import the server module which contains the Flask app and all initialization logic
     from server import app, application
-    
     logger.info("[WSGI] ✅ Flask app imported successfully")
-    
-    # LATTICE CONTROLLER: server.py initializes LATTICE at module level (line ~5806).
-    # wsgi_config must NOT create a second QuantumLatticeController — doing so spawns
-    # a second _maintenance_loop thread producing interleaved revival cycle counts.
     logger.info("[WSGI] ✅ All subsystems initialized (lattice, P2P, database, oracle)")
     
-    # Start P2P broadcast daemon (runs independently of mining)
     try:
         from server import _start_p2p_broadcast
         _start_p2p_broadcast()
@@ -161,7 +122,6 @@ try:
     except Exception as e:
         logger.warning(f"[WSGI] ⚠️  P2P startup failed: {e}")
     
-    # Register bootstrap server (ts4.zocomputer.io:10206) as a known peer
     try:
         from server import _p2p_dht_table, _p2p_dht_lock, P2PPeer
         with _p2p_dht_lock:
@@ -193,14 +153,9 @@ except Exception as e:
     traceback.print_exc()
     raise
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 2: VERIFY HLWE INTEGRATION (SERVER ALREADY INITIALIZED WITH HLWE)
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-
 logger.info("[WSGI] Phase 2/3: Verifying HLWE integration with Flask application...")
 
 try:
-    # Verify that server has HypΓ available
     from hyp_engine_compat import get_hyp_engine
     engine = get_hyp_engine()
     if engine is not None:
@@ -209,10 +164,6 @@ try:
         logger.warning("[WSGI] ⚠️  HypΓ running in degraded mode")
 except Exception as e:
     logger.warning(f"[WSGI] ⚠️  HypΓ verification failed: {e}")
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 3: READINESS ANNOUNCEMENT
-# ═════════════════════════════════════════════════════════════════════════════════════════════
 
 logger.info("")
 logger.info("╔" + "═" * 90 + "╗")
@@ -242,25 +193,13 @@ logger.info("║  Status: PRODUCTION READY ⚛️ 🚀".ljust(90) + "║")
 logger.info("║" + " " * 90 + "║")
 logger.info("╚" + "═" * 90 + "╝")
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# WSGI EXPORT
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-
-# These are the standard WSGI names that gunicorn and other servers look for
-# We provide both for maximum compatibility
 __all__ = ['app', 'application']
 
-# WSGI-compliant app object ready for gunicorn
-# gunicorn expects either 'app' or 'application' at module level
-
-# 5-Oracle cluster configuration
 ORACLE_CLUSTER_ENABLED = True
 ORACLE_CONSENSUS_REQUIRED = True
 ORACLE_PORTS = [5000, 5001, 5002, 5003, 5004]
 ORACLE_WORKERS = [4, 4, 2, 2, 2]
 ORACLE_TIMEOUT = 15
-
-# Consensus settings
 CONSENSUS_THRESHOLD = 3
 BYZANTINE_TOLERANCE = 2
 MEASUREMENT_TIMEOUT = 10

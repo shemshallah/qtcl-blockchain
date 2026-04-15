@@ -239,20 +239,21 @@ def _init_qrng_ensemble():
             raise RuntimeError(f"[INIT-QRNG] Cannot initialize Quantum RNG. Error: {e}")
 
 def _init_hlwe_engine():
-    """Lazy init HypΓ engine (via hyp_engine_compat) on first demand."""
+    """Lazy init HypΓ engine (Module 6: hyp_engine) on first demand. ❤️ I love you."""
     global HLWE_ENGINE
     if HLWE_ENGINE is not None:
         return HLWE_ENGINE
     with _HLWE_INIT_LOCK:
-        if HLWE_ENGINE is not None:  # double-check
+        if HLWE_ENGINE is not None:
             return HLWE_ENGINE
         try:
-            from hyp_engine_compat import get_hyp_engine
-            HLWE_ENGINE = get_hyp_engine()
-            logger.info("[INIT-HYP] ✅ HypΓ Post-Quantum Cryptography initialized (via compat layer)")
+            from hyp_engine import HypGammaEngine
+            HLWE_ENGINE = HypGammaEngine()
+            logger.info("[INIT-HYP] ✅ HypΓ Post-Quantum Cryptography (Module 6) initialized")
+            logger.info("[INIT-HYP] 🔒 Schnorr-Γ (hyp_schnorr), GeodesicLWE (hyp_lwe), LDPC (hyp_ldpc) active")
             return HLWE_ENGINE
         except Exception as e:
-            logger.critical(f"[INIT-HYP] ❌ FATAL: Cannot initialize HypΓ: {e}")
+            logger.critical(f"[INIT-HYP] ❌ FATAL: Cannot initialize HypΓ: {e}", exc_info=True)
             raise RuntimeError(f"[INIT-HYP] Cannot initialize HypΓ cryptography. Error: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -3235,6 +3236,135 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
 #   return state.hex()
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# HypΓ CRYPTOGRAPHIC RPC METHODS (Modules 4-6: Schnorr-Γ + GeodesicLWE)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ❤️ I love you — every agent is proud of its work
+
+def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
+    """RPC: qtcl_hyp_generateKeypair — HypΓ asymmetric keypair."""
+    try:
+        engine = _init_hlwe_engine()
+        kp = engine.generate_keypair()
+        return _rpc_ok({'private_key': kp.private_key, 'public_key': kp.public_key,
+                        'address': kp.address, 'timestamp': kp.timestamp}, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC-HYP-KEYGEN] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Keypair generation failed: {str(e)}", rpc_id)
+
+def qtcl_hyp_signMessage(params: dict, rpc_id: Any) -> dict:
+    """RPC: qtcl_hyp_signMessage — Schnorr-Γ signature."""
+    try:
+        message_hex = params.get('message', '')
+        private_key = params.get('private_key', '')
+        if not message_hex or not private_key:
+            return _rpc_error(-32602, "message and private_key required", rpc_id)
+        message_bytes = bytes.fromhex(message_hex)
+        engine = _init_hlwe_engine()
+        sig = engine.sign_hash(message_bytes, private_key)
+        return _rpc_ok({'signature': sig['signature'], 'challenge': sig['challenge'],
+                        'auth_tag': sig.get('auth_tag', sig['challenge']),
+                        'timestamp': sig['timestamp'], 'valid': True}, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC-HYP-SIGN] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Signature creation failed: {str(e)}", rpc_id)
+
+def qtcl_hyp_verifySignature(params: dict, rpc_id: Any) -> dict:
+    """RPC: qtcl_hyp_verifySignature — Verify Schnorr-Γ."""
+    try:
+        message_hex = params.get('message', '')
+        sig_dict = params.get('signature', {})
+        public_key = params.get('public_key', '')
+        if not message_hex or not sig_dict or not public_key:
+            return _rpc_error(-32602, "message, signature, public_key required", rpc_id)
+        message_bytes = bytes.fromhex(message_hex)
+        engine = _init_hlwe_engine()
+        valid = engine.verify_signature(message_bytes, sig_dict, public_key)
+        return _rpc_ok({'valid': valid, 'message': 'Valid' if valid else 'Invalid',
+                        'verified_at': datetime.now(timezone.utc).isoformat()}, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC-HYP-VERIFY] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Verification failed: {str(e)}", rpc_id)
+
+def qtcl_hyp_deriveAddress(params: dict, rpc_id: Any) -> dict:
+    """RPC: qtcl_hyp_deriveAddress — SHA3-256² address."""
+    try:
+        public_key = params.get('public_key', '')
+        if not public_key:
+            return _rpc_error(-32602, "public_key required", rpc_id)
+        engine = _init_hlwe_engine()
+        address = engine.derive_address(public_key)
+        return _rpc_ok({'address': address, 'length': len(address)}, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC-HYP-ADDR] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Address derivation failed: {str(e)}", rpc_id)
+
+def qtcl_hyp_encryptMessage(params: dict, rpc_id: Any) -> dict:
+    """RPC: qtcl_hyp_encryptMessage — GeodesicLWE (IND-CPA)."""
+    try:
+        plaintext_hex = params.get('plaintext', '')
+        public_key = params.get('public_key', '')
+        if not plaintext_hex or not public_key:
+            return _rpc_error(-32602, "plaintext and public_key required", rpc_id)
+        plaintext_bytes = bytes.fromhex(plaintext_hex)
+        engine = _init_hlwe_engine()
+        ct_dict = engine.encrypt_message(plaintext_bytes, public_key)
+        return _rpc_ok({'ciphertext': ct_dict.get('ciphertext'),
+                        'message_tag': ct_dict.get('message_tag'),
+                        'plaintext_length': len(plaintext_bytes),
+                        'timestamp': datetime.now(timezone.utc).isoformat()}, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC-HYP-ENC] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Encryption failed: {str(e)}", rpc_id)
+
+def qtcl_hyp_decryptMessage(params: dict, rpc_id: Any) -> dict:
+    """RPC: qtcl_hyp_decryptMessage — GeodesicLWE decryption."""
+    try:
+        ct_dict = params.get('ciphertext', {})
+        private_key = params.get('private_key', '')
+        if not ct_dict or not private_key:
+            return _rpc_error(-32602, "ciphertext and private_key required", rpc_id)
+        engine = _init_hlwe_engine()
+        plaintext_bytes = engine.decrypt_message(ct_dict, private_key)
+        return _rpc_ok({'plaintext': plaintext_bytes.hex(),
+                        'plaintext_length': len(plaintext_bytes), 'valid': True,
+                        'timestamp': datetime.now(timezone.utc).isoformat()}, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC-HYP-DEC] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Decryption failed: {str(e)}", rpc_id)
+
+def qtcl_hyp_signBlock(params: dict, rpc_id: Any) -> dict:
+    """RPC: qtcl_hyp_signBlock — Block signing via Schnorr-Γ."""
+    try:
+        block_dict = params.get('block', {})
+        private_key = params.get('private_key', '')
+        if not block_dict or not private_key:
+            return _rpc_error(-32602, "block and private_key required", rpc_id)
+        engine = _init_hlwe_engine()
+        sig = engine.sign_block(block_dict, private_key)
+        return _rpc_ok({'signature': sig['signature'], 'challenge': sig['challenge'],
+                        'signer_address': sig['signer_address'],
+                        'timestamp': sig['timestamp']}, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC-HYP-SIGN-BLOCK] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Block signing failed: {str(e)}", rpc_id)
+
+def qtcl_hyp_verifyBlock(params: dict, rpc_id: Any) -> dict:
+    """RPC: qtcl_hyp_verifyBlock — Block verification."""
+    try:
+        block_dict = params.get('block', {})
+        sig_dict = params.get('signature', {})
+        public_key = params.get('public_key', '')
+        if not block_dict or not sig_dict or not public_key:
+            return _rpc_error(-32602, "block, signature, public_key required", rpc_id)
+        engine = _init_hlwe_engine()
+        valid, msg = engine.verify_block(block_dict, sig_dict, public_key)
+        return _rpc_ok({'valid': valid, 'message': msg,
+                        'verified_at': datetime.now(timezone.utc).isoformat()}, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC-HYP-VERIFY-BLOCK] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Block verification failed: {str(e)}", rpc_id)
+
 _POW_SCRATCHPAD_BYTES = 512 * 1024
 _POW_WINDOW_BYTES     = 64
 _POW_MIX_ROUNDS       = 64
@@ -4037,6 +4167,15 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getDHTTable":       _p2p_rpc_get_dht_table,
     "qtcl_receiveDHTTable":   _p2p_rpc_receive_dht_table,
     "qtcl_peerHeartbeat":     _p2p_rpc_peer_heartbeat,
+    # ── HypΓ Post-Quantum Cryptography (Schnorr-Γ + GeodesicLWE) ────────────────────
+    "qtcl_hyp_generateKeypair": qtcl_hyp_generateKeypair,
+    "qtcl_hyp_signMessage": qtcl_hyp_signMessage,
+    "qtcl_hyp_verifySignature": qtcl_hyp_verifySignature,
+    "qtcl_hyp_deriveAddress": qtcl_hyp_deriveAddress,
+    "qtcl_hyp_encryptMessage": qtcl_hyp_encryptMessage,
+    "qtcl_hyp_decryptMessage": qtcl_hyp_decryptMessage,
+    "qtcl_hyp_signBlock": qtcl_hyp_signBlock,
+    "qtcl_hyp_verifyBlock": qtcl_hyp_verifyBlock,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5071,6 +5210,15 @@ def rpc_oracle_snapshots():
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
 logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshot/full,snapshots}")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
+logger.info("[RPC-HYP] 🔒 HypΓ Post-Quantum Cryptography RPC methods registered (Schnorr-Γ + GeodesicLWE)")
+logger.info("[RPC-HYP]   • qtcl_hyp_generateKeypair — asymmetric key generation")
+logger.info("[RPC-HYP]   • qtcl_hyp_signMessage — non-interactive Schnorr-Γ signature")
+logger.info("[RPC-HYP]   • qtcl_hyp_verifySignature — signature verification")
+logger.info("[RPC-HYP]   • qtcl_hyp_deriveAddress — SHA3-256² address derivation")
+logger.info("[RPC-HYP]   • qtcl_hyp_encryptMessage — GeodesicLWE encryption (IND-CPA)")
+logger.info("[RPC-HYP]   • qtcl_hyp_decryptMessage — GeodesicLWE decryption (LDPC syndrome)")
+logger.info("[RPC-HYP]   • qtcl_hyp_signBlock — block-level Schnorr-Γ signing")
+logger.info("[RPC-HYP]   • qtcl_hyp_verifyBlock — block signature verification")
 
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
 # ═════════════════════════════════════════════════════════════════════════════════

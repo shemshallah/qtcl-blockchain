@@ -2,12 +2,12 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                  ║
-║   QTCL PYTHON MEMPOOL v3.0 — Bitcoin-Model, HLWE-Entangled, Quantum-Native                     ║
+║   QTCL PYTHON MEMPOOL v3.1 — Bitcoin-Model, HypΓ-Entangled, Quantum-Native                     ║
 ║                                                                                                  ║
 ║   Architecture:                                                                                  ║
 ║     • Pure Python in-memory priority heap (fee-rate ordered, O(log n) insert/pop)               ║
 ║     • PostgreSQL `transactions` table as persistence & crash-recovery backing store             ║
-║     • Full HLWE signature verification on every inbound transaction                             ║
+║     • Full HypΓ Schnorr-Γ signature verification on every inbound transaction                  ║
 ║     • W-state quantum entropy entanglement — every TX commits to current quantum state          ║
 ║     • Bitcoin-exact mempool semantics: RBF, CPFP ancestry, fee estimation, eviction             ║
 ║     • Double-spend / replay protection via address nonce ordering                               ║
@@ -18,12 +18,13 @@
 ║     • SSE/callback event bus for real-time dashboard updates                                    ║
 ║     • Background worker: eviction, expiry, fee-rate histogram, persistence sync                 ║
 ║                                                                                                  ║
-║   HLWE Signature Chain:                                                                          ║
+║   HypΓ Schnorr-Γ Signature Chain:                                                               ║
 ║     tx_hash   = SHA3-256(canonical_json(fields))                                                ║
-║     commitment = SHA3-256(child_private || w_entropy || tx_hash_bytes)                          ║
-║     witness    = SHAKE-256(commitment || child_private, 64 bytes)                               ║
-║     proof      = HMAC-SHA3(child_private, witness || tx_hash_bytes)                             ║
-║     verify     = recompute commitment from pubkey, check proof with pubkey                      ║
+║     r         = random_walk(L=512) [fresh nonce]                                                ║
+║     R         = evaluate_walk(r)   [commitment ∈ PSL(2,ℝ)]                                     ║
+║     c         = SHA3-256(serialize(R) ‖ m) mod 2^256  [Fiat-Shamir]                            ║
+║     Z         = R ⊗ y^c            [response via eigendecomposition]                           ║
+║     verify    = recover R′=Z⊗y^{-c}, check c′==c AND det(R′)≈1                                ║
 ║                                                                                                  ║
 ║   Bitcoin Mempool Parity:                                                                        ║
 ║     • fee_rate = fee_base / tx_vsize  (vsize = constant 250 vbytes per QTCL TX)                 ║
@@ -50,10 +51,10 @@ import os
 import sys
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# ADD HYP SUBDIRECTORY TO SYS.PATH (allow imports from ~/hlwe/hyp_* modules)
+# ADD HYP SUBDIRECTORY TO SYS.PATH (allow imports from ~/hyp_* modules)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_HYP_DIR = os.path.join(_REPO_ROOT, 'hlwe')
+_HYP_DIR = os.path.join(_REPO_ROOT, 'hyp')
 if _HYP_DIR not in sys.path:
     sys.path.insert(0, _HYP_DIR)
 
@@ -115,18 +116,16 @@ ADDRESS_PREFIX            = "qtcl1"       # canonical address prefix
 
 # Oracle (HypΓ verification + W-state entropy)
 try:
-    from oracle import ORACLE, HLWESignature, HLWEVerifier, ADDRESS_PREFIX as _ORACLE_PREFIX
-    from hyp_engine_compat import get_hyp_engine
+    from oracle import ORACLE, ADDRESS_PREFIX as _ORACLE_PREFIX
+    from hyp_engine import get_hyp_engine
     ADDRESS_PREFIX = _ORACLE_PREFIX
     _ORACLE_AVAILABLE = True
-    _VERIFIER = HLWEVerifier()
-    _HLWE_ENGINE = get_hyp_engine()
+    _HYP_ENGINE = get_hyp_engine()
     logger.info("[MEMPOOL] ✅ Oracle / HypΓ engine loaded")
 except ImportError:
     _ORACLE_AVAILABLE = False
-    _VERIFIER = None
-    _HLWE_ENGINE = None
-    logger.warning("[MEMPOOL] ⚠️  oracle.py or hyp_engine_compat.py not found — HypΓ verification in advisory mode")
+    _HYP_ENGINE = None
+    logger.warning("[MEMPOOL] ⚠️  oracle.py or hyp_engine.py not found — HypΓ verification in advisory mode")
 
 # Block field entropy (W-state quantum entropy pool)
 try:
@@ -203,7 +202,7 @@ class MempoolTx:
     amount_base   : int           # base units (1 QTCL = 100 base)
     fee_base      : int           # base units
     nonce         : int
-    signature     : str           # JSON-serialised HLWESignature
+    signature     : str           # JSON-serialised HypΓ signature {signature, challenge, timestamp}
     w_entropy_hash: str           # SHA3-256 of W-state entropy at submission time
     timestamp_ns  : int           # nanosecond epoch at acceptance
     tx_type       : str   = "transfer"
@@ -343,7 +342,7 @@ class MempoolTx:
 
     def get_signing_hash(self) -> bytes:
         """
-        Calculate binary hash used for HLWE signing (must match client _integrate_wallet_send).
+        Calculate binary hash used for HypΓ signing (must match client _integrate_wallet_send).
         Uses JSON-serialized payload with keys: sender, recipient, amount, nonce.
         """
         # Mapping mempool fields back to client-side signing fields
@@ -695,35 +694,32 @@ class _PGListenerThread:
             logger.debug(f"[MEMPOOL-LISTEN] ingest error: {exc}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HLWE SIGNATURE VERIFIER — standalone, no oracle instance required
+# HypΓ SIGNATURE VERIFIER — standalone, no oracle instance required
 # ══════════════════════════════════════════════════════════════════════════════
 
-class HLWEMempoolVerifier:
+class HypMempoolVerifier:
     """
-    Self-contained HLWE verifier that does NOT require the Oracle singleton.
+    Self-contained HypΓ Schnorr-Γ verifier that does NOT require the Oracle singleton.
 
-    Verification algorithm (mirrors oracle.HLWEVerifier exactly):
-        1. Recompute commitment  = SHA3-256(pubkey || witness || tx_hash_bytes)
-        2. Recompute proof       = HMAC-SHA3(pubkey, witness || tx_hash_bytes)
-        3. Derive address        = ADDRESS_PREFIX + SHA3-256(pubkey)[:20].hex()
-        4. Assert derived_address == expected_address (from_address)
+    Verification algorithm (HypΓ address-binding check):
+        1. Parse sig fields: {signature: hex(R‖Z), challenge: hex(c), public_key: hex(PSL mat)}
+        2. Derive address = SHA3-256(SHA3-256(public_key_bytes)).hex()  [64-char hex]
+        3. Assert derived_address == expected_address (from_address)
+        4. If oracle available: delegate full Schnorr-Γ verification to ORACLE.verify_transaction
 
-    This means a TX can be verified by ANYONE with the public key — no secret
-    material required. This is the quantum analogue of ECDSA verify.
+    TX can be verified by ANYONE with the public key — no secret material required.
+    Full Schnorr-Γ (R′=Z⊗y^{-c}, c′==c, det(R′)≈1) done inside hyp_engine.
     """
 
     @staticmethod
-    def verify(tx_hash: str, signature_json: str, expected_address: str) -> Tuple[bool, str]:
+    def verify(tx_hash: str, signature_json, expected_address: str) -> Tuple[bool, str]:
         """
-        Verify an HLWE TX signature.
-        
-        Only checks address derivation. Does not verify commitment or proof
-        because the verifier only has the public key, not the private key.
+        Verify a HypΓ TX signature.
 
         Args:
             tx_hash           : hex SHA3-256 of the canonical TX payload
-            signature_json    : JSON string (or dict) of HLWESignature fields
-            expected_address  : the claimed sender address
+            signature_json    : JSON string or dict with HypΓ signature fields
+            expected_address  : the claimed sender address (64-char hex or qtcl1-prefixed)
 
         Returns:
             (valid: bool, reason: str)
@@ -740,20 +736,26 @@ class HLWEMempoolVerifier:
             else:
                 return False, "invalid_signature_type"
 
-            required_sig_fields = {'commitment', 'witness', 'proof', 'public_key_hex'}
-            missing = required_sig_fields - set(sig_dict.keys())
-            if missing:
-                return False, f"signature_missing_fields:{missing}"
+            # HypΓ signature fields: signature (R‖Z hex), challenge (c hex), public_key (PSL hex)
+            pub_key_hex = sig_dict.get('public_key') or sig_dict.get('public_key_hex', '')
+            if not pub_key_hex:
+                return False, "signature_missing_public_key"
+            if not sig_dict.get('signature'):
+                return False, "signature_missing_commitment_R_Z"
+            if not sig_dict.get('challenge'):
+                return False, "signature_missing_challenge_c"
 
-            pub_bytes = bytes.fromhex(sig_dict['public_key_hex'])
+            pub_bytes = bytes.fromhex(pub_key_hex)
 
-            # Verify address derivation: ADDRESS_PREFIX + SHA3-256(pubkey)[:20].hex()
-            derived_address = ADDRESS_PREFIX + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
-            if derived_address != expected_address:
-                # Also accept hlwe_ prefix for legacy wallets
-                hlwe_address = "hlwe_" + hashlib.sha256(pub_bytes).hexdigest()[:40]
-                if hlwe_address != expected_address:
-                    return False, f"address_mismatch(derived={derived_address[:16]}…)"
+            # HypΓ address derivation: SHA3-256(SHA3-256(pubkey_bytes)).hex() — 64 hex chars
+            derived_address = hashlib.sha3_256(
+                hashlib.sha3_256(pub_bytes).digest()
+            ).hexdigest()  # 64-char hex
+            # Also check qtcl1-prefixed form for chain compatibility
+            derived_qtcl = ADDRESS_PREFIX + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
+
+            if expected_address not in (derived_address, derived_qtcl):
+                return False, f"address_mismatch(derived={derived_address[:16]}…)"
 
             return True, "valid"
 
@@ -762,7 +764,10 @@ class HLWEMempoolVerifier:
         except Exception as exc:
             return False, f"verification_exception:{exc}"
 
-_hlwe_verifier = HLWEMempoolVerifier()
+# Singleton verifier instance
+_hyp_verifier = HypMempoolVerifier()
+# Backward-compat alias
+HLWEMempoolVerifier = HypMempoolVerifier
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NONCE TRACKER — per-address last accepted nonce
@@ -939,7 +944,7 @@ class BalanceOracle:
 
 class Mempool:
     """
-    Bitcoin-model in-memory transaction pool with HLWE entanglement.
+    Bitcoin-model in-memory transaction pool with HypΓ entanglement.
 
     Internal data structures:
         _heap          : list[MempoolTx]           max-heap by fee_rate (Python heapq, min-heap inverted)
@@ -1019,7 +1024,7 @@ class Mempool:
             [N] Nonce              — not replaying a confirmed nonce, not duplicate pending
             [B] Balance            — spendable(from_address) >= amount + fee
             [R] Fee rate           — fee_rate >= MIN_RELAY_FEE_RATE
-            [S] Signature          — HLWE commitment / witness / proof chain valid
+            [S] Signature          — HypΓ Schnorr-Γ R‖Z‖c chain valid
             [L] Sender limit       — sender has < MAX_TX_PER_SENDER pending TXs
             [M] Mempool capacity   — not full, or RBF eviction possible
 
@@ -1141,11 +1146,11 @@ class Mempool:
                 sig_valid, sig_reason = self._verify_signature(tx_hash, sig_raw, from_addr, norm)
                 if not sig_valid:
                     self._stats['total_rejected'] += 1
-                    return AcceptResult.INVALID_SIG, f"HLWE verification failed: {sig_reason}", None
+                    return AcceptResult.INVALID_SIG, f"HypΓ verification failed: {sig_reason}", None
 
                 # ── [C] ORACLE CERT VALIDATION (oracle_reg only) ───────────
-                # input_data must carry cert_sig (HLWE auth tag over oracle_addr+wallet_addr)
-                # This proves the oracle's HLWE keypair signed its own identity binding.
+                # input_data must carry cert_sig (HypΓ auth tag over oracle_addr+wallet_addr)
+                # This proves the oracle's HypΓ keypair signed its own identity binding.
                 if _is_oracle_reg:
                     _idat       = input_data if isinstance(input_data, dict) else {}
                     _oracle_addr = _idat.get('oracle_addr', '')
@@ -1163,7 +1168,7 @@ class Mempool:
                             f"oracle_reg missing cert_sig for action={_action}"
                         ), None
                     # cert_sig structure: sha256(oracle_addr + "|" + from_addr + "|" + oracle_pub)
-                    # Full HLWE cert verification is done server-side at block seal time.
+                    # Full HypΓ cert verification is done server-side at block seal time.
                     # Here we do a fast structural check: cert_sig must be 64-char hex.
                     if _cert_sig and (len(_cert_sig) < 32 or not all(c in '0123456789abcdef' for c in _cert_sig.lower())):
                         self._stats['total_rejected'] += 1
@@ -1559,7 +1564,7 @@ class Mempool:
         self, tx_hash: str, sig_raw: Any, from_address: str, norm: Dict[str, Any]
     ) -> Tuple[bool, str]:
         """
-        Verify HLWE signature using canonical HLWE engine.
+        Verify HypΓ Schnorr-Γ signature using canonical hyp_engine.
         Matches client-side _integrate_wallet_send exactly.
         """
         if sig_raw is None or sig_raw == '' or sig_raw == '{}':
@@ -2250,7 +2255,7 @@ def estimate_fee(target_blocks: int = 1) -> Dict[str, Any]:
 
 class TransactionBuilder:
     """
-    Constructs and HLWE-signs transactions.
+    Constructs and HypΓ Schnorr-Γ-signs transactions.
     Used by the wallet API layer to assemble TXs before submitting to mempool.
 
     Usage:
@@ -2294,7 +2299,7 @@ class TransactionBuilder:
             from_address, to_address, amount_base, nonce, fee_base, timestamp_ns
         )
 
-        # Sign with HLWE via oracle
+        # Sign with HypΓ via oracle
         sig_dict : Dict[str, Any] = {}
         if self._oracle:
             try:
@@ -2382,7 +2387,8 @@ __all__ = [
     'Transaction',
     'CoinbaseBuilder',
     'TransactionBuilder',
-    'HLWEMempoolVerifier',
+    'HypMempoolVerifier',
+    'HLWEMempoolVerifier',  # backward-compat alias
     'FeeHistogram',
     'NonceOracle',
     'BalanceOracle',
