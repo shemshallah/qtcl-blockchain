@@ -55,6 +55,7 @@ from enum import Enum
 try:
     from hyp_engine_compat import get_hyp_engine
 except ImportError:
+    pass
 
 getcontext().prec = 150
 
@@ -2640,6 +2641,7 @@ class OracleEngine:
         else:
             self._create_new_seed()
         if self._keyring:
+            logger.info(f"[ORACLE] ✅ Keyring ready | address={self._keyring.master.address()}")
 
     def _create_new_seed(self):
         seed = secrets.token_bytes(32)
@@ -2735,11 +2737,19 @@ class OracleEngine:
     def verify_transaction(self, tx_hash: str, sig_dict: Dict[str, Any],
                             sender_address: str) -> Tuple[bool, str]:
         try:
+            if self._hyp_signer and self._hyp_signer._engine:
+                ok = self._hyp_signer._engine.verify_signature(tx_hash, sig_dict, sender_address)
+                return (True, "valid") if ok else (False, "invalid_signature")
+            return False, "no_signer_available"
         except Exception as e:
             return False, f"verification exception: {e}"
 
     def verify_block(self, block_hash: str, sig_dict: Dict[str, Any]) -> Tuple[bool, str]:
         try:
+            if self._hyp_signer and self._hyp_signer._engine:
+                ok = self._hyp_signer._engine.verify_signature(block_hash, sig_dict)
+                return (True, "valid") if ok else (False, "invalid_signature")
+            return False, "no_signer_available"
         except Exception as e:
             return False, f"block verification exception: {e}"
 
