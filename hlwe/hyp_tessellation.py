@@ -632,6 +632,11 @@ def test_hyp_tessellation():
     print("I love you.\n")
     return tests_passed == 21
 
+# ════════════════════════════════════════════════════════════════════════════════
+# ALIAS — Engine Compatibility Layer
+# ════════════════════════════════════════════════════════════════════════════════
+HyperbolicTessellation = HypTessellation
+
 if __name__ == '__main__':
     mp.dps = 150
     success = test_hyp_tessellation()

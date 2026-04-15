@@ -197,8 +197,22 @@ try:
                         fabs, acos, atan2, nstr, almosteq, acosh, re, im, conj,
                         mpjii, fmod, ceil, floor)
     arctanh = atanh
+    MPMATH_AVAILABLE = True
 except ImportError:
-    raise ImportError("mpmath required: pip install mpmath")
+    logger = logging.getLogger(__name__)
+    logger.warning("[HYP-LWE] mpmath not installed; GeodesicLWE will not initialize. pip install mpmath")
+    MPMATH_AVAILABLE = False
+    # Define stubs for graceful degradation
+    class mpf: pass
+    class mpc: pass
+    class mp: dps = 150
+    def sqrt(x): return x**0.5
+    def exp(x): return 2.718**x
+    def log(x): return float('inf')
+    def acosh(x): return float('inf')
+    mpmatrix = None
+    mpeye = None
+    arctanh = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PRECISION ARCHITECTURE — mp.dps = 150 throughout, NEVER reduce

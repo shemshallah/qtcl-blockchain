@@ -1684,3 +1684,55 @@ if __name__ == '__main__':
         sys.exit(1)
 
     print("\n✅ hyp_schnorr.py ready — proceed to hyp_lwe.py (Module 5 of 6)\n")
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# SCHNORRGAMMA CLASS — Unified API Facade
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# Auto-generated compatibility layer: wraps module-level functions into a stateless class.
+# This allows hyp_engine.py to instantiate SchnorrGamma() and call methods directly.
+
+class SchnorrGamma:
+    """
+    HypΓ Schnorr-Γ Cryptosystem — Unified API Facade.
+    Stateless wrapper around module functions.
+    """
+    
+    def keygen(self) -> SchnorrKeyPair:
+        """Generate a random Schnorr-Γ key pair."""
+        return keygen()
+    
+    def keygen_from_walk(self, private_walk: List[int]) -> SchnorrKeyPair:
+        """Regenerate key pair from existing private walk."""
+        return keygen_from_walk(private_walk)
+    
+    def sign(self, message: bytes, private_walk: List[int], public_key: PSLMatrix) -> SchnorrSignature:
+        """Sign a message with a private walk."""
+        return sign(message, private_walk, public_key)
+    
+    def verify(self, sig: SchnorrSignature, message: bytes, public_key: PSLMatrix) -> VerifyResult:
+        """Verify a Schnorr-Γ signature."""
+        return verify(sig, message, public_key)
+    
+    def verify_simulation(self, sig: SchnorrSignature, public_key: PSLMatrix) -> bool:
+        """Run HVZK simulator check on signature."""
+        return verify_simulation(sig, public_key)
+    
+    def signature_to_dict(self, sig: SchnorrSignature) -> Dict[str, Any]:
+        """Serialize signature to JSON-compatible dict."""
+        return signature_to_dict(sig)
+    
+    def signature_from_dict(self, d: Dict[str, Any]) -> SchnorrSignature:
+        """Deserialize signature from dict."""
+        return signature_from_dict(d)
+    
+    def sign_message_dict(self, message: Union[str, bytes], 
+                         kp: SchnorrKeyPair) -> Dict[str, Any]:
+        """Sign message and return full sig dict."""
+        return sign_message_dict(message, kp)
+    
+    def verify_message_dict(self, sig_dict: Dict[str, Any], 
+                           message: Union[str, bytes], 
+                           public_key: PSLMatrix) -> bool:
+        """Verify signature from dict."""
+        return verify_message_dict(sig_dict, message, public_key)
