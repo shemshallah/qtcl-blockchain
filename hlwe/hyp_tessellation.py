@@ -636,6 +636,7 @@ def test_hyp_tessellation():
 # ALIAS — Engine Compatibility Layer
 # ════════════════════════════════════════════════════════════════════════════════
 HyperbolicTessellation = HypTessellation
+TessellationCell = HypTriangle
 
 if __name__ == '__main__':
     mp.dps = 150

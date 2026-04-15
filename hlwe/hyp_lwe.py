@@ -253,9 +253,9 @@ except ImportError as e:
     _HYP_LDPC_AVAILABLE = False
 
 if not (_HYP_GROUP_AVAILABLE and _HYP_TESS_AVAILABLE and _HYP_LDPC_AVAILABLE):
-    raise ImportError(
-        "GeodesicLWE requires: hyp_group.py, hyp_tessellation.py, hyp_ldpc.py\n"
-        "Ensure all modules are in PYTHONPATH or current directory."
+    logger.warning(
+        "[HYP-LWE] GeodesicLWE requires: hyp_group.py, hyp_tessellation.py, hyp_ldpc.py\n"
+        "Continuing without GeodesicLWE support. Engine will run degraded."
     )
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -482,8 +482,8 @@ class GeodesicLWE:
     """
     
     def __init__(self, tessellation: Optional[Any] = None,
-                 ldpc_code: Optional[LDPCCode] = None,
-                 sigma: float = SIGMA_DEFAULT):
+                 ldpc_code: Optional[Any] = None,
+                 sigma: float = 2.5):
         """
         Initialize GeodesicLWE with tessellation and LDPC code.
         
@@ -496,7 +496,11 @@ class GeodesicLWE:
             ImportError: if required modules unavailable
         """
         if not (_HYP_GROUP_AVAILABLE and _HYP_TESS_AVAILABLE and _HYP_LDPC_AVAILABLE):
-            raise ImportError("GeodesicLWE requires all hyp_*.py modules")
+            logger.warning("[GeodesicLWE] Degraded mode: missing hyp modules")
+            self.sigma = sigma
+            self.tessellation = None
+            self.ldpc_code = None
+            return
         
         self.sigma = sigma
         self.lock = threading.RLock()

@@ -1806,3 +1806,9 @@ if __name__ == '__main__':
     print(f"  vol(B_{{dₕ(z,w)}}) = {nstr(vol, 12)}")
 
     print("\n✅ hyp_group.py ready for hyp_tessellation.py\n")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# COMPATIBILITY ALIASES
+# ════════════════════════════════════════════════════════════════════════════════
+serialize_walk = walk_to_bytes
+deserialize_walk = bytes_to_walk
