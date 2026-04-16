@@ -131,9 +131,8 @@ try:
 except ImportError:
     ENTROPY_AVAILABLE = False
     def get_block_field_entropy():
-        """Fallback: use random entropy"""
-        import os
-        return os.urandom(32)
+        """Quantum entropy only—FAIL-FAST if unavailable"""
+        raise RuntimeError("[LATTICE] Block field entropy pool unavailable. QTCL requires quantum entropy sources.")
     def get_entropy_pool_manager():
         """Stub for compatibility"""
         return None

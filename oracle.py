@@ -663,9 +663,8 @@ _ORACLE_QRNG_INSTANCE = None
 _ORACLE_QRNG_LOCK     = threading.Lock()
 
 def _oracle_qrng_bytes(n: int) -> bytes:
-    """Get QRNG bytes with fast os.urandom fallback when ensemble is degraded."""
+    """Get QRNG bytes — QUANTUM ONLY, fail-fast if ensemble unavailable."""
     global _ORACLE_QRNG_INSTANCE
-    import os as _qos
     if _ORACLE_QRNG_INSTANCE is None:
         with _ORACLE_QRNG_LOCK:
             if _ORACLE_QRNG_INSTANCE is None:
@@ -674,18 +673,17 @@ def _oracle_qrng_bytes(n: int) -> bytes:
                     _ORACLE_QRNG_INSTANCE = QuantumEntropyEnsemble()
                     logger.info("[ORACLE] ✅ QRNG ensemble wired — per-call stochastic channels active")
                 except Exception as _e:
-                    logger.warning(f"[ORACLE] QRNG init failed ({_e}) — using os.urandom")
-                    return _qos.urandom(n)
+                    raise RuntimeError(f"[ORACLE] QRNG ensemble unavailable: {_e}. Cannot proceed without quantum entropy.")
     try:
-        # Check if all circuit breakers are open — if so skip network wait
+        # Check if all circuit breakers are open — error instead of fallback
         if hasattr(_ORACLE_QRNG_INSTANCE, '_sources'):
             live = [s for s in _ORACLE_QRNG_INSTANCE._sources
                     if not getattr(s, '_cb_open', False)]
             if not live:
-                return _qos.urandom(n)   # all CBs open — instant fallback
+                raise RuntimeError("[ORACLE] All QRNG circuit breakers open—quantum entropy sources exhausted.")
         return _ORACLE_QRNG_INSTANCE.get_random_bytes(n)
-    except Exception:
-        return _qos.urandom(n)   # any error → instant os.urandom fallback
+    except Exception as e:
+        raise RuntimeError(f"[ORACLE] QRNG call failed: {e}. Quantum entropy unavailable.")
 
 def _oracle_qrng_gaussian_pair() -> tuple:
     import struct as _s, math as _m
