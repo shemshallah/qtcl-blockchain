@@ -717,8 +717,13 @@ def random_walk(length: int = WALK_LENGTH,
     CANCEL = {0: 1, 1: 0, 2: 3, 3: 2}
 
     if entropy_source is None:
-        # Use secrets module (OS CSPRNG) for cryptographic quality
-        entropy_source = secrets.token_bytes((length + 3) // 4 * 4)
+        # Try QRNG first; fallback to secrets if unavailable
+        try:
+            from globals import get_entropy
+            entropy_source = get_entropy((length + 3) // 4 * 4)
+        except (ImportError, RuntimeError):
+            # Fallback to OS CSPRNG if QRNG unavailable (e.g., offline mode)
+            entropy_source = secrets.token_bytes((length + 3) // 4 * 4)
 
     walk: List[int] = []
     entropy_idx = 0
@@ -727,8 +732,12 @@ def random_walk(length: int = WALK_LENGTH,
     for step in range(length):
         # Draw one byte of entropy and use it to select a generator
         if entropy_idx >= len(entropy_source):
-            # Exhaust — top up entropy
-            entropy_source = secrets.token_bytes(64)
+            # Exhaust — top up entropy from QRNG if available
+            try:
+                from globals import get_entropy
+                entropy_source = get_entropy(64)
+            except (ImportError, RuntimeError):
+                entropy_source = secrets.token_bytes(64)
             entropy_idx = 0
 
         byte = entropy_source[entropy_idx]
