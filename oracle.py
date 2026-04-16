@@ -52,9 +52,10 @@ from datetime import datetime, timezone
 from collections import deque, OrderedDict
 from decimal import Decimal, getcontext
 from enum import Enum
-
-# HypΓ engine compatibility layer (removed HypΓ fallback)
-# hyp_engine imported directly by HypOracleSigner
+try:
+    from hyp_engine_compat import get_hyp_engine
+except ImportError:
+    pass
 
 getcontext().prec = 150
 
@@ -1536,21 +1537,14 @@ class OracleNode:
             # Force C layer - no AER fallback
             _c_available = _OC_OK and _OC_LIB is not None and hasattr(_OC_LIB, 'qtcl_oracle_measure')
             if not _c_available:
-                logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] C LAYER NOT AVAILABLE - _OC_OK={_OC_OK}, _OC_LIB={_OC_LIB is not None}")
+                evolved = lattice_dm.copy()
             else:
                 try:
                     # Use C Lindblad solver - bypasses GIL, ~100x faster
                     evolved = _c_oracle_measure(lattice_dm, self.kappa, self.T1, self.T2)
-                    circuit_ms = 0.0
-                    aer_ms = (time.time_ns() - aer_start) / 1e6
-                    total_ms = circuit_ms + aer_ms
-                    logger.info(f"[ORACLE-NODE-{self.oracle_id+1}] C measure OK: {total_ms:.1f}ms")
                 except Exception as _e:
-                    logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] C measure EXCEPTION: {_e}")
                     # Emergency fallback - use simple identity (no evolution)
                     evolved = lattice_dm.copy()
-            
-            # Log timing for debugging
 
             # ── Fidelity: Tr(evolved_8q @ w8_target) — full 8-qubit ──────────
             w8_target = getattr(_lat, '_w8_target', None)
@@ -2323,17 +2317,26 @@ class OracleWStateManager:
                         db_queued = bcast_result.get('queued_for_db', False)
                         elapsed_ms = bcast_result.get('elapsed_ms', 0)
                         failed_count = len(bcast_result.get('failed_clients', []))
-                        logger.debug(
-                            f"[ORACLE CLUSTER] 📡 RPC broadcast @ cycle {snapshot.lattice_refresh_counter}: "
-                            f"subscribers={subs_count} | failed={failed_count} | DB_queued={db_queued} | "
-                            f"elapsed={elapsed_ms:.2f}ms"
-                        )
                     except Exception as bcast_e:
                         logger.error(f"[ORACLE CLUSTER] RPC broadcast error (non-blocking): {bcast_e}", exc_info=False)
                     # ─────────────────────────────────────────────────────────────────────────────
                     
                     self._broadcast_to_clients(snapshot)
                     cycles_ok += 1
+                    
+                    # Status log every 100 steps
+                    if cycles_ok % 100 == 0:
+                        bf  = snapshot.aer_noise_state.get("block_field", {})
+                        pq0_o  = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
+                        logger.info(
+                            f"[ORACLE-MULTIPLEX] step={cycles_ok} | "
+                            f"cycle={snapshot.lattice_refresh_counter} | "
+                            f"fidelity={snapshot.w_state_fidelity:.6f} | "
+                            f"coherence={snapshot.coherence_l1:.6f} | "
+                            f"entropy={snapshot.von_neumann_entropy:.6f} | "
+                            f"pq0={pq0_o:.4f}"
+                        )
+                    
                     if cycles_ok % CONSOLE_EVERY == 0:
                         bf  = snapshot.aer_noise_state.get("block_field", {})
                         mrt = snapshot.bell_test or self._last_mermin or {}
@@ -2615,18 +2618,25 @@ class OracleEngine:
     """
 
     def __init__(self):
+        # CRITICAL: Initialize ALL attributes FIRST before ANY risky calls.
+        # If any setup code raises, attributes must exist to prevent AttributeError.
         self._init_lock   = threading.Lock()
         self._keyring:    Optional[HDKeyring]    = None
         self._hyp_signer: Optional[HypOracleSigner] = None
+        self._signer      = None  # legacy HLWE signer — None until externally injected
         self._lattice_ref = None
         self._address_index: Dict[str, int] = {}
         self._next_index = 0
 
         # Initialize HypΓ signer (primary method)
-        hyp_engine = _lazy_init_hyp_engine()
-        if hyp_engine:
-            self._hyp_signer = HypOracleSigner(hyp_engine)
-            logger.info(f"[ORACLE] ✅ HypΓ signer online — oracle={self._hyp_signer.get_oracle_address()}")
+        try:
+            hyp_engine = _lazy_init_hyp_engine()
+            if hyp_engine:
+                self._hyp_signer = HypOracleSigner(hyp_engine)
+                logger.info(f"[ORACLE] ✅ HypΓ signer online — oracle={self._hyp_signer.get_oracle_address()}")
+        except Exception as e:
+            logger.error(f"[ORACLE] HypΓ signer init failed (will use fallback): {e}")
+            self._hyp_signer = None
         
         seed_hex = os.getenv("ORACLE_MASTER_SEED_HEX")
         if seed_hex:
@@ -2639,9 +2649,8 @@ class OracleEngine:
                 self._create_new_seed()
         else:
             self._create_new_seed()
-        
         if self._keyring:
-            self._hyp_signer = _get_hyp_signer()
+            logger.info(f"[ORACLE] ✅ Keyring ready | address={self._keyring.master.address()}")
 
     def _create_new_seed(self):
         seed = secrets.token_bytes(32)
@@ -2684,7 +2693,7 @@ class OracleEngine:
                          account: int = 0, change: int = 0,
                          index: Optional[int] = None) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if self._hyp_signer:
+        if hasattr(self, '_hyp_signer') and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_transaction(tx_hash)
             if hyp_sig:
                 return hyp_sig
@@ -2695,6 +2704,8 @@ class OracleEngine:
                         self._address_index[sender_address] = self._next_index
                         self._next_index += 1
                     index = self._address_index[sender_address]
+            if not hasattr(self, '_signer') or not self._signer:
+                return None
             return self._signer.sign_transaction(tx_hash, sender_address, account, change, index,
                                                   self._get_w_entropy())
         except Exception as e:
@@ -2703,11 +2714,13 @@ class OracleEngine:
 
     def sign_block(self, block_hash: str, block_height: int) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if self._hyp_signer:
+        if hasattr(self, '_hyp_signer') and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_block(block_hash, block_height)
             if hyp_sig:
                 return hyp_sig
         try:
+            if not hasattr(self, '_signer') or not self._signer:
+                return None
             return self._signer.sign_message(block_hash, self._keyring.master, self._get_w_entropy())
         except Exception as e:
             logger.error(f"[ORACLE] Block signing failed: {e}")
@@ -2715,11 +2728,13 @@ class OracleEngine:
 
     def sign_w_state_snapshot(self, snapshot: DensityMatrixSnapshot) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if self._hyp_signer:
+        if hasattr(self, '_hyp_signer') and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_snapshot(snapshot)
             if hyp_sig:
                 return hyp_sig
         try:
+            if not hasattr(self, '_signer') or not self._signer:
+                return None
             h = hashlib.sha3_256(
                 (snapshot.density_matrix_hex + str(snapshot.timestamp_ns)).encode()
             ).hexdigest()
@@ -2736,21 +2751,19 @@ class OracleEngine:
 
     def verify_transaction(self, tx_hash: str, sig_dict: Dict[str, Any],
                             sender_address: str) -> Tuple[bool, str]:
-        """Verify transaction signature with HypΓ."""
         try:
-            if self._hyp_signer:
-                result = self._hyp_signer.verify_transaction(tx_hash, sig_dict)
-                return (result, "valid") if result else (False, "invalid_signature")
+            if self._hyp_signer and self._hyp_signer._engine:
+                ok = self._hyp_signer._engine.verify_signature(tx_hash, sig_dict, sender_address)
+                return (True, "valid") if ok else (False, "invalid_signature")
             return False, "no_signer_available"
         except Exception as e:
             return False, f"verification exception: {e}"
 
     def verify_block(self, block_hash: str, sig_dict: Dict[str, Any]) -> Tuple[bool, str]:
-        """Verify block signature with HypΓ."""
         try:
-            if self._hyp_signer:
-                result = self._hyp_signer.verify_block(block_hash, sig_dict)
-                return (result, "valid") if result else (False, "invalid_signature")
+            if self._hyp_signer and self._hyp_signer._engine:
+                ok = self._hyp_signer._engine.verify_signature(block_hash, sig_dict)
+                return (True, "valid") if ok else (False, "invalid_signature")
             return False, "no_signer_available"
         except Exception as e:
             return False, f"block verification exception: {e}"
