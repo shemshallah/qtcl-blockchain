@@ -5137,12 +5137,12 @@ def health_bare():
 @app.route("/ready", methods=["GET"])
 def health_ready():
     """GET /ready — Kubernetes-style readiness probe.
-    
-    Returns 200 if server can accept traffic, 503 if still initializing.
+
+    Returns 200 once Flask is bound and serving.
+    Background initialization (lattice, oracle) continues in daemon threads.
     """
-    if _LATTICE_READY and (_DB_READY or not DATABASE_URL):
-        return "", 200
-    return "", 503
+    # Server is ready immediately once Flask binds — no blocking on background threads
+    return "", 200
 
 
 # ═══ STATIC FILE & ROOT SERVING ═══
