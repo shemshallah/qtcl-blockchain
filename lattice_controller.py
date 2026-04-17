@@ -770,8 +770,11 @@ class QuantumDatabaseConnector:
         self.running = False
         self.lock = threading.RLock()
         self.stats = {'inserts_succeeded': 0, 'inserts_failed': 0, 'queue_depth': 0}
+        self._sqlite_conn = None  # SQLite fallback
         if DB_AVAILABLE:
             self._initialize_pool()
+        # Always initialize SQLite fallback
+        self._init_sqlite()
     
     def _initialize_pool(self):
         """
@@ -811,8 +814,67 @@ class QuantumDatabaseConnector:
         self._db_pool = pool
         logger.info("[DB] QuantumDatabaseConnector: server db_pool injected")
     
+    def _init_sqlite(self):
+        """Initialize SQLite fallback for block persistence."""
+        try:
+            import sqlite3
+            db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'qtcl.db')
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            self._sqlite_conn = sqlite3.connect(db_path, check_same_thread=False)
+            # Create blocks table if not exists
+            self._sqlite_conn.execute("""
+                CREATE TABLE IF NOT EXISTS blocks (
+                    height INTEGER PRIMARY KEY,
+                    block_hash TEXT NOT NULL,
+                    parent_hash TEXT,
+                    w_state_hash TEXT,
+                    hyp_witness TEXT,
+                    timestamp REAL DEFAULT 0,
+                    tx_count INTEGER DEFAULT 0,
+                    merkle_root TEXT DEFAULT '',
+                    difficulty INTEGER DEFAULT 6,
+                    nonce INTEGER DEFAULT 0,
+                    coherence_snapshot REAL DEFAULT 1.0,
+                    fidelity_snapshot REAL DEFAULT 1.0,
+                    finalized INTEGER DEFAULT 0,
+                    finalized_at REAL DEFAULT 0
+                )
+            """)
+            self._sqlite_conn.commit()
+            logger.info(f"[DB] ✅ SQLite fallback initialized: {db_path}")
+        except Exception as e:
+            logger.warning(f"[DB] SQLite fallback init failed: {e}")
+            self._sqlite_conn = None
+    
+    def _sqlite_execute(self, query: str, params: Tuple = None) -> bool:
+        """Execute query on SQLite."""
+        if not self._sqlite_conn:
+            return False
+        try:
+            # Convert PostgreSQL %s placeholders to SQLite ?
+            sql = query.replace('%s', '?')
+            self._sqlite_conn.execute(sql, params or ())
+            self._sqlite_conn.commit()
+            return True
+        except Exception as e:
+            logger.debug(f"[DB-SQLITE] Execute failed: {e}")
+            return False
+    
+    def _sqlite_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
+        """Fetch all results from SQLite."""
+        if not self._sqlite_conn:
+            return []
+        try:
+            sql = query.replace('%s', '?')
+            cursor = self._sqlite_conn.execute(sql, params or ())
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.debug(f"[DB-SQLITE] Fetch failed: {e}")
+            return []
+    
     def execute(self, query: str, params: Tuple = None) -> bool:
-        """Execute query using injected pool or fallback."""
+        """Execute query using injected pool, pool, or SQLite fallback."""
         if self._db_pool:
             conn = None
             try:
@@ -847,11 +909,11 @@ class QuantumDatabaseConnector:
             finally:
                 if conn:
                     self.pool.putconn(conn)
-        logger.warning(f"[DB-EXEC] No pool available for: {query[:80]}...")
-        return False
+        # SQLite fallback
+        return self._sqlite_execute(query, params)
     
     def execute_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
-        """Execute query and fetch all results using injected pool."""
+        """Execute query and fetch all results using injected pool or SQLite fallback."""
         if self._db_pool:
             conn = None
             try:
@@ -882,8 +944,8 @@ class QuantumDatabaseConnector:
             finally:
                 if conn:
                     self.pool.putconn(conn)
-        logger.warning(f"[DB-FETCH] No pool available for: {query[:60]}...")
-        return []
+        # SQLite fallback
+        return self._sqlite_fetch_all(query, params)
     
     def execute(self, query: str, params: Tuple = None) -> bool:
         if not self.pool:
