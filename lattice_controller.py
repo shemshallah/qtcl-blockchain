@@ -2109,6 +2109,7 @@ class QuantumLatticeController:
     
     def _maintenance_loop(self):
         """Perpetual non-Markovian coherence maintenance"""
+        _announce_counter = 0  # Rate-limit announcement spam to every 50 cycles
         while self.running:
             try:
                 # Apply non-Markovian memory effects (quantum evolution at 72ns timescale)
@@ -2148,10 +2149,10 @@ class QuantumLatticeController:
                 # - Non-Markovian noise bath (κ=0.35, T1/T2 realistic)
                 # - Kraus operator decoherence
                 # Natural revivals emerge from quantum memory, not tuning.
-                
+
                 fidelity_pre = self.fidelity
                 coherence_pre = self.coherence
-                
+
                 fidelity_post_evolution = QuantumInformationMetrics.state_fidelity(
                     self.current_density_matrix, self._w8_target
                 )
@@ -2159,7 +2160,7 @@ class QuantumLatticeController:
                     QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix) / 7.0,
                     0.0, 1.0
                 ))
-                
+
                 self.fidelity = fidelity_post_evolution
                 self.coherence = coherence_post_evolution
                 self.w_state_strength = min(1.0, self.coherence * QuantumInformationMetrics.purity(self.current_density_matrix))
@@ -2202,14 +2203,17 @@ class QuantumLatticeController:
                     self.fidelity = QuantumInformationMetrics.state_fidelity(
                         self.current_density_matrix, self._w8_target
                     )
-                    logger.info(
-                        f"[σ-REVIVAL] ⚡ cycle={self.cycle_count} | "
-                        f"F={fidelity_post_evolution:.4f}→{self.fidelity:.4f} | "
-                        f"C={coherence_post_evolution:.4f}→{self.coherence:.4f} | "
-                        f"pump_α={_pump_alpha:.3f} | Δf={self.fidelity - fidelity_post_evolution:+.4f}"
-                    )
+                    # Log only every 50 revival events to reduce spam
+                    _announce_counter += 1
+                    if _announce_counter % 50 == 0:
+                        logger.info(
+                            f"[σ-REVIVAL] ⚡ cycle={self.cycle_count} (×50) | "
+                            f"F={fidelity_post_evolution:.4f}→{self.fidelity:.4f} | "
+                            f"C={coherence_post_evolution:.4f}→{self.coherence:.4f} | "
+                            f"pump_α={_pump_alpha:.3f} | Δf={self.fidelity - fidelity_post_evolution:+.4f}"
+                        )
                     entropy = QuantumInformationMetrics.von_neumann_entropy(self.current_density_matrix)
-                
+
                 # 🔍 ENTANGLEMENT REVIVAL DETECTION (Non-Markovian signature)
                 # Track coherence peaks: when C(t) > C(t-1) after decay → revival detected
                 try:
@@ -2218,12 +2222,15 @@ class QuantumLatticeController:
                         if self.coherence > prev_coherence + 0.01:  # Rising edge (1% threshold)
                             # Check if this is a revival (not just noise)
                             if self.coherence > 0.15:  # Significant coherence
-                                logger.info(
-                                    f"✨ [REVIVAL] Entanglement revival detected! "
-                                    f"Coherence: {prev_coherence:.4f} → {self.coherence:.4f} "
-                                    f"(Δ={self.coherence - prev_coherence:.4f}) "
-                                    f"Fidelity={self.fidelity:.4f} | Non-Markovian signature ✓"
-                                )
+                                # Log only every 50 entanglement revivals to reduce spam
+                                _announce_counter += 1
+                                if _announce_counter % 50 == 0:
+                                    logger.info(
+                                        f"✨ [REVIVAL] Entanglement revival (×50) | "
+                                        f"C: {prev_coherence:.4f}→{self.coherence:.4f} "
+                                        f"(Δ={self.coherence - prev_coherence:.4f}) | "
+                                        f"F={self.fidelity:.4f}"
+                                    )
                 except:
                     pass
                 

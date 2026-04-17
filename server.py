@@ -6239,11 +6239,20 @@ def _fix_pq_values_on_startup():
     except Exception as e:
         logger.warning(f"[PQ-FIX] Could not update pq values: {e}")
 
-# Run on import
-try:
-    _fix_pq_values_on_startup()
-except Exception:
-    pass
+# Defer pq_curr/pq_last sync to background thread to unblock /health endpoint
+def _deferred_pq_fix():
+    """Background thread: Fix pq_curr/pq_last values without blocking Flask init."""
+    try:
+        _fix_pq_values_on_startup()
+    except Exception as e:
+        logger.warning(f"[PQ-FIX] Background sync failed: {e}")
+
+threading.Thread(
+    target=_deferred_pq_fix,
+    daemon=True,
+    name="PQFix",
+).start()
+logger.info("[PQ-FIX] 🔄 Block pq values sync deferred to background thread — /health ready immediately")
 
 # Synchronize mempool database pool with server pool
 try:
