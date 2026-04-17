@@ -6256,15 +6256,23 @@ threading.Thread(
 ).start()
 logger.info("[PQ-FIX] 🔄 Block pq values sync deferred to background thread — /health ready immediately")
 
-# Synchronize mempool database pool with server pool
-try:
-    import mempool as _mp_sync
-    # ⚛️ CRITICAL: Share the server's db_pool with the mempool module
-    # ensures both use the same (possibly HTTP-mode) connection logic.
-    _mp_sync._db = db_pool
-    logger.info("[DB] Mempool database pool synchronized with server (museum-grade sync)")
-except Exception as _sync_err:
-    logger.debug(f"[DB] Mempool sync failed: {_sync_err}")
+# Defer mempool sync to background thread (avoids blocking on DB initialization)
+def _deferred_mempool_sync():
+    """Background thread: Sync mempool DB pool without blocking Flask init."""
+    try:
+        import mempool as _mp_sync
+        # ⚛️ CRITICAL: Share the server's db_pool with the mempool module
+        # ensures both use the same (possibly HTTP-mode) connection logic.
+        _mp_sync._db = db_pool
+        logger.info("[DB] Mempool database pool synchronized with server (museum-grade sync)")
+    except Exception as _sync_err:
+        logger.warning(f"[DB] Mempool sync failed: {_sync_err}")
+
+threading.Thread(
+    target=_deferred_mempool_sync,
+    daemon=True,
+    name="MempoolSync",
+).start()
 
 # ═══ MODULE LOAD COMPLETE ═══
 # Flask app is ready to serve /health immediately
