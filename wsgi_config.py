@@ -2,13 +2,14 @@
 """
 WSGI entry point for Gunicorn/Koyeb.
 
-Loads server module directly - /health is already defined in server.py.
-Lattice and oracle initialize in background threads (non-blocking).
+KEY: /health returns 200 in <100ms. Server loads in background.
+All other endpoints wait for server to load (max 30s).
 """
 
 import os
 import sys
 import time
+import threading
 
 # Add hlwe to path
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -18,13 +19,56 @@ if _HYP_DIR not in sys.path:
 
 _STARTUP = time.time()
 
-print(f"[WSGI] Loading QTCL blockchain server...")
+# ═══ INSTANT HEALTH APP - no heavy imports ═══
+from flask import Flask
 
-# Import server - /health endpoint is defined in server.py
-from server import app, application
+_health_app = Flask('__health__')
 
-print(f"[WSGI] ✅ Server ready at {time.time() - _STARTUP:.1f}s")
-print(f"[WSGI] /health endpoint available immediately")
-print(f"[WSGI] Lattice/oracle initializing in background...")
+@_health_app.route("/health")
+def health():
+    return "", 200
 
-__all__ = ['app', 'application']
+print(f"[WSGI] ✅ /health ready at {time.time() - _STARTUP:.2f}s", flush=True)
+
+# ═══ LOAD SERVER IN BACKGROUND ═══
+_full_app = None
+_load_done = threading.Event()
+
+def _load_server():
+    global _full_app
+    try:
+        print("[WSGI] Loading full server module...", flush=True)
+        from server import app as full_app
+        _full_app = full_app
+        print(f"[WSGI] ✅ Full server loaded at {time.time() - _STARTUP:.1f}s", flush=True)
+    except Exception as e:
+        print(f"[WSGI] ❌ Server load failed: {e}", flush=True)
+    finally:
+        _load_done.set()
+
+# Start loading immediately but don't block
+_thread = threading.Thread(target=_load_server, daemon=True)
+_thread.start()
+
+# ═══ WSGI APP ═══
+def application(environ, start_response):
+    path = environ.get('PATH_INFO', '/')
+    
+    # Health check always instant
+    if path in ('/health', '/health/'):
+        return _health_app(environ, start_response)
+    
+    # Wait for full app (with timeout)
+    _load_done.wait(timeout=30)
+    
+    if _full_app:
+        return _full_app(environ, start_response)
+    
+    # Not ready
+    start_response('503 Service Unavailable', [('Content-Type', 'text/plain')])
+    return [b'Server starting, retry in a few seconds...']
+
+app = application
+
+print(f"[WSGI] ✅ WSGI ready at {time.time() - _STARTUP:.2f}s", flush=True)
+print("[WSGI] /health instant, /rpc waits for full load", flush=True)
