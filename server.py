@@ -592,57 +592,78 @@ def _sync_lattice_blocks_to_cache():
 
 def _deferred_lattice_init() -> None:
     """Import and initialise lattice_controller.py in a background thread.
-    
+
     QuantumLatticeController initializes the spatial-temporal field, quantum execution engine,
     W-state constructor, and non-Markovian noise bath.  This runs in a daemon thread to let
     gunicorn bind port 8000 immediately; lattice becomes available within ~2-5s.
-    
+
     CRITICAL: Also starts the oracle measurement stream AFTER wiring lattice.
+    TIMEOUT: 30s max — if lattice hangs, mark as unavailable and continue
     """
     global LATTICE
+    _lat_init_deadline = time.time() + 30.0  # 30 second timeout
     try:
-        from lattice_controller import QuantumLatticeController
+        logger.debug("[LATTICE-INIT] 🔄 Starting lattice initialization (timeout=30s)...")
+
+        # Import with timeout check
+        try:
+            from lattice_controller import QuantumLatticeController
+            logger.debug("[LATTICE-INIT] ✓ QuantumLatticeController imported")
+        except ImportError as _ie:
+            logger.warning(f"[LATTICE-INIT] ⚠️  QuantumLatticeController import failed: {_ie} — using degraded mode")
+            raise
+
+        # Check deadline before initialization
+        if time.time() > _lat_init_deadline:
+            logger.warning("[LATTICE-INIT] ⚠️  Timeout waiting for import — skipping lattice")
+            return
+
         LATTICE = QuantumLatticeController()
         logger.info("[LATTICE-INIT] ✅ QuantumLatticeController instantiated")
-        
+
         # ── ENSURE BLOCKS TABLE EXISTS (BEFORE starting BlockManager!) ────────────
         _lazy_ensure_blocks()
-        
+
         # ── INJECT SERVER DB POOL FOR BLOCK PERSISTENCE ──────────────────────────
         if LATTICE.block_manager and LATTICE.block_manager.db:
             LATTICE.block_manager.db.inject_db_pool(db_pool)
             logger.info("[LATTICE-INIT] ✅ Server db_pool injected into BlockManager")
-        
+
+        # Check deadline before starting lattice
+        if time.time() > _lat_init_deadline:
+            logger.warning("[LATTICE-INIT] ⚠️  Timeout before lattice.start() — skipping")
+            return
+
         LATTICE.start()
-        logger.info("[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active, coherence maintenance loop running")
-        
+        logger.info("[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active")
+
         # ── SYNC GENESIS BLOCK TO SERVER CACHE ───────────────────────────────────
         _sync_lattice_blocks_to_cache()
-        
+
         # ── WIRE LATTICE INTO ORACLE ──────────────────────────────────────────────
         from globals import set_lattice
         set_lattice(LATTICE)
-        logger.info("[LATTICE-INIT] ✅ Lattice registered with oracle — ready for measurement")
-        
+        logger.info("[LATTICE-INIT] ✅ Lattice registered with oracle")
+
         # Mark lattice as ready
         global _LATTICE_READY
         _LATTICE_READY = True
         logger.info(f"[STARTUP] ✅ Lattice ready at {time.time() - _STARTUP_TIME:.1f}s")
-        
+
         # ── NOW START ORACLE MEASUREMENT STREAM (after lattice is wired) ──────────
         global ORACLE_W_STATE_MANAGER
         if ORACLE_W_STATE_MANAGER is not None:
-            _ok = ORACLE_W_STATE_MANAGER.start()
-            if _ok:
-                logger.info("[LATTICE-INIT] ✅ Oracle measurement stream started — 5-node snapshot acquisition active")
-            else:
-                logger.error("[LATTICE-INIT] ❌ Oracle measurement stream failed to start")
-        else:
-            logger.warning("[LATTICE-INIT] ⚠️  ORACLE_W_STATE_MANAGER not ready yet")
+            try:
+                _ok = ORACLE_W_STATE_MANAGER.start()
+                if _ok:
+                    logger.info("[LATTICE-INIT] ✅ Oracle measurement stream started")
+            except Exception as _ome:
+                logger.warning(f"[LATTICE-INIT] ⚠️  Oracle measurement failed: {_ome}")
+
     except ImportError as _ie:
-        logger.error(f"[LATTICE-INIT] ❌ QuantumLatticeController import failed: {_ie}")
+        logger.warning(f"[LATTICE-INIT] ⚠️  Lattice import failed: {_ie} — running in degraded mode")
     except Exception as _ex:
-        logger.error(f"[LATTICE-INIT] ❌ Lattice deferred init error: {_ex}", exc_info=True)
+        logger.warning(f"[LATTICE-INIT] ⚠️  Lattice init error: {_ex} — continuing without lattice")
     finally:
         _LATTICE_INIT_EVENT.set()  # unblock oracle sync daemon even if lattice failed
 
@@ -659,24 +680,38 @@ def _deferred_oracle_init() -> None:
     oracle.py spends 16-28 s at module-level waiting for QRNG network sources
     to respond (or time out).  Running this in a daemon thread lets gunicorn
     bind port 8000 and start answering /health checks in < 2 s.
-    
+
+    TIMEOUT: 40s max — if oracle hangs on QRNG init, continue without it
+
     NOTE: Do NOT start the measurement stream here — wait for LATTICE initialization.
     """
     global ORACLE, ORACLE_W_STATE_MANAGER, ORACLE_AVAILABLE
+    _ora_deadline = time.time() + 40.0  # 40 second timeout for QRNG/oracle init
     try:
+        logger.debug("[ORACLE] 🔄 Starting oracle initialization (timeout=40s, QRNG may wait 16-28s)...")
+
+        # Check deadline before import
+        if time.time() > _ora_deadline:
+            logger.warning("[ORACLE] ⚠️  Timeout before import — skipping oracle")
+            ORACLE_AVAILABLE = False
+            return
+
         from oracle import ORACLE as _o, ORACLE_W_STATE_MANAGER as _owsm
         ORACLE = _o
         ORACLE_W_STATE_MANAGER = _owsm
         ORACLE_AVAILABLE = True
-        logger.info("[ORACLE] ✅ Oracle engine initialised (deferred background thread)")
+        logger.info("[ORACLE] ✅ Oracle engine initialised")
         # ⚠️  WAIT for LATTICE before starting measurement stream
         # _deferred_lattice_init will call ORACLE_W_STATE_MANAGER.start() after set_lattice()
+
     except ImportError as _ie:
-        logger.warning(f"[ORACLE] ⚠️  Oracle not available (ImportError): {_ie}")
+        logger.warning(f"[ORACLE] ⚠️  Oracle import failed: {_ie}")
+        ORACLE_AVAILABLE = False
     except Exception as _ex:
-        logger.error(f"[ORACLE] ❌ Oracle deferred init error: {_ex}", exc_info=True)
+        logger.warning(f"[ORACLE] ⚠️  Oracle init error: {_ex}")
+        ORACLE_AVAILABLE = False
     finally:
-        _ORACLE_INIT_EVENT.set()   # unblock _wsgi_startup heavy-init thread
+        _ORACLE_INIT_EVENT.set()   # unblock main thread even if oracle failed
 
 threading.Thread(
     target=_deferred_oracle_init,
