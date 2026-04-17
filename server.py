@@ -2589,13 +2589,39 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 result["lattice_error"] = str(le)
 
         # ── WIRE DENSITY_MATRIX_HEX — 256x256->64x64 via shared reducer ─────────
+        # Skip large tensor - use compact w_state_amplitudes instead (128 bytes vs 32KB)
+        # try:
+        #     _tensor_hex = _get_lattice_tensor_hex()
+        #     if _tensor_hex:
+        #         result["density_tensor_hex"] = _tensor_hex
+        #         result["tensor_dim"]         = 32
+        # except Exception as dme:
+        #     logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: DM (non-fatal): {dme}")
+        
+        # ── COMPACT W-STATE AMPLITUDES (8 complex doubles = 256 hex chars) ──────
         try:
-            _tensor_hex = _get_lattice_tensor_hex()
-            if _tensor_hex:
-                result["density_tensor_hex"] = _tensor_hex
-                result["tensor_dim"]         = 32
-        except Exception as dme:
-            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: DM (non-fatal): {dme}")
+            if LATTICE and hasattr(LATTICE, 'current_density_matrix'):
+                dm = LATTICE.current_density_matrix
+                if dm is not None:
+                    # Extract 8 single-excitation amplitudes (indices 1,2,4,8,16,32,64,128)
+                    import struct as _ws
+                    w_indices = [1, 2, 4, 8, 16, 32, 64, 128]
+                    w_amplitudes = []
+                    for idx in w_indices:
+                        if idx < dm.shape[0]:
+                            re = float(dm[idx, idx].real)
+                            im = float(dm[idx, idx].imag)
+                        else:
+                            re, im = 0.0, 0.0
+                        w_amplitudes.append((re, im))
+                    
+                    # Pack as 8 complex doubles = 128 bytes = 256 hex chars
+                    result["w_state_hex"] = b''.join(
+                        _ws.pack('>dd', re, im) for re, im in w_amplitudes
+                    ).hex()
+                    result["w_state_size"] = 8  # 8 qubits
+        except Exception as wse:
+            logger.debug(f"[RPC-METHOD] w_state_hex (non-fatal): {wse}")
 
         # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
         # No fallback — DB is authoritative
