@@ -5406,19 +5406,25 @@ def pyth_oracle_stats():
     return jsonify(po.stats()), 200
 
 def _build_snapshot_payload() -> dict:
-    """Build the full snapshot payload for SSE/polling with MULTIPLEX packet types.
+    """Build compact snapshot payload for fast SSE delivery.
 
-    Tensor format: 32×32×32 float32 volumetric = 262144 hex chars (tensor_dim=32).
-    The 32³ tensor IS the quantum state. No 2D density matrix is transmitted.
+    Format: 4×4×4 float32 volumetric = 1024 hex chars (COMPACT).
+    Includes W-state hex (128 bytes) + essential metrics.
+    Fast enough for 50ms cadence on dial-up connections.
     """
     with _snapshot_lock:
         _base = dict(_latest_snapshot) if _latest_snapshot else {}
 
-    # Single cache-hit: 32³ tensor only
-    tensor_hex = _get_lattice_tensor_hex()
+    # COMPACT: 4³ tensor only (1KB vs 128KB for 32³)
+    tensor_hex = _get_compact_lattice_tensor_hex()
     if tensor_hex:
         _base['density_tensor_hex'] = tensor_hex
-        _base['tensor_dim']         = 32
+        _base['tensor_dim']         = 4
+
+    # W-state amplitudes (8 complex doubles = 128 bytes hex)
+    w_hex = _get_w_state_hex()
+    if w_hex:
+        _base['w_state_hex'] = w_hex
 
     try:
         lat = sys.modules[__name__].__dict__.get('LATTICE')
@@ -5456,28 +5462,31 @@ _connected_metric_clients = []
 
 # SEPARATE THREADS FOR DM AND METRICS - prevents race condition
 def _dm_sse_worker():
-    """Dedicated thread for DM→SSE stream only"""
-    logger.info("[MUX-DM] DM SSE worker started")
+    """Dedicated thread for DM→SSE stream only (compact 4×4×4 tensor)"""
+    logger.info("[MUX-DM] DM SSE worker started (COMPACT 4³ mode)")
     last_dm_send_ts = 0
     dm_send_interval = 0.05  # 20x/sec for real-time updates
-    
+
     while True:
         try:
-            snap = _snapshot_multiplexer_queue.get(timeout=0.01)  # Non-blocking, check more often
+            snap = _snapshot_multiplexer_queue.get(timeout=0.01)  # Non-blocking
             if not snap:
                 continue
-            
+
             now_ts = time.time()
             if now_ts - last_dm_send_ts >= dm_send_interval:
-                tensor_hex = _get_lattice_tensor_hex()
+                # Use COMPACT 4³ tensor instead of massive 32³
+                tensor_hex = _get_compact_lattice_tensor_hex()
+                w_hex = _get_w_state_hex()
                 last_dm_send_ts = now_ts
 
-                if tensor_hex:
+                if tensor_hex or w_hex:
                     mermin = snap.get('mermin_test') or snap.get('bell_test')
                     dm_snap = {
                         'packet_type': 'tensor',
                         'density_tensor_hex': tensor_hex,
-                        'tensor_dim': 32,
+                        'w_state_hex': w_hex,
+                        'tensor_dim': 4,
                         'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                         'w_state_fidelity': snap.get('w_state_fidelity'),
                         'purity': snap.get('purity'),
@@ -5488,7 +5497,7 @@ def _dm_sse_worker():
                         _snapshot_sse_queue.put_nowait(dm_snap)
                     except _queue_module.Full:
                         pass
-                    
+
         except _queue_module.Empty:
             time.sleep(0.005)  # Brief pause before retry
         except GeneratorExit:
@@ -6030,12 +6039,82 @@ _tensor_cache: tuple = ('', 0.0)   # tensor_hex, ts
 _TENSOR_CACHE_TTL = 0.05            # 50ms — matches SSE cadence
 
 
+def _get_w_state_hex() -> str:
+    """Extract W-state amplitudes (8 complex doubles) from lattice.
+
+    Returns 128-byte hex string (8 × 2 doubles × 8 bytes each).
+    Format: 8 consecutive complex doubles in big-endian binary.
+    """
+    try:
+        from globals import LATTICE
+        lat = LATTICE
+        if lat is not None and hasattr(lat, 'w_state_amplitudes'):
+            w = lat.w_state_amplitudes
+            if w is not None and len(w) >= 8:
+                # Pack 8 complex doubles as binary
+                import struct
+                data = bytearray()
+                for i in range(8):
+                    amp = complex(w[i]) if not isinstance(w[i], complex) else w[i]
+                    data.extend(struct.pack('>dd', amp.real, amp.imag))
+                return data.hex()
+    except Exception as e:
+        logger.debug(f"[W-STATE] extraction failed: {e}")
+    return ""
+
+
+def _get_compact_lattice_tensor_hex() -> str:
+    """Build compact 4×4×4 density tensor from 256×256 DM.
+
+    Returns tensor_hex (1024 hex chars) instead of massive 32³.
+    Cached for 50ms — fast for dial-up/slow connections.
+    """
+    global _tensor_cache
+    from globals import LATTICE
+
+    now = time.time()
+    # Use existing cache for now
+    cache_key = ('compact', _tensor_cache[1])
+    if now - _tensor_cache[1] < _TENSOR_CACHE_TTL and _tensor_cache[0]:
+        # Check if cached result looks like compact (< 2000 hex chars)
+        if len(_tensor_cache[0]) < 2000:
+            return _tensor_cache[0]
+
+    try:
+        lat = LATTICE
+        if lat is not None and hasattr(lat, 'current_density_matrix'):
+            dm = lat.current_density_matrix
+            if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
+                # Build 4×4×4 tensor from 256×256 DM
+                N = 4
+                dm_abs = np.abs(dm[:N*4, :N*4])  # Take top-left 16×16
+                # Slice into 4×4 blocks, take magnitude
+                tensor = np.zeros((N, N, N), dtype=np.float32)
+                for i in range(N):
+                    for j in range(N):
+                        block = dm_abs[i*4:(i+1)*4, j*4:(j+1)*4]
+                        tensor[i, j, :] = np.mean(block, axis=0)[:N]
+
+                # Normalize
+                tm = float(tensor.max())
+                if tm > 1e-12:
+                    tensor /= tm
+                tensor_hex = tensor.tobytes().hex()
+                _tensor_cache = (tensor_hex, now)
+                return tensor_hex
+    except Exception as e:
+        logger.debug(f"[COMPACT-TENSOR] build failed: {e}")
+
+    return ""
+
+
 def _get_lattice_tensor_hex() -> str:
     """Pull current_density_matrix from LATTICE and build the 32³ tensor.
 
     Returns tensor_hex (262144 hex chars) or '' on failure.
     Cached for 50ms — one computation shared across all SSE subscribers.
     NOTE: Server-side cache only; oracle AER simulation is unaffected.
+    DEPRECATED: Use _get_compact_lattice_tensor_hex() for smaller payloads.
     """
     global _tensor_cache
     from globals import LATTICE
@@ -6084,7 +6163,7 @@ def _get_lattice_tensor_hex() -> str:
                 return tensor_hex
     except Exception:
         pass
-    return 
+    return "" 
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
