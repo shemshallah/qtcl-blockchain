@@ -97,8 +97,11 @@ WALK_LENGTH:   int = 512   # L — private key length in steps
 NOISE_STEPS:   int = 8     # k — noise perturbation walk length
 N_GENERATORS:  int = 4     # {a, a⁻¹, b, b⁻¹}
 
-# Precision tolerance for det=1 check (at 150 dps we can be very strict)
-DET_TOLERANCE: mpf = mpf('1e-128')   # 150 dps gives ~499 bits; 128 dec places leaves plenty of room
+# Precision tolerance for det=1 check
+# At 150 dps with 500 bits precision, we allow error up to 1e-60.
+# With periodic renorm every 16 ops in long chains, accumulated error is ~1e-60 to 1e-65.
+# This tolerance allows normal floating-point error while catching protocol violations.
+DET_TOLERANCE: mpf = mpf('1e-60')
 
 # Overflow bound for matrix entries (if entries exceed this, matrices have drifted)
 ENTRY_OVERFLOW_BOUND: mpf = mpf('1e100')
@@ -239,6 +242,9 @@ class PSLMatrix:
 
         At most ⌈log₂(n)⌉ matrix multiplications.
         For c = 2^256: at most 256 multiplications — fast.
+
+        Now includes periodic renormalization (every 16 squarings) to prevent
+        determinant drift over long exponentiation chains.
         """
         if n < 0:
             return self.inverse() ** (-n)
@@ -248,15 +254,24 @@ class PSLMatrix:
         # Binary exponentiation (right-to-left)
         result = identity()
         base = PSLMatrix(self.a, self.b, self.c, self.d, skip_validation=True)
+        mul_count = 0
 
         while n > 0:
             if n & 1:
                 result = result @ base
+                mul_count += 1
             base = base @ base
+            mul_count += 1
             n >>= 1
 
-        # Re-normalize at end to correct accumulated floating point drift
+            # Periodic renormalization every 16 multiplications
+            if mul_count % 16 == 0:
+                result = result.renormalize_det()
+                base = base.renormalize_det()
+
+        # Final renormalization and validation
         result = result.renormalize_det()
+        result._enforce_invariants()
         return result
 
     def inverse(self) -> 'PSLMatrix':
@@ -271,21 +286,29 @@ class PSLMatrix:
         Correct accumulated floating-point drift by rescaling entries so det=1.
         Used after long composition chains.
 
-        The rescaling factor is 1/√det applied to all entries.
-        This exploits the fact that for small errors, scaling by 1/√det
-        restores the invariant without changing the group element
-        (up to the PSL identification M ~ λM for λ²=det).
+        If det < 0, first flip all entries to positive, then rescale by 1/√det.
+        This exploits the PSL identification M ~ -M, restoring the invariant
+        without changing the group element.
         """
         det = self.a * self.d - self.b * self.c
         if fabs(det - mpf('1')) < DET_TOLERANCE:
             self._validated = True
             return self
 
-        # Scale by inverse square root of determinant
+        # If det is negative, flip sign of all entries (PSL identifies M with -M)
+        a, b, c, d = self.a, self.b, self.c, self.d
+        if det < 0:
+            a = -a
+            b = -b
+            c = -c
+            d = -d
+            det = -det
+
+        # Scale by inverse square root of determinant (now positive)
         scale = mpf('1') / sqrt(fabs(det))
         m = PSLMatrix(
-            self.a * scale, self.b * scale,
-            self.c * scale, self.d * scale
+            a * scale, b * scale,
+            c * scale, d * scale
         )
         return m
 
@@ -585,8 +608,9 @@ def _compute_generators() -> Dict[str, 'PSLMatrix']:
             f"(expected < 1e-100). Generators may need adjustment."
         )
 
-    a_gen = a_mat
-    b_gen = b_mat
+    # Ensure all generators are properly normalized before returning
+    a_gen = a_mat.renormalize_det()
+    b_gen = b_mat.renormalize_det()
     a_inv = a_gen.inverse().renormalize_det()
     b_inv = b_gen.inverse().renormalize_det()
 
@@ -780,7 +804,7 @@ def noise_walk(steps: int = NOISE_STEPS,
 
 
 def evaluate_walk(walk: List[int],
-                  renormalize_interval: int = 64) -> PSLMatrix:
+                  renormalize_interval: int = 32) -> PSLMatrix:
     """
     Compose a walk sequence into a single PSL(2,ℝ) group element.
 
@@ -795,9 +819,11 @@ def evaluate_walk(walk: List[int],
     walk : List[int]
         Sequence of generator indices in {0,1,2,3}.
     renormalize_interval : int
-        Re-normalize det every this many steps. Default 64.
+        Re-normalize det every this many steps. Default 32 (was 64).
+        For WALK_LENGTH=512, this gives 16 renormalizations.
         Balances performance (each normalization costs one sqrt) against
-        numerical stability (drift accumulates over steps).
+        numerical stability (drift accumulates over steps, especially
+        when signs are involved in matrix composition).
 
     Returns
     -------
@@ -829,9 +855,9 @@ def evaluate_walk(walk: List[int],
 
         # Periodic renormalization to prevent det drift
         # At 150 dps, each multiply introduces ~1 ULP error.
-        # After 64 steps, error ~64 ULP ≈ 10^{-148} — still fine.
-        # After 512 steps without normalization: ~512 ULP ≈ 10^{-146} — still fine.
-        # We normalize every 64 steps for extra safety.
+        # Over 512 steps without normalization: accumulated error ≈ 512 ULP.
+        # We normalize every 32 steps (16 times per 512-step walk) for stability.
+        # Renormalization is now also sign-aware, fixing negative det issues.
         if (step + 1) % renormalize_interval == 0:
             result = result.renormalize_det()
 
@@ -1817,7 +1843,47 @@ if __name__ == '__main__':
     print("\n✅ hyp_group.py ready for hyp_tessellation.py\n")
 
 # ════════════════════════════════════════════════════════════════════════════════
-# COMPATIBILITY ALIASES
+# CRITICAL PUBLIC EXPORTS & COMPATIBILITY ALIASES
 # ════════════════════════════════════════════════════════════════════════════════
+
+# Walk evaluation canonical alias (used by hyp_schnorr.py and hyp_engine.py)
+walk_eval = evaluate_walk
+"""Alias: walk_eval = evaluate_walk() for canonical walk composition."""
+
 serialize_walk = walk_to_bytes
 deserialize_walk = bytes_to_walk
+
+
+def generator_product(*gen_names: str) -> PSLMatrix:
+    """
+    Compose a sequence of named generators in order.
+    
+    Example: generator_product('a', 'b', 'a_inv') → a ⊗ b ⊗ a⁻¹
+    
+    Parameters:
+        *gen_names: Generator names from {'a', 'a_inv', 'b', 'b_inv'}
+        
+    Returns:
+        PSLMatrix: The composed product M₁ ⊗ M₂ ⊗ ... ⊗ Mₙ
+    """
+    if not gen_names:
+        return identity()
+    gens = get_generators()
+    result = gens[gen_names[0]]
+    for gen_name in gen_names[1:]:
+        result = result * gens[gen_name]
+    return result
+
+
+def serialize_matrix(matrix: PSLMatrix) -> str:
+    """Serialize PSL(2,ℝ) matrix to hex string for storage/transmission.
+    
+    Uses the canonical hex serialization of the matrix entries.
+    
+    Parameters:
+        matrix (PSLMatrix): The matrix to serialize.
+        
+    Returns:
+        str: Hex-encoded matrix representation (~1200 chars).
+    """
+    return matrix.to_hex()

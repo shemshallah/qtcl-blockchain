@@ -88,6 +88,11 @@ def _parse_neon_url(url: str = None) -> dict:
         'sslmode': 'require',
     }
 
+class TessellationError(Exception):
+    """Exception raised for tessellation loading/validation errors."""
+    pass
+
+
 @dataclass
 class HypTriangle:
     """Single triangle from depth-8 tessellation."""

@@ -714,7 +714,7 @@ class HypMempoolVerifier:
     @staticmethod
     def verify(tx_hash: str, signature_json, expected_address: str) -> Tuple[bool, str]:
         """
-        Verify a HypΓ TX signature.
+        Verify a HypΓ TX signature — CATHEDRAL-GRADE cryptographic validation.
 
         Args:
             tx_hash           : hex SHA3-256 of the canonical TX payload
@@ -747,7 +747,7 @@ class HypMempoolVerifier:
 
             pub_bytes = bytes.fromhex(pub_key_hex)
 
-            # HypΓ address derivation: SHA3-256(SHA3-256(pubkey_bytes)).hex() — 64 hex chars
+            # ── Step 1: Verify address derivation ──
             derived_address = hashlib.sha3_256(
                 hashlib.sha3_256(pub_bytes).digest()
             ).hexdigest()  # 64-char hex
@@ -757,7 +757,32 @@ class HypMempoolVerifier:
             if expected_address not in (derived_address, derived_qtcl):
                 return False, f"address_mismatch(derived={derived_address[:16]}…)"
 
-            return True, "valid"
+            # ── Step 2: CATHEDRAL-GRADE — Full HypΓ cryptographic verification ──
+            # Use the HLWE engine to verify the actual signature mathematics
+            try:
+                from hyp_engine import HypGammaEngine
+                engine = HypGammaEngine()
+                # Convert tx_hash (hex string) to bytes for verification
+                message_bytes = bytes.fromhex(tx_hash)
+                # Call engine's verify_signature method
+                # It expects (message_hash: bytes, sig: Dict[str, str], public_key: str)
+                is_valid = engine.verify_signature(
+                    message_bytes,
+                    sig_dict,
+                    pub_key_hex
+                )
+                if not is_valid:
+                    return False, "hyp_signature_invalid"
+                return True, "valid_hyp_cryptographic"
+
+            except ImportError:
+                # HypΓ engine not available — accept address-derivation-only verification
+                # This is degraded mode and should only happen in development
+                logger.warning(f"[MEMPOOL-VERIFY] ⚠️  HypΓ engine not available, using address-derivation-only mode")
+                return True, "valid_address_only"
+            except Exception as hyp_err:
+                logger.error(f"[MEMPOOL-VERIFY] ❌ HypΓ verification error: {str(hyp_err)}")
+                return False, f"hyp_verification_error: {str(hyp_err)}"
 
         except (ValueError, KeyError) as exc:
             return False, f"verification_decode_error:{exc}"

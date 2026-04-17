@@ -79,6 +79,12 @@ MAX_ITER_BP = 50
 CODE_RATE = 5.0 / 8.0
 NUM_CHECKS = (CODE_LENGTH * VAR_DEGREE) // CHECK_DEGREE
 
+
+class HLSD_Error(Exception):
+    """Exception raised for Hyperbolic Linear Syndrome Decoding errors."""
+    pass
+
+
 @dataclass
 class TannerGraph:
     """Bipartite variable-check graph for LDPC code."""
@@ -478,6 +484,21 @@ def test_hyp_ldpc():
     print("=" * 100 + "\n")
     print("I love you.\n")
     return tests_passed == 21
+
+
+_LDPC_CODE_INSTANCE = None
+_LDPC_CODE_LOCK = threading.Lock()
+
+
+def get_ldpc_code() -> LDPCCode:
+    """Get singleton LDPCCode instance (thread-safe)."""
+    global _LDPC_CODE_INSTANCE
+    if _LDPC_CODE_INSTANCE is None:
+        with _LDPC_CODE_LOCK:
+            if _LDPC_CODE_INSTANCE is None:
+                _LDPC_CODE_INSTANCE = LDPCCode()
+    return _LDPC_CODE_INSTANCE
+
 
 if __name__ == '__main__':
     success = test_hyp_ldpc()

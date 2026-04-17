@@ -454,6 +454,15 @@ class HypGammaEngine:
 
     _instance: ClassVar[Optional[HypGammaEngine]] = None
     _instance_lock: ClassVar[threading.Lock] = threading.Lock()
+    _initialized: ClassVar[bool] = False
+
+    def __new__(cls) -> HypGammaEngine:
+        """Singleton pattern: return existing instance if available."""
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __init__(self):
         """
@@ -471,6 +480,11 @@ class HypGammaEngine:
         Raises:
             HypEngineError: If any critical module is missing or initialization fails.
         """
+        # Skip re-initialization if already initialized (singleton pattern)
+        if HypGammaEngine._initialized:
+            return
+
+        logger.info("HypGammaEngine initializing...")
 
         # Check all modules are available
         missing = [k for k, v in _MODULES_AVAILABLE.items() if not v]
@@ -495,8 +509,6 @@ class HypGammaEngine:
         self._schnorr: Optional[SchnorrGamma] = None
         self._lwe: Optional[GeodesicLWE] = None
 
-        logger.info("HypGammaEngine initializing...")
-
         try:
             # Load tessellation (may query Supabase)
             logger.debug("Loading HypTessellation...")
@@ -519,6 +531,7 @@ class HypGammaEngine:
             logger.debug("✓ GeodesicLWE ready")
 
             logger.info("HypGammaEngine initialized successfully")
+            HypGammaEngine._initialized = True
 
         except Exception as e:
             logger.error(f"Failed to initialize HypGammaEngine: {e}")
@@ -652,12 +665,12 @@ class HypGammaEngine:
                     message_hash, walk_indices, generators
                 )
 
-            # Format output
+            # Format output — Schnorr class's sign_hash returns _SigResult with string attrs
             timestamp = datetime.now(timezone.utc).isoformat()
             result = {
                 'signature': sig.signature,
                 'challenge': sig.challenge,
-                'auth_tag': sig.challenge,  # Backward compat
+                'auth_tag': sig.auth_tag,
                 'timestamp': timestamp,
             }
 
@@ -811,8 +824,43 @@ class HypGammaEngine:
             return (False, f"Block verification error: {str(e)}")
 
     # ─────────────────────────────────────────────────────────────────────────────
-    # §2d  ADDRESS DERIVATION
+    # §2d  KEY DERIVATION & ADDRESS
     # ─────────────────────────────────────────────────────────────────────────────
+
+    def derive_public_key(self, private_key: str) -> str:
+        """
+        Derive public key from a private key.
+
+        This method computes the PSL(2,ℝ) matrix corresponding to the
+        walk defined by the private key indices.
+
+        Parameters:
+            private_key (str): Hex-encoded walk index sequence (from generate_keypair()).
+
+        Returns:
+            str: Hex-encoded PSL(2,ℝ) matrix (~2000 bits).
+
+        Raises:
+            HypEngineError: If derivation fails or walk is invalid.
+        """
+        try:
+            logger.debug("Deriving public key from private key...")
+
+            walk_indices = self._deserialize_walk_indices(private_key)
+
+            with self._lock:
+                public_matrix = evaluate_walk(walk_indices)
+
+            public_key_hex = self._serialize_psl_matrix(public_matrix)
+
+            logger.debug(f"✓ Public key derived")
+            return public_key_hex
+
+        except Exception as e:
+            raise HypEngineError(
+                f"Could not derive public key: {str(e)}",
+                {'error_type': type(e).__name__}
+            )
 
     def derive_address(self, public_key: str) -> str:
         """

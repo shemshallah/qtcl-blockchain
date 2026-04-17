@@ -5,4 +5,4 @@ nixPkgs = ["python312", "gcc", "gnumake", "pkg-config", "openssl"]
 cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
 
 [start]
-cmd = "gunicorn wsgi_config:app --bind 0.0.0.0:${PORT:-8000} --config gunicorn_conf.py --timeout 120"
+cmd = "gunicorn wsgi_config:app --bind 0.0.0.0:${PORT:-8000} --config gunicorn_conf.py"

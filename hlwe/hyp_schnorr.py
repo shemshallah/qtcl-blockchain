@@ -363,6 +363,12 @@ def _matrix_pow_elevated(M: PSLMatrix, n: int) -> PSLMatrix:
                         f"_matrix_pow_elevated: result determinant collapsed to {nstr(det_r, 20)} "
                         f"at n={n}. This indicates a fundamental group arithmetic error."
                     )
+                # Fix for negative determinants: PSL identifies M with -M
+                # If det < 0, flip sign of all entries first, then rescale
+                if det_r < 0:
+                    new_a = -new_a; new_b = -new_b
+                    new_c = -new_c; new_d = -new_d
+                    det_r = -det_r
                 scale_r = mpf('1') / sqrt(fabs(det_r))
                 res_a = new_a * scale_r;  res_b = new_b * scale_r
                 res_c = new_c * scale_r;  res_d = new_d * scale_r
@@ -379,6 +385,11 @@ def _matrix_pow_elevated(M: PSLMatrix, n: int) -> PSLMatrix:
                     f"n={n}, det={nstr(det_sq, 20)}. "
                     f"entry magnitude: |a|={nstr(fabs(sq_a), 8)}"
                 )
+            # Fix for negative determinants: flip entries if det < 0, then rescale
+            if det_sq < 0:
+                sq_a = -sq_a; sq_b = -sq_b
+                sq_c = -sq_c; sq_d = -sq_d
+                det_sq = -det_sq
             scale_sq = mpf('1') / sqrt(fabs(det_sq))
             base_a = sq_a * scale_sq;  base_b = sq_b * scale_sq
             base_c = sq_c * scale_sq;  base_d = sq_d * scale_sq
@@ -468,6 +479,28 @@ def _fiat_shamir_challenge_from_hex(R_hex: str, message: bytes) -> int:
 #   Public key:  y = evaluate_walk(private_key) ∈ PSL(2,ℝ)
 #   Address:     SHA3-256²(serialize(y)) — backward compatible
 # ════════════════════════════════════════════════════════════════════════════
+
+
+class SchnorrError(Exception):
+    """Exception raised for Schnorr-Γ signing/verification errors."""
+    pass
+
+
+class HypSignature(NamedTuple):
+    """Schnorr-Γ signature (alias for compatibility with hyp_engine)."""
+    signature: str
+    challenge: str
+    auth_tag: str
+    timestamp: str
+
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            'signature': self.signature,
+            'challenge': self.challenge,
+            'auth_tag': self.auth_tag,
+            'timestamp': self.timestamp,
+        }
+
 
 class SchnorrKeyPair(NamedTuple):
     """
@@ -1709,6 +1742,24 @@ class SchnorrGamma:
     def sign(self, message: bytes, private_walk: List[int], public_key: PSLMatrix) -> SchnorrSignature:
         """Sign a message with a private walk."""
         return sign(message, private_walk, public_key)
+
+    def sign_hash(self, message_hash: bytes, private_walk: List[int], public_key) -> 'SchnorrSignature':
+        """
+        Sign a pre-hashed message (32-byte hash).
+        public_key may be a PSLMatrix OR the generators dict from hyp_engine —
+        we always derive the canonical PSLMatrix from the private_walk to be safe.
+        Returns an object with .signature and .challenge string attributes.
+        """
+        # Derive the PSLMatrix public key from the private walk so we never
+        # pass a wrong type regardless of what hyp_engine sends as third arg.
+        _kp = keygen_from_walk(private_walk)
+        _result_dict = sign_hash(message_hash, private_walk, _kp.public_key)
+        class _SigResult:
+            signature = _result_dict.get('signature', '')
+            challenge  = _result_dict.get('challenge', '')
+            auth_tag   = _result_dict.get('auth_tag', '')
+            timestamp  = _result_dict.get('timestamp', '')
+        return _SigResult()
     
     def verify(self, sig: SchnorrSignature, message: bytes, public_key: PSLMatrix) -> VerifyResult:
         """Verify a Schnorr-Γ signature."""
@@ -1757,3 +1808,44 @@ class SchnorrGamma:
                            public_key: PSLMatrix) -> bool:
         """Verify signature from dict."""
         return verify_message_dict(sig_dict, message, public_key)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# CRITICAL MODULE-LEVEL SIGNING FUNCTIONS (for hyp_engine integration)
+# ════════════════════════════════════════════════════════════════════════════════
+
+def sign_hash(message_hash: bytes, private_walk: List[int], public_key: PSLMatrix) -> Dict[str, str]:
+    """
+    Sign a pre-hashed message with Schnorr-Γ (canonical QTCL signing function).
+
+    Parameters:
+        message_hash (bytes): SHA3-256 hash of message (32 bytes)
+        private_walk (List[int]): Private key as walk index sequence
+        public_key (PSLMatrix): Public key (Y element in PSL(2,ℝ))
+
+    Returns:
+        dict: {
+            'signature': hex(R‖Z),
+            'challenge': hex(c),
+            'timestamp': ISO 8601,
+            'auth_tag': hex(c),  # backward compat field
+        }
+    """
+    sig = sign(message_hash, private_walk, public_key)
+    # Serialize the SchnorrSignature to dict format for transmission
+    sig_dict = signature_to_dict(sig)
+    # Convert challenge to canonical hex format
+    challenge_hex = format(sig.c_full, '064x')  # 64-char hex = 256 bits
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).isoformat()
+    return {
+        'signature': sig_dict['R'] if isinstance(sig_dict.get('R'), str) else json.dumps(sig_dict['R']),
+        'challenge': challenge_hex,
+        'timestamp': timestamp,
+        'auth_tag': challenge_hex,
+        # Include full dict for compatibility with verification
+        'R': sig_dict['R'],
+        'Z': sig_dict['Z'],
+        'c_full': challenge_hex,
+        'c_exp': sig.c_exp,
+    }

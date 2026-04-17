@@ -1563,16 +1563,31 @@ def get_db_connection():
 
 def query_latest_block() -> Optional[Dict[str, Any]]:
     """Get latest block from Supabase PostgreSQL (authoritative source).
-    
+
     Raises on DB connection errors — callers must handle.
     Returns None only when table is empty (no blocks yet).
+
+    CRITICAL: This is the source of truth for chain height.
+    If blocks aren't showing up here, the height won't advance.
     """
-    with get_db_cursor() as cur:
-        cur.execute("SELECT height, block_hash, timestamp FROM blocks ORDER BY height DESC LIMIT 1")
-        row = cur.fetchone()
-        if row:
-            return {"height": row[0], "hash": row[1] or "", "timestamp": row[2] or 0}
-    return None
+    try:
+        with get_db_cursor() as cur:
+            # Force no caching - read latest committed data
+            cur.execute("""
+                SELECT height, block_hash, timestamp FROM blocks
+                ORDER BY height DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+            if row:
+                latest = {"height": row[0], "hash": row[1] or "", "timestamp": row[2] or 0}
+                logger.debug(f"[QUERY-LATEST] ✅ Latest block: h={latest['height']} hash={latest['hash'][:16]}…")
+                return latest
+            else:
+                logger.debug(f"[QUERY-LATEST] No blocks in DB yet (genesis)")
+                return None
+    except Exception as e:
+        logger.error(f"[QUERY-LATEST] ❌ DB error: {e}")
+        raise
 
 def query_block_by_height(height: int) -> Optional[Dict[str, Any]]:
     """Get block by height from Supabase PostgreSQL (authoritative source)."""
@@ -2183,10 +2198,27 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         address = (params[0] if isinstance(params, list) else params.get("address", "")) if params else ""
         if not address:
             return _rpc_error(-32602, "address required", rpc_id)
+        
+        _diagnostic = {"address_queried": address[:24] + "…" if len(address) > 24 else address}
+        
         try:
             with get_db_cursor() as cur:
+                # Check if wallet_addresses table exists
+                try:
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = 'wallet_addresses'
+                        )
+                    """)
+                    _table_exists = cur.fetchone()[0] if cur.fetchone() else False
+                    _diagnostic["table_exists"] = bool(_table_exists)
+                except Exception as _te:
+                    _diagnostic["table_check_error"] = str(_te)
+                
+                # Query balance
                 cur.execute(
-                    "SELECT balance, transaction_count FROM wallet_addresses WHERE address = %s",
+                    "SELECT balance, transaction_count, address_type FROM wallet_addresses WHERE address = %s",
                     (address,)
                 )
                 row = cur.fetchone()
@@ -2195,18 +2227,33 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                         'address': address,
                         'balance': row[0],
                         'tx_count': row[1],
+                        'address_type': row[2] if len(row) > 2 else 'unknown',
                     }
+                    _diagnostic["found_in_db"] = True
+                    _diagnostic["raw_balance_base_units"] = int(row[0]) if row[0] else 0
                 else:
                     wallet = None
+                    _diagnostic["found_in_db"] = False
+                    # Check how many total wallet addresses exist
+                    try:
+                        cur.execute("SELECT COUNT(*) FROM wallet_addresses")
+                        _total_wallets = cur.fetchone()[0]
+                        _diagnostic["total_wallets_in_db"] = int(_total_wallets) if _total_wallets else 0
+                    except Exception:
+                        pass
         except Exception as _wqe:
             logger.debug(f"[RPC] query_wallet_info DB error: {_wqe}")
+            _diagnostic["db_error"] = str(_wqe)
             wallet = None
+        
         if wallet is None:
-            # Address not yet in DB — return 0 balance, not an error
+            # Address not yet in DB — return 0 balance with diagnostic info
             result = {
                 "address": address,
                 "balance": 0.0,
                 "symbol":  "QTCL",
+                "diagnostic": _diagnostic,
+                "note": "Address not found in wallet_addresses table — no balance recorded",
             }
         else:
             raw_balance = int(wallet.get('balance') or 0)
@@ -2214,8 +2261,12 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                 "address": address,
                 "balance": raw_balance / 100.0,
                 "symbol":  "QTCL",
+                "raw_balance_base_units": raw_balance,
+                "transaction_count": wallet.get('tx_count', 0),
+                "address_type": wallet.get('address_type', 'unknown'),
+                "diagnostic": _diagnostic,
             }
-        logger.debug(f"[RPC-METHOD] qtcl_getBalance success: address={address}, balance={result['balance']}")
+        logger.debug(f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
@@ -3781,6 +3832,29 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
 
         # ═══════════════════════════════════════════════════════════════════════
+        # CATHEDRAL-GRADE: BLOCK SIGNATURE VERIFICATION (HypΓ Schnorr-Γ)
+        # Block MUST be cryptographically signed by miner's private key
+        # ═══════════════════════════════════════════════════════════════════════
+        _hyp_sig = data.get('hyp_signature') or data.get('signature', {})
+        _miner_pubkey = data.get('miner_public_key_hex', '')
+
+        if _hyp_sig and _miner_pubkey:
+            try:
+                _engine = _init_hlwe_engine()
+                _block_for_verify = hdr.copy()  # header dict without signature
+                _sig_valid, _sig_msg = _engine.verify_block(_block_for_verify, _hyp_sig, _miner_pubkey)
+                if not _sig_valid:
+                    logger.error(f"[RPC-submitBlock] ❌ HypΓ signature verification FAILED h={height}: {_sig_msg}")
+                    return _rpc_error(-32003, f"Block signature invalid: {_sig_msg}", rpc_id)
+                logger.info(f"[RPC-submitBlock] ✅ HypΓ signature verified h={height}")
+            except Exception as _hyp_verify_err:
+                logger.error(f"[RPC-submitBlock] ❌ HypΓ verification error h={height}: {_hyp_verify_err}")
+                return _rpc_error(-32003, f"Block signature verification failed: {str(_hyp_verify_err)}", rpc_id)
+        else:
+            logger.warning(f"[RPC-submitBlock] ⚠️  Block h={height} missing HypΓ signature or public key — will be rejected")
+            return _rpc_error(-32003, "Block must include hyp_signature and miner_public_key_hex for cryptographic verification", rpc_id)
+
+        # ═══════════════════════════════════════════════════════════════════════
         # TRANSACTION VALIDATION — Bitcoin-style security
         # Every transaction must be cryptographically valid and economically sound
         # ═══════════════════════════════════════════════════════════════════════
@@ -3855,11 +3929,34 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # Validate non-coinbase transactions (if any)
         for tx in _non_coinbase_txs:
             # Every non-coinbase must have a valid signature
-            _sig = tx.get('signature') or tx.get('hyp_sig') or tx.get('sig', '')
+            _sig = tx.get('signature') or tx.get('hyp_sig') or tx.get('sig', {})
             if not _sig:
-                return _rpc_error(-32003, 
+                return _rpc_error(-32003,
                     f"Transaction {tx.get('tx_id', '?')[:16]}... has no signature — all non-coinbase txs must be signed",
                     rpc_id)
+
+            # ── CATHEDRAL-GRADE: Transaction signature verification ──
+            _tx_pubkey = tx.get('sender_public_key_hex') or tx.get('public_key', '')
+            _tx_id = tx.get('tx_id') or tx.get('tx_hash', '')
+            if not _tx_pubkey:
+                return _rpc_error(-32003,
+                    f"Transaction {_tx_id[:16]}... missing sender_public_key_hex for verification",
+                    rpc_id)
+
+            try:
+                _engine = _init_hlwe_engine()
+                # Hash the transaction ID for signature verification
+                _tx_hash_bytes = bytes.fromhex(_tx_id) if len(_tx_id) == 64 else hashlib.sha3_256(str(_tx_id).encode()).digest()
+                # Call engine's verify_signature method
+                # It expects (message_hash: bytes, sig: Dict[str, str], public_key: str)
+                _tx_sig_valid = _engine.verify_signature(_tx_hash_bytes, _sig, _tx_pubkey)
+                if not _tx_sig_valid:
+                    logger.error(f"[RPC-submitBlock] ❌ Transaction signature verification FAILED {_tx_id[:16]}...")
+                    return _rpc_error(-32003, f"Transaction signature invalid", rpc_id)
+                logger.debug(f"[RPC-submitBlock] ✅ Transaction signature verified: {_tx_id[:16]}...")
+            except Exception as _tx_verify_err:
+                logger.error(f"[RPC-submitBlock] ❌ Transaction verification error {_tx_id[:16]}...: {_tx_verify_err}")
+                return _rpc_error(-32003, f"Transaction verification failed: {str(_tx_verify_err)}", rpc_id)
             
             # Validate sender has sufficient balance by tracing unspent outputs
             _from = tx.get('from_addr', tx.get('from_address', ''))
@@ -3889,8 +3986,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # ── Persist block + transactions (transaction 1 — no wallet writes) ──
         _block_rowcount = 0
+        _block_insert_error = None
         try:
             with get_db_cursor() as cur:
+                # DEBUG: Log the insert attempt
+                logger.warning(
+                    f"[RPC-submitBlock] 🔄 BLOCK INSERT attempt: h={height}, "
+                    f"hash={block_hash[:16]}…, parent={parent_hash[:16]}…, "
+                    f"miner={miner_address[:16]}…"
+                )
                 cur.execute("""
                     INSERT INTO blocks
                     (height, block_number, block_hash, previous_hash, timestamp,
@@ -3909,6 +4013,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 ))
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
+                if _block_rowcount > 0:
+                    logger.warning(f"[RPC-submitBlock] ✅ BLOCK PERSISTED: rowcount={_block_rowcount}, height will advance to {height}")
+                else:
+                    logger.warning(f"[RPC-submitBlock] ⚠️  Block insert rowcount=0 (duplicate height or conflict)")
 
                 # Persist user-supplied transactions
                 for tx in (txs or []):
@@ -3932,15 +4040,104 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         tx.get("tx_type", "transfer"),
                         height,
                     ))
+
+                # ✅ CRITICAL: Verify block was actually inserted before proceeding
+                cur.execute("SELECT COUNT(*) FROM blocks WHERE height = %s", (height,))
+                verify_row = cur.fetchone()
+                block_exists_in_db = verify_row and verify_row[0] > 0
+                if block_exists_in_db:
+                    logger.warning(f"[RPC-submitBlock] ✅ BLOCK VERIFIED IN DATABASE: h={height}")
+                else:
+                    logger.error(f"[RPC-submitBlock] ❌ BLOCK NOT IN DATABASE AFTER INSERT: h={height} - CRITICAL ISSUE")
+                    _block_rowcount = 0  # Mark as failed
         except Exception as dbe:
-            logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
+            _block_insert_error = str(dbe)
+            logger.exception(f"[RPC-submitBlock] ❌ DB error during block persist: {dbe}")
+            # Log additional diagnostic info
+            logger.error(
+                f"[RPC-submitBlock] Block persist FAILED: h={height}, "
+                f"hash={block_hash[:16]}…, error_type={type(dbe).__name__}"
+            )
             # Even if PG fails, we attempt to continue with SQLite if we can.
             # But normally we want the authoritative DB to succeed.
             # return _rpc_error(-32603, f"DB persist failed: {str(dbe)}", rpc_id)
         
-        # ── Credit coinbase rewards (transaction 2 — isolated from block persist) ──
+        # ─────────────────────────────────────────────────────────────────────────
+        # TRANSACTION SETTLEMENT — Update wallet balances for all non-coinbase txs
+        # For each transaction: SENDER balance ↓, RECEIVER balance ↑
+        # ─────────────────────────────────────────────────────────────────────────
+        _txs_settled = 0
+        if _block_rowcount > 0:
+            try:
+                with get_db_cursor() as cur:
+                    # Ensure wallet_addresses table exists
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS wallet_addresses (
+                            address VARCHAR(128) PRIMARY KEY,
+                            wallet_fingerprint VARCHAR(64),
+                            public_key TEXT,
+                            balance NUMERIC(30,0) DEFAULT 0,
+                            transaction_count INTEGER DEFAULT 0,
+                            address_type VARCHAR(20) DEFAULT 'standard',
+                            last_updated TIMESTAMP DEFAULT NOW()
+                        )
+                    """)
+
+                    # Process each non-coinbase transaction
+                    for tx in _non_coinbase_txs:
+                        tx_sender = tx.get('from_addr', tx.get('from_address', ''))
+                        tx_receiver = tx.get('to_addr', tx.get('to_address', ''))
+                        tx_amount = int(round(float(tx.get('amount', 0)) * 100))  # Convert to base units
+                        tx_fee = int(round(float(tx.get('fee', 0)) * 100))
+                        tx_id = tx.get('tx_id', tx.get('tx_hash', ''))
+
+                        if not tx_sender or not tx_receiver or tx_amount <= 0:
+                            continue
+
+                        # DEDUCT from sender (amount + fee)
+                        total_deduction = tx_amount + tx_fee
+                        cur.execute("""
+                            INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
+                            VALUES (%s, -%s, 'standard', NOW())
+                            ON CONFLICT (address) DO UPDATE SET
+                                balance = wallet_addresses.balance - %s,
+                                transaction_count = wallet_addresses.transaction_count + 1,
+                                last_updated = NOW()
+                        """, (tx_sender, total_deduction, total_deduction))
+
+                        # ADD to receiver (amount only, not fee)
+                        cur.execute("""
+                            INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
+                            VALUES (%s, %s, 'standard', NOW())
+                            ON CONFLICT (address) DO UPDATE SET
+                                balance = wallet_addresses.balance + %s,
+                                transaction_count = wallet_addresses.transaction_count + 1,
+                                last_updated = NOW()
+                        """, (tx_receiver, tx_amount, tx_amount))
+
+                        # Update transaction status to 'confirmed'
+                        cur.execute("""
+                            UPDATE transactions SET status = 'confirmed', height = %s, updated_at = NOW()
+                            WHERE tx_hash = %s OR tx_id = %s
+                        """, (height, tx_id, tx_id))
+
+                        _txs_settled += 1
+                        logger.info(
+                            f"[RPC-submitBlock] ✅ TX settled h={height}: "
+                            f"{tx_sender[:16]}…→{tx_receiver[:16]}… "
+                            f"amount={tx_amount/100:.2f} fee={tx_fee/100:.2f} QTCL"
+                        )
+
+                    if _txs_settled > 0:
+                        logger.info(f"[RPC-submitBlock] ✅ {_txs_settled} transactions settled with balance updates")
+            except Exception as _tx_settle_err:
+                logger.error(f"[RPC-submitBlock] ⚠️  Transaction settlement error (non-fatal): {_tx_settle_err}")
+                # Continue — block was persisted; settlement failure is not fatal
+
+        # ── Credit coinbase rewards (transaction 3 — isolated from block persist) ──
         # Separate get_db_cursor so a wallet schema error cannot roll back the block.
         # Deterministic from header: never scan txs (breaks when miner == treasury).
+        _rewards_credited = False
         if _block_rowcount > 0 and TessellationRewardSchedule:
             try:
                 rewards          = TessellationRewardSchedule.get_rewards_for_height(height)
@@ -3974,20 +4171,40 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 ).hexdigest()
 
                 with get_db_cursor() as cur:
+                    # First, ensure wallet_addresses table exists (create if missing)
+                    try:
+                        cur.execute("""
+                            CREATE TABLE IF NOT EXISTS wallet_addresses (
+                                address VARCHAR(128) PRIMARY KEY,
+                                wallet_fingerprint VARCHAR(64),
+                                public_key TEXT,
+                                balance NUMERIC(30,0) DEFAULT 0,
+                                transaction_count INTEGER DEFAULT 0,
+                                address_type VARCHAR(20) DEFAULT 'standard',
+                                last_updated TIMESTAMP DEFAULT NOW()
+                            )
+                        """)
+                    except Exception as _table_err:
+                        logger.warning(f"[RPC-submitBlock] Could not ensure wallet_addresses table: {_table_err}")
+                    
                     # ── Miner wallet balance ─────────────────────────────────────
                     _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
                     cur.execute("""
                         INSERT INTO wallet_addresses
                             (address, wallet_fingerprint, public_key,
-                             balance, transaction_count, address_type)
-                        VALUES (%s, %s, %s, %s, 1, 'miner')
+                             balance, transaction_count, address_type, last_updated)
+                        VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
                         ON CONFLICT (address) DO UPDATE SET
                             balance           = wallet_addresses.balance + EXCLUDED.balance,
-                            transaction_count = wallet_addresses.transaction_count + 1
+                            transaction_count = wallet_addresses.transaction_count + 1,
+                            last_updated      = NOW()
                     """, (miner_address, _miner_fp, _miner_fp, miner_reward))
+                    _miner_rowcount = cur.rowcount
+                    _rewards_credited = (_miner_rowcount > 0)
                     logger.info(
                         f"[RPC-submitBlock] ⛏  Miner credited: {miner_reward} base units "
-                        f"({miner_reward/100:.2f} QTCL) → {miner_address[:22]}…"
+                        f"({miner_reward/100:.2f} QTCL) → {miner_address[:22]}… "
+                        f"(rows={_miner_rowcount})"
                     )
 
                     # ── Treasury wallet balance ──────────────────────────────────
@@ -4088,11 +4305,40 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         try: _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
         except Exception: _resp_reward = 7.20
+        
+        # ── Final diagnostics and response ───────────────────────────────────
         if _block_rowcount == 0:
-            logger.info(f"[RPC-submitBlock] 🔁 DUPLICATE h={height} hash={block_hash[:16]}…")
-            return _rpc_ok({"status":"duplicate","height":height,"block_hash":block_hash}, rpc_id)
-        logger.info(f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… miner={miner_address[:16]}… reward={_resp_reward} QTCL")
-        return _rpc_ok({"status":"accepted","height":height,"block_hash":block_hash,"difficulty_bits":difficulty_bits,"miner_reward_qtcl":_resp_reward}, rpc_id)
+            # Block wasn't inserted - could be duplicate or DB issue
+            logger.info(f"[RPC-submitBlock] 🔁 DUPLICATE h={height} hash={block_hash[:16]}… (rowcount=0, existing block)")
+            return _rpc_ok({
+                "status": "duplicate",
+                "height": height,
+                "block_hash": block_hash,
+                "diagnostic": {
+                    "block_rowcount": _block_rowcount,
+                    "rewards_credited": _rewards_credited,
+                    "note": "Block at this height already exists in database"
+                }
+            }, rpc_id)
+        
+        # Block was successfully inserted
+        logger.info(
+            f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… "
+            f"miner={miner_address[:16]}… reward={_resp_reward} QTCL "
+            f"(rows={_block_rowcount}, rewards_ok={_rewards_credited})"
+        )
+        return _rpc_ok({
+            "status": "accepted",
+            "height": height,
+            "block_hash": block_hash,
+            "difficulty_bits": difficulty_bits,
+            "miner_reward_qtcl": _resp_reward,
+            "diagnostic": {
+                "block_rowcount": _block_rowcount,
+                "rewards_credited": _rewards_credited,
+                "persistence_verified": True
+            }
+        }, rpc_id)
 
     except Exception as e:
         logger.exception(f"[RPC] _rpc_submitBlock unhandled: {e}")
