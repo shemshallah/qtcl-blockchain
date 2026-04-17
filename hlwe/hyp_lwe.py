@@ -195,7 +195,7 @@ try:
     from mpmath import mp, mpf, mpc, matrix as mpmatrix, eye as mpeye
     from mpmath import (cos, sin, cosh, sinh, tanh, atanh, sqrt, pi, exp, log,
                         fabs, acos, atan2, nstr, almosteq, acosh, re, im, conj,
-                        mpjii, fmod, ceil, floor)
+                        fmod, ceil, floor)
     arctanh = atanh
     MPMATH_AVAILABLE = True
 except ImportError:
@@ -233,7 +233,6 @@ except ImportError:
     mpmatrix = None
     mpeye = None
     arctanh = atanh
-    mpjii = None
     pi = 3.14159265358979
     atan2 = None
 

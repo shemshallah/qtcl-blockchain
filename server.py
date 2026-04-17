@@ -2269,13 +2269,53 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                 height = int(height)
 
         def _query_block_at_height(h: int) -> Optional[dict]:
-            """Full block query from Supabase PostgreSQL (authoritative source)."""
+            """Full block query from database (authoritative source)."""
             try:
+                # Try SQLite first
+                if _LATTICE and hasattr(_LATTICE, 'block_manager') and _LATTICE.block_manager and _LATTICE.block_manager.db:
+                    db = _LATTICE.block_manager.db
+                    if db._sqlite_conn:
+                        try:
+                            sql = """
+                                SELECT height, block_hash, timestamp, w_state_hash,
+                                       parent_hash, nonce, difficulty,
+                                       coherence_snapshot, merkle_root, tx_count
+                                FROM blocks WHERE height = ? LIMIT 1
+                            """
+                            cursor = db._sqlite_conn.execute(sql, (h,))
+                            row = cursor.fetchone()
+                            if not row:
+                                return None
+                            block = {
+                                'height':           row[0],
+                                'block_height':     row[0],
+                                'block_hash':       row[1],
+                                'hash':             row[1],
+                                'parent_hash':      row[4] or ('0' * 64),
+                                'previous_hash':    row[4] or ('0' * 64),
+                                'merkle_root':      row[8] or ('0' * 64),
+                                'timestamp_s':      int(row[2]) if row[2] else 0,
+                                'timestamp':        int(row[2]) if row[2] else 0,
+                                'difficulty':       int(float(row[6])) if row[6] else 5,
+                                'nonce':            int(row[5]) if row[5] else 0,
+                                'w_state_fidelity': float(row[7]) if row[7] is not None else 0.0,
+                                'w_entropy_hash':   row[3] or '',
+                                'pq_curr':          h,
+                                'pq_last':          max(0, h - 1),
+                                'tx_count':         int(row[9]) if row[9] else 0,
+                                'mined':            True,
+                                'finalized':        True,
+                            }
+                            return block
+                        except Exception as _se:
+                            logger.debug(f"[RPC] SQLite query failed: {_se}")
+                
+                # Fallback to PostgreSQL
                 with get_db_cursor() as cur:
                     cur.execute("""
-                        SELECT height, block_hash, timestamp, oracle_w_state_hash,
-                               previous_hash, validator_public_key, nonce, difficulty,
-                               entropy_score, transactions_root, pq_curr, pq_last
+                        SELECT height, block_hash, timestamp, w_state_hash,
+                               parent_hash, nonce, difficulty,
+                               coherence_snapshot, merkle_root, tx_count
                         FROM blocks WHERE height = %s LIMIT 1
                     """, (h,))
                     row = cur.fetchone()
@@ -2288,17 +2328,18 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         'hash':             row[1],
                         'parent_hash':      row[4] or ('0' * 64),
                         'previous_hash':    row[4] or ('0' * 64),
-                        'merkle_root':      row[9] or ('0' * 64),
+                        'merkle_root':      row[8] or ('0' * 64),
                         'timestamp_s':      int(row[2]) if row[2] else 0,
                         'timestamp':        int(row[2]) if row[2] else 0,
-                        'difficulty_bits':  int(float(row[7])) if row[7] else 5,
-                        'difficulty':       int(float(row[7])) if row[7] else 5,
-                        'nonce':            int(row[6]) if row[6] else 0,
-                        'miner_address':    row[5] or '',
-                        'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
+                        'difficulty':       int(float(row[6])) if row[6] else 5,
+                        'nonce':            int(row[5]) if row[5] else 0,
+                        'w_state_fidelity': float(row[7]) if row[7] is not None else 0.0,
                         'w_entropy_hash':   row[3] or '',
-                        'pq_curr':          int(row[10]) if row[10] is not None else h,
-                        'pq_last':          int(row[11]) if row[11] is not None else max(0, h - 1),
+                        'pq_curr':          h,
+                        'pq_last':          max(0, h - 1),
+                        'tx_count':         int(row[9]) if row[9] else 0,
+                        'mined':            True,
+                        'finalized':        True,
                     }
                     # Fetch transactions for this block
                     cur.execute("""
