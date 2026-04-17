@@ -2109,7 +2109,6 @@ class QuantumLatticeController:
     
     def _maintenance_loop(self):
         """Perpetual non-Markovian coherence maintenance"""
-        _announce_counter = 0  # Rate-limit announcement spam to every 50 cycles
         while self.running:
             try:
                 # Apply non-Markovian memory effects (quantum evolution at 72ns timescale)
@@ -2204,8 +2203,7 @@ class QuantumLatticeController:
                         self.current_density_matrix, self._w8_target
                     )
                     # Log only every 50 revival events to reduce spam
-                    _announce_counter += 1
-                    if _announce_counter % 50 == 0:
+                    if self.cycle_count % 50 == 0:
                         logger.info(
                             f"[σ-REVIVAL] ⚡ cycle={self.cycle_count} (×50) | "
                             f"F={fidelity_post_evolution:.4f}→{self.fidelity:.4f} | "
@@ -2223,8 +2221,7 @@ class QuantumLatticeController:
                             # Check if this is a revival (not just noise)
                             if self.coherence > 0.15:  # Significant coherence
                                 # Log only every 50 entanglement revivals to reduce spam
-                                _announce_counter += 1
-                                if _announce_counter % 50 == 0:
+                                if self.cycle_count % 50 == 0:
                                     logger.info(
                                         f"✨ [REVIVAL] Entanglement revival (×50) | "
                                         f"C: {prev_coherence:.4f}→{self.coherence:.4f} "
