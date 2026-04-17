@@ -539,21 +539,22 @@ class NoiseChannelType(Enum):
 
 class DatabaseConfig:
     """
-    PostgreSQL/Supabase configuration resolved from environment variables.
+    Neon PostgreSQL configuration resolved from environment variables.
 
     Variable priority (first wins):
-      1. POOLER_* — Supabase session-pooler variables (set by Koyeb/Supabase integrations)
-      2. DB_*     — Generic fallback variables for other platforms / local dev
+      1. DATABASE_URL — Neon connection string (recommended)
+      2. POOLER_*      — Legacy fallback variables
 
     This means you only need ONE set of env vars in your deployment; whichever
     the platform injects will be picked up automatically.
     """
 
+    # ── DATABASE_URL ───────────────────────────────────────────────────────────
+    DATABASE_URL = os.getenv('DATABASE_URL', '')
     # ── Host ──────────────────────────────────────────────────────────────────
     HOST     = (os.getenv('POOLER_HOST')     or os.getenv('DB_HOST',     'localhost'))
     # ── Port ──────────────────────────────────────────────────────────────────
-    # Supabase session-pooler default is 6543; direct Postgres is 5432.
-    PORT     = int(os.getenv('POOLER_PORT')  or os.getenv('DB_PORT',     '6543'))
+    PORT     = int(os.getenv('POOLER_PORT')  or os.getenv('DB_PORT',     '5432'))
     # ── Credentials ───────────────────────────────────────────────────────────
     USER     = (os.getenv('POOLER_USER')     or os.getenv('DB_USER',     'postgres'))
     PASSWORD = (os.getenv('POOLER_PASSWORD') or os.getenv('DB_PASSWORD', ''))
@@ -801,6 +802,88 @@ class QuantumDatabaseConnector:
         """
         self._cursor_func = cursor_func
         logger.info("[DB] QuantumDatabaseConnector: server cursor injected")
+    
+    def inject_db_pool(self, pool) -> None:
+        """
+        Inject server's db_pool for direct block persistence.
+        This pool is the server's shared psycopg2 pool.
+        """
+        self._db_pool = pool
+        logger.info("[DB] QuantumDatabaseConnector: server db_pool injected")
+    
+    def execute(self, query: str, params: Tuple = None) -> bool:
+        """Execute query using injected pool or fallback."""
+        if self._db_pool:
+            conn = None
+            try:
+                conn = self._db_pool.get_connection()
+                cursor = conn.cursor()
+                cursor.execute(query, params or ())
+                conn.commit()
+                cursor.close()
+                logger.debug(f"[DB-EXEC] Success: {query[:80]}...")
+                return True
+            except Exception as e:
+                logger.error(f"[DB-EXEC] Failed: {query[:80]}... Error: {e}")
+                if conn:
+                    conn.rollback()
+                return False
+            finally:
+                if conn:
+                    self._db_pool.put_connection(conn)
+        elif self.pool:  # Fallback to old pool
+            conn = None
+            try:
+                conn = self.pool.getconn()
+                cursor = conn.cursor()
+                cursor.execute(query, params or ())
+                conn.commit()
+                cursor.close()
+                return True
+            except Exception as e:
+                if conn:
+                    conn.rollback()
+                return False
+            finally:
+                if conn:
+                    self.pool.putconn(conn)
+        logger.warning(f"[DB-EXEC] No pool available for: {query[:80]}...")
+        return False
+    
+    def execute_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
+        """Execute query and fetch all results using injected pool."""
+        if self._db_pool:
+            conn = None
+            try:
+                conn = self._db_pool.get_connection()
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute(query, params or ())
+                results = cursor.fetchall()
+                cursor.close()
+                logger.debug(f"[DB-FETCH] Success: {len(results)} rows from {query[:60]}...")
+                return [dict(r) for r in results]
+            except Exception as e:
+                logger.error(f"[DB-FETCH] Failed: {query[:60]}... Error: {e}")
+                return []
+            finally:
+                if conn:
+                    self._db_pool.put_connection(conn)
+        elif self.pool:  # Fallback to old pool
+            conn = None
+            try:
+                conn = self.pool.getconn()
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute(query, params or ())
+                results = cursor.fetchall()
+                cursor.close()
+                return [dict(r) for r in results]
+            except Exception:
+                return []
+            finally:
+                if conn:
+                    self.pool.putconn(conn)
+        logger.warning(f"[DB-FETCH] No pool available for: {query[:60]}...")
+        return []
     
     def execute(self, query: str, params: Tuple = None) -> bool:
         if not self.pool:
@@ -2686,12 +2769,17 @@ class BlockManager:
             GENESIS_MERKLE    = hashlib.sha3_256(b"QTCL_GENESIS").hexdigest()
             GENESIS_WITNESS   = _generate_hyp_witness("GENESIS_WITNESS")
 
-            genesis_hash = '0' * 64
+            # Null parent for genesis (traditional blockchain pattern)
+            GENESIS_PARENT = '0' * 64
+
+            # Compute proper genesis block hash from contents (SHA3-256² for HypΓ)
+            genesis_content = f"QTCL_GENESIS:{GENESIS_TIMESTAMP}:{GENESIS_MERKLE}:{GENESIS_WITNESS}:{GENESIS_PARENT}"
+            genesis_hash = hashlib.sha3_256(hashlib.sha3_256(genesis_content.encode()).digest()).hexdigest()
 
             genesis = QuantumBlock(
                 block_height       = 0,
                 block_hash         = genesis_hash,
-                parent_hash        = '0' * 64,
+                parent_hash        = GENESIS_PARENT,
                 miner_address      = self.validator.miner_address,
                 tx_count           = 0,
                 merkle_root        = GENESIS_MERKLE,
@@ -2726,20 +2814,25 @@ class BlockManager:
             # Persist genesis to DB if available
             if self.db is not None:
                 try:
-                    self.db.execute(
+                    success = self.db.execute(
                         """
                         INSERT INTO blocks
-                            (block_height, block_hash, parent_hash, oracle_w_state_hash,
-                             timestamp, tx_count, merkle_root, hyp_witness, difficulty, nonce)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (block_height) DO NOTHING
+                            (height, block_hash, parent_hash, w_state_hash, hyp_witness,
+                             timestamp, tx_count, merkle_root, difficulty, nonce,
+                             coherence_snapshot, fidelity_snapshot, finalized, finalized_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (height) DO NOTHING
                         """,
                         (
-                            0, genesis_hash, '0x' + '0'*64, GENESIS_WITNESS,
-                            GENESIS_TIMESTAMP, 0, GENESIS_MERKLE, GENESIS_WITNESS, 6, 0,
+                            0, genesis_hash, GENESIS_PARENT, GENESIS_WITNESS, GENESIS_WITNESS,
+                            GENESIS_TIMESTAMP, 0, GENESIS_MERKLE, 6, 0,
+                            1.0, 1.0, True, GENESIS_TIMESTAMP,
                         ),
                     )
-                    logger.info("[GENESIS] ✅ Genesis block persisted to DB (difficulty=6)")
+                    if success:
+                        logger.info("[GENESIS] ✅ Genesis block persisted to DB (difficulty=6)")
+                    else:
+                        logger.warning("[GENESIS] ⚠️ DB execute returned False — genesis may not be persisted")
                 except Exception as persist_err:
                     logger.warning(f"[GENESIS] DB persist failed ({persist_err}); genesis lives in-memory only")
     

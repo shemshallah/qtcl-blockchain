@@ -49,14 +49,13 @@ logger = logging.getLogger(__name__)
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 try:
-    from pool_api import get_entropy_pool_manager, get_entropy, get_entropy_stats
+    from qrng_ensemble import get_entropy_pool_manager, get_entropy, get_entropy_stats
     POOL_API_AVAILABLE = True
     logger.info("[GLOBALS] ✅ Pool API (Quantum Entropy) available")
 except ImportError as e:
     POOL_API_AVAILABLE = False
     logger.warning(f"[GLOBALS] ⚠️  Pool API import failed: {e}")
     
-    # NO FALLBACK TO os.urandom() — FAIL-FAST if called
     def get_entropy(size=32):
         raise RuntimeError(
             "[GLOBALS] Quantum entropy pool unavailable. "

@@ -1714,6 +1714,27 @@ class SchnorrGamma:
         """Verify a Schnorr-Γ signature."""
         return verify(sig, message, public_key)
     
+    def verify_signature(self, message_hash: bytes, sig_dict: Dict[str, Any], 
+                        public_key: PSLMatrix) -> bool:
+        """
+        Verify a Schnorr-Γ signature from dict format (hyp_engine integration).
+        
+        Parameters:
+            message_hash (bytes): 32-byte hash of message
+            sig_dict (dict): Signature dict with keys: 'signature', 'challenge'
+            public_key (PSLMatrix): Signer's public key matrix
+        
+        Returns:
+            bool: True if signature is valid, False otherwise.
+        """
+        try:
+            sig = signature_from_dict(sig_dict)
+            result = verify(sig, message_hash, public_key)
+            return result.valid
+        except Exception as e:
+            logger.error(f"[SchnorrΓ] verify_signature failed: {e}", exc_info=True)
+            return False
+    
     def verify_simulation(self, sig: SchnorrSignature, public_key: PSLMatrix) -> bool:
         """Run HVZK simulator check on signature."""
         return verify_simulation(sig, public_key)

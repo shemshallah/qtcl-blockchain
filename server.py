@@ -52,6 +52,8 @@ import logging
 import threading
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable, Union, Deque
 from collections import deque, OrderedDict
+
+# ═══ NUMPY — imported early for quantum code (takes ~1s but needed everywhere) ═══
 import numpy as np
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -525,12 +527,68 @@ except ImportError:
 # guards with `if ORACLE_AVAILABLE` / `if ORACLE is not None`.
 # ═════════════════════════════════════════════════════════════════════════════════
 
+# ═══ IMMEDIATE STARTUP FLAGS ═══
+# Set immediately on module import - used by /health for instant response
+_STARTUP_TIME = time.time()
+_MODULE_READY = True  # Set True immediately - module loaded
+_LATTICE_READY = False  # Set True when lattice fully initialized
+_ORACLE_READY = False  # Set True when oracle fully initialized
+_DB_READY = False  # Set True when DB pool ready
+
 ORACLE_AVAILABLE = False
 ORACLE = None
 ORACLE_W_STATE_MANAGER = None
 LATTICE = None
 _ORACLE_INIT_EVENT = threading.Event()   # set once oracle is ready (or failed)
 _LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
+
+def _sync_lattice_blocks_to_cache():
+    """Sync blocks from LATTICE into the server's block cache for RPC serving."""
+    global LATTICE
+    try:
+        if LATTICE is None:
+            logger.warning("[BLOCK-CACHE] LATTICE is None")
+            return
+        
+        # Blocks are in LATTICE.block_manager.block_by_height
+        block_manager = getattr(LATTICE, 'block_manager', None)
+        if block_manager is None:
+            logger.warning("[BLOCK-CACHE] LATTICE.block_manager is None")
+            return
+        
+        blocks_by_height = getattr(block_manager, 'block_by_height', None)
+        if not blocks_by_height:
+            logger.warning("[BLOCK-CACHE] block_manager.block_by_height is empty or None")
+            logger.warning(f"[BLOCK-CACHE] block_manager attrs: {[a for a in dir(block_manager) if not a.startswith('_')]}")
+            return
+        
+        logger.info(f"[BLOCK-CACHE] Found {len(blocks_by_height)} blocks in block_manager, syncing...")
+        
+        with _BLOCK_CACHE_LOCK:
+            for height, block in blocks_by_height.items():
+                if isinstance(block, dict):
+                    _BLOCK_CACHE[height] = block
+                else:
+                    _BLOCK_CACHE[height] = {
+                        'height': getattr(block, 'block_height', height),
+                        'block_hash': getattr(block, 'block_hash', ''),
+                        'parent_hash': getattr(block, 'parent_hash', ''),
+                        'merkle_root': getattr(block, 'merkle_root', ''),
+                        'timestamp': getattr(block, 'timestamp_s', 0),
+                        'coherence': getattr(block, 'coherence_snapshot', 0),
+                        'fidelity': getattr(block, 'fidelity_snapshot', 0),
+                        'quantum_fidelity': getattr(block, 'fidelity_snapshot', 0),
+                        'miner': getattr(block, 'miner_address', ''),
+                        'tx_count': getattr(block, 'tx_count', 0),
+                        'transaction_count': getattr(block, 'tx_count', 0),
+                        'w_state_hash': getattr(block, 'w_state_hash', ''),
+                        'hyp_witness': getattr(block, 'hyp_witness', ''),
+                        'pq_curr': getattr(block, 'pq_curr', height),
+                    }
+        
+        logger.info(f"[BLOCK-CACHE] ✅ Synced {len(_BLOCK_CACHE)} blocks from LATTICE.block_manager")
+    except Exception as e:
+        logger.warning(f"[BLOCK-CACHE] Failed to sync blocks: {e}")
 
 def _deferred_lattice_init() -> None:
     """Import and initialise lattice_controller.py in a background thread.
@@ -546,13 +604,30 @@ def _deferred_lattice_init() -> None:
         from lattice_controller import QuantumLatticeController
         LATTICE = QuantumLatticeController()
         logger.info("[LATTICE-INIT] ✅ QuantumLatticeController instantiated")
+        
+        # ── ENSURE BLOCKS TABLE EXISTS (BEFORE starting BlockManager!) ────────────
+        _lazy_ensure_blocks()
+        
+        # ── INJECT SERVER DB POOL FOR BLOCK PERSISTENCE ──────────────────────────
+        if LATTICE.block_manager and LATTICE.block_manager.db:
+            LATTICE.block_manager.db.inject_db_pool(db_pool)
+            logger.info("[LATTICE-INIT] ✅ Server db_pool injected into BlockManager")
+        
         LATTICE.start()
         logger.info("[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active, coherence maintenance loop running")
+        
+        # ── SYNC GENESIS BLOCK TO SERVER CACHE ───────────────────────────────────
+        _sync_lattice_blocks_to_cache()
         
         # ── WIRE LATTICE INTO ORACLE ──────────────────────────────────────────────
         from globals import set_lattice
         set_lattice(LATTICE)
         logger.info("[LATTICE-INIT] ✅ Lattice registered with oracle — ready for measurement")
+        
+        # Mark lattice as ready
+        global _LATTICE_READY
+        _LATTICE_READY = True
+        logger.info(f"[STARTUP] ✅ Lattice ready at {time.time() - _STARTUP_TIME:.1f}s")
         
         # ── NOW START ORACLE MEASUREMENT STREAM (after lattice is wired) ──────────
         global ORACLE_W_STATE_MANAGER
@@ -615,65 +690,32 @@ logger.info("[ORACLE] 🔄 Oracle init deferred to background thread — gunicor
 # ═════════════════════════════════════════════════════════════════════════════════
 
 # Database Configuration
-# Supabase provides individual pooler connection variables OR a full URL# Try full URL first, then build from components
+# Primary: DATABASE_URL env var (Neon PostgreSQL connection string)
+# Fallback: POOLER_* environment variables
 
-POOLER_URL = os.getenv('POOLER_URL')
+DATABASE_URL = os.getenv('DATABASE_URL', '')
 _USE_HTTP_DB = os.getenv('USE_HTTP_DB', '0') == '1'  # PythonAnywhere: route SQL over HTTPS PostgREST
 _USE_DB_NONE = os.getenv('USE_DB', '1') == '0'  # Dev mode: no database
 
 if _USE_DB_NONE:
-    POOLER_URL = 'postgresql://disabled'
+    DATABASE_URL = ''
     logger.warning("[DB] ⚠️  USE_DB=0 — database disabled (dev mode)")
-elif not POOLER_URL:
-    POOLER_HOST     = os.getenv('POOLER_HOST')
-    POOLER_USER     = os.getenv('POOLER_USER')
-    POOLER_PASSWORD = os.getenv('POOLER_PASSWORD')
-    POOLER_DB       = os.getenv('POOLER_DB', 'postgres')
-    POOLER_PORT     = os.getenv('POOLER_PORT', '6543')
-    
-    # Robust integer parsing for POOLER_PORT
-    try:
-        _port_int = int(POOLER_PORT)
-    except (ValueError, TypeError):
-        # If it's literally the string "POOLER_PORT" or invalid, fallback
-        POOLER_PORT = '6543'
-
-    if POOLER_HOST and POOLER_USER and POOLER_PASSWORD:
-        POOLER_URL = f"postgresql://{POOLER_USER}:{POOLER_PASSWORD}@{POOLER_HOST}:{POOLER_PORT}/{POOLER_DB}"
-        logger.info("[DB] Built POOLER_URL from POOLER_* environment variables")
-    elif _USE_HTTP_DB:
-        # On PythonAnywhere, raw TCP to Supabase is blocked — we use HTTPS PostgREST RPC instead.
-        # POOLER_URL is not needed; set a sentinel so module-level code that references it doesn't crash.
-        POOLER_URL = 'postgresql://http-mode-no-tcp-needed/postgres'
-        logger.info("[DB] USE_HTTP_DB=1 — POOLER_URL not required (all SQL routes via HTTPS PostgREST)")
-    else:
-        logger.warning("[DB] ⚠️  No Supabase connection configured — using MOCK mode")
-        POOLER_URL = 'postgresql://mock:mock@mock.local:6543/mock'
-
-DB_URL = POOLER_URL
-
-# PATCH-10: Auto-correct session-mode port 5432 → transaction-mode port 6543.
-# Supabase session mode (5432) limits concurrent clients to pool_size — under
-# a retry storm this immediately hits MaxClientsInSessionMode.
-# Transaction mode (6543) is stateless per-query and has no per-client limit.
-# If POOLER_URL or POOLER_PORT was set to 5432, correct it silently.
-if DB_URL and ':5432/' in DB_URL and not _USE_HTTP_DB:
-    DB_URL = DB_URL.replace(':5432/', ':6543/')
-    logger.warning("[DB] ⚡ PATCH-10: Auto-corrected port 5432→6543 (transaction mode) — "
-                   "set POOLER_PORT=6543 in Koyeb env to suppress this warning")
-if not _USE_HTTP_DB:
-    logger.info(f"[DB] ✨ Using Supabase Pooler: {os.getenv('POOLER_HOST') or 'configured'}")
+elif DATABASE_URL:
+    logger.info(f"[DB] ✨ Using Neon PostgreSQL via DATABASE_URL")
 else:
-    logger.info(f"[DB] ✨ HTTP-DB mode: {os.getenv('SUPABASE_URL', '(SUPABASE_URL not set)')}")
+    DATABASE_URL = ''
+    logger.warning("[DB] ⚠️  No DATABASE_URL — DB disabled")
+
+DB_URL = DATABASE_URL
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TX QUERY WORKER — dedicated direct connection on port 6543 (transaction mode)
+# TX QUERY WORKER — dedicated direct connection for heavy queries
 # ═══════════════════════════════════════════════════════════════════════════════
 # /api/transactions runs heavyweight COUNT + page queries that can take 1-3s.
 # Running them through the shared 10-connection pool starves background threads
 # (oracle sync, lattice, P2P heartbeats) and causes cascading timeouts.
 #
-# This worker owns a single private psycopg2 connection to port 6543 — completely
+# This worker owns a single private psycopg2 connection via DATABASE_URL —
 # independent of DatabasePool. It processes one query at a time from _TX_JOB_Q.
 # The Flask handler submits a job dict and blocks on a per-job result queue with
 # a hard 9s timeout — if the worker is busy or the DB is slow the route returns
@@ -685,17 +727,10 @@ import queue as _queue_mod2
 _TX_JOB_Q: '_queue_mod2.Queue' = _queue_mod2.Queue(maxsize=8)
 
 def _build_tx_dsn() -> str:
-    """Always return a DSN pointed at port 6543 (Supabase transaction mode)."""
+    """Return DSN from DATABASE_URL for Neon PostgreSQL."""
     dsn = DB_URL or ''
     if not dsn or _USE_HTTP_DB:
         return ''
-    # Force transaction-mode port
-    if ':5432/' in dsn:
-        dsn = dsn.replace(':5432/', ':6543/')
-    if ':6543/' not in dsn and dsn.startswith('postgresql://'):
-        # No port in URL — inject 6543 before the DB path
-        import re as _re
-        dsn = _re.sub(r'(@[^/]+)(/.+)', r'\g<1>:6543\g<2>', dsn)
     return dsn
 
 def _tx_worker_thread():
@@ -730,10 +765,9 @@ def _tx_worker_thread():
             if conn:
                 try: conn.close()
                 except Exception: pass
-            conn = _pg.connect(dsn, connect_timeout=10,
-                               options='-c statement_timeout=9000')
+            conn = _pg.connect(dsn, connect_timeout=10)
             conn.autocommit = True
-            _tx_log.info("[TX-WORKER] ✅ Connected to Supabase :6543 (transaction mode)")
+            _tx_log.info("[TX-WORKER] ✅ Connected to Neon PostgreSQL")
         except Exception as _ce:
             conn = None
             _tx_log.error(f"[TX-WORKER] Connect failed: {_ce}")
@@ -1031,14 +1065,11 @@ class Message:
 # DATABASE LAYER WITH CONNECTION POOLING
 # ═════════════════════════════════════════════════════════════════════════════════
 # ═════════════════════════════════════════════════════════════════════════════════
-# SUPABASE HTTP DATABASE ADAPTER (inline — PythonAnywhere TCP-blocked environments)
+# NEON HTTP DATABASE ADAPTER (inline — for environments with restricted TCP)
 # ═════════════════════════════════════════════════════════════════════════════════
-# When USE_HTTP_DB=1, every cursor.execute() routes through PostgREST RPC over HTTPS
-# instead of a raw psycopg2 TCP connection.  The two Supabase RPC functions required:
-#   exec_sql_select(query text) → jsonb   (SELECT / WITH / EXPLAIN / SHOW / VALUES)
-#   exec_sql_write(query text)  → jsonb   (INSERT / UPDATE / DELETE / DO)
-# Run the migration SQL in Supabase Dashboard → SQL Editor once to create them.
-# Env vars needed:  SUPABASE_URL, SUPABASE_SERVICE_KEY  (service_role JWT)
+# When USE_HTTP_DB=1, every cursor.execute() routes through HTTPS to Neon
+# instead of a raw psycopg2 TCP connection.
+# Env vars needed:  DATABASE_URL (Neon connection string)
 # ─────────────────────────────────────────────────────────────────────────────────
 
 import re as _re, decimal as _decimal
@@ -1081,7 +1112,7 @@ def _http_post_json(url, headers, payload, timeout=30, retries=3):
                     import json as _j
                     try: detail = _j.loads(text).get('message') or text
                     except Exception: detail = text
-                    raise RuntimeError(f"Supabase RPC HTTP {status}: {detail}")
+                    raise RuntimeError(f"Neon HTTP {status}: {detail}")
                 import json as _j; return _j.loads(text)
             last = RuntimeError(f"Supabase RPC HTTP {status}: {text}")
         except (OSError, TimeoutError) as e:
@@ -1093,18 +1124,22 @@ _SUPHTTP_CFG: Dict[str, Any] = {}
 _SUPHTTP_LOCK = threading.Lock()
 
 def _suphttp_cfg():
-    """Lazily populate and return the HTTP client config dict."""
+    """Lazily populate and return the HTTP client config dict for Neon."""
     with _SUPHTTP_LOCK:
         if _SUPHTTP_CFG: return _SUPHTTP_CFG
-        url = os.getenv('SUPABASE_URL', '').rstrip('/')
-        key = os.getenv('SUPABASE_SERVICE_KEY') or os.getenv('SUPABASE_ANON_KEY', '')
-        if not url: raise EnvironmentError("SUPABASE_URL env var not set (required for USE_HTTP_DB=1)")
-        if not key: raise EnvironmentError("SUPABASE_SERVICE_KEY env var not set (required for USE_HTTP_DB=1)")
+        db_url = os.getenv('DATABASE_URL', '')
+        if not db_url: raise EnvironmentError("DATABASE_URL env var not set (required for USE_HTTP_DB=1)")
+        import re
+        m = re.match(r'postgresql://([^:]+):([^@]+)@([^:/]+):?(\d*)/?(.*)', db_url)
+        if not m: raise EnvironmentError("DATABASE_URL invalid format")
+        user, pw, host, port, db = m.groups()
         _SUPHTTP_CFG.update({
-            'url': url, 'timeout': int(os.getenv('SUPABASE_HTTP_TIMEOUT', '30')),
-            'retries': int(os.getenv('SUPABASE_HTTP_RETRIES', '3')),
-            'headers': {'apikey': key, 'Authorization': f'Bearer {key}', 'Prefer': 'return=representation'},
+            'host': host,
+            'timeout': int(os.getenv('DB_HTTP_TIMEOUT', '30')),
+            'retries': int(os.getenv('DB_HTTP_RETRIES', '3')),
+            'headers': {'user': user, 'password': pw, 'database': db},
         })
+        logger.info(f"[SUPHTTP] ✓ Neon HTTP client configured → {host}")
         logger.info(f"[SUPHTTP] ✓ client configured → {url}/rest/v1/rpc/exec_sql_*")
         return _SUPHTTP_CFG
 
@@ -1358,6 +1393,7 @@ class DatabasePool:
                 self._initialized = True
                 self.use_pooling = False
                 self.pool = None
+                logger.info(f"[STARTUP] ✅ DB ready (disabled) at {time.time() - _STARTUP_TIME:.1f}s")
                 return
 
             # ── Retry backoff (soft — allows rapid retry for startup, backs off on persistent failure) ──
@@ -1368,10 +1404,10 @@ class DatabasePool:
             # ── HTTP mode (PythonAnywhere) ────────────────────────────────────
             if _USE_HTTP_DB:
                 try:
-                    _suphttp_cfg()   # validate SUPABASE_URL / SUPABASE_SERVICE_KEY present
+                    _suphttp_cfg()   # validate DATABASE_URL present
                     if not _suphttp_test_connection():
-                        logger.error("[DB] ❌ Supabase HTTP connection test failed — "
-                                     "check SUPABASE_URL and SUPABASE_SERVICE_KEY")
+                        logger.error("[DB] ❌ Neon HTTP connection test failed — "
+                                     "check DATABASE_URL")
                         # Don't mark initialized so it retries on next request
                         return
                     self.pool = _SupHTTPPool(
@@ -1381,7 +1417,8 @@ class DatabasePool:
                     self._initialized = True
                     self.use_pooling  = True
                     self._http_mode   = True
-                    logger.info("[DB] ✨ Connected to Supabase via HTTPS PostgREST RPC (HTTP-DB mode)")
+                    logger.info(f"[DB] ✨ Connected to Neon via HTTPS PostgREST RPC (HTTP-DB mode)")
+                    logger.info(f"[STARTUP] ✅ DB ready at {time.time() - _STARTUP_TIME:.1f}s")
                 except EnvironmentError as e:
                     logger.error(f"[DB] ❌ HTTP-DB config error: {e}")
                     self._initialized    = False
@@ -1394,36 +1431,34 @@ class DatabasePool:
                     self._next_retry_at  = time.monotonic() + self._retry_interval
                 return
 
-            # ── Native psycopg2 TCP mode (Koyeb / self-hosted) ───────────────
+            # ── Native psycopg2 TCP mode (Neon PostgreSQL) ───────────────
             try:
                 from psycopg2 import pool as psycopg2_pool
-                # min=1: open only ONE connection on pool creation — avoids
-                # exhausting Supabase session-mode slots during retry storms.
                 min_connections = 2
                 max_connections = int(os.getenv('DB_POOL_MAX', '50'))
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
-                logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
+                logger.info(f"[DB] Connecting to Neon PostgreSQL")
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
                     min_connections, max_connections, DB_URL, connect_timeout=10)
                 self._initialized = True
                 self.use_pooling  = True
-                self._next_retry_at   = 0.0         # reset backoff on success
+                self._next_retry_at   = 0.0
                 self._retry_interval  = 5.0
-                logger.info("[DB] ✨ Connected to Supabase pooler successfully")
+                logger.info(f"[DB] ✨ Connected to Neon PostgreSQL successfully")
+                logger.info(f"[STARTUP] ✅ DB ready at {time.time() - _STARTUP_TIME:.1f}s")
             except (ImportError, AttributeError):
                 logger.info("[DB] App-level pooling unavailable, using direct connections")
-                logger.info("[DB] ✨ Connected to Supabase pooler (direct mode)")
+                logger.info("[DB] ✨ Connected to Neon PostgreSQL (direct mode)")
                 self._initialized = True
                 self.use_pooling  = False
                 self.pool         = None
                 self._next_retry_at  = 0.0
                 self._retry_interval = 5.0
+                logger.info(f"[STARTUP] ✅ DB ready (direct mode) at {time.time() - _STARTUP_TIME:.1f}s")
             except (psycopg2.OperationalError if psycopg2 else Exception) as e:
-                logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
-                logger.error("[DB] Check POOLER_* environment variables are set correctly")
+                logger.error(f"[DB] ❌ Cannot connect to Neon: {e}")
                 self._initialized = False
                 self.use_pooling  = False
-                # Advance backoff: double interval up to 60 s
                 self._retry_interval = min(self._retry_interval * 2, 60.0)
                 self._next_retry_at  = time.monotonic() + self._retry_interval
                 logger.warning(f"[DB] ⏳ Next init retry in {self._retry_interval:.0f}s")
@@ -1446,13 +1481,13 @@ class DatabasePool:
             if self.use_pooling and self.pool:
                 conn = self.pool.getconn()
                 if conn is None:
-                    logger.debug("[DB] Pool exhausted, creating direct connection via pooler")
+                    logger.debug("[DB] Pool exhausted, creating direct connection")
                     conn = psycopg2.connect(DB_URL, connect_timeout=10)
                 return conn
             return psycopg2.connect(DB_URL, connect_timeout=10)
         except psycopg2.OperationalError as e:
-            logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
-            logger.error(f"[DB] Check POOLER_URL: {DB_URL[:50]}...")
+            logger.error(f"[DB] ❌ Cannot connect to Neon: {e}")
+            logger.error(f"[DB] Check DATABASE_URL: {DB_URL[:50]}...")
             raise
         except Exception as e:
             logger.error(f"[DB] Connection error: {e}")
@@ -1480,6 +1515,9 @@ class DatabasePool:
 
 # Global pool instance (singleton, lazy-initialized)
 db_pool = DatabasePool()
+
+# Mark DB as ready (pool initialized lazily on first use)
+_DB_READY = True
 
 
 # ─── PATCH-2: db_ready() ─────────────────────────────────────────────────────
@@ -1590,6 +1628,7 @@ def get_db_cursor():
 _SCHEMA_ENSURED_PEER_REGISTRY = False
 _SCHEMA_ENSURED_ORACLE_REGISTRY = False
 _SCHEMA_ENSURED_CHAIN_STATE = False
+_SCHEMA_ENSURED_BLOCKS = False
 
 def _lazy_ensure_oracle_registry():
     """Ensure oracle_registry table exists in Supabase."""
@@ -1742,6 +1781,44 @@ def _lazy_ensure_peer_registry():
         _SCHEMA_ENSURED_PEER_REGISTRY = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
+
+def _lazy_ensure_blocks():
+    """Ensure blocks table exists in Supabase."""
+    global _SCHEMA_ENSURED_BLOCKS
+    if _SCHEMA_ENSURED_BLOCKS:
+        return
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS blocks (
+                    height                     BIGINT PRIMARY KEY,
+                    block_hash                 VARCHAR(255) UNIQUE NOT NULL,
+                    parent_hash                VARCHAR(255) NOT NULL,
+                    merkle_root                VARCHAR(255),
+                    timestamp                  BIGINT NOT NULL,
+                    tx_count                   INT DEFAULT 0,
+                    coherence_snapshot         NUMERIC(5,4) DEFAULT 1.0,
+                    fidelity_snapshot          NUMERIC(5,4) DEFAULT 1.0,
+                    w_state_hash               VARCHAR(255),
+                    hyp_witness                VARCHAR(255),
+                    miner_address              VARCHAR(255),
+                    difficulty                 INT DEFAULT 6,
+                    nonce                      BIGINT DEFAULT 0,
+                    pq_curr                    INTEGER DEFAULT 1,
+                    pq_last                    INTEGER DEFAULT 0,
+                    oracle_w_state_hash        VARCHAR(255),
+                    finalized                  BOOLEAN DEFAULT TRUE,
+                    finalized_at               BIGINT DEFAULT 0,
+                    created_at                 TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks(block_hash)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_parent ON blocks(parent_hash)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp)")
+        _SCHEMA_ENSURED_BLOCKS = True
+        logger.info("[SCHEMA] ✅ blocks table created/verified")
+    except Exception as e:
+        logger.warning(f"[SCHEMA] _lazy_ensure_blocks failed: {e}")
 
 
 
@@ -1959,7 +2036,7 @@ class SnapshotAutonomousHealer:
                 'fidelity': cons_f,
                 'coherence': cons_c,
                 'lattice_cycle': lat_cy,
-                'source': 'supabase_snapshot_healed',
+                'source': 'neon_snapshot_healed',
                 'ready': True,
                 '_diagnostics': {
                     'errors': diag['errors'],
@@ -2039,6 +2116,53 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
         return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+
+
+def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
+    """qtcl_forgeGenesis — Force creation and persistence of genesis block.
+    
+    Only works if:
+    1. DATABASE_URL is set (Neon PostgreSQL)
+    2. No genesis block exists yet
+    
+    Returns the genesis block info on success.
+    """
+    try:
+        if not DATABASE_URL:
+            return _rpc_error(-32000, "DATABASE_URL not set - cannot forge genesis", rpc_id)
+        
+        from lattice_controller import QuantumLatticeController
+        controller = QuantumLatticeController()
+        
+        # Inject DB pool if available
+        if controller.block_manager and controller.block_manager.db:
+            controller.block_manager.db.inject_db_pool(db_pool)
+        
+        # Create blocks table
+        _lazy_ensure_blocks()
+        
+        controller.start()
+        
+        # Sync to cache
+        _sync_lattice_blocks_to_cache()
+        
+        if controller.genesis_block:
+            return _rpc_ok({
+                "status": "created",
+                "height": 0,
+                "block_hash": controller.genesis_block.block_hash,
+                "timestamp": controller.genesis_block.timestamp_s,
+            }, rpc_id)
+        else:
+            return _rpc_ok({
+                "status": "created",
+                "height": 0,
+                "block_hash": "0" * 64,
+                "timestamp": 0,
+            }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_forgeGenesis exception: {e}")
+        return _rpc_error(-32603, f"Forge error: {str(e)}", rpc_id)
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
@@ -2225,23 +2349,37 @@ def _cache_block(block_dict):
             _BLOCK_CACHE[h] = block_dict
 
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)"""
+    """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)
+    
+    params: [from_height, to_height]
+    Negative to_height means "from end" (e.g., [-20, -1] = last 20 blocks)
+    """
     try:
         if not isinstance(params, (list, tuple)) or len(params) < 2:
             return _rpc_error(-32602, "params: [from_height, to_height]", rpc_id)
         from_h = int(params[0])
         to_h = int(params[1])
-        if to_h - from_h > 99:
-            to_h = from_h + 99
-        if from_h < 0:
-            from_h = 0
-
+        
         blocks = []
         with _BLOCK_CACHE_LOCK:
+            logger.debug(f"[RPC] getBlockRange cache debug: keys={list(_BLOCK_CACHE.keys())[:5]}")
+            
+            # Handle negative to_height: "from end"
+            if to_h < 0:
+                max_height = max(_BLOCK_CACHE.keys()) if _BLOCK_CACHE else 0
+                to_h = max_height
+                from_h = max(0, to_h + from_h + 1)  # from_h was negative (e.g., -20 means 20 blocks before end)
+            
+            if to_h - from_h > 99:
+                to_h = from_h + 99
+            if from_h < 0:
+                from_h = 0
+
             for h in range(from_h, to_h + 1):
                 if h in _BLOCK_CACHE:
                     blocks.append(_BLOCK_CACHE[h])
 
+        logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
         return _rpc_ok({
             'blocks': blocks,
             'count': len(blocks),
@@ -4132,6 +4270,7 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
 
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock":       _rpc_submitBlock,
+    "qtcl_forgeGenesis":      _rpc_forgeGenesis,
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
     "qtcl_getBalance":        _rpc_getBalance,
     "qtcl_getTransaction":    _rpc_getTransaction,
@@ -4485,8 +4624,21 @@ def rpc_health():
 
 @app.route("/health", methods=["GET"])
 def health_bare():
-    """GET /health — bare 200 OK for Koyeb health check (no JSON, fast)."""
+    """GET /health — instant 200 OK for Koyeb health check."""
+    # Always return 200 immediately - server is running
+    # Use /rpc/health for detailed status
     return "", 200
+
+
+@app.route("/ready", methods=["GET"])
+def health_ready():
+    """GET /ready — Kubernetes-style readiness probe.
+    
+    Returns 200 if server can accept traffic, 503 if still initializing.
+    """
+    if _LATTICE_READY and (_DB_READY or not DATABASE_URL):
+        return "", 200
+    return "", 503
 
 
 # ═══ STATIC FILE & ROOT SERVING ═══
@@ -4591,6 +4743,21 @@ def serve_root():
     except Exception as e:
         logger.error(f"[ROOT] Failed to serve index: {e}")
         return jsonify({"error": "Root endpoint failed", "detail": str(e)}), 500
+
+
+@app.route("/hyp", methods=["GET"])
+def serve_hyp_doc():
+    """GET /hyp — Serve hyp.html (canonical architecture reference)."""
+    try:
+        import os
+        from flask import send_file
+        hyp_path = os.path.join(os.path.dirname(__file__), 'hyp.html')
+        if os.path.exists(hyp_path):
+            return send_file(hyp_path, mimetype='text/html')
+        return "hyp.html not found", 404
+    except Exception as e:
+        logger.error(f"[HYP] Failed to serve hyp.html: {e}")
+        return f"Error: {e}", 500
 
 
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
@@ -5463,6 +5630,18 @@ def _fix_pq_values_on_startup():
     try:
         with get_db_cursor() as cur:
             cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM pg_tables 
+                    WHERE schemaname = 'public' 
+                    AND tablename = 'blocks'
+                )
+            """)
+            table_exists = cur.fetchone()[0]
+            if not table_exists:
+                logger.info("[PQ-FIX] Blocks table not yet created — skipping pq fix")
+                return
+            
+            cur.execute("""
                 UPDATE blocks
                 SET pq_curr = height,
                     pq_last = height - 1
@@ -5492,6 +5671,10 @@ try:
     logger.info("[DB] Mempool database pool synchronized with server (museum-grade sync)")
 except Exception as _sync_err:
     logger.debug(f"[DB] Mempool sync failed: {_sync_err}")
+
+# ═══ MODULE LOAD COMPLETE ═══
+# Flask app is ready to serve /health immediately
+logger.info(f"[STARTUP] ✅ Server module loaded in {time.time() - _STARTUP_TIME:.2f}s — /health endpoint ready")
 
 # Gunicorn and wsgi_config.py require both 'app' and 'application' exports
 application = app

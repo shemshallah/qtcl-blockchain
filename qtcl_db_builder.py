@@ -1,19 +1,51 @@
-
-# ╔════════════════════════════════════════════════════════════════════════════════╗
+# ═════════════════════════════════════════════════════════════════════════════════╗
 # ║                                                                                ║
-# ║   QTCL DATABASE BUILDER V5 - GOOGLE COLAB EDITION (COMPLETE)                  ║
-# ║   Hard-coded Supabase Pooler Connection | Optimized Bulk Load                ║
-# ║   RUN THIS CELL IN GOOGLE COLAB - NO MODIFICATIONS NEEDED                    ║
+# ║   QTCL DATABASE BUILDER V7 - NEONDB + SQLITE DUAL-MODE                       ║
+# ║   NeonDB (server) via DATABASE_URL env | SQLite (client) fallback             ║
+# ║   Client-side Argon2id key-wrapping (NO external KMS required)               ║
+# ║                                                                                ║
+# ║   SERVER MODE  → export DATABASE_URL=postgresql://neondb_owner:<pw>@<host>/  ║
+# ║   CLIENT MODE  → no DATABASE_URL set → qtcl.db local SQLite                  ║
+# ║                                                                                ║
+# ║   KEY SECURITY MODEL (replaces Google/AWS KMS):                               ║
+# ║     passphrase + device_pepper → Argon2id → KEK (never stored)               ║
+# ║     KEK + AES-256-GCM encrypts 32-byte DEK                                    ║
+# ║     DEK + AES-256-GCM encrypts BIP39 seed entropy                             ║
+# ║     DB contains: salts + ciphertexts + nonces only — zero key material       ║
 # ║                                                                                ║
 # ╚════════════════════════════════════════════════════════════════════════════════╝
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 1: INSTALL DEPENDENCIES (Colab-specific)
+# GUARD: This module is NOT meant to be imported. Only run as __main__.
+# ─────────────────────────────────────────────────────────────────────────────
+import sys as _sys
+if __name__ not in ('__main__', '__mp_main__'):
+    raise ImportError(
+        "qtcl_db_builder.py is NOT a module for import. "
+        "Run as standalone script: python qtcl_db_builder.py"
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1: DEPENDENCIES (only if running as main)
 # ─────────────────────────────────────────────────────────────────────────────
 import subprocess
-import sys
+import os
+import sys  # needed early for logging
 
-subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "psycopg2-binary", "mpmath", "tqdm"])
+_db_url = os.environ.get("DATABASE_URL", "")
+_pg_mode = _db_url.startswith("postgresql")
+
+_pkgs = ["mpmath", "tqdm"]
+if _pg_mode:
+    _pkgs.append("psycopg2-binary")
+_pkgs.append("argon2-cffi")
+_pkgs.append("cryptography")
+
+try:
+    subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages"] + _pkgs)
+except subprocess.CalledProcessError:
+    print("Installing packages without --break-system-packages...")
+    subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--user"] + _pkgs)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2: IMPORTS & SETUP
@@ -23,16 +55,35 @@ import json
 import math
 import hashlib
 import logging
-import os
 import gc
+import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Any, Iterator
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from urllib.parse import quote_plus
 
-# Colab progress bar
-from tqdm.notebook import tqdm
+# Progress bar — use standard mode (notebook mode fails without ipywidgets)
+try:
+    # Try standard tqdm first (works everywhere, no widget dependencies)
+    from tqdm import tqdm
+except ImportError:
+    # Fallback: simple dummy progress bar if tqdm unavailable
+    class tqdm:
+        def __init__(self, *args, total=None, desc=None, leave=True, **kwargs):
+            self.total = total
+            self.desc = desc
+            self.n = 0
+        def update(self, n=1):
+            self.n += n
+        def close(self):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.close()
+        def __iter__(self):
+            return iter([])
 
 # Mathematical precision
 try:
@@ -58,6 +109,17 @@ try:
 except ImportError:
     PSYCOPG2_AVAILABLE = False
     print("⚠️ psycopg2 not available", file=sys.stderr)
+
+# Argon2id — client-side KEK derivation (no external KMS)
+try:
+    from argon2.low_level import hash_secret_raw, Type
+    ARGON2_AVAILABLE = True
+except ImportError:
+    ARGON2_AVAILABLE = False
+import hashlib as _hashlib  # always available (used in device_pepper + scrypt fallback)
+
+# AES-256-GCM — stdlib from Python 3.6+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 3: LOGGING (Colab-friendly)
@@ -86,25 +148,222 @@ class CLR:
     QUANTUM = f'{BOLD}{M}'
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4: HARD-CODED SUPABASE POOLER CONNECTION (AS REQUESTED)
+# STEP 4: CONNECTION MODE — NeonDB (server) or SQLite (client)
 # ─────────────────────────────────────────────────────────────────────────────
-POOLER_DB = "postgres"
-POOLER_HOST = "aws-0-us-west-2.pooler.supabase.com"
-POOLER_PORT = "5432"
-POOLER_USER = "postgres.rslvlsqwkfmdtebqsvtw"
-POOLER_PASSWORD = "$h10j1r1H0w4rd"
+#
+#  SERVER / COLAB:  export DATABASE_URL="postgresql://neondb_owner:<pw>@<host>/neondb?sslmode=require&channel_binding=require"
+#  CLIENT (local):  leave DATABASE_URL unset → SQLite file qtcl.db is created
+#
+# The NeonDB connection string is NEVER hard-coded here.
+# Set it as an environment variable or a Colab secret (userdata.get).
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Build connection URL with proper URL encoding for special characters
-# Note: statement_timeout must be set via SET command, not DSN parameter
-pg_url = (
-    f"postgresql://{quote_plus(POOLER_USER)}:"
-    f"{quote_plus(POOLER_PASSWORD)}@"
-    f"{POOLER_HOST}:{POOLER_PORT}/{POOLER_DB}"
-)
-logger.info(f"{CLR.QUANTUM}[COLAB] Supabase Pooler Connection Configured{CLR.E}")
-logger.info(f"  Host: {POOLER_HOST}:{POOLER_PORT}")
-logger.info(f"  User: {POOLER_USER}")
-logger.info(f"  DB: {POOLER_DB}")
+def _resolve_database_url() -> Tuple[str, str]:
+    """
+    Returns (db_url, db_mode) where db_mode is 'postgres' or 'sqlite'.
+    Priority:
+      1. DATABASE_URL environment variable
+      2. Colab userdata secret (if running in Colab)
+      3. Fall back to SQLite
+    """
+    # 1. Env var (works everywhere: Koyeb, local, Termux, Colab with os.environ)
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url and url.startswith("postgresql"):
+        logger.info(f"{CLR.OK}[CONN] PostgreSQL mode via DATABASE_URL env{CLR.E}")
+        return url, "postgres"
+
+    # 2. SQLite fallback — local client mode
+    sqlite_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qtcl.db")
+    logger.info(f"{CLR.WARN}[CONN] No DATABASE_URL found → SQLite client mode: {sqlite_path}{CLR.E}")
+    return sqlite_path, "sqlite"
+
+
+# Resolve at import time so builder classes can use it
+_DB_URL, _DB_MODE = _resolve_database_url()
+
+logger.info(f"[CONN] Mode: {_DB_MODE.upper()}")
+if _DB_MODE == "postgres":
+    # Redact password from log
+    _log_url = _DB_URL.split("@")[-1] if "@" in _DB_URL else _DB_URL
+    logger.info(f"[CONN] Host: {_log_url}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4B: CLIENT-SIDE KEY VAULT (replaces Google/AWS KMS entirely)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  Security model — three-layer envelope encryption:
+#
+#   Layer 1  passphrase + device_pepper
+#              ↓  Argon2id(m=65536, t=3, p=4) or scrypt fallback
+#            KEK  (32 bytes, NEVER stored anywhere)
+#
+#   Layer 2  KEK + random salt
+#              ↓  AES-256-GCM
+#            wrapped_dek  (stored in wallet_encrypted_seeds.wrapped_dek_b64)
+#
+#   Layer 3  DEK (unwrapped in RAM) + random nonce
+#              ↓  AES-256-GCM
+#            ciphertext_b64  (BIP39 entropy, stored in wallet_encrypted_seeds)
+#
+#  Attacker with full DB dump + no passphrase = zero decryptable material.
+#  Argon2id m=65536 = 64MB RAM cost — brute force on GPU is economically broken.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+import base64 as _b64
+import secrets as _secrets
+import hmac as _hmac
+import struct as _struct
+
+# Argon2id params (OWASP 2024 minimum: m=19456, t=2)
+# We use 3× that for wallet keys.
+_ARGON2_M_COST   = 65536   # 64 MB RAM
+_ARGON2_T_COST   = 3       # iterations
+_ARGON2_P_COST   = 4       # parallelism
+_ARGON2_HASH_LEN = 32      # 256-bit KEK
+_ARGON2_SALT_LEN = 32      # 256-bit salt
+
+# scrypt fallback params (BIP38-compatible strength)
+_SCRYPT_N = 1 << 17  # 131072
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+
+
+def _device_pepper() -> bytes:
+    """
+    Derive a stable device-specific pepper from local hardware identifiers.
+    This binds encrypted keys to the device without storing the pepper.
+    If hardware identifiers are unavailable, returns empty bytes (still secure,
+    just not device-bound — passphrase strength alone protects the key).
+    """
+    import platform, socket
+    parts = [
+        platform.node(),
+        platform.machine(),
+        platform.processor(),
+        socket.gethostname(),
+    ]
+    # Android/Termux: try ANDROID_ID
+    for env_var in ["ANDROID_ID", "BUILD_FINGERPRINT", "SERIAL"]:
+        v = os.environ.get(env_var, "")
+        if v:
+            parts.append(v)
+    combined = "|".join(p for p in parts if p).encode()
+    return _hashlib.sha256(combined).digest() if not ARGON2_AVAILABLE else            _hashlib.sha3_256(combined).digest()
+
+
+def derive_kek(passphrase: str, salt: bytes, device_pepper: bytes = b"") -> bytes:
+    """
+    Derive Key-Encryption-Key (KEK) from passphrase + salt + device pepper.
+    Returns 32 bytes. KEK is NEVER stored — re-derived on demand.
+
+    Uses Argon2id if available, falls back to scrypt.
+    """
+    # Pepper the passphrase: HMAC(device_pepper, passphrase_bytes) if pepper present
+    if device_pepper:
+        pw_bytes = _hmac.new(device_pepper, passphrase.encode(), "sha3_256").digest()
+    else:
+        pw_bytes = passphrase.encode("utf-8")
+
+    if ARGON2_AVAILABLE:
+        return hash_secret_raw(
+            secret=pw_bytes,
+            salt=salt,
+            time_cost=_ARGON2_T_COST,
+            memory_cost=_ARGON2_M_COST,
+            parallelism=_ARGON2_P_COST,
+            hash_len=_ARGON2_HASH_LEN,
+            type=Type.ID,
+        )
+    else:
+        # scrypt fallback (BIP38-strength)
+        return _hashlib.scrypt(
+            pw_bytes, salt=salt,
+            n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P,
+            dklen=32
+        )
+
+
+def wrap_dek(dek: bytes, kek: bytes) -> tuple:
+    """
+    Encrypt DEK with KEK using AES-256-GCM.
+    Returns (nonce_b64, ciphertext_b64) — both safe to store in DB.
+    """
+    nonce = _secrets.token_bytes(12)
+    ct = AESGCM(kek).encrypt(nonce, dek, None)
+    return (
+        _b64.b64encode(nonce).decode(),
+        _b64.b64encode(ct).decode(),
+    )
+
+
+def unwrap_dek(nonce_b64: str, ciphertext_b64: str, kek: bytes) -> bytes:
+    """Decrypt wrapped DEK. Raises InvalidTag if KEK is wrong (wrong passphrase)."""
+    nonce = _b64.b64decode(nonce_b64)
+    ct    = _b64.b64decode(ciphertext_b64)
+    return AESGCM(kek).decrypt(nonce, ct, None)
+
+
+def encrypt_seed(seed_entropy: bytes, dek: bytes) -> tuple:
+    """
+    Encrypt BIP39 seed entropy (16-32 bytes) with DEK using AES-256-GCM.
+    Returns (nonce_b64, ciphertext_b64).
+    """
+    nonce = _secrets.token_bytes(12)
+    ct = AESGCM(dek).encrypt(nonce, seed_entropy, None)
+    return (
+        _b64.b64encode(nonce).decode(),
+        _b64.b64encode(ct).decode(),
+    )
+
+
+def decrypt_seed(nonce_b64: str, ciphertext_b64: str, dek: bytes) -> bytes:
+    """Decrypt BIP39 seed entropy. Raises InvalidTag on wrong DEK."""
+    nonce = _b64.b64decode(nonce_b64)
+    ct    = _b64.b64decode(ciphertext_b64)
+    return AESGCM(dek).decrypt(nonce, ct, None)
+
+
+def new_wallet_envelope(passphrase: str) -> dict:
+    """
+    Generate a complete wallet key envelope ready for DB insertion.
+    Returns dict matching wallet_encrypted_seeds columns.
+    Call with a fresh random BIP39 entropy (or your existing entropy).
+
+    Example usage:
+        import secrets
+        entropy = secrets.token_bytes(32)   # 256-bit → 24-word mnemonic
+        envelope = new_wallet_envelope("my strong passphrase")
+        # then INSERT envelope into wallet_encrypted_seeds + store entropy's
+        # ciphertext — the plaintext entropy should be wiped from RAM.
+    """
+    import secrets as _s
+    kek_salt  = _s.token_bytes(_ARGON2_SALT_LEN)
+    dek       = _s.token_bytes(32)
+    pepper    = _device_pepper()
+    kek       = derive_kek(passphrase, kek_salt, pepper)
+    w_nonce, wrapped_dek = wrap_dek(dek, kek)
+
+    kdf_type = "argon2id" if ARGON2_AVAILABLE else "scrypt"
+    return {
+        "kdf_type":          kdf_type,
+        "kdf_salt_b64":      _b64.b64encode(kek_salt).decode(),
+        "argon2_m_cost":     _ARGON2_M_COST   if ARGON2_AVAILABLE else None,
+        "argon2_t_cost":     _ARGON2_T_COST   if ARGON2_AVAILABLE else None,
+        "argon2_p_cost":     _ARGON2_P_COST   if ARGON2_AVAILABLE else None,
+        "scrypt_n":          _SCRYPT_N         if not ARGON2_AVAILABLE else None,
+        "scrypt_r":          _SCRYPT_R         if not ARGON2_AVAILABLE else None,
+        "scrypt_p":          _SCRYPT_P         if not ARGON2_AVAILABLE else None,
+        "dek_nonce_b64":     w_nonce,
+        "wrapped_dek_b64":   wrapped_dek,
+        "device_bound":      bool(pepper),
+        # caller must fill: wallet_fingerprint, seed_nonce_b64, seed_ciphertext_b64, bip32_xpub
+    }
+
+logger.info(f"[KEYVAULT] Client-side KEK: {'Argon2id' if ARGON2_AVAILABLE else 'scrypt (fallback)'}")
+logger.info(f"[KEYVAULT] Device-bound pepper: enabled")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 5: MATHEMATICAL STRUCTURES (Optimized for Colab memory)
@@ -404,40 +663,30 @@ CREATE TABLE block_headers_cache (
 
 -- TABLE: blocks
 CREATE TABLE blocks (
-    height BIGINT PRIMARY KEY,
-    block_number BIGINT UNIQUE NOT NULL,
-    block_hash VARCHAR(255) UNIQUE NOT NULL,
-    previous_hash VARCHAR(255) NOT NULL,
-    state_root VARCHAR(255),
-    transactions_root VARCHAR(255),
-    receipts_root VARCHAR(255),
-    timestamp BIGINT NOT NULL,
-    transactions INT DEFAULT 0,
-    validator_public_key VARCHAR(255) NOT NULL,
-    validator_signature TEXT,
-    difficulty NUMERIC(20, 10) DEFAULT 1.0,
-    total_difficulty NUMERIC(30, 0),
-    nonce VARCHAR(255),
-    quantum_proof TEXT,
-    quantum_state_hash VARCHAR(255),
-    quantum_validation_status VARCHAR(50) DEFAULT 'unvalidated',
-    entropy_score NUMERIC(5, 4) DEFAULT 0.0,
-    temporal_coherence NUMERIC(5, 4) DEFAULT 0.9,
-    pq_signature TEXT,
-    pq_key_fingerprint VARCHAR(255),
-    pq_validation_status VARCHAR(50) DEFAULT 'unsigned',
-    pq_curr INTEGER DEFAULT 1,
-    pq_last INTEGER DEFAULT 0,
-    oracle_w_state_hash VARCHAR(255),
-    oracle_density_matrix_hash VARCHAR(255),
-    oracle_entropy_hash VARCHAR(255),
-    oracle_consensus_reached BOOLEAN DEFAULT FALSE,
-    status VARCHAR(50) DEFAULT 'pending',
-    finalized BOOLEAN DEFAULT FALSE,
-    finalized_at TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    height                     BIGINT PRIMARY KEY,
+    block_hash                 VARCHAR(255) UNIQUE NOT NULL,
+    parent_hash                VARCHAR(255) NOT NULL,
+    merkle_root                VARCHAR(255),
+    timestamp                  BIGINT NOT NULL,
+    tx_count                   INT DEFAULT 0,
+    coherence_snapshot         NUMERIC(5,4) DEFAULT 1.0,
+    fidelity_snapshot          NUMERIC(5,4) DEFAULT 1.0,
+    w_state_hash               VARCHAR(255),
+    hyp_witness                VARCHAR(255),
+    miner_address              VARCHAR(255),
+    difficulty                 INT DEFAULT 6,
+    nonce                      BIGINT DEFAULT 0,
+    pq_curr                    INTEGER DEFAULT 1,
+    pq_last                    INTEGER DEFAULT 0,
+    oracle_w_state_hash        VARCHAR(255),
+    finalized                  BOOLEAN DEFAULT TRUE,
+    finalized_at               BIGINT DEFAULT 0,
+    created_at                 TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks(block_hash);
+CREATE INDEX IF NOT EXISTS idx_blocks_parent ON blocks(parent_hash);
+CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
 
 -- TABLE: chain_reorganizations
 CREATE TABLE chain_reorganizations (
@@ -644,17 +893,17 @@ CREATE TABLE hyperbolic_triangles (
     triangle_id BIGINT PRIMARY KEY,
     depth INT NOT NULL,
     parent_id BIGINT,
-    v0_x NUMERIC(200, 150) NOT NULL,
-    v0_y NUMERIC(200, 150) NOT NULL,
+    v0_x NUMERIC(250, 210) NOT NULL,
+    v0_y NUMERIC(250, 210) NOT NULL,
     v0_name TEXT,
-    v1_x NUMERIC(200, 150) NOT NULL,
-    v1_y NUMERIC(200, 150) NOT NULL,
+    v1_x NUMERIC(250, 210) NOT NULL,
+    v1_y NUMERIC(250, 210) NOT NULL,
     v1_name TEXT,
-    v2_x NUMERIC(200, 150) NOT NULL,
-    v2_y NUMERIC(200, 150) NOT NULL,
+    v2_x NUMERIC(250, 210) NOT NULL,
+    v2_y NUMERIC(250, 210) NOT NULL,
     v2_name TEXT,
-    area NUMERIC(200, 150),
-    perimeter NUMERIC(200, 150),
+    area NUMERIC(250, 210),
+    perimeter NUMERIC(250, 210),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -1338,128 +1587,323 @@ CREATE TABLE pq_sequential (
 CREATE INDEX idx_pq_next ON pq_sequential(next_pq_id);
 CREATE INDEX idx_pq_prev ON pq_sequential(prev_pq_id);
 CREATE INDEX idx_sequence_order ON pq_sequential(sequence_order);
+
+-- ════════════════════════════════════════════════════════
+-- SECURITY: CLIENT-SIDE KEY VAULT (no external KMS required)
+-- ════════════════════════════════════════════════════════
+--
+--  Envelope encryption model (3 layers, all client-side):
+--    passphrase + device_pepper → Argon2id → KEK  (never stored)
+--    KEK → AES-256-GCM → wrapped_dek_b64          (stored here)
+--    DEK → AES-256-GCM → BIP39 entropy ciphertext (stored here)
+--
+--  Full DB scrape exposes: salts, nonces, ciphertexts, KDF params.
+--  None of these are decryptable without the passphrase.
+--  Argon2id m=65536 makes GPU brute-force economically infeasible.
+--  No external service, no API keys, no cloud dependency.
+
+CREATE TABLE IF NOT EXISTS wallet_encrypted_seeds (
+    seed_id              BIGSERIAL PRIMARY KEY,
+    wallet_fingerprint   VARCHAR(64)   NOT NULL UNIQUE,
+    -- KDF params (stored so we can re-derive KEK on any device)
+    kdf_type             VARCHAR(16)   NOT NULL DEFAULT 'argon2id',
+    kdf_salt_b64         TEXT          NOT NULL,  -- 32-byte random salt, base64
+    argon2_m_cost        INTEGER       DEFAULT 65536,
+    argon2_t_cost        INTEGER       DEFAULT 3,
+    argon2_p_cost        INTEGER       DEFAULT 4,
+    scrypt_n             INTEGER,                  -- populated only if kdf_type=scrypt
+    scrypt_r             INTEGER,
+    scrypt_p             INTEGER,
+    -- Wrapped DEK: AES-256-GCM(KEK, random_dek)
+    dek_nonce_b64        TEXT          NOT NULL,   -- 12-byte GCM nonce
+    wrapped_dek_b64      TEXT          NOT NULL,   -- ciphertext+tag (useless without KEK)
+    -- Seed ciphertext: AES-256-GCM(DEK, bip39_entropy)
+    seed_nonce_b64       TEXT          NOT NULL,   -- 12-byte GCM nonce
+    seed_ciphertext_b64  TEXT          NOT NULL,   -- encrypted BIP39 entropy
+    -- Safe-to-expose public identity
+    bip32_xpub           TEXT,
+    derivation_scheme    VARCHAR(32)   DEFAULT 'BIP44',
+    coin_type            INTEGER       DEFAULT 60,
+    mnemonic_word_count  SMALLINT      DEFAULT 24,
+    is_passphrase_protected BOOLEAN    DEFAULT FALSE,
+    device_bound         BOOLEAN       DEFAULT FALSE,  -- was device pepper used?
+    -- Usage tracking
+    last_decrypted_at    TIMESTAMP WITH TIME ZONE,
+    decrypt_count        INTEGER       DEFAULT 0,
+    created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- key_audit_log: append-only compliance log of every decrypt/sign event.
+CREATE TABLE IF NOT EXISTS key_audit_log (
+    audit_id             BIGSERIAL PRIMARY KEY,
+    event_type           VARCHAR(64)  NOT NULL,
+    wallet_fingerprint   VARCHAR(64),
+    address              VARCHAR(255),
+    kms_key_id           BIGINT,
+    actor_peer_id        VARCHAR(255),
+    tx_hash              VARCHAR(255),
+    block_height         BIGINT,
+    success              BOOLEAN      NOT NULL DEFAULT TRUE,
+    failure_reason       TEXT,
+    duration_ms          NUMERIC(10,2),
+    created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_key_audit_wallet  ON key_audit_log (wallet_fingerprint, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_key_audit_event   ON key_audit_log (event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_key_audit_fail    ON key_audit_log (success) WHERE success = FALSE;
+
+-- nonce_ledger: replay-attack prevention. Every signing nonce recorded here.
+CREATE TABLE IF NOT EXISTS nonce_ledger (
+    nonce_id             BIGSERIAL PRIMARY KEY,
+    nonce_hex            VARCHAR(128) NOT NULL UNIQUE,
+    address              VARCHAR(255) NOT NULL,
+    used_in_type         VARCHAR(50)  NOT NULL,
+    used_in_hash         VARCHAR(255),
+    created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    expires_at           TIMESTAMP WITH TIME ZONE
+);
+CREATE INDEX IF NOT EXISTS idx_nonce_address ON nonce_ledger (address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_nonce_expiry  ON nonce_ledger (expires_at) WHERE expires_at IS NOT NULL;
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 8: OPTIMIZED DATABASE BUILDER CLASS (Colab-tuned)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 8: DUAL-MODE DATABASE BUILDER CLASS (NeonDB / SQLite)
+# ─────────────────────────────────────────────────────────────────────────────
+
 class QuantumTemporalCoherenceLedgerServer:
-    """Optimized server-side database builder for PostgreSQL/Supabase - Colab Edition"""
-    
+    """
+    Dual-mode QTCL database builder.
+      postgres mode → NeonDB via DATABASE_URL (server / Colab)
+      sqlite mode   → qtcl.db local file (client / Termux)
+
+    Same schema, same logic, same call surface.
+    """
+
     TRIANGLE_BATCH_SIZE = 2000
     QUBIT_BATCH_SIZE = 10000
     PROGRESS_INTERVAL_TRI = 500
     PROGRESS_INTERVAL_QUB = 5000
-    
-    def __init__(self, pg_url: str, tessellation_depth: int = 5):
-        self.pg_url = pg_url
+
+    def __init__(self, db_url: str = _DB_URL, db_mode: str = _DB_MODE, tessellation_depth: int = 5):
+        self.db_url = db_url
+        self.db_mode = db_mode
         self.tessellation_depth = tessellation_depth
         self.conn = None
         self.cursor = None
         self._start_time = None
-    
+
+    # ── internal helpers ──────────────────────────────────────────────────────
+
+    def _exec(self, sql: str, params=None):
+        """Execute a statement, adapting %s → ? for SQLite."""
+        if self.db_mode == "sqlite":
+            sql = sql.replace("%s", "?")
+        if params:
+            self.cursor.execute(sql, params)
+        else:
+            self.cursor.execute(sql)
+
+    def _commit(self):
+        self.conn.commit()
+
+    def _execute_values_compat(self, sql_template: str, rows: list, page_size: int = 200):
+        """
+        Batch insert: uses psycopg2.extras.execute_values for postgres,
+        falls back to executemany with ? placeholders for sqlite.
+        """
+        if self.db_mode == "postgres":
+            execute_values(self.cursor, sql_template, rows, page_size=page_size)
+        else:
+            # Convert VALUES %s template to INSERT ... VALUES (?,?,...) for sqlite
+            import re
+            # Count placeholders from first row
+            n_cols = len(rows[0]) if rows else 0
+            placeholders = "(" + ",".join(["?"] * n_cols) + ")"
+            # Replace everything after VALUES with placeholder
+            base = re.split(r'\bVALUES\b', sql_template, flags=re.IGNORECASE)[0]
+            sqlite_sql = base.strip() + " VALUES " + placeholders
+            self.cursor.executemany(sqlite_sql, rows)
+
+    # ── connection ────────────────────────────────────────────────────────────
+
     def connect(self):
-        logger.info(f"{CLR.QUANTUM}[DB] Connecting to Supabase Pooler...{CLR.E}")
-        try:
-            self.conn = psycopg2.connect(self.pg_url)
+        if self.db_mode == "postgres":
+            logger.info(f"{CLR.QUANTUM}[DB] Connecting to NeonDB (PostgreSQL)...{CLR.E}")
+            self.conn = psycopg2.connect(self.db_url)
             self.cursor = self.conn.cursor()
-            # Set connection parameters via SET commands (not DSN parameters)
             self.cursor.execute("SET statement_timeout = '600s';")
-            self.cursor.execute("SET application_name = 'qtcl_colab_v4';")
+            self.cursor.execute("SET application_name = 'qtcl_v6';")
             self.cursor.execute("SET work_mem = '128MB';")
             self.cursor.execute("SET maintenance_work_mem = '256MB';")
             self.cursor.execute("SET synchronous_commit = off;")
-            logger.info(f"{CLR.OK}[DB] Connected with bulk-optimized settings{CLR.E}")
-        except Exception as e:
-            logger.error(f"{CLR.ERROR}[DB] Connection failed: {e}{CLR.E}")
-            raise
-    
+            logger.info(f"{CLR.OK}[DB] NeonDB connected{CLR.E}")
+        else:
+            logger.info(f"{CLR.QUANTUM}[DB] Opening SQLite: {self.db_url}{CLR.E}")
+            self.conn = sqlite3.connect(self.db_url, isolation_level=None)
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA synchronous=NORMAL;")
+            self.conn.execute("PRAGMA cache_size=-131072;")  # 128MB
+            self.conn.execute("PRAGMA temp_store=MEMORY;")
+            self.cursor = self.conn.cursor()
+            # SQLite manual transaction for bulk ops
+            self.conn.execute("BEGIN;")
+            logger.info(f"{CLR.OK}[DB] SQLite opened in WAL mode{CLR.E}")
+
     def drop_all_tables(self):
         logger.info(f"{CLR.ERROR}[DROP] Dropping ALL existing tables...{CLR.E}")
         try:
-            self.cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public';")
-            tables = self.cursor.fetchall()
-            if not tables:
-                logger.info(f"{CLR.OK}[DROP] No tables to drop{CLR.E}")
-                return
-            logger.info(f"[DROP] Found {len(tables)} tables to drop")
-            for i, table in enumerate(tables, 1):
-                table_name = table[0]
-                self.cursor.execute(f"DROP TABLE IF EXISTS {table_name} CASCADE;")
-                if i % 10 == 0:
-                    self.conn.commit()
-            self.conn.commit()
-            logger.info(f"{CLR.OK}[DROP] All {len(tables)} tables dropped successfully{CLR.E}")
+            if self.db_mode == "postgres":
+                self.cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public';")
+                tables = [r[0] for r in self.cursor.fetchall()]
+                for tname in tables:
+                    self.cursor.execute(f"DROP TABLE IF EXISTS {tname} CASCADE;")
+                    self._commit()
+            else:
+                self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                tables = [r[0] for r in self.cursor.fetchall()]
+                for tname in tables:
+                    self.cursor.execute(f"DROP TABLE IF EXISTS {tname};")
+            self._commit()
+            logger.info(f"{CLR.OK}[DROP] {len(tables)} tables dropped{CLR.E}")
         except Exception as e:
-            logger.error(f"{CLR.ERROR}[DROP] Drop failed: {e}{CLR.E}")
+            logger.error(f"{CLR.ERROR}[DROP] Failed: {e}{CLR.E}")
             self.conn.rollback()
             raise
-    
+
     def create_schema(self):
-        logger.info(f"{CLR.QUANTUM}[SCHEMA] Creating schema...{CLR.E}")
+        logger.info(f"{CLR.QUANTUM}[SCHEMA] Creating schema ({self.db_mode})...{CLR.E}")
         try:
-            self.cursor.execute(COMPLETE_SCHEMA)
-            self.conn.commit()
-            logger.info(f"{CLR.OK}[SCHEMA] Schema created successfully{CLR.E}")
+            schema = COMPLETE_SCHEMA
+            if self.db_mode == "sqlite":
+                # SQLite compatibility: strip PG-only DDL
+                import re
+                schema = re.sub(r'CREATE EXTENSION[^;]+;', '', schema)
+                schema = re.sub(r'BIGSERIAL', 'INTEGER', schema)
+                schema = re.sub(r'BIGINT\b', 'INTEGER', schema)  # SQLite uses INTEGER for big ints
+                schema = re.sub(r'BOOLEAN', 'INTEGER', schema)
+                schema = re.sub(r'TIMESTAMP WITH TIME ZONE', 'TEXT', schema)
+                schema = re.sub(r'NUMERIC\([^)]+\)', 'TEXT', schema)  # High precision numbers stored as TEXT
+                schema = re.sub(r'JSONB', 'TEXT', schema)
+                schema = re.sub(r'BYTEA', 'BLOB', schema)
+                schema = re.sub(r'\bINET\b', 'TEXT', schema)  # IP addresses as TEXT
+                schema = re.sub(r'TEXT\[\]', 'TEXT', schema)
+                schema = re.sub(r'VARCHAR\(\d+\)', 'TEXT', schema)
+                schema = re.sub(r'VARCHAR\b', 'TEXT', schema)  # Any VARCHAR -> TEXT
+                schema = re.sub(r'SMALLINT', 'INTEGER', schema)
+                schema = re.sub(r'INT\b', 'INTEGER', schema)  # INT -> INTEGER
+                schema = re.sub(r"DEFAULT '.*?'::JSONB", "DEFAULT '{}'", schema)
+                schema = re.sub(r"::\w+", "", schema)  # Remove ALL PostgreSQL type casts (::TEXT, ::jsonb, etc.)
+                schema = re.sub(r'REFERENCES \w+\(\w+\)', '', schema)  # SQLite FK optional
+                schema = re.sub(r"DEFAULT NOW\(\)", "DEFAULT (strftime('%s', 'now'))", schema)  # NOW() not valid in SQLite
+            
+            logger.info(f"[SCHEMA] Raw schema length: {len(schema)}")
+            
+            # Execute statement by statement
+            skipped = 0
+            tables_created = 0
+            stmts = schema.split(";")
+            logger.info(f"[SCHEMA] Total statements: {len(stmts)}")
+            
+            for i, stmt in enumerate(stmts):
+                # Remove leading comment-only lines but keep the actual SQL
+                lines = stmt.strip().split('\n')
+                sql_lines = [l for l in lines if not l.strip().startswith('--')]
+                s = '\n'.join(sql_lines).strip()
+                
+                if s:  # Only execute if there's actual SQL content
+                    try:
+                        self.cursor.execute(s)
+                        if 'CREATE TABLE' in s.upper():
+                            tables_created += 1
+                            logger.info(f"[SCHEMA] ✓ Created: {s[:60]}...")
+                    except Exception as e:
+                        # Log CREATE TABLE failures as errors (not just warnings)
+                        if 'CREATE TABLE' in s.upper():
+                            logger.error(f"[SCHEMA] CREATE TABLE failed: {s[:60]}... → {e}")
+                            raise
+                        else:
+                            logger.info(f"[SCHEMA] Skipped: {s[:60]}... → {e}")
+                            skipped += 1
+            
+            self._commit()
+            logger.info(f"[SCHEMA] Created {tables_created} tables, {skipped} skipped")
+            if skipped > 0:
+                logger.warning(f"[SCHEMA] {skipped} statements skipped")
+            
+            # Verify tables exist
+            if self.db_mode == "sqlite":
+                self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = [r[0] for r in self.cursor.fetchall()]
+                logger.info(f"[SCHEMA] Tables in DB: {len(tables)}")
+                if 'hyperbolic_triangles' in tables:
+                    logger.info(f"[SCHEMA] ✓ hyperbolic_triangles table verified")
+                else:
+                    logger.error(f"[SCHEMA] ❌ hyperbolic_triangles NOT in DB! Tables: {tables[:10]}...")
+            
+            logger.info(f"{CLR.OK}[SCHEMA] Schema created{CLR.E}")
         except Exception as e:
-            logger.error(f"{CLR.ERROR}[SCHEMA] Schema creation failed: {e}{CLR.E}")
+            logger.error(f"{CLR.ERROR}[SCHEMA] Failed: {e}{CLR.E}")
             self.conn.rollback()
             raise
 
     def _migrate_oracle_registry_onchain(self):
-        """Idempotent migration — adds 8 on-chain identity columns to oracle_registry.
-        Safe to run on existing DBs: ADD COLUMN IF NOT EXISTS never fails on re-run.
-        Also ensures the 3 new indexes land on both fresh builds and live migrations."""
-        migrations = [
-            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS wallet_address  VARCHAR(128) NOT NULL DEFAULT ''",
-            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_pub_key  TEXT         NOT NULL DEFAULT ''",
-            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_sig        VARCHAR(128) NOT NULL DEFAULT ''",
-            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_auth_tag   VARCHAR(128) NOT NULL DEFAULT ''",
-            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS mode            VARCHAR(32)  NOT NULL DEFAULT 'full'",
-            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS ip_hint         VARCHAR(256) NOT NULL DEFAULT ''",
-            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS reg_tx_hash     VARCHAR(64)  NOT NULL DEFAULT ''",
-            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS registered_at   BIGINT       NOT NULL DEFAULT 0",
-            "CREATE INDEX IF NOT EXISTS idx_oracle_registry_wallet        ON oracle_registry (wallet_address)",
-            "CREATE INDEX IF NOT EXISTS idx_oracle_registry_reg_tx        ON oracle_registry (reg_tx_hash) WHERE reg_tx_hash != ''",
-            "CREATE INDEX IF NOT EXISTS idx_oracle_registry_registered_at ON oracle_registry (registered_at DESC)",
-        ]
-        ok_count = 0
+        """Idempotent migration — adds on-chain identity columns if missing."""
+        if self.db_mode == "sqlite":
+            migrations = [
+                "ALTER TABLE oracle_registry ADD COLUMN wallet_address  TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN oracle_pub_key  TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN cert_sig        TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN cert_auth_tag   TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN mode            TEXT NOT NULL DEFAULT 'full'",
+                "ALTER TABLE oracle_registry ADD COLUMN ip_hint         TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN reg_tx_hash     TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN registered_at   INTEGER NOT NULL DEFAULT 0",
+            ]
+        else:
+            migrations = [
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS wallet_address  VARCHAR(128) NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_pub_key  TEXT         NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_sig        VARCHAR(128) NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_auth_tag   VARCHAR(128) NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS mode            VARCHAR(32)  NOT NULL DEFAULT 'full'",
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS ip_hint         VARCHAR(256) NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS reg_tx_hash     VARCHAR(64)  NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS registered_at   BIGINT       NOT NULL DEFAULT 0",
+                "CREATE INDEX IF NOT EXISTS idx_oracle_registry_wallet        ON oracle_registry (wallet_address)",
+                "CREATE INDEX IF NOT EXISTS idx_oracle_registry_reg_tx        ON oracle_registry (reg_tx_hash) WHERE reg_tx_hash != ''",
+                "CREATE INDEX IF NOT EXISTS idx_oracle_registry_registered_at ON oracle_registry (registered_at DESC)",
+            ]
+        ok = 0
         for ddl in migrations:
             try:
                 self.cursor.execute(ddl)
-                self.conn.commit()
-                ok_count += 1
+                self._commit()
+                ok += 1
             except Exception as e:
-                self.conn.rollback()
-                logger.debug(f"{CLR.WARNING}[MIGRATE] oracle_registry DDL skipped ({ddl[:55]}…): {e}{CLR.E}")
-        logger.info(f"{CLR.OK}[MIGRATE] oracle_registry on-chain identity migration: {ok_count}/{len(migrations)} OK{CLR.E}")
+                try: self.conn.rollback()
+                except: pass
+                logger.debug(f"[MIGRATE] Skipped ({ddl[:50]}): {e}")
+        logger.info(f"{CLR.OK}[MIGRATE] oracle_registry migration: {ok}/{len(migrations)} OK{CLR.E}")
 
-    def _insert_triangles_batched(self, triangles: Dict[int, HyperbolicTriangle]):
-        logger.info(f"{CLR.C}[TRI] Inserting {len(triangles)} triangles in batches...{CLR.E}")
-        triangle_list = list(triangles.values())
-        # Only insert final-depth triangles for correct tessellation count
-        triangle_list = [t for t in triangle_list if t.depth == self.tessellation_depth]
+    def _insert_triangles_batched(self, triangles: Dict[int, 'HyperbolicTriangle']):
+        logger.info(f"{CLR.C}[TRI] Inserting triangles...{CLR.E}")
+        triangle_list = [t for t in triangles.values() if t.depth == self.tessellation_depth]
         total = len(triangle_list)
-        logger.info(f"{CLR.C}[TRI] Keeping only depth={self.tessellation_depth} triangles: {total}...{CLR.E}")
-        
         pbar = tqdm(total=total, desc="Triangles", leave=True)
-        
         for batch_start in range(0, total, self.TRIANGLE_BATCH_SIZE):
             batch = triangle_list[batch_start:batch_start + self.TRIANGLE_BATCH_SIZE]
-            rows = []
-            for tri in batch:
-                # Create row but set parent_id to NULL (parents not being stored)
-                row = (
-                    tri.triangle_id, tri.depth, None,  # parent_id set to NULL
-                    str(tri.v0.x), str(tri.v0.y), tri.v0.name,
-                    str(tri.v1.x), str(tri.v1.y), tri.v1.name,
-                    str(tri.v2.x), str(tri.v2.y), tri.v2.name
-                )
-                rows.append(row)
-            
-            execute_values(
-                self.cursor,
+            rows = [(
+                tri.triangle_id, tri.depth, None,
+                str(tri.v0.x), str(tri.v0.y), tri.v0.name,
+                str(tri.v1.x), str(tri.v1.y), tri.v1.name,
+                str(tri.v2.x), str(tri.v2.y), tri.v2.name
+            ) for tri in batch]
+            self._execute_values_compat(
                 """
                 INSERT INTO hyperbolic_triangles (
                     triangle_id, depth, parent_id,
@@ -1468,49 +1912,41 @@ class QuantumTemporalCoherenceLedgerServer:
                     v2_x, v2_y, v2_name
                 ) VALUES %s
                 """,
-                rows,
-                page_size=100
+                rows, page_size=100
             )
             if batch_start % (self.TRIANGLE_BATCH_SIZE * 5) == 0 and batch_start > 0:
-                self.conn.commit()
+                self._commit()
             pbar.update(len(batch))
         pbar.close()
-        self.conn.commit()
-        logger.info(f"{CLR.OK}[TRI] All {total} final-depth triangles inserted (parent_id=NULL){CLR.E}")
-    
-    def _insert_pseudoqubits_batched(self, qubits: Dict[int, Pseudoqubit], triangle_ids: set):
-        logger.info(f"{CLR.C}[QUB] Filtering {len(qubits)} pseudoqubits to match inserted triangles...{CLR.E}")
-        qubit_list = list(qubits.values())
-        # Only insert qubits for triangles that were actually inserted (final-depth)
-        qubit_list = [q for q in qubit_list if q.triangle_id in triangle_ids]
+        self._commit()
+        logger.info(f"{CLR.OK}[TRI] {total} triangles inserted{CLR.E}")
+
+    def _insert_pseudoqubits_batched(self, qubits: Dict[int, 'Pseudoqubit'], triangle_ids: set):
+        qubit_list = [q for q in qubits.values() if q.triangle_id in triangle_ids]
         total = len(qubit_list)
-        logger.info(f"{CLR.C}[QUB] Keeping {total} pseudoqubits matching inserted triangles...{CLR.E}")
-        
+        logger.info(f"{CLR.C}[QUB] Inserting {total} pseudoqubits...{CLR.E}")
         pbar = tqdm(total=total, desc="Pseudoqubits", leave=True)
-        
         for batch_start in range(0, total, self.QUBIT_BATCH_SIZE):
             batch = qubit_list[batch_start:batch_start + self.QUBIT_BATCH_SIZE]
             rows = [q.to_db_row() for q in batch]
-            execute_values(
-                self.cursor,
+            self._execute_values_compat(
                 """
                 INSERT INTO pseudoqubits (
                     pq_id, triangle_id, x, y,
                     placement_type, phase_theta, coherence_measure
                 ) VALUES %s
                 """,
-                rows,
-                page_size=200
+                rows, page_size=200
             )
             if batch_start % (self.QUBIT_BATCH_SIZE * 3) == 0 and batch_start > 0:
-                self.conn.commit()
+                self._commit()
             pbar.update(len(batch))
         pbar.close()
-        self.conn.commit()
-        logger.info(f"{CLR.OK}[QUB] All {total} pseudoqubits inserted{CLR.E}")
-    
-    def _build_tessellation_inline(self) -> Tuple[Dict[int, HyperbolicTriangle], Dict[int, Pseudoqubit]]:
-        """Inline tessellation builder - memory efficient for Colab"""
+        self._commit()
+        logger.info(f"{CLR.OK}[QUB] {total} pseudoqubits inserted{CLR.E}")
+
+    def _build_tessellation_inline(self) -> Tuple[Dict[int, 'HyperbolicTriangle'], Dict[int, 'Pseudoqubit']]:
+        """Inline tessellation builder — memory efficient"""
         triangles: Dict[int, HyperbolicTriangle] = {}
         qubits: Dict[int, Pseudoqubit] = {}
         triangle_id_counter = [0]
@@ -1623,89 +2059,87 @@ class QuantumTemporalCoherenceLedgerServer:
     def populate_tessellation(self):
         logger.info(f"{CLR.QUANTUM}[POPULATE] Building and inserting tessellation...{CLR.E}")
         self._start_time = time.time()
-        
         try:
-            # Build tessellation
-            logger.info(f"{CLR.C}[BUILD] Constructing tessellation depth {self.tessellation_depth}...{CLR.E}")
             triangles, qubits = self._build_tessellation_inline()
-            
-            # Get IDs of final-depth triangles that will be inserted
             final_depth_triangle_ids = set(
-                t.triangle_id for t in triangles.values() 
+                t.triangle_id for t in triangles.values()
                 if t.depth == self.tessellation_depth
             )
-            logger.info(f"{CLR.C}[FILTER] Final-depth triangle IDs: {len(final_depth_triangle_ids)}{CLR.E}")
-            
-            # Insert with batching + progress bars
+            logger.info(f"{CLR.C}[FILTER] Final-depth triangles: {len(final_depth_triangle_ids)}{CLR.E}")
             self._insert_triangles_batched(triangles)
             self._insert_pseudoqubits_batched(qubits, final_depth_triangle_ids)
-            
-            # Insert metadata
-            self.cursor.execute("""
-                INSERT INTO quantum_lattice_metadata (
-                    tessellation_depth, total_triangles, total_pseudoqubits,
-                    precision_bits, hyperbolicity_constant, poincare_radius,
-                    status, construction_started_at, construction_completed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                self.tessellation_depth,
-                len(final_depth_triangle_ids),
-                len([q for q in qubits.values() if q.triangle_id in final_depth_triangle_ids]),
-                150, -1.0, 1.0,
-                'complete',
-                datetime.now(timezone.utc),
-                datetime.now(timezone.utc)
-            ))
-            
-            self.cursor.execute("""
-                INSERT INTO database_metadata (
-                    schema_version, build_timestamp, tables_created
-                ) VALUES (%s, %s, %s)
-            """, ('4.1.0-colab', datetime.now(timezone.utc), 58))
-            
-            self.conn.commit()
-            
+
+            ts_now = datetime.now(timezone.utc).isoformat()
+            n_tris = len(final_depth_triangle_ids)
+            n_qubs = len([q for q in qubits.values() if q.triangle_id in final_depth_triangle_ids])
+
+            if self.db_mode == "postgres":
+                self.cursor.execute("""
+                    INSERT INTO quantum_lattice_metadata (
+                        tessellation_depth, total_triangles, total_pseudoqubits,
+                        precision_bits, hyperbolicity_constant, poincare_radius,
+                        status, construction_started_at, construction_completed_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (self.tessellation_depth, n_tris, n_qubs, 150, -1.0, 1.0,
+                      'complete', ts_now, ts_now))
+                self.cursor.execute("""
+                    INSERT INTO database_metadata (schema_version, build_timestamp, tables_created)
+                    VALUES (%s,%s,%s)
+                """, ('6.0.0-neon', ts_now, 62))
+            else:
+                self.cursor.execute(
+                    "INSERT INTO quantum_lattice_metadata "
+                    "(tessellation_depth, total_triangles, total_pseudoqubits, "
+                    "precision_bits, hyperbolicity_constant, poincare_radius, "
+                    "status, construction_started_at, construction_completed_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (self.tessellation_depth, n_tris, n_qubs, 150, -1.0, 1.0,
+                     'complete', ts_now, ts_now)
+                )
+                self.cursor.execute(
+                    "INSERT INTO database_metadata (schema_version, build_timestamp, tables_created) "
+                    "VALUES (?,?,?)", ('6.0.0-sqlite', ts_now, 62)
+                )
+
+            self._commit()
             elapsed = time.time() - self._start_time
             logger.info(f"{CLR.OK}[POPULATE] Complete in {elapsed:.1f}s{CLR.E}")
-            
         except Exception as e:
-            logger.error(f"{CLR.ERROR}[POPULATE] Population failed: {e}{CLR.E}")
-            self.conn.rollback()
+            logger.error(f"{CLR.ERROR}[POPULATE] Failed: {e}{CLR.E}")
+            try: self.conn.rollback()
+            except: pass
             raise
-    
+
     def close(self):
-        if self.cursor:
-            self.cursor.close()
-        if self.conn:
-            self.conn.commit()
-            self.conn.close()
-        logger.info(f"{CLR.OK}[DB] Connection closed{CLR.E}")
-    
+        try:
+            if self.cursor:
+                self.cursor.close()
+            if self.conn:
+                self._commit()
+                self.conn.close()
+            logger.info(f"{CLR.OK}[DB] Connection closed{CLR.E}")
+        except Exception as e:
+            logger.warning(f"[DB] Close warning: {e}")
+
     def rebuild_complete(self):
         logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}")
-        logger.info(f"{CLR.HEADER}QTCL DATABASE BUILDER V4.1 - COLAB EDITION (FIXED){CLR.E}")
+        logger.info(f"{CLR.HEADER}QTCL DATABASE BUILDER V6 — MODE: {self.db_mode.upper()}{CLR.E}")
         logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}")
-        
         total_start = time.time()
-        
         try:
             self.connect()
             self.drop_all_tables()
             self.create_schema()
             self._migrate_oracle_registry_onchain()
             self.populate_tessellation()
-            
             total_elapsed = time.time() - total_start
             logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}")
-            logger.info(f"{CLR.OK}✓ BUILD COMPLETE{CLR.E}")
-            logger.info(f"{CLR.OK}  Total time: {total_elapsed/60:.1f} minutes{CLR.E}")
+            logger.info(f"{CLR.OK}✓ BUILD COMPLETE — {total_elapsed/60:.1f} min — {self.db_mode.upper()}{CLR.E}")
             logger.info(f"{CLR.OK}  Tessellation depth: {self.tessellation_depth}{CLR.E}")
-            logger.info(f"{CLR.OK}  Schema tables: 58{CLR.E}")
-            logger.info(f"{CLR.OK}  Status: PRODUCTION READY{CLR.E}")
+            logger.info(f"{CLR.OK}  Security tables: kms_key_references, wallet_encrypted_seeds, key_audit_log, nonce_ledger{CLR.E}")
             logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}")
-            
         except Exception as e:
-            logger.error(f"{CLR.ERROR}Build failed after {time.time()-total_start:.1f}s: {e}{CLR.E}")
+            logger.error(f"{CLR.ERROR}Build failed: {e}{CLR.E}")
             raise
         finally:
             self.close()
@@ -1715,32 +2149,23 @@ class QuantumTemporalCoherenceLedgerServer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    logger.info(f"\n{CLR.HEADER}{'='*80}{CLR.E}")
-    logger.info(f"{CLR.HEADER}QTCL DATABASE BUILDER V4.1 - GOOGLE COLAB{CLR.E}")
-    logger.info(f"{CLR.HEADER}Hard-coded Supabase Pooler | Optimized Bulk Load{CLR.E}")
-    logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}\n")
-    
-    # Build complete system
-    builder = QuantumTemporalCoherenceLedgerServer(
-        pg_url=pg_url,
-        tessellation_depth=5
-    )
+    logger.info(f"\n{'='*80}")
+    logger.info(f"QTCL DATABASE BUILDER V7 — MODE: {_DB_MODE.upper()}")
+    logger.info(f"KEK: {'Argon2id' if ARGON2_AVAILABLE else 'scrypt'} (client-side, no external KMS)")
+    logger.info(f"{'='*80}\n")
+
+    builder = QuantumTemporalCoherenceLedgerServer(tessellation_depth=5)
     builder.rebuild_complete()
-    
-    logger.info(f"\n{CLR.QUANTUM}✓ QTCL V4.1 server database ready for production{CLR.E}\n")
-    
-    # Colab-specific: keep runtime alive for verification queries
-    print("\n💡 Tip: Run verification queries in a new cell:")
-    print("""
-    # Verify build success
-    import psycopg2
-    conn = psycopg2.connect(pg_url)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM hyperbolic_triangles;")
-    print(f"Triangles: {cur.fetchone()[0]}")
-    cur.execute("SELECT COUNT(*) FROM pseudoqubits;")
-    print(f"Pseudoqubits: {cur.fetchone()[0]}")
-    cur.execute("SELECT * FROM quantum_lattice_metadata LIMIT 1;")
-    print(f"Metadata: {cur.fetchone()}")
-    conn.close()
-    """)
+
+    logger.info(f"\n✓ QTCL V7 database ready ({_DB_MODE})\n")
+
+    if _DB_MODE == "postgres":
+        print("\n💡 Verify:")
+        print("  SELECT COUNT(*) FROM hyperbolic_triangles;")
+        print("  SELECT COUNT(*) FROM wallet_encrypted_seeds;")
+        print("  SELECT COUNT(*) FROM key_audit_log;")
+        print("  SELECT COUNT(*) FROM nonce_ledger;")
+    else:
+        print(f"\n💡 SQLite written to: {_DB_URL}")
+        print("   Client nodes: run without DATABASE_URL env var.")
+        print("   Wallet seeds: use new_wallet_envelope(passphrase) → INSERT into wallet_encrypted_seeds.")

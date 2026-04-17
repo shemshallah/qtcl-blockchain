@@ -65,19 +65,41 @@ logger = logging.getLogger(__name__)
 
 # ─── Oracle address registry ──────────────────────────────────────────────────
 
+def _parse_db_url(url: str = None) -> dict:
+    """Parse DATABASE_URL into connection params for psycopg2."""
+    import re
+    url = url or os.getenv('DATABASE_URL', '')
+    if not url or url.startswith('sqlite'):
+        return None
+    m = re.match(r'postgresql://([^:]+):([^@]+)@([^:/]+):?(\d*)/?(.*)', url)
+    if not m:
+        return None
+    user, pw, host, port, db = m.groups()
+    return {
+        'host': host,
+        'port': int(port) if port else 5432,
+        'database': db or 'postgres',
+        'user': user,
+        'password': pw,
+    }
+
 def get_all_oracle_addresses_batch() -> Dict[int, str]:
     """Batch-fetch all 5 oracle addresses in a single DB query."""
     _ROLES = ['PRIMARY_LATTICE', 'SECONDARY_LATTICE', 'VALIDATION', 'ARBITER', 'METRICS']
     fallbacks = {i+1: f'qtcl1{_ROLES[i].lower()[:12]}_{i+1:02d}' for i in range(5)}
     try:
-        conn = psycopg2.connect(
-            host=os.getenv('POOLER_HOST', 'aws-0-us-west-2.pooler.supabase.com'),
-            port=int(os.getenv('POOLER_PORT', 6543)),
-            database=os.getenv('POSTGRES_DB', 'postgres'),
-            user=os.getenv('POSTGRES_USER', 'postgres'),
-            password=os.getenv('POSTGRES_PASSWORD', ''),
-            connect_timeout=2,
-        )
+        db_params = _parse_db_url()
+        if db_params:
+            conn = psycopg2.connect(**db_params, connect_timeout=2, options='-c statement_timeout=5000')
+        else:
+            conn = psycopg2.connect(
+                host=os.getenv('POOLER_HOST'),
+                port=int(os.getenv('POOLER_PORT', 5432)),
+                database=os.getenv('POSTGRES_DB', 'postgres'),
+                user=os.getenv('POSTGRES_USER', 'postgres'),
+                password=os.getenv('POSTGRES_PASSWORD', ''),
+                connect_timeout=2,
+            )
         if not os.getenv('POSTGRES_PASSWORD', ''):
             return fallbacks
         conn.set_session(autocommit=True)
@@ -2813,11 +2835,18 @@ class OracleEngine:
 def json_stable_bytes(obj) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-# ─── Module-level singletons ──────────────────────────────────────────────────
+# ─── Module-level singletons (lazy initialization) ──────────────────────────────────────────────────
+
+class _LazyOracle:
+    """Lazy wrapper to prevent blocking at import time."""
+    _instance = None
+    def __getattr__(self, name):
+        if _LazyOracle._instance is None:
+            _LazyOracle._instance = OracleEngine()
+        return getattr(_LazyOracle._instance, name)
 
 ORACLE_W_STATE_MANAGER = OracleWStateManager()
-ORACLE = OracleEngine()
-ORACLE_W_STATE_MANAGER.set_oracle_signer(ORACLE)
+ORACLE = _LazyOracle()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PYTH NETWORK PRICE ORACLE — Enterprise-Grade Direct Integration

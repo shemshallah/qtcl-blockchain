@@ -1,6 +1,6 @@
 """
 gunicorn.conf.py — QTCL Blockchain Enterprise Production Configuration
-═══════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════
 Auto-loaded by gunicorn at startup. Overrides dashboard/CLI worker settings.
 
 WORKER MODEL — gthread:
@@ -10,8 +10,8 @@ WORKER MODEL — gthread:
   64 threads → 64 concurrent blocking operations in flight at once.
 
 SCALE ARCHITECTURE:
-  • Single Koyeb instance:  1 worker × 64 threads = 64 concurrent requests
-  • Horizontal scale:       Multiple Koyeb instances, each 1 worker × 64 threads
+  • Single instance:  1 worker × 64 threads = 64 concurrent requests
+  • Horizontal scale:       Multiple instances, each 1 worker × 64 threads
   • Cross-instance mempool: pg_notify('qtcl_mempool') — _PGListenerThread in each
     worker receives TX payloads from all other workers and inserts into local heap.
     Every worker's in-memory mempool is consistent within ~1–5 ms.
@@ -20,14 +20,14 @@ SCALE ARCHITECTURE:
     every event.
   • Connection budget:      pool max=40 query conns + 1 NOTIFY conn (_PGNotifier) +
     1 LISTEN conn (_PGListenerThread) + 1 LISTEN conn (_SSEBroadcaster) = 43 max
-    per worker.  Supabase pooler comfortably handles this.
+    per worker.  Neon PostgreSQL handles this.
   • DB_POOL_MAX env var:     set to 40 (default) — raise if adding more workers.
 
 SCALING ROADMAP:
   1. Now:     1 worker, 64 threads, PG NOTIFY cross-worker  ← THIS CONFIG
-  2. Phase 2: Increase Koyeb instance count (horizontal) — works automatically
+  2. Phase 2: Increase instance count (horizontal) — works automatically
   3. Phase 3: workers = 2-4 per instance if CPU-bound; DB_POOL_MAX stays 40
-             per worker — Supabase pooler multiplexes all of them.
+             per worker.
 """
 
 import os

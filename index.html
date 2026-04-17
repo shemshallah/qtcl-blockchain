@@ -66,36 +66,11 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
   <div class="tab active" data-page="dashboard">DASHBOARD</div>
   <div class="tab" data-page="explorer">EXPLORER</div>
   <div class="tab" data-page="network">NETWORK</div>
+  <div class="tab" data-page="hyp">HYPΓ DOCS</div>
 </div>
 
 <div id="dashboard" class="page active">
-  <div class="tc">
-    <div class="pn">
-      <div class="ph"><span class="pht">Quantum Volume Tensor 32³</span><span class="pb" id="dm-status">INIT</span></div>
-      <div class="dm-panel" style="position:relative">
-        <canvas id="tensor-canvas" width="640" height="340" style="width:100%;height:100%;display:block"></canvas>
-        <div class="pq-hud">
-          <span>32³ QUANTUM VOLUME</span>
-          <span>Z: <span id="tensor-slice">—</span>/32 &nbsp;|&nbsp; Fidelity: <span id="dm-fid">—</span></span>
-        </div>
-        <input type="range" id="tensor-z" min="0" max="31" value="0"
-               style="position:absolute;bottom:28px;left:8px;right:8px;width:calc(100% - 16px);
-                      accent-color:#00dcff;background:transparent;cursor:pointer"/>
-      </div>
-      <div class="bs">
-        <div class="bv"><div class="bvl">|W₃|</div><div class="bvn" id="dm-fidelity">—</div></div>
-        <div class="bv"><div class="bvl">Purity</div><div class="bvn" id="dm-purity">—</div></div>
-        <div class="bv"><div class="bvl">Cycle</div><div class="bvn" id="dm-cycle">—</div></div>
-      </div>
-    </div>
-    <div class="pn" id="mermin-module">
-      <div class="ph"><span class="pht">Mermin Test</span><span class="pb" id="mermin-status">INIT</span></div>
-      <div style="padding:20px;text-align:center">
-        <div style="font-size:36px;font-weight:bold;color:var(--re)" id="mermin-M">—</div>
-        <div style="font-size:10px;color:var(--dim);margin-top:8px" id="mermin-verdict">Awaiting...</div>
-      </div>
-    </div>
-  </div>
+
   <div class="tc">
     <div class="pn">
       <div class="ph"><span class="pht">Block Chain</span><span class="pb" id="chain-height">—</span></div>
@@ -125,9 +100,13 @@ body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100
   <div class="pn">
     <div class="ph"><span class="pht">Nodes</span><span class="pb" id="network-status">IDLE</span></div>
     <div style="padding:20px; font-family:var(--mono); font-size:10px" id="node-list">
-      <div style="color:var(--dim); text-align:center">Scanning for peers...</div>
+      <div style="color:var(--dim);text-align:center">Scanning for peers...</div>
     </div>
   </div>
+</div>
+
+<div id="hyp" class="page" style="padding:0;max-width:none;">
+  <iframe src="/hyp" style="width:100%;height:calc(100vh - 100px);border:none;background:var(--bg)"></iframe>
 </div>
 
 <script>
@@ -171,209 +150,22 @@ document.querySelectorAll('.tab').forEach(tab => {
   if(hck) setInterval(() => { hck.textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'; }, 1000);
 
   // RENDER FUNCTION - 64x64 with phase-based coloring and magnitude brightness
-    // ── Hex → Uint8Array fast decoder ───────────────────────────────────────
-    function _hexToBytes(hex) {
-      const H = new Uint8Array(256);
-      for(let i=0;i<10;i++) H[48+i]=i;
-      for(let i=0;i<6;i++){H[65+i]=10+i; H[97+i]=10+i;}
-      const b = new Uint8Array(hex.length >> 1);
-      for(let i=0;i<b.length;i++)
-        b[i]=(H[hex.charCodeAt(i*2)]<<4)|H[hex.charCodeAt(i*2+1)];
-      return b;
-    }
+    // Rendering functions disabled to prevent hanging
+    function renderTensor(hex){}
+    function _startTensorAnim(){}
+    function _stopTensorAnim(){}
 
-    // ── 32³ Quantum Volume Tensor renderer ──────────────────────────────────
-    // Tensor layout: float32[D=32][X=32][Y=32] row-major.
-    //   Z-axis  (D): decoherence depth — shell 0 = near-diagonal high-coherence,
-    //                shell 31 = fully mixed decoherence floor.
-    //   X/Y axes    : 32×32 spatial block structure of the 256-dim Hilbert space.
-    // The slider selects which decoherence shell to display.
-    // Auto-animation cycles through all 32 shells at 150ms/frame when live.
-    const TENSOR_HEX_LEN = 32 * 32 * 32 * 4 * 2;  // 262144
-
-    let _tensorHex  = '';
-    let _tensorZ    = 0;
-    let _tensorAnim = null;   // requestAnimationFrame handle
-
-    function renderTensor(hex){
-      if(!hex || hex.length !== TENSOR_HEX_LEN) return;
-      _tensorHex = hex;
-      _drawTensorSlice(_tensorZ);
-    }
-
-    function _drawTensorSlice(z){
-      const canvas = document.getElementById('tensor-canvas');
-      if(!canvas || !_tensorHex) return;
-      const ctx   = canvas.getContext('2d');
-      const N = 32;
-      try {
-        const bytes  = _hexToBytes(_tensorHex);
-        const fa     = new Float32Array(bytes.buffer.slice(bytes.byteOffset,
-                                        bytes.byteOffset + bytes.byteLength));
-        const offset = z * N * N;
-
-        // Find slice max for normalisation
-        let maxV = 0;
-        for(let i=0;i<N*N;i++){ const v=fa[offset+i]; if(v>maxV) maxV=v; }
-        if(maxV < 1e-12) maxV = 1;
-
-        // Render with plasma/inferno palette: encodes energy density
-        const px = new Uint8ClampedArray(N*N*4);
-        for(let i=0;i<N*N;i++){
-          const v = fa[offset+i]/maxV;
-          // Inferno: black→violet→red→orange→yellow→white
-          const r = Math.min(255, Math.round(
-            v < 0.4  ? v/0.4 * 120 :
-            v < 0.75 ? 120 + (v-0.4)/0.35 * 135 : 255));
-          const g = Math.min(255, Math.round(
-            v < 0.25 ? 0 :
-            v < 0.7  ? (v-0.25)/0.45 * 120 :
-                       120 + (v-0.7)/0.3 * 135));
-          const b = Math.min(255, Math.round(
-            v < 0.15 ? v/0.15 * 180 :
-            v < 0.5  ? 180 - (v-0.15)/0.35 * 180 : 0));
-          const idx = i*4;
-          px[idx]=r; px[idx+1]=g; px[idx+2]=b; px[idx+3]=255;
-        }
-
-        const img = new ImageData(px, N, N);
-        const tc  = document.createElement('canvas');
-        tc.width=N; tc.height=N;
-        tc.getContext('2d').putImageData(img, 0, 0);
-
-        const W=canvas.width, H=canvas.height;
-        ctx.fillStyle='#000508'; ctx.fillRect(0,0,W,H);
-        ctx.imageSmoothingEnabled=false;
-
-        // Draw 3 Z-slices side by side for volumetric depth perception:
-        // Previous shell (z-1), current shell (z), next shell (z+1) — dim/bright/dim
-        const sliceW = Math.floor((W - 24) / 3);
-        const sliceH = H - 44;
-        const zPrev  = Math.max(0, z-1);
-        const zNext  = Math.min(31, z+1);
-
-        // Helper: draw a z-slice from raw fa data
-        const drawZSlice = (zIdx, xOff, alpha) => {
-          const off = zIdx * N * N;
-          let mx=0;
-          for(let i=0;i<N*N;i++){ const v=fa[off+i]; if(v>mx)mx=v; }
-          if(mx<1e-12) return;
-          const px2 = new Uint8ClampedArray(N*N*4);
-          for(let i=0;i<N*N;i++){
-            const v=fa[off+i]/mx;
-            const r=Math.min(255,Math.round(v<0.4?v/0.4*120:v<0.75?120+(v-0.4)/0.35*135:255));
-            const g=Math.min(255,Math.round(v<0.25?0:v<0.7?(v-0.25)/0.45*120:120+(v-0.7)/0.3*135));
-            const b=Math.min(255,Math.round(v<0.15?v/0.15*180:v<0.5?180-(v-0.15)/0.35*180:0));
-            const idx=i*4;
-            px2[idx]=r*alpha; px2[idx+1]=g*alpha; px2[idx+2]=b*alpha; px2[idx+3]=255;
-          }
-          const img2=new ImageData(px2,N,N);
-          const tc2=document.createElement('canvas');
-          tc2.width=N; tc2.height=N;
-          tc2.getContext('2d').putImageData(img2,0,0);
-          ctx.drawImage(tc2, xOff, 8, sliceW, sliceH);
-        };
-
-        drawZSlice(zPrev, 8,            0.45);
-        drawZSlice(z,     8+sliceW+4,   1.0);
-        drawZSlice(zNext, 8+sliceW*2+8, 0.45);
-
-        // Depth-glow line connecting the three slices
-        const grad = ctx.createLinearGradient(8, 0, W-8, 0);
-        grad.addColorStop(0,   'rgba(0,220,255,0)');
-        grad.addColorStop(0.35,'rgba(0,220,255,0.3)');
-        grad.addColorStop(0.5, 'rgba(0,220,255,0.7)');
-        grad.addColorStop(0.65,'rgba(0,220,255,0.3)');
-        grad.addColorStop(1,   'rgba(0,220,255,0)');
-        ctx.strokeStyle=grad; ctx.lineWidth=1;
-        ctx.beginPath();
-        ctx.moveTo(8+sliceW, H-44); ctx.lineTo(8+sliceW*2+4, H-44);
-        ctx.stroke();
-
-        document.getElementById('tensor-slice').textContent = z;
-        document.getElementById('dm-status').textContent = 'LIVE';
-      } catch(e){ console.error('Tensor render error:', e); }
-    }
-
-    // Auto-animate through Z-shells when data is live (150ms per shell)
-    function _startTensorAnim(){
-      if(_tensorAnim) return;
-      let last = 0;
-      const FRAME_MS = 150;
-      const step = (ts) => {
-        if(ts - last > FRAME_MS){
-          _tensorZ = (_tensorZ + 1) % 32;
-          const sl = document.getElementById('tensor-z');
-          if(sl) sl.value = _tensorZ;
-          if(_tensorHex) _drawTensorSlice(_tensorZ);
-          last = ts;
-        }
-        _tensorAnim = requestAnimationFrame(step);
-      };
-      _tensorAnim = requestAnimationFrame(step);
-    }
-    function _stopTensorAnim(){
-      if(_tensorAnim){ cancelAnimationFrame(_tensorAnim); _tensorAnim=null; }
-    }
-
-    // Slider wiring — pauses auto-animation while user scrubs
+    // Slider wiring — paused for now to prevent hanging
     document.addEventListener('DOMContentLoaded', ()=>{
       const sl = document.getElementById('tensor-z');
       if(sl){
-        sl.addEventListener('mousedown', _stopTensorAnim);
-        sl.addEventListener('touchstart', _stopTensorAnim);
-        sl.addEventListener('input', e=>{
-          _tensorZ = parseInt(e.target.value);
-          if(_tensorHex) _drawTensorSlice(_tensorZ);
-        });
-        sl.addEventListener('mouseup',   _startTensorAnim);
-        sl.addEventListener('touchend',  _startTensorAnim);
+        sl.disabled = true;
+        sl.style.opacity = '0.3';
       }
     });
-    });
 
-  // SSE using EventSource for real-time streams
-  let snapshotSource;
-  
-  function connectSSE(){
-    snapshotSource = new EventSource('/rpc/oracle/snapshot');
-    snapshotSource.onmessage = function(e) {
-      try {
-        const data = JSON.parse(e.data);
-        const r = data.result || data;
-        
-        // 32³ tensor → volumetric renderer (primary quantum state)
-        if(r.density_tensor_hex){
-          renderTensor(r.density_tensor_hex);
-          if(!_tensorAnim) _startTensorAnim();
-        }
-        
-        // Metrics → gauges
-        if(r.w_state_fidelity !== undefined){
-          document.getElementById('dm-fidelity').textContent = r.w_state_fidelity?.toFixed(4) || '—';
-          document.getElementById('dm-fid').textContent = r.w_state_fidelity?.toFixed(4) || '—';
-        }
-        if(r.purity !== undefined){
-          document.getElementById('dm-purity').textContent = r.purity?.toFixed(4) || '—';
-        }
-        
-        // Mermin → display
-        if(r.mermin_test){
-          const M = r.mermin_test.M ?? r.mermin_test.value ?? 0;
-          document.getElementById('mermin-status').textContent = 'LIVE';
-          document.getElementById('mermin-M').textContent = M.toFixed(3);
-          const verdict = M > 2.0 ? 'ENTANGLED' : M < -2.0 ? 'ENTANGLED' : 'SEPARABLE';
-          document.getElementById('mermin-verdict').textContent = verdict;
-        }
-        
-        // Cycle
-        if(r.lattice_refresh_counter !== undefined){
-          document.getElementById('dm-cycle').textContent = r.lattice_refresh_counter ?? '—';
-        }
-      } catch(e){console.log('SSE parse error', e);}
-    };
-    snapshotSource.onerror = function(){};
-  }
+  // SSE disabled to prevent hanging
+  // function connectSSE(){ ... }
   
   // Explorer - fetch recent blocks with in-depth info
   function updateExplorer(){
@@ -455,10 +247,11 @@ document.querySelectorAll('.tab').forEach(tab => {
     }).catch(() => {});
   }
   
+  // DISABLED - re-enable one by one
   updateBlockChain();
   setInterval(updateBlockChain, 5000);
   
-  connectSSE();
+  // connectSSE();
   updateExplorer();
   updateNetwork();
   setInterval(updateExplorer, 5000);

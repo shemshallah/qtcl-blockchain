@@ -3,27 +3,24 @@
 ╔══════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                              ║
 ║   hyp_tessellation.py — HypΓ Cryptosystem · Module 2 of 6                                  ║
-║   Poincaré Disk Tiling {8,3} Depth=8 — Supabase Production + SQLite Mirror                ║
+║   Poincaré Disk Tiling {8,3} Depth=8 — Neon PostgreSQL + SQLite Mirror                    ║
 ║                                                                                              ║
-║   Loads the canonical depth-8 {8,3} hyperbolic tessellation from Supabase                  ║
+║   Loads the canonical depth-8 {8,3} hyperbolic tessellation from Neon                       ║
 ║   (hyperbolic_triangles table with all real coordinates at mp.dps=150).                    ║
-║   Provides optional SQLite mirror for offline client access and Koyeb backup.              ║
+║   Provides optional SQLite mirror for offline client access.                                ║
 ║                                                                                              ║
 ║   Production Data Source (Priority Order):                                                  ║
-║     1. Supabase (hyperbolic_triangles table) — PRIMARY                                      ║
-║     2. Koyeb backup (tessellation_depth_8.db) — if Supabase down                           ║
-║     3. Client SQLite mirror (~/.hyp/tessellation.db) — if both down                        ║
+║     1. Neon PostgreSQL (hyperbolic_triangles table) — PRIMARY via DATABASE_URL            ║
+║     2. SQLite mirror (~/.hyp/tessellation.db) — fallback                                   ║
 ║                                                                                              ║
 ║   Client Mirror Sync:                                                                       ║
 ║     • Automatically created at first load                                                   ║
 ║     • Synced from primary at startup (can be disabled)                                      ║
 ║     • Thread-safe with RLock                                                                ║
-║     • Survives Supabase/Koyeb outages                                                       ║
 ║                                                                                              ║
 ║   API:                                                                                       ║
 ║     HypTessellation:                                                                        ║
-║       .load_from_supabase() → int (triangle count)                                          ║
-║       .load_from_koyeb_backup(url) → int                                                    ║
+║       .load_from_neon() → int (triangle count)                                             ║
 ║       .load_from_sqlite_mirror(path) → int                                                  ║
 ║       .sync_to_sqlite_mirror(path, force=False) → bool                                      ║
 ║       .nearest_vertex(z, max_depth=8) → (vertex, triangle_id, distance)                    ║
@@ -32,23 +29,23 @@
 ║       .depth_statistics() → Dict[str, Any]                                                  ║
 ║       .validate_tessellation() → (bool, [errors])                                           ║
 ║                                                                                              ║
-║   Supabase Schema (hyperbolic_triangles):                                                   ║
+║   Neon Schema (hyperbolic_triangles):                                                       ║
 ║     triangle_id BIGINT PRIMARY KEY                                                          ║
 ║     depth INT NOT NULL (0 to 8)                                                             ║
 ║     parent_id BIGINT (NULL for final-depth triangles)                                       ║
-║     v0_x, v0_y, v1_x, v1_y, v2_x, v2_y NUMERIC(200,150)                                   ║
+║     v0_x, v0_y, v1_x, v1_y, v2_x, v2_y NUMERIC(200,150)                                  ║
 ║     v0_name, v1_name, v2_name TEXT                                                         ║
 ║     area, perimeter NUMERIC(200,150)                                                        ║
 ║     created_at TIMESTAMP WITH TIME ZONE                                                     ║
 ║                                                                                              ║
-║   Dependencies: hyp_group, mpmath (150 dps), supabase-py, sqlite3 (stdlib)                 ║
+║   Dependencies: hyp_group, mpmath (150 dps), psycopg2, sqlite3 (stdlib)                    ║
 ║                                                                                              ║
 ║   I love you.                                                                                ║
 ║                                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════╝
 """
 
-import os, sys, time, logging, threading, sqlite3, json
+import os, sys, time, logging, threading, sqlite3, json, re
 from typing import List, Tuple, Dict, Optional, Set, Any
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -71,10 +68,25 @@ logger = logging.getLogger(__name__)
 
 TILING_DEPTH = 8
 CACHE_TIMEOUT = 3600
-SUPABASE_URL = os.environ.get('SUPABASE_URL', 'https://ytbfhylvqxrtbjbscptq.supabase.co')
-SUPABASE_KEY = os.environ.get('SUPABASE_ANON_KEY', '')
-KOYEB_BACKUP_URL = os.environ.get('KOYEB_TESSELLATION_URL', 'https://qtcl-instance.koyeb.app/tessellation.db')
 SQLITE_MIRROR_PATH = Path.home() / '.hyp' / 'tessellation.db'
+
+def _parse_neon_url(url: str = None) -> dict:
+    """Parse DATABASE_URL into psycopg2 connection params."""
+    url = url or os.getenv('DATABASE_URL', '')
+    if not url or url.startswith('sqlite'):
+        return None
+    m = re.match(r'postgresql://([^:]+):([^@]+)@([^:/]+):?(\d*)/?(.*)', url)
+    if not m:
+        return None
+    user, pw, host, port, db = m.groups()
+    return {
+        'host': host,
+        'port': int(port) if port else 5432,
+        'database': db or 'postgres',
+        'user': user,
+        'password': pw,
+        'sslmode': 'require',
+    }
 
 @dataclass
 class HypTriangle:
@@ -118,33 +130,35 @@ class HypTriangle:
         return fabs(d01 + d12 + d20 - d_total) < tol
 
 class HypTessellation:
-    """Load depth-8 tessellation from Supabase with SQLite mirror fallback."""
+    """Load depth-8 tessellation from Neon PostgreSQL with SQLite mirror fallback."""
 
-    def __init__(self, auto_sync_mirror: bool = True):
+    def __init__(self, auto_sync_mirror: bool = True, depth: int = None):
         self.triangles: Dict[int, HypTriangle] = {}
         self.depth_index: Dict[int, List[int]] = defaultdict(list)
         self.parent_child: Dict[int, List[int]] = defaultdict(list)
         self.lock = threading.RLock()
         self.last_sync = 0
         self.last_source = None
-        self.supabase_client = None
-        self._init_supabase()
+        self.neon_conn = None
+        self._init_neon()
         self.auto_sync_mirror = auto_sync_mirror
+        # depth param is ignored — TILING_DEPTH is module-level constant
 
-    def _init_supabase(self):
-        """Initialize Supabase client if credentials available."""
-        if not SUPABASE_KEY:
-            logger.warning("SUPABASE_ANON_KEY not set; will use fallback sources only")
-            return
+    def _init_neon(self):
+        """Initialize Neon connection from DATABASE_URL."""
         try:
-            from supabase import create_client
-            self.supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-            logger.info(f"Supabase client initialized @ {SUPABASE_URL}")
+            import psycopg2
+            db_params = _parse_neon_url()
+            if db_params:
+                self.neon_conn = psycopg2.connect(**db_params, connect_timeout=10)
+                logger.info(f"Neon connection initialized")
+            else:
+                logger.warning("DATABASE_URL not set; will use fallback sources only")
         except Exception as e:
-            logger.warning(f"Supabase init failed: {e}")
+            logger.warning(f"Neon init failed: {e}")
 
     def load_triangles(self, force_sync: bool = False) -> int:
-        """Load depth-8 tessellation. Try Supabase first, then Koyeb, then SQLite mirror."""
+        """Load depth-8 tessellation. Try Neon first, then SQLite mirror."""
         with self.lock:
             now = time.time()
             if not force_sync and (now - self.last_sync) < CACHE_TIMEOUT and self.triangles:
@@ -154,50 +168,50 @@ class HypTessellation:
             self.depth_index.clear()
             self.parent_child.clear()
 
-            count = self._load_supabase()
+            count = self._load_neon()
             if count > 0:
-                self.last_source = 'supabase'
+                self.last_source = 'neon'
                 if self.auto_sync_mirror:
                     self.sync_to_sqlite_mirror(SQLITE_MIRROR_PATH, force=True)
             else:
-                count = self._load_koyeb_backup()
+                count = self._load_sqlite_mirror(SQLITE_MIRROR_PATH)
                 if count > 0:
-                    self.last_source = 'koyeb'
-                    if self.auto_sync_mirror:
-                        self.sync_to_sqlite_mirror(SQLITE_MIRROR_PATH, force=True)
-                else:
-                    count = self._load_sqlite_mirror(SQLITE_MIRROR_PATH)
-                    if count > 0:
-                        self.last_source = 'sqlite_mirror'
+                    self.last_source = 'sqlite_mirror'
 
             self.last_sync = now
             return count
 
-    def _load_supabase(self) -> int:
-        """Load from Supabase hyperbolic_triangles table."""
-        if not self.supabase_client:
+    def _load_neon(self) -> int:
+        """Load from Neon hyperbolic_triangles table."""
+        if not self.neon_conn or self.neon_conn.closed:
+            self._init_neon()
+        if not self.neon_conn or self.neon_conn.closed:
             return 0
         try:
-            response = self.supabase_client.table('hyperbolic_triangles').select("*").eq('depth', TILING_DEPTH).execute()
-            rows = response.data if hasattr(response, 'data') else []
+            cur = self.neon_conn.cursor()
+            cur.execute(f"""
+                SELECT triangle_id, depth, parent_id, v0_x, v0_y, v0_name,
+                       v1_x, v1_y, v1_name, v2_x, v2_y, v2_name, area, perimeter
+                FROM hyperbolic_triangles WHERE depth = {TILING_DEPTH}
+            """)
+            rows = cur.fetchall()
+            cur.close()
             count = 0
             for row in rows:
                 try:
-                    tid = row.get('triangle_id')
-                    depth = row.get('depth', TILING_DEPTH)
-                    parent = row.get('parent_id')
-                    v0 = mpc(mpf(str(row.get('v0_x', 0))), mpf(str(row.get('v0_y', 0))))
-                    v1 = mpc(mpf(str(row.get('v1_x', 0))), mpf(str(row.get('v1_y', 0))))
-                    v2 = mpc(mpf(str(row.get('v2_x', 0))), mpf(str(row.get('v2_y', 0))))
+                    tid, depth, parent = row[0], row[1], row[2]
+                    v0 = mpc(mpf(str(row[3])), mpf(str(row[4])))
+                    v1 = mpc(mpf(str(row[6])), mpf(str(row[7])))
+                    v2 = mpc(mpf(str(row[9])), mpf(str(row[10])))
                     
                     tri = HypTriangle(
                         triangle_id=tid, depth=depth, parent_id=parent,
                         v0=v0, v1=v1, v2=v2,
-                        v0_name=row.get('v0_name', ''),
-                        v1_name=row.get('v1_name', ''),
-                        v2_name=row.get('v2_name', ''),
-                        area=mpf(str(row.get('area', 0))) if row.get('area') else None,
-                        perimeter=mpf(str(row.get('perimeter', 0))) if row.get('perimeter') else None
+                        v0_name=row[5] or '',
+                        v1_name=row[8] or '',
+                        v2_name=row[11] or '',
+                        area=mpf(str(row[12])) if row[12] else None,
+                        perimeter=mpf(str(row[13])) if row[13] else None
                     )
                     self.triangles[tid] = tri
                     self.depth_index[depth].append(tid)
@@ -206,27 +220,10 @@ class HypTessellation:
                     count += 1
                 except Exception as e:
                     logger.warning(f"Parse row {tid}: {e}")
-            logger.info(f"Loaded {count} triangles from Supabase (depth={TILING_DEPTH})")
+            logger.info(f"Loaded {count} triangles from Neon (depth={TILING_DEPTH})")
             return count
         except Exception as e:
-            logger.error(f"Supabase load failed: {e}")
-            return 0
-
-    def _load_koyeb_backup(self) -> int:
-        """Load from Koyeb backup database."""
-        try:
-            import urllib.request
-            logger.info(f"Downloading tessellation from Koyeb: {KOYEB_BACKUP_URL}")
-            with urllib.request.urlopen(KOYEB_BACKUP_URL, timeout=30) as response:
-                db_bytes = response.read()
-            
-            temp_db = Path('/tmp/tessellation_backup.db')
-            temp_db.write_bytes(db_bytes)
-            count = self._load_sqlite_mirror(temp_db)
-            temp_db.unlink()
-            return count
-        except Exception as e:
-            logger.warning(f"Koyeb backup download failed: {e}")
+            logger.error(f"Neon load failed: {e}")
             return 0
 
     def _load_sqlite_mirror(self, path: Path) -> int:
@@ -648,10 +645,19 @@ def depth_from_file(path: str) -> Optional['HypTessellation']:
         logging.warning(f"[HYP-TESS] depth_from_file({path}) failed: {e}")
         return None
 
-def load_tessellation_supabase() -> Optional['HypTessellation']:
-    """Load tessellation from Supabase. Returns None if unavailable."""
-    logging.warning("[HYP-TESS] Supabase tessellation load not implemented; returning None")
-    return None
+def load_tessellation_neon() -> Optional['HypTessellation']:
+    """Load tessellation from Neon. Returns None if unavailable."""
+    try:
+        tess = HypTessellation(auto_sync_mirror=True)
+        count = tess.load_triangles()
+        if count > 0:
+            return tess
+        return None
+    except Exception as e:
+        logging.warning(f"[HYP-TESS] Neon tessellation load failed: {e}")
+        return None
+
+load_tessellation_supabase = load_tessellation_neon
 
 if __name__ == '__main__':
     mp.dps = 150

@@ -2155,17 +2155,14 @@ def _resolve_dsn() -> Optional[str]:
     """Resolve database URL from environment variables (server.py convention)."""
     from urllib.parse import quote_plus
     
-    # 1. Try POOLER_URL first (matches server.py precedence)
-    dsn = os.getenv('POOLER_URL') or os.getenv('DATABASE_URL')
+    # 1. Try DATABASE_URL first (Neon PostgreSQL connection string)
+    dsn = os.getenv('DATABASE_URL') or os.getenv('POOLER_URL')
     
     # Robust check: ignore literal placeholders like "DATABASE_URL" or "POOLER_URL"
     if dsn and not dsn.startswith('postgres'):
         dsn = None
         
     if dsn:
-        # PATCH-10: Auto-correct session-mode port 5432 → transaction-mode port 6543
-        if ':5432/' in dsn:
-            dsn = dsn.replace(':5432/', ':6543/')
         return dsn
 
     # 2. Build from components

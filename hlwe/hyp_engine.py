@@ -578,10 +578,8 @@ class HypGammaEngine:
             walk_indices = [secrets.randbelow(N_GENERATORS) for _ in range(WALK_LENGTH)]
             private_key_hex = ''.join(f'{idx:x}' for idx in walk_indices)
 
-            # Evaluate walk to PSL(2,ℝ) matrix
-            with self._lock:
-                generators = get_generators()
-            public_matrix = evaluate_walk(walk_indices, generators)
+            # Evaluate walk to PSL(2,ℝ) matrix (uses module-level generators internally)
+            public_matrix = evaluate_walk(walk_indices)
 
             # Serialize and hash
             public_key_hex = self._serialize_psl_matrix(public_matrix)
