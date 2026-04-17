@@ -1432,12 +1432,21 @@ class DatabasePool:
                 return
 
             # ── Native psycopg2 TCP mode (Neon PostgreSQL) ───────────────
+            # Check if DATABASE_URL is set before attempting connection
+            if not DB_URL:
+                logger.warning("[DB] ⚠️  DATABASE_URL not set — DB disabled")
+                logger.info(f"[STARTUP] ✅ DB ready (no DATABASE_URL) at {time.time() - _STARTUP_TIME:.1f}s")
+                self._initialized = True
+                self.use_pooling = False
+                self.pool = None
+                return
+            
             try:
                 from psycopg2 import pool as psycopg2_pool
                 min_connections = 2
                 max_connections = int(os.getenv('DB_POOL_MAX', '50'))
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
-                logger.info(f"[DB] Connecting to Neon PostgreSQL")
+                logger.info(f"[DB] Connecting to Neon via DATABASE_URL")
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
                     min_connections, max_connections, DB_URL, connect_timeout=10)
                 self._initialized = True
@@ -1471,10 +1480,11 @@ class DatabasePool:
                 self._retry_interval = 5.0
 
     def get_connection(self):
+        # Check DB disabled first
+        if _USE_DB_NONE or not DB_URL:
+            return None
         if not self._initialized:
             self._initialize_pool()
-        if _USE_DB_NONE:
-            return None
         try:
             if self._http_mode and self.pool:
                 return self.pool.getconn()
