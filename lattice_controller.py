@@ -818,8 +818,14 @@ class QuantumDatabaseConnector:
         """Initialize SQLite fallback for block persistence."""
         try:
             import sqlite3
-            db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'qtcl.db')
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            # Use /tmp on Koyeb (always writable) or data/ locally
+            if os.path.exists('/workspace'):
+                # Running on Koyeb - use /tmp which is writable
+                db_path = '/tmp/qtcl.db'
+            else:
+                # Running locally - use data/ directory
+                db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'qtcl.db')
+                os.makedirs(os.path.dirname(db_path), exist_ok=True)
             self._sqlite_conn = sqlite3.connect(db_path, check_same_thread=False)
             # Create blocks table if not exists
             self._sqlite_conn.execute("""
@@ -2800,14 +2806,35 @@ class BlockManager:
             # ── Try to resume from persisted chain ───────────────────────────
             if self.db is not None:
                 try:
+                    # Try SQLite first (height column)
+                    if self.db._sqlite_conn:
+                        cursor = self.db._sqlite_conn.execute(
+                            "SELECT height, block_hash FROM blocks ORDER BY height DESC LIMIT 1"
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            tip_height, tip_hash = row[0], row[1]
+                            logger.info(
+                                f"📦 [GENESIS] Resuming from SQLite tip: "
+                                f"height={tip_height}  hash={tip_hash[:18]}…"
+                            )
+                            self.chain_height        = tip_height + 1
+                            self.current_block_hash  = tip_hash
+                            self.pending_block = QuantumBlock(
+                                block_height   = self.chain_height,
+                                parent_hash    = tip_hash,
+                                miner_address  = self.validator.miner_address,
+                            )
+                            return
+                    
+                    # Fallback to PostgreSQL
                     rows = self.db.execute_fetch_all(
-                        "SELECT block_height, block_hash, oracle_w_state_hash "
-                        "FROM blocks ORDER BY block_height DESC LIMIT 1"
+                        "SELECT height, block_hash FROM blocks ORDER BY height DESC LIMIT 1"
                     )
                     if rows:
                         tip = rows[0]
-                        tip_height  = tip.get('block_height', 0)
-                        tip_hash    = tip.get('block_hash',   '0x' + '0'*64)
+                        tip_height  = tip.get('height', 0)
+                        tip_hash    = tip.get('block_hash',   '0' * 64)
                         logger.info(
                             f"📦 [GENESIS] Resuming from DB tip: "
                             f"height={tip_height}  hash={tip_hash[:18]}…"
