@@ -5145,6 +5145,8 @@ def health_ready():
     return "", 200
 
 
+logger.info("[HEALTH] ✅ /health and /ready endpoints mounted (immediate 200 OK)")
+
 # ═══ STATIC FILE & ROOT SERVING ═══
 @app.route("/", methods=["GET"])
 def serve_root():
