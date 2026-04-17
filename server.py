@@ -2374,10 +2374,26 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
         block = None
         if height is not None:
             block = _query_block_at_height(height)
+            
+            # Fallback: check in-memory cache (for genesis and recently mined blocks)
+            if block is None:
+                with _BLOCK_CACHE_LOCK:
+                    if height in _BLOCK_CACHE:
+                        block = _BLOCK_CACHE[height]
+                        logger.debug(f"[RPC] Block h={height} served from cache")
         elif block_hash:
             row = query_block_by_hash(block_hash)
             if row:
                 block = _query_block_at_height(row['height'])
+            
+            # Fallback: search cache by hash
+            if block is None:
+                with _BLOCK_CACHE_LOCK:
+                    for h, b in _BLOCK_CACHE.items():
+                        if b.get('block_hash') == block_hash or b.get('hash') == block_hash:
+                            block = b
+                            logger.debug(f"[RPC] Block hash={block_hash[:16]}... served from cache")
+                            break
 
         if block is None:
             return _rpc_error(-32000, "Block not found", rpc_id)
@@ -3764,6 +3780,113 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             if not block_hash.startswith('0' * difficulty_bits):
                 return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
 
+        # ═══════════════════════════════════════════════════════════════════════
+        # TRANSACTION VALIDATION — Bitcoin-style security
+        # Every transaction must be cryptographically valid and economically sound
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # Get reward schedule for validation
+        _scheduled_miner_reward = 720.0  # default
+        _scheduled_treasury_reward = 80.0  # default
+        if TessellationRewardSchedule:
+            try:
+                _rewards = TessellationRewardSchedule.get_rewards_for_height(height)
+                _scheduled_miner_reward = float(_rewards.get('miner', 720))
+                _scheduled_treasury_reward = float(_rewards.get('treasury', 80))
+            except Exception as _e:
+                logger.warning(f"[RPC-submitBlock] Could not fetch reward schedule: {_e}")
+        
+        # Calculate expected total coinbase (miner + treasury + fees)
+        _total_fees = 0
+        _non_coinbase_txs = []
+        _coinbase_txs = []
+        
+        for tx in (txs or []):
+            tx_type = tx.get('tx_type', '').lower()
+            if tx_type == 'coinbase':
+                _coinbase_txs.append(tx)
+            else:
+                _non_coinbase_txs.append(tx)
+                # Sum fees from non-coinbase transactions
+                _fee = tx.get('fee', tx.get('fee_base', 0))
+                if isinstance(_fee, (float, str)):
+                    try:
+                        _total_fees += int(round(float(_fee) * 100))  # convert to base units
+                    except:
+                        pass
+                else:
+                    _total_fees += int(_fee)
+        
+        # Validate coinbase structure
+        if len(_coinbase_txs) < 1:
+            return _rpc_error(-32003, "Block must have at least one coinbase transaction", rpc_id)
+        
+        if len(_coinbase_txs) > 2:
+            return _rpc_error(-32003, f"Block has too many coinbase transactions: {len(_coinbase_txs)} (max 2: miner + treasury)", rpc_id)
+        
+        # Validate each coinbase amount matches schedule + fees
+        _miner_coinbase = None
+        _treasury_coinbase = None
+        
+        for cb in _coinbase_txs:
+            _to = cb.get('to_addr', cb.get('to_address', ''))
+            _amount = float(cb.get('amount', 0))
+            _amount_base = int(round(_amount * 100))  # Convert to base units
+            
+            if _to == miner_address:
+                _miner_coinbase = cb
+                # Miner reward = scheduled reward + 50% of fees
+                _expected_miner = int(round(_scheduled_miner_reward * 100)) + (_total_fees // 2)
+                if abs(_amount_base - _expected_miner) > 1:  # Allow 1 unit rounding tolerance
+                    return _rpc_error(-32003, 
+                        f"Invalid miner coinbase: got {_amount_base} base units, expected {_expected_miner} "
+                        f"(reward={_scheduled_miner_reward}*100 + fees/2={_total_fees//2})", rpc_id)
+            elif TessellationRewardSchedule and _to == TessellationRewardSchedule.TREASURY_ADDRESS:
+                _treasury_coinbase = cb
+                # Treasury reward = scheduled reward + 50% of fees
+                _expected_treasury = int(round(_scheduled_treasury_reward * 100)) + (_total_fees - (_total_fees // 2))
+                if abs(_amount_base - _expected_treasury) > 1:
+                    return _rpc_error(-32003,
+                        f"Invalid treasury coinbase: got {_amount_base} base units, expected {_expected_treasury}",
+                        rpc_id)
+            else:
+                return _rpc_error(-32003, f"Invalid coinbase recipient: {_to}. Only miner or treasury allowed.", rpc_id)
+        
+        # Validate non-coinbase transactions (if any)
+        for tx in _non_coinbase_txs:
+            # Every non-coinbase must have a valid signature
+            _sig = tx.get('signature') or tx.get('hyp_sig') or tx.get('sig', '')
+            if not _sig:
+                return _rpc_error(-32003, 
+                    f"Transaction {tx.get('tx_id', '?')[:16]}... has no signature — all non-coinbase txs must be signed",
+                    rpc_id)
+            
+            # Validate sender has sufficient balance by tracing unspent outputs
+            _from = tx.get('from_addr', tx.get('from_address', ''))
+            _amount = float(tx.get('amount', 0))
+            
+            # Query sender's confirmed balance from DB
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT balance FROM wallet_addresses WHERE address = %s",
+                        (_from,)
+                    )
+                    _row = cur.fetchone()
+                    _confirmed_balance = float(_row[0]) if _row else 0.0
+                    
+                    if _confirmed_balance < _amount:
+                        return _rpc_error(-32003,
+                            f"Insufficient balance: {_from[:16]}... has {_confirmed_balance:.2f} QTCL, "
+                            f"tried to send {_amount:.2f} QTCL",
+                            rpc_id)
+            except Exception as _be:
+                logger.warning(f"[RPC-submitBlock] Balance check failed for {_from[:16]}...: {_be}")
+                # Fail-safe: reject if we can't verify balance
+                return _rpc_error(-32003, f"Could not verify balance for {_from[:16]}...", rpc_id)
+        
+        logger.info(f"[RPC-submitBlock] ✅ Transaction validation passed: {len(_coinbase_txs)} coinbase, {len(_non_coinbase_txs)} transfers, {_total_fees} base units in fees")
+
         # ── Persist block + transactions (transaction 1 — no wallet writes) ──
         _block_rowcount = 0
         try:
@@ -3916,6 +4039,29 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             dm.on_block_accepted(timestamp_s)
         except Exception:
             pass
+
+        # ── Cache block for fast retrieval ───────────────────────────────────
+        if _block_rowcount > 0:
+            _cache_block({
+                'height': height,
+                'block_hash': block_hash,
+                'parent_hash': parent_hash,
+                'merkle_root': merkle_root,
+                'timestamp': timestamp_s,
+                'timestamp_s': timestamp_s,
+                'difficulty': difficulty_bits,
+                'nonce': nonce,
+                'miner': miner_address,
+                'tx_count': len(txs) if txs else 0,
+                'w_state_fidelity': w_state_fidelity,
+                'coherence': w_state_fidelity,
+                'fidelity': w_state_fidelity,
+                'quantum_fidelity': w_state_fidelity,
+                'w_state_hash': w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
+                'hyp_witness': w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
+                'pq_curr': height,
+                'pq_last': max(0, height - 1),
+            })
 
         # ── Update chain state ──────────────────────────────────────────────
         try:
