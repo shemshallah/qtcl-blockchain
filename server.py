@@ -85,9 +85,9 @@ _verbose_p2p_logging = False
 _last_snapshot_log_time = 0
 _snapshot_log_interval = 10
 
-# ═══ DENSITY MATRIX SNAPSHOT RING BUFFER (1000 snapshots, LRU eviction) ═══
-_DM_SNAPSHOT_RING = deque(maxlen=1000)
-_DM_SNAPSHOT_LOCK = threading.RLock()
+# ═══ PURE SSE STREAMING ARCHITECTURE ═══
+# Oracle generates 16³ → queued directly to SSE → clients sample from stream
+# NO caching, NO RPC snapshot polling, NO ring buffers
 
 # ═══ CLIENT TRIPARTITE ORACLE POOL ═══════════════════════════════════════════
 # Receives fused DMs pushed by trusted client oracle nodes (qtcl_pushOracleDM).
@@ -191,7 +191,6 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         timeout_map = {
             'qtcl_getBlockRange': 10.0,
             'qtcl_getQuantumMetrics': 25.0,  # Oracle cluster - generous to let AER complete
-            'qtcl_getLatestDMSnapshot': 5.0,
             'qtcl_getTransactions': 10.0,
             'qtcl_getPeers': 5.0,
             'qtcl_getMerminTest': 20.0,
@@ -1957,12 +1956,6 @@ _latest_snapshot: Optional[dict] = None              # Last cached snapshot (pol
 _latest_snapshot_ts: int = 0                         # Timestamp of latest snapshot
 _snapshot_lock = threading.RLock()                   # Guards _latest_snapshot updates
 
-def _cache_snapshot(snapshot: dict) -> None:
-    """Cache snapshot for RPC polling (no SSE push)."""
-    global _latest_snapshot
-    with _snapshot_lock:
-        _latest_snapshot = snapshot
-
 def _log_rpc_event(event_type: str, data: Any) -> None:
     """Log event for /api/events RPC polling endpoint."""
     with _rpc_event_lock:
@@ -2714,19 +2707,8 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}")
 
-        # ── FIRST: Include latest cached quantum snapshot (real 16³ data from oracle) ──
-        # This is the authoritative quantum state from the oracle, NOT static LATTICE
-        try:
-            with _DM_SNAPSHOT_LOCK:
-                if _DM_SNAPSHOT_RING:
-                    latest_cached = _DM_SNAPSHOT_RING[-1]  # Most recent snapshot
-                    if latest_cached.get('density_tensor_hex'):
-                        result['density_matrix_hex'] = latest_cached['density_tensor_hex']
-                    if latest_cached.get('w_state_hex'):
-                        result['w_state_hex'] = latest_cached['w_state_hex']
-                    logger.debug(f"[RPC-METHOD] Injected cached 16³ density_matrix_hex from oracle snapshot")
-        except Exception as _cached_e:
-            logger.debug(f"[RPC-METHOD] Failed to inject cached snapshot: {_cached_e}")
+        # NOTE: 16³ quantum data flows via SSE stream /rpc/oracle/snapshot, NOT via RPC
+        # Clients subscribe to the SSE stream and sample whatever resolution they need
 
         if ORACLE_AVAILABLE and ORACLE is not None:
             try:
@@ -4611,52 +4593,6 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"pushOracleDM failed: {e}", rpc_id)
 
 
-def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshot — fetch latest density matrix snapshot from oracle ring buffer.
-    
-    Returns: {
-        timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
-        von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid, oracle_address
-    }
-    """
-    try:
-        with _DM_SNAPSHOT_LOCK:
-            if not _DM_SNAPSHOT_RING:
-                return _rpc_error(-32000, "No DM snapshots available yet", rpc_id)
-            latest = list(_DM_SNAPSHOT_RING)[-1]
-        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: returned snapshot ts={latest.get('timestamp_ns')}")
-        return _rpc_ok(latest, rpc_id)
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
-
-
-def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshots — fetch last N DM snapshots (default 10, max 100)."""
-    try:
-        limit = 10
-        if isinstance(params, list) and params:
-            try:
-                limit = min(int(params[0]), 100)
-            except (ValueError, TypeError):
-                pass
-        elif isinstance(params, dict):
-            try:
-                limit = min(int(params.get("limit", 10)), 100)
-            except (ValueError, TypeError):
-                pass
-        
-        with _DM_SNAPSHOT_LOCK:
-            snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
-        
-        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: returned {len(snaps)} snapshots")
-        return _rpc_ok({"snapshots": snaps, "count": len(snaps)}, rpc_id)
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
-
-
-
 def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitTransaction — validate and accept a transaction into the mempool."""
     try:
@@ -4892,9 +4828,6 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_registerMeasurementSubscriber": _rpc_registerMeasurementSubscriber,
     "qtcl_unregisterMeasurementSubscriber": _rpc_unregisterMeasurementSubscriber,
     "qtcl_listMeasurementSubscribers": _rpc_listMeasurementSubscribers,
-    # ── NEW: Density Matrix Snapshot Streaming ──────────────────────────────────
-    "qtcl_getLatestDMSnapshot": _rpc_getLatestDMSnapshot,
-    "qtcl_getLatestDMSnapshots": _rpc_getLatestDMSnapshots,
     # DEPRECATED: qtcl_pushOracleDM (replaced by SSE stream /rpc/oracle/snapshot for 16³ tensors)
     # "qtcl_pushOracleDM": _rpc_pushOracleDM,
     # ── NEW: Transaction Explorer ─────────────────────────────────────────────────
@@ -5739,31 +5672,8 @@ def _blocks_broadcaster_worker():
 _blocks_broadcaster_thread = _threading_module.Thread(target=_blocks_broadcaster_worker, daemon=True)
 _blocks_broadcaster_thread.start()
 
-@app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshots():
-    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N DM snapshots.
-    
-    Returns snapshots from _DM_SNAPSHOT_RING which contains authoritative oracle data
-    including per_node measurements from all 5 oracle nodes.
-    """
-    if request.method == "OPTIONS":
-        return "", 204
-    try:
-        limit = int(request.args.get('limit', 10))
-        limit = min(limit, 100)  # cap at 100
-        
-        # Read from DM snapshot ring buffer (authoritative oracle data with per_node)
-        with _DM_SNAPSHOT_LOCK:
-            snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
-        
-        logger.debug(f"[RPC-ORACLE] /rpc/oracle/snapshots: returning {len(snaps)} snapshots")
-        return jsonify({"jsonrpc": "2.0", "result": {"snapshots": snaps, "count": len(snaps)}, "id": request.args.get('id', 1)}), 200
-    except Exception as e:
-        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
-        return jsonify({"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}), 500
-
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
-logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshot/full,snapshots}")
+logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/snapshot (SSE stream only)")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
 logger.info("[RPC-HYP] 🔒 HypΓ Post-Quantum Cryptography RPC methods registered (Schnorr-Γ + GeodesicLWE)")
 logger.info("[RPC-HYP]   • qtcl_hyp_generateKeypair — asymmetric key generation")
@@ -5779,34 +5689,12 @@ logger.info("[RPC-HYP]   • qtcl_hyp_verifyBlock — block signature verificati
 # ═════════════════════════════════════════════════════════════════════════════════
 
 def _broadcast_snapshot_to_database(snapshot: dict) -> None:
-    """
-    Snapshot caching and SSE broadcast: queue to ring buffer + SSE stream.
-    """
+    """Direct pass-through: oracle snapshot → SSE stream (no caching)."""
     try:
-        # Cache latest snapshot for RPC polling
-        _cache_snapshot(snapshot)
-
-        # Queue into ring buffer (latest 1000) for /rpc methods
-        if 'density_tensor_hex' in snapshot:
-            dm_snap = {
-                'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
-                'oracle_id': snapshot.get('oracle_id'),
-                'density_tensor_hex': snapshot.get('density_tensor_hex', ''),
-                'tensor_dim': 16,  # 16³ unified snapshot
-                'purity': snapshot.get('purity'),
-                'w_state_fidelity': snapshot.get('w_state_fidelity'),
-                'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
-                'coherence_l1': snapshot.get('coherence_l1'),
-                'w_state_hex': snapshot.get('w_state_hex', ''),
-            }
-            with _DM_SNAPSHOT_LOCK:
-                _DM_SNAPSHOT_RING.append(dm_snap)
-            logger.debug(f"[RPC-SNAPSHOT] ✅ Unified 16³ snapshot cached (ring={len(_DM_SNAPSHOT_RING)}/1000)")
-
-            # Enqueue for SSE streaming to clients
-            _enqueue_snapshot_for_sse(dm_snap)
+        if snapshot.get('density_tensor_hex'):
+            _enqueue_snapshot_for_sse(snapshot)
     except Exception as e:
-        logger.error(f"[RPC-SNAPSHOT] Error: {e}")
+        logger.error(f"[SSE] Snapshot enqueue failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
