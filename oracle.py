@@ -2223,18 +2223,27 @@ class OracleWStateManager:
                 except Exception as _te:
                     pass  # non-fatal
 
-                # Build W-state hex from amplitudes if available
+                # Build W-state hex from density matrix diagonal elements
                 _w_hex = ''
                 try:
-                    if hasattr(snapshot, 'w_state_amplitudes') and snapshot.w_state_amplitudes:
-                        import struct
+                    import struct
+                    # Extract diagonal elements as W-state amplitudes (8 most significant)
+                    if hasattr(snapshot, 'density_matrix') and snapshot.density_matrix is not None:
+                        dm = snapshot.density_matrix
+                        # Take diagonal and normalize
+                        diag = np.diag(dm)[:8]  # First 8 diagonal elements
+                        total = float(np.sum(diag))
+                        if total > 1e-12:
+                            diag = diag / total
+                        # Build complex amplitudes (real part from diag, imag = 0)
                         _w_data = bytearray()
-                        for i in range(8):
-                            amp = complex(snapshot.w_state_amplitudes[i]) if not isinstance(snapshot.w_state_amplitudes[i], complex) else snapshot.w_state_amplitudes[i]
-                            _w_data.extend(struct.pack('>dd', amp.real, amp.imag))
+                        for i in range(min(8, len(diag))):
+                            re = float(diag[i].real)
+                            im = float(diag[i].imag)
+                            _w_data.extend(struct.pack('>dd', re, im))
                         _w_hex = _w_data.hex()
-                except Exception:
-                    pass  # W-state optional
+                except Exception as _w_err:
+                    logger.debug(f"[ORACLE] W-state build failed: {_w_err}")
                 
                 _mux_snapshot = {
                     'timestamp_ns': snapshot.timestamp_ns,

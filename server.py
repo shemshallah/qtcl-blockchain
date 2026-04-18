@@ -5518,6 +5518,13 @@ def _dm_sse_worker():
                 tensor_hex = ''
                 w_hex = snap.get('w_state_hex', '') or _get_w_state_hex()
                 
+                # DEBUG: Log what we received from oracle
+                if not hasattr(_dm_sse_worker, '_logged_input'):
+                    _dm_sse_worker._logged_input = 0
+                if _dm_sse_worker._logged_input < 3:
+                    logger.info(f"[MUX-DM-INPUT] oracle_tensor_len={len(_oracle_tensor_hex)} w_state_len={len(w_hex)} snap_keys={list(snap.keys())[:5]}")
+                    _dm_sse_worker._logged_input += 1
+                
                 if _oracle_tensor_hex and len(_oracle_tensor_hex) == 262144:
                     # Convert 32³ to 4³ by averaging 8×8×8 blocks
                     try:
@@ -5786,12 +5793,17 @@ def rpc_oracle_snapshot():
 
     def generate():
         import itertools
+        _sent_count = 0
         for _ in itertools.count():
             try:
                 snap = _snapshot_sse_queue.get(timeout=2.0)
-                if snap and snap.get('density_tensor_hex'):
+                # ✅ FIXED: Send if EITHER tensor OR w_state present (not just tensor)
+                if snap and (snap.get('density_tensor_hex') or snap.get('w_state_hex')):
                     payload = json.dumps({"result": snap, "id": 1})
                     yield f"data: {payload}\n\n"
+                    _sent_count += 1
+                    if _sent_count <= 3:
+                        logger.info(f"[SSE-SNAPSHOT] Sent #{_sent_count} | tensor={bool(snap.get('density_tensor_hex'))} w_state={bool(snap.get('w_state_hex'))}")
             except _queue_module.Empty:
                 yield f": heartbeat\n\n"
             except GeneratorExit:
