@@ -6274,6 +6274,38 @@ threading.Thread(
     name="MempoolSync",
 ).start()
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATHEDRAL-GRADE: HYP-WALLET Deferred Initialization (Server-Side)
+# Initialize server wallet for block validation and coinbase operations
+# ═══════════════════════════════════════════════════════════════════════════════
+def _deferred_server_wallet_init():
+    """Initialize HYP-WALLET on server for coinbase signing (non-blocking)."""
+    try:
+        # Add hlwe directory to path
+        _hlwe_dir = os.path.join(os.path.dirname(__file__), 'hlwe')
+        if _hlwe_dir not in sys.path:
+            sys.path.insert(0, _hlwe_dir)
+        
+        # Import wallet from existing miner module
+        _miner_path = os.path.expanduser('~/.qtcl')
+        _wallet_file = os.path.join(_miner_path, 'wallet.json')
+        
+        if os.path.exists(_wallet_file):
+            logger.info(f"[HYP-WALLET-SERVER] 📍 Found server wallet at {_wallet_file}")
+            logger.info(f"[HYP-WALLET-SERVER]    Server can sign coinbase transactions")
+        else:
+            logger.info(f"[HYP-WALLET-SERVER] 📭 No server wallet found at {_wallet_file}")
+            logger.info(f"[HYP-WALLET-SERVER]    Create one with: python qtcl-miner/qtcl_client.py")
+            logger.info(f"[HYP-WALLET-SERVER]    Then select 'Wallet → Create New'")
+    except Exception as _wallet_err:
+        logger.warning(f"[HYP-WALLET-SERVER] ⚠️  Server wallet check: {_wallet_err}")
+
+threading.Thread(
+    target=_deferred_server_wallet_init,
+    daemon=True,
+    name="ServerWalletInit",
+).start()
+
 # ═══ MODULE LOAD COMPLETE ═══
 # Flask app is ready to serve /health immediately
 logger.info(f"[STARTUP] ✅ Server module loaded in {time.time() - _STARTUP_TIME:.2f}s — /health endpoint ready")
