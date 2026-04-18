@@ -5586,6 +5586,10 @@ import threading as _threading_module
 _latest_unified_snapshot = {}
 _snapshot_cache_lock = _threading_module.RLock()
 
+# Metrics streaming client tracking (for /rpc/events/metrics)
+_connected_metric_clients = []
+_metrics_stream_lock = _threading_module.RLock()
+
 # Removed: old SSE multiplexer infrastructure. Clients fetch snapshots via RPC.
 
 # Removed: old 64³ snapshot generation. Clients fetch unified 16³ snapshots via RPC.
@@ -5593,31 +5597,12 @@ _snapshot_cache_lock = _threading_module.RLock()
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """
-    SSE STREAM — HIGH-FREQUENCY (50ms) DENSITY MATRIX ONLY.
-    Multiplexer forks DM (here) from metrics (RPC PUSH).
+    Deprecated: Use /rpc/oracle/snapshot/stream instead.
+    Redirects to the 16³ SSE stream endpoint.
     """
     if request.method == "OPTIONS":
         return "", 204
-
-    def generate():
-        import itertools
-        for _ in itertools.count():
-            try:
-                snap = _snapshot_sse_queue.get(timeout=2.0)
-                # ✅ FIXED: Send if density_matrix_hex present (native 64³ format)
-                if snap and snap.get('density_matrix_hex'):
-                    payload = json.dumps({"result": snap, "id": 1})
-                    yield f"data: {payload}\n\n"
-            except _queue_module.Empty:
-                yield f": heartbeat\n\n"
-            except GeneratorExit:
-                break
-            except Exception as e:
-                logger.debug(f"[SSE-SNAPSHOT] error: {e}")
-                break
-
-    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
-    return Response(generate(), mimetype='text/event-stream', headers=headers)
+    return rpc_oracle_snapshot_stream()
 
 @app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
 def rpc_metrics_push():
@@ -5629,7 +5614,7 @@ def rpc_metrics_push():
         return "", 204
 
     client_queue = _queue_module.Queue(maxsize=50)
-    with _snapshot_multiplexer_lock:
+    with _metrics_stream_lock:
         _connected_metric_clients.append(client_queue)
 
     def generate():
