@@ -5580,240 +5580,15 @@ import threading as _threading_module
 # SSE STREAMING INFRASTRUCTURE (FIXED: oracle → server → client real-time delivery)
 # ════════════════════════════════════════════════════════════════════════════════════════
 
-class SnapshotMultiplexer:
-    """Atomic fork: receives QuantumSnapshotFrame, enqueues to DM + Metrics queues."""
-    def __init__(self, dm_queue_size: int = 50, metrics_queue_size: int = 50):
-        self.dm_sse_queue = _queue_module.Queue(maxsize=dm_queue_size)
-        self.metrics_sse_queue = _queue_module.Queue(maxsize=metrics_queue_size)
-        self.lock = _threading_module.RLock()
-        self.total_snapshots_received = 0
-        self.total_snapshots_forwarded_dm = 0
-        self.total_snapshots_forwarded_metrics = 0
-        self.validation_failures = 0
-        self.last_forward_ts = time.time()
-        logger.info("[SnapshotMultiplexer] initialized (DM queue={}, Metrics queue={})".format(dm_queue_size, metrics_queue_size))
-    
-    def ingest(self, snapshot: Dict[str, Any]) -> bool:
-        """Atomic ingestion: validate snapshot, fork to both queues."""
-        try:
-            with self.lock:
-                self.total_snapshots_received += 1
-            try:
-                self.dm_sse_queue.put_nowait(snapshot)
-                with self.lock:
-                    self.total_snapshots_forwarded_dm += 1
-            except _queue_module.Full:
-                try:
-                    self.dm_sse_queue.get_nowait()
-                    self.dm_sse_queue.put_nowait(snapshot)
-                except Exception:
-                    pass
-            metrics_frame = {'packet_type': 'metrics','snapshot_id': snapshot.get('snapshot_id'),'timestamp_ns': snapshot.get('timestamp_ns'),'w_state_fidelity': snapshot.get('w_state_fidelity'),'purity': snapshot.get('purity'),'coherence_l1': snapshot.get('coherence_l1'),'von_neumann_entropy': snapshot.get('von_neumann_entropy'),'sequence_num': snapshot.get('sequence_num')}
-            try:
-                self.metrics_sse_queue.put_nowait(metrics_frame)
-                with self.lock:
-                    self.total_snapshots_forwarded_metrics += 1
-            except _queue_module.Full:
-                try:
-                    self.metrics_sse_queue.get_nowait()
-                    self.metrics_sse_queue.put_nowait(metrics_frame)
-                except Exception:
-                    pass
-            with self.lock:
-                self.last_forward_ts = time.time()
-            return True
-        except Exception as e:
-            self.validation_failures += 1
-            logger.error(f"[MUX] Ingestion failed: {e}")
-            return False
-    
-    def get_dm_frame(self, timeout: float = 0.05) -> Optional[Dict[str, Any]]:
-        try:
-            return self.dm_sse_queue.get(timeout=timeout)
-        except _queue_module.Empty:
-            return None
-    
-    def get_metrics_frame(self, timeout: float = 0.05) -> Optional[Dict[str, Any]]:
-        try:
-            return self.metrics_sse_queue.get(timeout=timeout)
-        except _queue_module.Empty:
-            return None
-    
-    def get_diagnostics(self) -> Dict[str, Any]:
-        with self.lock:
-            return {'total_received': self.total_snapshots_received,'total_forwarded_dm': self.total_snapshots_forwarded_dm,'total_forwarded_metrics': self.total_snapshots_forwarded_metrics,'validation_failures': self.validation_failures,'dm_queue_depth': self.dm_sse_queue.qsize(),'metrics_queue_depth': self.metrics_sse_queue.qsize(),'seconds_since_last_forward': time.time() - self.last_forward_ts}
-
-class HeartbeatMonitor:
-    """Watches snapshot flow, detects stalls."""
-    def __init__(self, threshold_ms: int = 500):
-        self.threshold_ms = threshold_ms
-        self.last_snapshot_ts = time.time()
-        self.stall_count = 0
-        self.recovery_count = 0
-        self.lock = _threading_module.RLock()
-    
-    def record_snapshot(self):
-        with self.lock:
-            self.last_snapshot_ts = time.time()
-    
-    def check_health(self) -> Tuple[bool, str]:
-        with self.lock:
-            elapsed_ms = (time.time() - self.last_snapshot_ts) * 1000
-            if elapsed_ms > self.threshold_ms:
-                self.stall_count += 1
-                return False, f"Stream stalled for {elapsed_ms:.0f}ms"
-            self.recovery_count += 1
-            return True, f"Healthy ({elapsed_ms:.0f}ms since last snapshot)"
-    
-    def get_diagnostics(self) -> Dict[str, Any]:
-        with self.lock:
-            return {'stall_count': self.stall_count,'recovery_count': self.recovery_count,'seconds_since_last_snapshot': time.time() - self.last_snapshot_ts}
-
-_snapshot_multiplexer = SnapshotMultiplexer(dm_queue_size=50, metrics_queue_size=50)
-_heartbeat_monitor = HeartbeatMonitor(threshold_ms=500)
-_connected_metric_clients = []
-_snapshot_multiplexer_lock = _threading_module.RLock()
-logger.info("[SSE] Multiplexer initialized: DM & Metrics splitting enabled")
-
-def _oracle_sse_ingestion_worker():
-    logger.info("[ORACLE-SSE-WORKER] Started (pulls from ORACLE_W_STATE_MANAGER)")
-    consecutive_empty = 0
-    while True:
-        try:
-            if not globals().get('ORACLE_W_STATE_MANAGER'):
-                if consecutive_empty < 1:
-                    logger.info("[ORACLE-SSE-WORKER] Waiting for ORACLE_W_STATE_MANAGER initialization...")
-                consecutive_empty += 1
-                time.sleep(0.5)
-                continue
-            oracle_mgr = globals()['ORACLE_W_STATE_MANAGER']
-            try:
-                snap = oracle_mgr.sse_bridge.get_next_snapshot(timeout=0.05)
-                if not snap:
-                    consecutive_empty += 1
-                    time.sleep(0.01)
-                    continue
-                consecutive_empty = 0
-                frame = {'snapshot_id': snap.snapshot_id,'timestamp_ns': snap.timestamp_ns,'density_matrix_real': snap.density_matrix_real,'density_matrix_imag': snap.density_matrix_imag,'w_state_hex': snap.w_state_hex,'w_state_fidelity': snap.w_state_fidelity,'purity': snap.purity,'coherence_l1': snap.coherence_l1,'von_neumann_entropy': snap.von_neumann_entropy,'oracle_signature': snap.oracle_signature,'sequence_num': snap.sequence_num}
-                if _snapshot_multiplexer.ingest(frame):
-                    _heartbeat_monitor.record_snapshot()
-            except AttributeError:
-                consecutive_empty += 1
-                time.sleep(0.01)
-                continue
-            except Exception as e:
-                logger.debug(f"[ORACLE-SSE-WORKER] Snapshot extraction failed: {e}")
-                consecutive_empty += 1
-                time.sleep(0.01)
-        except KeyboardInterrupt:
-            logger.info("[ORACLE-SSE-WORKER] Shutting down")
-            break
-        except Exception as e:
-            logger.error(f"[ORACLE-SSE-WORKER] Fatal error: {e}")
-            time.sleep(0.5)
-
-def start_sse_infrastructure():
-    _sse_worker = _threading_module.Thread(target=_oracle_sse_ingestion_worker, daemon=True, name="OracleSSEIngestion")
-    _sse_worker.start()
-    logger.info("[SSE] Infrastructure initialized: oracle ingestion worker started")
-
 # ════════════════════════════════════════════════════════════════════════════════
-# SNAPSHOT SSE STREAM — Continuous 64³ density matrix streaming
+# SNAPSHOT CACHING: Simple 16³ unified snapshot for RPC polling (no multiplexer)
 # ════════════════════════════════════════════════════════════════════════════════
-_snapshot_sse_queue = _queue_module.Queue(maxsize=50)
+_latest_unified_snapshot = {}
+_snapshot_cache_lock = _threading_module.RLock()
 
-def _generate_snapshot_64x64x64() -> dict:
-    """Stream native 64³ density tensor from LATTICE. NO CONVERSION, NO FALLBACK."""
-    try:
-        from globals import LATTICE
+# Removed: old SSE multiplexer infrastructure. Clients fetch snapshots via RPC.
 
-        # Wait briefly if LATTICE is initializing (max 5 attempts × 100ms = 500ms)
-        _wait_count = 0
-        _max_waits = 5
-        while (LATTICE is None or not hasattr(LATTICE, 'current_density_matrix')) and _wait_count < _max_waits:
-            import time as _t_snap
-            _t_snap.sleep(0.1)  # Give LATTICE time to initialize
-            from globals import LATTICE
-            _wait_count += 1
-
-        # FAIL FAST: must have real 64³ DM from lattice
-        if LATTICE is None or not hasattr(LATTICE, 'current_density_matrix'):
-            return {}
-
-        dm = LATTICE.current_density_matrix
-        if dm is None or not hasattr(dm, 'shape'):
-            return {}
-
-        # CRITICAL: dm must be 64³, not 256×256 or any other size
-        if dm.shape != (64, 64, 64):
-            logger.warning(f"[SNAPSHOT-GEN] ❌ LATTICE DM is {dm.shape}, expected (64, 64, 64)")
-            return {}
-
-        # Encode native 64³ tensor: complex64 = 262144 elements × 8 bytes = 2097152 bytes
-        dm_bytes = np.asarray(dm, dtype=np.complex64).tobytes()
-        dm_hex = dm_bytes.hex()
-
-        _bh = query_latest_block()
-        _bh_val = int(_bh['height']) if _bh else 0
-
-        return {
-            'density_matrix_hex': dm_hex,
-            'tensor_dim': 64,
-            'tensor_size': 262144,
-            'tensor_shape': [64, 64, 64],  # Explicitly state 3D shape
-            'block_height': _bh_val,
-            'height': _bh_val,
-            'timestamp': time.time(),
-            'ts': time.time(),
-        }
-    except Exception as e:
-        logger.debug(f"[SNAPSHOT-GEN] ❌ Cannot stream 64³ from LATTICE: {e}")
-        return {}
-
-def _snapshot_sse_generator_worker():
-    """Continuously generate and push 64³ density matrix snapshots."""
-    error_count = 0
-    startup_wait_count = 0
-    _max_startup_wait = 200  # 200 × 50ms = 10 seconds to wait for LATTICE init
-    while True:
-        try:
-            snap = _generate_snapshot_64x64x64()
-            if snap:
-                try:
-                    _snapshot_sse_queue.put_nowait(snap)
-                    if error_count > 0 or startup_wait_count > 0:
-                        logger.info(f"[SNAPSHOT-SSE-WORKER] ✅ DM generation active (waited {startup_wait_count} cycles for LATTICE)")
-                        error_count = 0
-                        startup_wait_count = 0
-                except _queue_module.Full:
-                    try:
-                        _snapshot_sse_queue.get_nowait()
-                    except _queue_module.Empty:
-                        pass
-                    try:
-                        _snapshot_sse_queue.put_nowait(snap)
-                    except Exception as q_err:
-                        logger.error(f"[SNAPSHOT-SSE-WORKER] Queue fatal error: {q_err}")
-            else:
-                if startup_wait_count < _max_startup_wait:
-                    # Still in startup window — wait for LATTICE to initialize
-                    startup_wait_count += 1
-                else:
-                    # Past startup window — log errors
-                    error_count += 1
-                    if error_count == 1:
-                        logger.error("[SNAPSHOT-SSE-WORKER] ❌ LATTICE not available or no DM — SSE stream will be empty")
-                        logger.error("[SNAPSHOT-SSE-WORKER] Is lattice_controller running? Is LATTICE.current_density_matrix populated?")
-                    if error_count % 100 == 0:
-                        logger.error(f"[SNAPSHOT-SSE-WORKER] Still no DM ({error_count} consecutive failures, {startup_wait_count} startup waits)")
-
-            time.sleep(0.05)  # 50ms cadence
-        except KeyboardInterrupt:
-            logger.info("[SNAPSHOT-SSE-WORKER] Shutting down")
-            break
-        except Exception as e:
-            logger.error(f"[SNAPSHOT-SSE-WORKER] Fatal error: {e}", exc_info=True)
-            time.sleep(1.0)  # Back off on errors
+# Removed: old 64³ snapshot generation. Clients fetch unified 16³ snapshots via RPC.
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
@@ -5955,9 +5730,6 @@ def _blocks_broadcaster_worker():
 _blocks_broadcaster_thread = _threading_module.Thread(target=_blocks_broadcaster_worker, daemon=True)
 _blocks_broadcaster_thread.start()
 
-_snapshot_generator_thread = _threading_module.Thread(target=_snapshot_sse_generator_worker, daemon=True, name="SnapshotSSEGenerator")
-_snapshot_generator_thread.start()
-
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():
     """GET/POST /rpc/oracle/snapshots — Ring buffer of last N DM snapshots.
@@ -5999,93 +5771,31 @@ logger.info("[RPC-HYP]   • qtcl_hyp_verifyBlock — block signature verificati
 
 def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     """
-    RPC-based snapshot broadcast: queue to ring buffer + persist to SQLite for P2P sync.
-    
-    Architecture:
-    - In-memory ring buffer (latest 1000) for fast /rpc polling
-    - Async SQLite write to dm_pool table for P2P replication & miners
-    - Dual persistence: Supabase (cloud) + SQLite (local mesh)
+    Simple snapshot caching: queue to ring buffer for /rpc polling.
+    No multiplexer, no SSE streaming — clients fetch via RPC.
     """
     try:
-        # 1. Update in-memory RPC cache
+        # Cache latest snapshot for RPC polling
         _cache_snapshot(snapshot)
-        
-        # 2. Queue into DM snapshot ring buffer for streaming
+
+        # Queue into ring buffer (latest 1000) for /rpc methods
         if 'density_tensor_hex' in snapshot:
             dm_snap = {
                 'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
                 'oracle_id': snapshot.get('oracle_id'),
                 'density_tensor_hex': snapshot.get('density_tensor_hex', ''),
-                'tensor_dim': 32,
+                'tensor_dim': 16,  # 16³ unified snapshot
                 'purity': snapshot.get('purity'),
                 'w_state_fidelity': snapshot.get('w_state_fidelity'),
                 'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
                 'coherence_l1': snapshot.get('coherence_l1'),
-                'coherence_renyi': snapshot.get('coherence_renyi'),
-                'coherence_geometric': snapshot.get('coherence_geometric'),
-                'quantum_discord': snapshot.get('quantum_discord'),
-                'w_state_strength': snapshot.get('w_state_strength'),
-                'phase_coherence': snapshot.get('phase_coherence'),
-                'entanglement_witness': snapshot.get('entanglement_witness'),
-                'trace_purity': snapshot.get('trace_purity'),
-                'hlwe_signature': snapshot.get('hlwe_signature'),
-                'signature_valid': snapshot.get('signature_valid', False),
-                'oracle_address': snapshot.get('oracle_address'),
-                'aer_noise_state': snapshot.get('aer_noise_state', {}),
-                'measurement_counts': snapshot.get('measurement_counts', {}),
-                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),  # Client expects mermin_test
-                'bell_test': snapshot.get('bell_test'),  # Backward compatibility
-                'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
+                'w_state_hex': snapshot.get('w_state_hex', ''),
             }
             with _DM_SNAPSHOT_LOCK:
                 _DM_SNAPSHOT_RING.append(dm_snap)
-            logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
-        
-        # 3. Persist to SQLite asynchronously (P2P replication)
-        def async_sqlite():
-            try:
-                import sqlite3
-                from pathlib import Path
-                db = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
-                db.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(db), timeout=5.0)
-                cur = conn.cursor()
-                cur.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
-                    id INTEGER PRIMARY KEY, timestamp_ns INTEGER, oracle_id INTEGER,
-                    density_tensor_hex TEXT, tensor_dim INTEGER, purity REAL, w_state_fidelity REAL,
-                    von_neumann_entropy REAL, coherence_l1 REAL, hlwe_signature TEXT,
-                    signature_valid INTEGER, oracle_address TEXT, aer_noise_state TEXT,
-                    measurement_counts TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-                cur.execute("""INSERT INTO dm_pool (
-                    timestamp_ns, oracle_id, density_tensor_hex, tensor_dim, purity, w_state_fidelity,
-                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
-                    oracle_address, aer_noise_state, measurement_counts
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
-                    snapshot.get('timestamp_ns'), snapshot.get('oracle_id'),
-                    snapshot.get('density_tensor_hex', ''), 32,
-                    snapshot.get('purity'), snapshot.get('w_state_fidelity'),
-                    snapshot.get('von_neumann_entropy'), snapshot.get('coherence_l1'),
-                    json.dumps(snapshot.get('hlwe_signature')),
-                    1 if snapshot.get('signature_valid') else 0,
-                    snapshot.get('oracle_address'),
-                    json.dumps(snapshot.get('aer_noise_state', {})),
-                    json.dumps(snapshot.get('measurement_counts', {}))
-                ))
-                conn.commit()
-                conn.close()
-                logger.debug("[RPC-BROADCAST] ✅ DM → SQLite dm_pool")
-            except Exception as e:
-                logger.warning(f"[RPC-BROADCAST] SQLite write: {e}")
-        
-        threading.Thread(target=async_sqlite, daemon=True).start()
-        
-        # 4. Persist to Supabase (cloud backup, non-blocking)
-        try:
-            _persist_chirp_snapshot(snapshot)
-        except Exception as e:
-            logger.debug(f"[RPC-BROADCAST] Supabase skipped: {e}")
+            logger.debug(f"[RPC-SNAPSHOT] ✅ Unified 16³ snapshot cached (ring={len(_DM_SNAPSHOT_RING)}/1000)")
     except Exception as e:
-        logger.error(f"[RPC-BROADCAST] Error: {e}")
+        logger.error(f"[RPC-SNAPSHOT] Error: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
