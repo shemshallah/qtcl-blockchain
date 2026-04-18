@@ -2312,30 +2312,30 @@ class OracleWStateManager:
             _server_mod = _sys.modules.get('server')
             if _server_mod and hasattr(_server_mod, '_enqueue_snapshot_for_streaming'):
                 # Build the dictionary snapshot for the multiplexer
-                # Build 32³ volumetric tensor — the PRIMARY transmitted quantum state
+                # Build 16³ volumetric tensor — the PRIMARY transmitted quantum state
                 _tensor_hex = ''
                 try:
-                    # Oracle dm_mean is 8×8 (W3 subspace). Kron-upsample 8→32.
+                    # Oracle dm_mean is 8×8 (W3 subspace). Kron-upsample 8→32, then downsample to 16.
                     _dm32 = np.kron(dm_mean.astype(np.complex64),
                                     np.ones((4, 4), dtype=np.complex64))
                     _tr32 = float(np.real(np.trace(_dm32)))
                     if _tr32 > 1e-12:
                         _dm32 /= _tr32
-                    # 32³ decoherence shell tensor
-                    _N32 = 32
-                    _idx = np.arange(_N32, dtype=np.float32)
+                    # 16³ decoherence shell tensor (reduced from 32³ for bandwidth efficiency)
+                    _N16 = 16
+                    _idx = np.arange(_N16, dtype=np.float32)
                     _dist = np.abs(_idx[:, None] - _idx[None, :])
-                    _lambdas = np.exp(np.linspace(np.log(1.0), np.log(float(_N32)), _N32))
-                    _mag32 = np.abs(_dm32)
-                    _t32 = np.zeros((_N32, _N32, _N32), dtype=np.float32)
-                    for _z in range(_N32):
+                    _lambdas = np.exp(np.linspace(np.log(1.0), np.log(float(_N16)), _N16))
+                    _mag16 = np.abs(_dm32)[:16, :16]  # Downsample dm32 to 16×16
+                    _t16 = np.zeros((_N16, _N16, _N16), dtype=np.float32)
+                    for _z in range(_N16):
                         _W = np.exp(-_dist / float(_lambdas[_z]))
                         _W /= _W.sum()
-                        _t32[_z] = (_mag32 * _W).astype(np.float32)
-                    _t32_max = float(_t32.max())
-                    if _t32_max > 1e-12:
-                        _t32 /= _t32_max
-                    _tensor_hex = _t32.tobytes().hex()
+                        _t16[_z] = (_mag16 * _W).astype(np.float32)
+                    _t16_max = float(_t16.max())
+                    if _t16_max > 1e-12:
+                        _t16 /= _t16_max
+                    _tensor_hex = _t16.tobytes().hex()
                 except Exception as _te:
                     pass  # non-fatal
 
@@ -2383,7 +2383,7 @@ class OracleWStateManager:
                     'oracle_address': snapshot.oracle_address,
                     'signature_valid': snapshot.signature_valid,
                     'density_tensor_hex': _tensor_hex,
-                    'tensor_dim': 32 if _tensor_hex else 0,
+                    'tensor_dim': 16 if _tensor_hex else 0,
                     'w_state_hex': _w_hex,  # ✅ ADDED: W-state for client
                 }
                 _server_mod._enqueue_snapshot_for_streaming(_mux_snapshot)
@@ -2405,7 +2405,7 @@ class OracleWStateManager:
                     'timestamp_ns': snapshot.timestamp_ns,
                     'oracle_id': snapshot.oracle_id,
                     'density_tensor_hex': getattr(snapshot, '_tensor_hex', ''),
-                    'tensor_dim': 32,
+                    'tensor_dim': 16,
                     'purity': snapshot.purity,
                     'w_state_fidelity': snapshot.w_state_fidelity,
                     'von_neumann_entropy': snapshot.von_neumann_entropy,

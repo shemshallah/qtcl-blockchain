@@ -1844,7 +1844,7 @@ def _lazy_ensure_peer_registry():
         logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
 
 def _lazy_ensure_blocks():
-    """Ensure blocks table exists in Supabase."""
+    """Ensure blocks table exists. Auto-create genesis block if empty."""
     global _SCHEMA_ENSURED_BLOCKS
     if _SCHEMA_ENSURED_BLOCKS:
         return
@@ -1876,8 +1876,54 @@ def _lazy_ensure_blocks():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks(block_hash)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_parent ON blocks(parent_hash)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp)")
+
+            # Auto-create genesis if table is empty
+            cur.execute("SELECT COUNT(*) FROM blocks")
+            count = cur.fetchone()[0]
+            if count == 0:
+                genesis_hash = "0" * 64
+                parent_hash = "0" * 64
+                genesis_ts = int(time.time() * 1e9)
+                cur.execute("""
+                    INSERT INTO blocks (
+                        height, block_hash, parent_hash, merkle_root,
+                        timestamp, tx_count, coherence_snapshot, fidelity_snapshot,
+                        difficulty, nonce, pq_curr, pq_last, finalized, finalized_at
+                    ) VALUES (
+                        0, %s, %s, %s,
+                        %s, 0, 1.0, 1.0,
+                        6, 0, 1, 0, TRUE, %s
+                    )
+                """, (genesis_hash, parent_hash, genesis_hash, genesis_ts, genesis_ts))
+                logger.info(f"[SCHEMA] 🌱 Genesis block auto-created: h=0  hash={genesis_hash[:16]}…")
+
+        # Create quantum_field_distribution table with triggers for neighbor broadcast
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS quantum_field_distribution (
+                    id                      SERIAL PRIMARY KEY,
+                    block_height            BIGINT NOT NULL,
+                    block_hash              VARCHAR(255) NOT NULL,
+                    miner_address           VARCHAR(255) NOT NULL,
+                    quantum_field_16x16x16  BYTEA NOT NULL,  -- 4096 complex64 elements
+                    pq_curr                 INTEGER,
+                    pq_last                 INTEGER,
+                    timestamp_ns            BIGINT NOT NULL,
+                    received_by_neighbor    BOOLEAN DEFAULT FALSE,
+                    neighbor_broadcast_list TEXT,  -- JSON array of neighbor addresses
+                    created_at              TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_qf_height ON quantum_field_distribution(block_height)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_qf_miner ON quantum_field_distribution(miner_address)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_qf_broadcast ON quantum_field_distribution(received_by_neighbor)")
+
+            logger.info("[SCHEMA] ✅ quantum_field_distribution table ready (neighbor gossip)")
+        except Exception as _qf_e:
+            logger.debug(f"[SCHEMA] quantum_field_distribution table creation: {_qf_e}")
+
         _SCHEMA_ENSURED_BLOCKS = True
-        logger.info("[SCHEMA] ✅ blocks table created/verified")
+        logger.info("[SCHEMA] ✅ blocks table ready")
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_blocks failed: {e}")
 
@@ -2732,15 +2778,16 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
                 result["lattice_error"] = str(le)
 
-        # ── WIRE DENSITY_MATRIX_HEX — 256x256->64x64 via shared reducer ─────────
-        # Skip large tensor - use compact w_state_amplitudes instead (128 bytes vs 32KB)
-        # try:
-        #     _tensor_hex = _get_lattice_tensor_hex()
-        #     if _tensor_hex:
-        #         result["density_tensor_hex"] = _tensor_hex
-        #         result["tensor_dim"]         = 32
-        # except Exception as dme:
-        #     logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: DM (non-fatal): {dme}")
+        # ── WIRE FULL 64³ DENSITY_MATRIX_HEX ───────────────────────────────
+        try:
+            snap_full = _generate_snapshot_64x64x64()
+            if snap_full and snap_full.get('density_matrix_hex'):
+                result["density_matrix_hex"] = snap_full['density_matrix_hex']
+                result["tensor_dim"]         = 64
+                result["tensor_shape"]       = [64, 64, 64]
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: 64³ density matrix included ({len(snap_full['density_matrix_hex'])} hex chars)")
+        except Exception as dme:
+            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: DM (non-fatal): {dme}")
         
         # ── COMPACT W-STATE AMPLITUDES (8 complex doubles = 256 hex chars) ──────
         try:
@@ -5670,6 +5717,104 @@ def start_sse_infrastructure():
     _sse_worker.start()
     logger.info("[SSE] Infrastructure initialized: oracle ingestion worker started")
 
+# ════════════════════════════════════════════════════════════════════════════════
+# SNAPSHOT SSE STREAM — Continuous 64³ density matrix streaming
+# ════════════════════════════════════════════════════════════════════════════════
+_snapshot_sse_queue = _queue_module.Queue(maxsize=50)
+
+def _generate_snapshot_64x64x64() -> dict:
+    """Stream native 64³ density tensor from LATTICE. NO CONVERSION, NO FALLBACK."""
+    try:
+        from globals import LATTICE
+
+        # Wait briefly if LATTICE is initializing (max 5 attempts × 100ms = 500ms)
+        _wait_count = 0
+        _max_waits = 5
+        while (LATTICE is None or not hasattr(LATTICE, 'current_density_matrix')) and _wait_count < _max_waits:
+            import time as _t_snap
+            _t_snap.sleep(0.1)  # Give LATTICE time to initialize
+            from globals import LATTICE
+            _wait_count += 1
+
+        # FAIL FAST: must have real 64³ DM from lattice
+        if LATTICE is None or not hasattr(LATTICE, 'current_density_matrix'):
+            return {}
+
+        dm = LATTICE.current_density_matrix
+        if dm is None or not hasattr(dm, 'shape'):
+            return {}
+
+        # CRITICAL: dm must be 64³, not 256×256 or any other size
+        if dm.shape != (64, 64, 64):
+            logger.warning(f"[SNAPSHOT-GEN] ❌ LATTICE DM is {dm.shape}, expected (64, 64, 64)")
+            return {}
+
+        # Encode native 64³ tensor: complex64 = 262144 elements × 8 bytes = 2097152 bytes
+        dm_bytes = np.asarray(dm, dtype=np.complex64).tobytes()
+        dm_hex = dm_bytes.hex()
+
+        _bh = query_latest_block()
+        _bh_val = int(_bh['height']) if _bh else 0
+
+        return {
+            'density_matrix_hex': dm_hex,
+            'tensor_dim': 64,
+            'tensor_size': 262144,
+            'tensor_shape': [64, 64, 64],  # Explicitly state 3D shape
+            'block_height': _bh_val,
+            'height': _bh_val,
+            'timestamp': time.time(),
+            'ts': time.time(),
+        }
+    except Exception as e:
+        logger.debug(f"[SNAPSHOT-GEN] ❌ Cannot stream 64³ from LATTICE: {e}")
+        return {}
+
+def _snapshot_sse_generator_worker():
+    """Continuously generate and push 64³ density matrix snapshots."""
+    error_count = 0
+    startup_wait_count = 0
+    _max_startup_wait = 200  # 200 × 50ms = 10 seconds to wait for LATTICE init
+    while True:
+        try:
+            snap = _generate_snapshot_64x64x64()
+            if snap:
+                try:
+                    _snapshot_sse_queue.put_nowait(snap)
+                    if error_count > 0 or startup_wait_count > 0:
+                        logger.info(f"[SNAPSHOT-SSE-WORKER] ✅ DM generation active (waited {startup_wait_count} cycles for LATTICE)")
+                        error_count = 0
+                        startup_wait_count = 0
+                except _queue_module.Full:
+                    try:
+                        _snapshot_sse_queue.get_nowait()
+                    except _queue_module.Empty:
+                        pass
+                    try:
+                        _snapshot_sse_queue.put_nowait(snap)
+                    except Exception as q_err:
+                        logger.error(f"[SNAPSHOT-SSE-WORKER] Queue fatal error: {q_err}")
+            else:
+                if startup_wait_count < _max_startup_wait:
+                    # Still in startup window — wait for LATTICE to initialize
+                    startup_wait_count += 1
+                else:
+                    # Past startup window — log errors
+                    error_count += 1
+                    if error_count == 1:
+                        logger.error("[SNAPSHOT-SSE-WORKER] ❌ LATTICE not available or no DM — SSE stream will be empty")
+                        logger.error("[SNAPSHOT-SSE-WORKER] Is lattice_controller running? Is LATTICE.current_density_matrix populated?")
+                    if error_count % 100 == 0:
+                        logger.error(f"[SNAPSHOT-SSE-WORKER] Still no DM ({error_count} consecutive failures, {startup_wait_count} startup waits)")
+
+            time.sleep(0.05)  # 50ms cadence
+        except KeyboardInterrupt:
+            logger.info("[SNAPSHOT-SSE-WORKER] Shutting down")
+            break
+        except Exception as e:
+            logger.error(f"[SNAPSHOT-SSE-WORKER] Fatal error: {e}", exc_info=True)
+            time.sleep(1.0)  # Back off on errors
+
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """
@@ -5684,8 +5829,8 @@ def rpc_oracle_snapshot():
         for _ in itertools.count():
             try:
                 snap = _snapshot_sse_queue.get(timeout=2.0)
-                # ✅ FIXED: Send if EITHER tensor OR w_state present (not just tensor)
-                if snap and (snap.get('density_tensor_hex') or snap.get('w_state_hex')):
+                # ✅ FIXED: Send if density_matrix_hex present (native 64³ format)
+                if snap and snap.get('density_matrix_hex'):
                     payload = json.dumps({"result": snap, "id": 1})
                     yield f"data: {payload}\n\n"
             except _queue_module.Empty:
@@ -5809,6 +5954,9 @@ def _blocks_broadcaster_worker():
 
 _blocks_broadcaster_thread = _threading_module.Thread(target=_blocks_broadcaster_worker, daemon=True)
 _blocks_broadcaster_thread.start()
+
+_snapshot_generator_thread = _threading_module.Thread(target=_snapshot_sse_generator_worker, daemon=True, name="SnapshotSSEGenerator")
+_snapshot_generator_thread.start()
 
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():

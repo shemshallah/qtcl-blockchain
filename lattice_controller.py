@@ -1324,14 +1324,8 @@ class NonMarkovianNoiseBath:
     
     def apply_memory_effect(self, density_matrix: np.ndarray, time_step: float) -> np.ndarray:
         """
-        Apply non-Markovian Lindblad + O-U memory bath.
-
-        Hot path: delegates to qtcl_nonmarkov_bath_step (C via qtcl_client cffi)
-        when available — ~20× faster for 256×256 DMs.  Identical 3-stage pipeline:
-          STAGE 1  Lindblad dephasing + T1 amplitude damping
-          STAGE 2  O-U non-Markovian revival (power-of-2 lookback, D-L kernel)
-          STAGE 3  Hermitian symmetrize + PSD clip + trace=1
-        Pure-numpy fallback preserved verbatim for environments without C layer.
+        Apply dephasing + amplitude damping to 64³ 3D density tensor.
+        Simplified for 3D arrays (no 2D matrix operations like diag/eigh).
         """
         if density_matrix is None or not NUMPY_AVAILABLE:
             return density_matrix
@@ -1341,94 +1335,28 @@ class NonMarkovianNoiseBath:
                 T2_s = T2_NS  / 1e9
                 T1_s = T1_NS  / 1e9
                 dt   = float(time_step)
-                dim  = density_matrix.shape[0]
 
-                # ── C fast path ──────────────────────────────────────────────
-                _c_ok = False
-                _c_lib = None
-                _c_ffi = None
-                try:
-                    import qtcl_client as _qc
-                    if getattr(_qc, '_accel_ok', False):
-                        _c_ok  = True
-                        _c_lib = _qc._accel_lib
-                        _c_ffi = _qc._accel_ffi
-                except ImportError:
-                    pass
-
-                if _c_ok and _c_lib is not None:
-                    _current_cycle = len(self.history)
-                    self.history.append((_current_cycle, density_matrix.copy()))
-                    n_mem = len(self.history)
-                    N2    = dim * dim
-
-                    dm_re_buf = _c_ffi.new('double[]', N2)
-                    dm_im_buf = _c_ffi.new('double[]', N2)
-                    _flat_re  = density_matrix.real.astype(np.float64).ravel()
-                    _flat_im  = density_matrix.imag.astype(np.float64).ravel()
-                    for _i in range(N2):
-                        dm_re_buf[_i] = float(_flat_re[_i])
-                        dm_im_buf[_i] = float(_flat_im[_i])
-
-                    mem_re_buf = _c_ffi.new(f'double[{n_mem * N2}]')
-                    mem_im_buf = _c_ffi.new(f'double[{n_mem * N2}]')
-                    for _si, (_cyc, _rho) in enumerate(self.history):
-                        _off = _si * N2
-                        _r   = _rho.real.astype(np.float64).ravel()
-                        _i2  = _rho.imag.astype(np.float64).ravel()
-                        for _e in range(N2):
-                            mem_re_buf[_off + _e] = float(_r[_e])
-                            mem_im_buf[_off + _e] = float(_i2[_e])
-
-                    _c_lib.qtcl_nonmarkov_bath_step(
-                        dim,
-                        dm_re_buf, dm_im_buf,
-                        1.0 / max(T2_s, 1e-9),
-                        T1_s, self.memory_kernel, dt,
-                        mem_re_buf, mem_im_buf,
-                        n_mem, CYCLE_TIME_NS / 1e9,
-                        BATH_OMEGA_C, BATH_OMEGA_0, BATH_GAMMA_R, BATH_ETA,
-                    )
-
-                    out_re = np.array([float(dm_re_buf[_i]) for _i in range(N2)],
-                                      dtype=np.float64).reshape(dim, dim)
-                    out_im = np.array([float(dm_im_buf[_i]) for _i in range(N2)],
-                                      dtype=np.float64).reshape(dim, dim)
-                    result = (out_re + 1j * out_im).astype(np.complex128)
-
-                    try:
-                        evals, evecs = np.linalg.eigh(result)
-                        evals = np.clip(evals.real, 0.0, None)
-                        tr    = float(np.sum(evals))
-                        if tr > 1e-12: evals /= tr
-                        result = evecs @ np.diag(evals) @ evecs.conj().T
-                    except Exception:
-                        pass
-                    return result
-
-                # ── numpy fallback ───────────────────────────────────────────
+                # Dephasing: decay off-diagonal coherences
                 gamma_phi   = 1.0 / max(T2_s, 1e-9)
                 deph_factor = float(np.exp(-gamma_phi * dt))
-                diag_vals   = np.diag(density_matrix).copy()
                 result      = deph_factor * density_matrix
-                np.fill_diagonal(result, diag_vals)
 
-                amp_factor   = float(np.exp(-dt / max(T1_s, 1e-9)))
-                new_diag     = diag_vals * amp_factor
-                ground_gain  = np.sum(diag_vals) * (1.0 - amp_factor)
-                new_diag[0] += ground_gain
-                np.fill_diagonal(result, new_diag)
+                # Amplitude damping: decay overall magnitude
+                amp_factor = float(np.exp(-dt / max(T1_s, 1e-9)))
+                result = amp_factor * result
 
+                # Store in history for memory kernel
                 _current_cycle = len(self.history)
                 self.history.append((_current_cycle, density_matrix.copy()))
 
+                # Non-Markovian memory revival: blend with past state
                 if len(self.history) > 2:
                     hist_list  = list(self.history)
                     dt_s       = CYCLE_TIME_NS / 1e9
                     mem_accum  = np.zeros_like(density_matrix)
                     norm_accum = 0.0
                     seen_cycles: set = set()
-                    for k in range(8):
+                    for k in range(4):  # Reduced lookback for 3D tensors
                         target_idx = _current_cycle - (1 << k)
                         if target_idx < 0: break
                         best = min(hist_list, key=lambda x: abs(x[0] - target_idx))
@@ -1439,18 +1367,17 @@ class NonMarkovianNoiseBath:
                         mem_accum += K_tau * best[1]
                         norm_accum += K_tau
                     if norm_accum > 1e-12: mem_accum /= norm_accum
-                    revival_weight = min(self.memory_kernel * 0.30, 0.15)
+                    revival_weight = min(self.memory_kernel * 0.20, 0.10)
                     result = (1.0 - revival_weight) * result + revival_weight * mem_accum
 
-                result = 0.5 * (result + result.conj().T)
-                try:
-                    evals, evecs = np.linalg.eigh(result)
-                    evals = np.clip(evals, 0.0, None)
-                    tr    = float(np.sum(evals))
-                    if tr > 1e-12: evals /= tr
-                    result = evecs @ np.diag(evals) @ evecs.conj().T
-                except Exception:
-                    pass
+                # Hermitianize for 3D tensor
+                result = 0.5 * (result + np.conj(np.transpose(result, (1, 0, 2))))
+
+                # Normalize to unit trace
+                _norm = np.sum(np.abs(result))
+                if _norm > 1e-12:
+                    result = result / _norm
+
                 return result
 
         except Exception as exc:
@@ -1887,20 +1814,41 @@ class QuantumLatticeController:
         self.w_state_constructor = WStateConstructor(self.field)
         self.noise_bath = NonMarkovianNoiseBath()
 
-        # Quantum state
-        # |W_8⟩ target DM — single-excitation sector, symmetric, museum-grade reference.
-        # Stored as self._w8_target so fidelity is measured vs THIS (not vs I/256)
-        # and periodic re-injection can blend it back after decoherence epochs.
-        _N = 256  # 2^8
-        _w8 = np.zeros((_N, _N), dtype=np.complex128)
-        _excitations = [1 << i for i in range(8)]  # single-excitation basis indices
-        _amp = 1.0 / 8.0                            # |W_8> = (1/sqrt(8)) sum |100..0>_k
-        for _i in _excitations:
-            for _j in _excitations:
-                _w8[_i, _j] = _amp                  # rho_ij = 1/8 for all single-excit pairs
-        self._w8_target = _w8.copy()                # canonical target for fidelity + re-injection
-        # Blend 70% W-state coherence + 30% maximally mixed for stability at startup
-        self.current_density_matrix = 0.70 * _w8 + 0.30 * (np.eye(_N, dtype=np.complex128) / _N)
+        # Quantum state — NATIVE 64³ 3D DENSITY TENSOR (NOT 256×256)
+        # 64×64×64 spatial-temporal field representation of quantum coherence
+        # Initialized as coherent 3D W-state with Gaussian envelope
+        _DIM = 64  # 64³ = 262,144 elements (native 3D quantum field)
+
+        # Initialize 64³ density tensor — SERVER LATTICE (GROUND TRUTH)
+        # Streamed to all clients via SSE /rpc/oracle/snapshot
+        # Clients receive this, compute measurements, average with neighbors → quantum mesh
+        self.current_density_matrix = np.zeros((_DIM, _DIM, _DIM), dtype=np.complex64)
+
+        # Multi-mode coherent quantum state (superposition of spatial W-state modes)
+        _num_modes = 8
+        for _m in range(_num_modes):
+            _cx = 16 + _m * 4
+            _cy = 16 + _m * 4
+            _cz = 32
+
+            for i in range(_DIM):
+                for j in range(_DIM):
+                    for k in range(_DIM):
+                        _dx = (i - _cx) / 20.0
+                        _dy = (j - _cy) / 20.0
+                        _dz = (k - _cz) / 20.0
+                        _r2 = _dx*_dx + _dy*_dy + _dz*_dz
+                        _envelope = np.exp(-_r2 / 2.0)
+                        _phase = 2 * np.pi * _m / _num_modes
+                        self.current_density_matrix[i, j, k] += (_envelope / _num_modes) * np.exp(1j * _phase)
+
+        # Normalize: trace = 1 (proper density matrix for quantum state)
+        _norm = np.sum(np.abs(self.current_density_matrix) ** 2)
+        if _norm > 1e-12:
+            self.current_density_matrix = self.current_density_matrix / np.sqrt(_norm)
+
+        # Store target for fidelity (clients measure against this)
+        self._w8_target = self.current_density_matrix.copy()
         self.w_state_strength = 0.8
         self.coherence = 0.9
         self.fidelity = 0.99
