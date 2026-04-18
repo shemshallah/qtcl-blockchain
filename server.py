@@ -2706,13 +2706,27 @@ def _call_with_timeout(func, timeout_sec=_RPC_TIMEOUT_SEC, default=None):
 
 def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
     """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics + density matrix snapshot.
-    
+
     All reads protected with 5s timeouts to prevent RPC hangs.
     """
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}")
         result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}")
+
+        # ── FIRST: Include latest cached quantum snapshot (real 16³ data from oracle) ──
+        # This is the authoritative quantum state from the oracle, NOT static LATTICE
+        try:
+            with _DM_SNAPSHOT_LOCK:
+                if _DM_SNAPSHOT_RING:
+                    latest_cached = _DM_SNAPSHOT_RING[-1]  # Most recent snapshot
+                    if latest_cached.get('density_tensor_hex'):
+                        result['density_matrix_hex'] = latest_cached['density_tensor_hex']
+                    if latest_cached.get('w_state_hex'):
+                        result['w_state_hex'] = latest_cached['w_state_hex']
+                    logger.debug(f"[RPC-METHOD] Injected cached 16³ density_matrix_hex from oracle snapshot")
+        except Exception as _cached_e:
+            logger.debug(f"[RPC-METHOD] Failed to inject cached snapshot: {_cached_e}")
 
         if ORACLE_AVAILABLE and ORACLE is not None:
             try:

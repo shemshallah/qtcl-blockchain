@@ -2402,7 +2402,7 @@ class OracleWStateManager:
                 snapshot_dict = {
                     'timestamp_ns': snapshot.timestamp_ns,
                     'oracle_id': snapshot.oracle_id,
-                    'density_tensor_hex': getattr(snapshot, '_tensor_hex', ''),
+                    'density_tensor_hex': _tensor_hex,  # Use local 16³ tensor generated above
                     'tensor_dim': 16,
                     'purity': snapshot.purity,
                     'w_state_fidelity': snapshot.w_state_fidelity,
@@ -2421,6 +2421,7 @@ class OracleWStateManager:
                     'measurement_counts': snapshot.measurement_counts,
                     'mermin_test': getattr(snapshot, 'bell_test', None),
                     'lattice_refresh_counter': snapshot.lattice_refresh_counter,
+                    'w_state_hex': _w_hex,  # Include W-state for RPC response
                 }
                 _mod._broadcast_snapshot_to_database(snapshot_dict)
                 logger.debug(f"[ORACLE] ✅ Broadcasted authoritative snapshot with per_node")
