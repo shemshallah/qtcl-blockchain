@@ -249,7 +249,8 @@ def _init_hlwe_engine():
         if HLWE_ENGINE is not None:
             return HLWE_ENGINE
         try:
-            from hyp_engine import HypGammaEngine
+            # ✅ FIXED: Import from hlwe package (not root-level hyp_engine)
+            from hlwe.hyp_engine import HypGammaEngine
             HLWE_ENGINE = HypGammaEngine()
             logger.info("[INIT-HYP] ✅ HypΓ Post-Quantum Cryptography (Module 6) initialized")
             logger.info("[INIT-HYP] 🔒 Schnorr-Γ (hyp_schnorr), GeodesicLWE (hyp_lwe), LDPC (hyp_ldpc) active")
@@ -3797,6 +3798,17 @@ def qtcl_pow_verify(
 def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitBlock — validate and persist a mined block directly (no Flask route needed)."""
     try:
+        # ✅ DEBUG: Log incoming submission
+        if params and isinstance(params, (list, tuple)) and len(params) > 0:
+            _data = params[0]
+            if isinstance(_data, dict):
+                _hdr = _data.get("header", _data)
+                _has_sig = bool(_data.get("hyp_signature") or _data.get("signature"))
+                _has_pubkey = bool(_data.get("miner_public_key_hex"))
+                _height = int(_hdr.get("height", 0))
+                _hash = str(_hdr.get("block_hash", "")[:16])
+                logger.info(f"[RPC-submitBlock] 📥 RECEIVED h={_height} hash={_hash}… | has_sig={_has_sig} has_pubkey={_has_pubkey} | data_keys={list(_data.keys())[:5]}")
+        
         if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
             return _rpc_error(-32602, "params[0] must be {header, transactions}", rpc_id)
         data = params[0]
@@ -3827,8 +3839,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ── Height check ─────────────────────────────────────────────────────
         latest = query_latest_block()
         expected_height = (int(latest["height"]) + 1) if latest else 1
+        _tip_str = f"tip={latest['height']}" if latest else "no blocks (genesis)"
+        logger.info(f"[RPC-submitBlock] 📏 HEIGHT CHECK: submitting h={height}, expected={expected_height}, {_tip_str}")
         if height != expected_height:
             tip = int(latest["height"]) if latest else 0
+            logger.warning(f"[RPC-submitBlock] ❌ HEIGHT REJECTED: expected {expected_height}, got {height}")
             return _rpc_error(-32001,
                 f"Invalid height: expected {expected_height}, got {height}",
                 rpc_id, {"tip": tip})
@@ -3859,11 +3874,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 block_timestamp_s=timestamp_s,
             )
             if not valid:
+                logger.warning(f"[RPC-submitBlock] ❌ PoW INVALID: {reason}")
                 return _rpc_error(-32003, f"PoW invalid: {reason}", rpc_id)
+            logger.info(f"[RPC-submitBlock] ✅ PoW VERIFIED h={height} hash={block_hash[:16]}…")
         except Exception as pe:
             logger.warning(f"[RPC-submitBlock] PoW verify error (non-fatal): {pe}")
             # Fall through — verify hash prefix at minimum
             if not block_hash.startswith('0' * difficulty_bits):
+                logger.warning(f"[RPC-submitBlock] ❌ DIFFICULTY NOT MET: {block_hash[:8]}…")
                 return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
 
         # ═══════════════════════════════════════════════════════════════════════
@@ -3877,16 +3895,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             try:
                 _engine = _init_hlwe_engine()
                 _block_for_verify = hdr.copy()  # header dict without signature
+                # ✅ DEBUG: Log what we're verifying
+                logger.info(f"[RPC-submitBlock] 🔐 Verifying signature h={height} | sig_keys={list(_hyp_sig.keys())[:3]} | pubkey_len={len(_miner_pubkey)}")
                 _sig_valid, _sig_msg = _engine.verify_block(_block_for_verify, _hyp_sig, _miner_pubkey)
                 if not _sig_valid:
                     logger.error(f"[RPC-submitBlock] ❌ HypΓ signature verification FAILED h={height}: {_sig_msg}")
                     return _rpc_error(-32003, f"Block signature invalid: {_sig_msg}", rpc_id)
                 logger.info(f"[RPC-submitBlock] ✅ HypΓ signature verified h={height}")
             except Exception as _hyp_verify_err:
-                logger.error(f"[RPC-submitBlock] ❌ HypΓ verification error h={height}: {_hyp_verify_err}")
+                logger.error(f"[RPC-submitBlock] ❌ HypΓ verification error h={height}: {_hyp_verify_err}", exc_info=True)
                 return _rpc_error(-32003, f"Block signature verification failed: {str(_hyp_verify_err)}", rpc_id)
         else:
-            logger.warning(f"[RPC-submitBlock] ⚠️  Block h={height} missing HypΓ signature or public key — will be rejected")
+            logger.warning(f"[RPC-submitBlock] ⚠️  Block h={height} missing HypΓ signature or public key — will be rejected | has_sig={bool(_hyp_sig)} has_pubkey={bool(_miner_pubkey)}")
             return _rpc_error(-32003, "Block must include hyp_signature and miner_public_key_hex for cryptographic verification", rpc_id)
 
         # ═══════════════════════════════════════════════════════════════════════
@@ -4344,17 +4364,19 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ── Final diagnostics and response ───────────────────────────────────
         if _block_rowcount == 0:
             # Block wasn't inserted - could be duplicate or DB issue
-            logger.info(f"[RPC-submitBlock] 🔁 DUPLICATE h={height} hash={block_hash[:16]}… (rowcount=0, existing block)")
-            return _rpc_ok({
+            logger.warning(f"[RPC-submitBlock] 🔁 DUPLICATE/REJECTED h={height} hash={block_hash[:16]}… (rowcount=0)")
+            _resp = _rpc_ok({
                 "status": "duplicate",
                 "height": height,
                 "block_hash": block_hash,
                 "diagnostic": {
                     "block_rowcount": _block_rowcount,
                     "rewards_credited": _rewards_credited,
-                    "note": "Block at this height already exists in database"
+                    "note": "Block at this height already exists or DB insert failed"
                 }
             }, rpc_id)
+            logger.info(f"[RPC-submitBlock] 📤 RESPONSE: {_resp}")
+            return _resp
         
         # Block was successfully inserted
         logger.info(
@@ -4362,7 +4384,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             f"miner={miner_address[:16]}… reward={_resp_reward} QTCL "
             f"(rows={_block_rowcount}, rewards_ok={_rewards_credited})"
         )
-        return _rpc_ok({
+        _resp = _rpc_ok({
             "status": "accepted",
             "height": height,
             "block_hash": block_hash,
@@ -4374,6 +4396,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "persistence_verified": True
             }
         }, rpc_id)
+        logger.info(f"[RPC-submitBlock] 📤 RESPONSE: status=accepted reward={_resp_reward}")
+        return _resp
 
     except Exception as e:
         logger.exception(f"[RPC] _rpc_submitBlock unhandled: {e}")
@@ -5518,13 +5542,6 @@ def _dm_sse_worker():
                 tensor_hex = ''
                 w_hex = snap.get('w_state_hex', '') or _get_w_state_hex()
                 
-                # DEBUG: Log what we received from oracle
-                if not hasattr(_dm_sse_worker, '_logged_input'):
-                    _dm_sse_worker._logged_input = 0
-                if _dm_sse_worker._logged_input < 3:
-                    logger.info(f"[MUX-DM-INPUT] oracle_tensor_len={len(_oracle_tensor_hex)} w_state_len={len(w_hex)} snap_keys={list(snap.keys())[:5]}")
-                    _dm_sse_worker._logged_input += 1
-                
                 if _oracle_tensor_hex and len(_oracle_tensor_hex) == 262144:
                     # Convert 32³ to 4³ by averaging 8×8×8 blocks
                     try:
@@ -5572,12 +5589,6 @@ def _dm_sse_worker():
                     }
                     try:
                         _snapshot_sse_queue.put_nowait(dm_snap)
-                        # Log first few sends
-                        if not hasattr(_dm_sse_worker, '_sent_count'):
-                            _dm_sse_worker._sent_count = 0
-                        if _dm_sse_worker._sent_count < 3:
-                            logger.info(f"[MUX-DM] Snapshot #{_dm_sse_worker._sent_count+1} sent to SSE queue | tensor_len={len(tensor_hex)} w_len={len(w_hex)}")
-                            _dm_sse_worker._sent_count += 1
                     except _queue_module.Full:
                         pass
 
@@ -5641,15 +5652,6 @@ def _enqueue_snapshot_for_streaming(snapshot: dict) -> None:
     """Called by oracle.py/lattice_controller.py every ~50ms."""
     try:
         _snapshot_multiplexer_queue.put_nowait(snapshot)
-        # Log first few snapshots to verify flow
-        if not hasattr(_enqueue_snapshot_for_streaming, '_logged_count'):
-            _enqueue_snapshot_for_streaming._logged_count = 0
-        if _enqueue_snapshot_for_streaming._logged_count < 3:
-            _log_count = _enqueue_snapshot_for_streaming._logged_count
-            _tensor_present = bool(snapshot.get('density_tensor_hex'))
-            _w_present = bool(snapshot.get('w_state_hex'))
-            logger.info(f"[MUX-ENQUEUE] Snapshot #{_log_count+1} queued | tensor={_tensor_present} w_state={_w_present}")
-            _enqueue_snapshot_for_streaming._logged_count += 1
     except _queue_module.Full:
         try:
             _snapshot_multiplexer_queue.get_nowait()
@@ -5793,7 +5795,6 @@ def rpc_oracle_snapshot():
 
     def generate():
         import itertools
-        _sent_count = 0
         for _ in itertools.count():
             try:
                 snap = _snapshot_sse_queue.get(timeout=2.0)
@@ -5801,9 +5802,6 @@ def rpc_oracle_snapshot():
                 if snap and (snap.get('density_tensor_hex') or snap.get('w_state_hex')):
                     payload = json.dumps({"result": snap, "id": 1})
                     yield f"data: {payload}\n\n"
-                    _sent_count += 1
-                    if _sent_count <= 3:
-                        logger.info(f"[SSE-SNAPSHOT] Sent #{_sent_count} | tensor={bool(snap.get('density_tensor_hex'))} w_state={bool(snap.get('w_state_hex'))}")
             except _queue_module.Empty:
                 yield f": heartbeat\n\n"
             except GeneratorExit:
