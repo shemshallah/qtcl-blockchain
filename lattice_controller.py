@@ -59,7 +59,8 @@ try:
     from hyp_tessellation import HyperbolicTessellation
     from hyp_lwe import GeodesicLWE, GeodesicLWEKeypair
     from hyp_ldpc import LDPCCode
-    from hyp_engine import HypGammaEngine
+    # ✅ FIXED: Import from hlwe package
+    from hlwe.hyp_engine import HypGammaEngine
     HYPGAMMA_AVAILABLE = True
     logger = logging.getLogger(__name__)
     logger.info("✅ HypΓ cryptosystem imported successfully")

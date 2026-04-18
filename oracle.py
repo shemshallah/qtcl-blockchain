@@ -183,7 +183,8 @@ def _lazy_init_hyp_engine():
         with _HYP_ENGINE_INIT_LOCK:
             if _HYP_ENGINE_INSTANCE is None:
                 try:
-                    from hyp_engine import HypGammaEngine as HypEngine
+                    # ✅ FIXED: Import from hlwe package
+                    from hlwe.hyp_engine import HypGammaEngine as HypEngine
                     _HYP_ENGINE_INSTANCE = HypEngine()
                     logger.info("[HYP-ORACLE] ✅ HypΓ engine online — Schnorr-Γ + GeodesicLWE active")
                 except Exception as e:

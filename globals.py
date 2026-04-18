@@ -77,7 +77,8 @@ except ImportError as e:
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 try:
-    from hyp_engine import HypGammaEngine, get_hyp_engine
+    # ✅ FIXED: Import from hlwe package
+    from hlwe.hyp_engine import HypGammaEngine, get_hyp_engine
     HYP_ENGINE_AVAILABLE = True
     logger.info("[GLOBALS] ✅ HypΓ engine available")
 except ImportError as e:

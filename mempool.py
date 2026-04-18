@@ -117,7 +117,8 @@ ADDRESS_PREFIX            = "qtcl1"       # canonical address prefix
 # Oracle (HypΓ verification + W-state entropy)
 try:
     from oracle import ORACLE, ADDRESS_PREFIX as _ORACLE_PREFIX
-    from hyp_engine import get_hyp_engine
+    # ✅ FIXED: Import from hlwe package
+    from hlwe.hyp_engine import get_hyp_engine
     ADDRESS_PREFIX = _ORACLE_PREFIX
     _ORACLE_AVAILABLE = True
     _HYP_ENGINE = get_hyp_engine()
@@ -760,7 +761,8 @@ class HypMempoolVerifier:
             # ── Step 2: CATHEDRAL-GRADE — Full HypΓ cryptographic verification ──
             # Use the HLWE engine to verify the actual signature mathematics
             try:
-                from hyp_engine import HypGammaEngine
+                # ✅ FIXED: Import from hlwe package
+                from hlwe.hyp_engine import HypGammaEngine
                 engine = HypGammaEngine()
                 # Convert tx_hash (hex string) to bytes for verification
                 message_bytes = bytes.fromhex(tx_hash)
