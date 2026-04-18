@@ -2223,6 +2223,19 @@ class OracleWStateManager:
                 except Exception as _te:
                     pass  # non-fatal
 
+                # Build W-state hex from amplitudes if available
+                _w_hex = ''
+                try:
+                    if hasattr(snapshot, 'w_state_amplitudes') and snapshot.w_state_amplitudes:
+                        import struct
+                        _w_data = bytearray()
+                        for i in range(8):
+                            amp = complex(snapshot.w_state_amplitudes[i]) if not isinstance(snapshot.w_state_amplitudes[i], complex) else snapshot.w_state_amplitudes[i]
+                            _w_data.extend(struct.pack('>dd', amp.real, amp.imag))
+                        _w_hex = _w_data.hex()
+                except Exception:
+                    pass  # W-state optional
+                
                 _mux_snapshot = {
                     'timestamp_ns': snapshot.timestamp_ns,
                     'lattice_refresh_counter': snapshot.lattice_refresh_counter,
@@ -2246,6 +2259,7 @@ class OracleWStateManager:
                     'signature_valid': snapshot.signature_valid,
                     'density_tensor_hex': _tensor_hex,
                     'tensor_dim': 32 if _tensor_hex else 0,
+                    'w_state_hex': _w_hex,  # ✅ ADDED: W-state for client
                 }
                 _server_mod._enqueue_snapshot_for_streaming(_mux_snapshot)
                 if current_cycle % 100 == 0:

@@ -5512,16 +5512,41 @@ def _dm_sse_worker():
 
             now_ts = time.time()
             if now_ts - last_dm_send_ts >= dm_send_interval:
-                # ✅ CRITICAL FIX: Use tensor from oracle snapshot, NOT recompute from LATTICE
-                # The oracle provides density_tensor_hex in the snapshot already
-                tensor_hex = snap.get('density_tensor_hex', '')
+                # ✅ CRITICAL FIX: Convert oracle's 32³ tensor to compact 4³ for client
+                # Oracle sends 262144 hex chars (32³ float32), client expects 512 hex chars (4³)
+                _oracle_tensor_hex = snap.get('density_tensor_hex', '')
+                tensor_hex = ''
                 w_hex = snap.get('w_state_hex', '') or _get_w_state_hex()
                 
-                # If oracle didn't provide tensor, fall back to LATTICE (but warn)
+                if _oracle_tensor_hex and len(_oracle_tensor_hex) == 262144:
+                    # Convert 32³ to 4³ by averaging 8×8×8 blocks
+                    try:
+                        import numpy as np
+                        _t32 = np.frombuffer(bytes.fromhex(_oracle_tensor_hex), dtype=np.float32).reshape(32, 32, 32)
+                        # Downsample to 4×4×4 by averaging 8×8×8 blocks
+                        _t4 = np.zeros((4, 4, 4), dtype=np.float32)
+                        for i in range(4):
+                            for j in range(4):
+                                for k in range(4):
+                                    _block = _t32[i*8:(i+1)*8, j*8:(j+1)*8, k*8:(k+1)*8]
+                                    _t4[i, j, k] = np.mean(_block)
+                        # Normalize
+                        _t4_max = float(_t4.max())
+                        if _t4_max > 1e-12:
+                            _t4 /= _t4_max
+                        tensor_hex = _t4.tobytes().hex()
+                    except Exception as _conv_err:
+                        logger.debug(f"[MUX-DM] Tensor conversion failed: {_conv_err}")
+                        tensor_hex = ''
+                elif _oracle_tensor_hex and len(_oracle_tensor_hex) == 512:
+                    # Already compact 4³ format
+                    tensor_hex = _oracle_tensor_hex
+                
+                # If no tensor, fall back to LATTICE
                 if not tensor_hex:
                     tensor_hex = _get_compact_lattice_tensor_hex()
                     if tensor_hex:
-                        logger.debug("[MUX-DM] Using LATTICE fallback tensor (oracle tensor missing)")
+                        logger.debug("[MUX-DM] Using LATTICE fallback tensor")
                 
                 last_dm_send_ts = now_ts
 
@@ -5531,7 +5556,7 @@ def _dm_sse_worker():
                         'packet_type': 'tensor',
                         'density_tensor_hex': tensor_hex,
                         'w_state_hex': w_hex,
-                        'tensor_dim': 4 if len(tensor_hex) < 2000 else 32,
+                        'tensor_dim': 4,
                         'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                         'w_state_fidelity': snap.get('w_state_fidelity'),
                         'purity': snap.get('purity'),
