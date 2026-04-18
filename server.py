@@ -5771,8 +5771,7 @@ logger.info("[RPC-HYP]   • qtcl_hyp_verifyBlock — block signature verificati
 
 def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     """
-    Simple snapshot caching: queue to ring buffer for /rpc polling.
-    No multiplexer, no SSE streaming — clients fetch via RPC.
+    Snapshot caching and SSE broadcast: queue to ring buffer + SSE stream.
     """
     try:
         # Cache latest snapshot for RPC polling
@@ -5794,9 +5793,64 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
             with _DM_SNAPSHOT_LOCK:
                 _DM_SNAPSHOT_RING.append(dm_snap)
             logger.debug(f"[RPC-SNAPSHOT] ✅ Unified 16³ snapshot cached (ring={len(_DM_SNAPSHOT_RING)}/1000)")
+
+            # Enqueue for SSE streaming to clients
+            _enqueue_snapshot_for_sse(dm_snap)
     except Exception as e:
         logger.error(f"[RPC-SNAPSHOT] Error: {e}")
 
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# 16³ SSE STREAM: Real-time 16³ density matrix snapshots for client AER processing
+# ═══════════════════════════════════════════════════════════════════════════════════════
+_sse_snapshot_queue = _queue_module.Queue(maxsize=50)
+
+def _enqueue_snapshot_for_sse(snapshot: dict) -> None:
+    """Queue snapshot for SSE broadcast (called from _broadcast_snapshot_to_database)."""
+    try:
+        if 'density_tensor_hex' in snapshot and snapshot.get('tensor_dim') == 16:
+            sse_frame = {
+                'timestamp_ns': snapshot.get('timestamp_ns'),
+                'density_tensor_hex': snapshot.get('density_tensor_hex'),
+                'tensor_dim': 16,
+                'w_state_fidelity': snapshot.get('w_state_fidelity'),
+                'purity': snapshot.get('purity'),
+                'w_state_hex': snapshot.get('w_state_hex', ''),
+            }
+            try:
+                _sse_snapshot_queue.put_nowait(sse_frame)
+            except _queue_module.Full:
+                try:
+                    _sse_snapshot_queue.get_nowait()
+                    _sse_snapshot_queue.put_nowait(sse_frame)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.debug(f"[SSE-QUEUE] Enqueue failed: {e}")
+
+@app.route("/rpc/oracle/snapshot/stream", methods=["GET"])
+def rpc_oracle_snapshot_stream():
+    """SSE stream: Real-time 16³ density matrix snapshots for client processing."""
+    def sse_generator():
+        timeout = 0.1  # 100ms per frame
+        while True:
+            try:
+                frame = _sse_snapshot_queue.get(timeout=timeout)
+                if frame:
+                    yield f"data: {json.dumps(frame)}\n\n"
+            except _queue_module.Empty:
+                yield ": heartbeat\n\n"
+            except GeneratorExit:
+                break
+            except Exception as e:
+                logger.debug(f"[SSE] Stream error: {e}")
+                break
+
+    return Response(sse_generator(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": "*",
+    })
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════════════════
