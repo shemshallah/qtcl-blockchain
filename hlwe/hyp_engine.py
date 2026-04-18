@@ -589,7 +589,8 @@ class HypGammaEngine:
 
             # Sample private key (512 random walk indices)
             walk_indices = [secrets.randbelow(N_GENERATORS) for _ in range(WALK_LENGTH)]
-            private_key_hex = ''.join(f'{idx:x}' for idx in walk_indices)
+            # Encode as single decimal digits (0,1,2,3) for compact storage
+            private_key_hex = ''.join(str(idx) for idx in walk_indices)
 
             # Evaluate walk to PSL(2,ℝ) matrix (uses module-level generators internally)
             public_matrix = evaluate_walk(walk_indices)
