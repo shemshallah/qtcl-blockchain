@@ -2386,11 +2386,9 @@ class OracleWStateManager:
                     'tensor_dim': 16 if _tensor_hex else 0,
                     'w_state_hex': _w_hex,  # ✅ ADDED: W-state for client
                 }
-                _server_mod._enqueue_snapshot_for_streaming(_mux_snapshot)
+                _server_mod._broadcast_snapshot_to_database(_mux_snapshot)
                 if current_cycle % 100 == 0:
                     logger.info(f"[ORACLE CLUSTER] Snapshot cycle {current_cycle}")
-            else:
-                logger.debug(f"[ORACLE CLUSTER] ⚠️ server._enqueue_snapshot_for_streaming not available")
         except Exception as _mux_err:
             logger.debug(f"[ORACLE CLUSTER] Multiplexer enqueue error: {_mux_err}")
 

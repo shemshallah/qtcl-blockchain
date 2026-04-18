@@ -5644,7 +5644,7 @@ def rpc_metrics_push():
                 break
         
         # Cleanup on disconnect
-        with _snapshot_multiplexer_lock:
+        with _metrics_stream_lock:
             try:
                 _connected_metric_clients.remove(client_queue)
             except ValueError:
