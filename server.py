@@ -3893,10 +3893,25 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         if _hyp_sig and _miner_pubkey:
             try:
-                _engine = _init_hlwe_engine()
+                # ✅ DEBUG: Log engine init attempt
+                logger.info(f"[RPC-submitBlock] 🔧 Initializing HypΓ engine for verification h={height}...")
+                try:
+                    _engine = _init_hlwe_engine()
+                    logger.info(f"[RPC-submitBlock] ✅ HypΓ engine initialized: {_engine}")
+                except Exception as _engine_init_err:
+                    logger.error(f"[RPC-submitBlock] ❌ HypΓ engine init FAILED: {_engine_init_err}", exc_info=True)
+                    return _rpc_error(-32003, f"Server crypto engine unavailable: {str(_engine_init_err)}", rpc_id)
+                
                 _block_for_verify = hdr.copy()  # header dict without signature
                 # ✅ DEBUG: Log what we're verifying
-                logger.info(f"[RPC-submitBlock] 🔐 Verifying signature h={height} | sig_keys={list(_hyp_sig.keys())[:3]} | pubkey_len={len(_miner_pubkey)}")
+                logger.info(f"[RPC-submitBlock] 🔐 Verifying signature h={height} | sig_keys={list(_hyp_sig.keys())[:3]} | pubkey_len={len(_miner_pubkey)} | pubkey_start={_miner_pubkey[:32]}...")
+                
+                # Check public key format before attempting verification
+                if len(_miner_pubkey) < 1200:
+                    logger.error(f"[RPC-submitBlock] ❌ Public key too short: {len(_miner_pubkey)} chars (expected 1200+). Client wallet needs regeneration!")
+                    return _rpc_error(-32003, f"Invalid public key format: length {len(_miner_pubkey)} (expected 1200+). Regenerate wallet.", rpc_id)
+                
+                logger.info(f"[RPC-submitBlock] 🔄 Calling verify_block...")
                 _sig_valid, _sig_msg = _engine.verify_block(_block_for_verify, _hyp_sig, _miner_pubkey)
                 if not _sig_valid:
                     logger.error(f"[RPC-submitBlock] ❌ HypΓ signature verification FAILED h={height}: {_sig_msg}")
