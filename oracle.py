@@ -57,6 +57,118 @@ try:
 except ImportError:
     pass
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# SSE STREAMING INFRASTRUCTURE (Real-time density matrix → server → client)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class QuantumSnapshot:
+    """Immutable quantum state snapshot with cryptographic proof."""
+    snapshot_id: str
+    timestamp_ns: int
+    density_matrix_real: List[float]
+    density_matrix_imag: List[float]
+    w_state_hex: str
+    w_state_fidelity: float
+    purity: float
+    coherence_l1: float
+    von_neumann_entropy: float
+    oracle_signature: Optional[str] = None
+    sequence_num: int = 0
+    
+    def frobenius_norm(self) -> float:
+        """‖ρ‖_F = √(Σ|ρ_ij|²) — must be ≤ 1.0 for valid density matrix."""
+        try:
+            real_sq = sum(x**2 for x in (self.density_matrix_real or []))
+            imag_sq = sum(x**2 for x in (self.density_matrix_imag or []))
+            return float(np.sqrt(real_sq + imag_sq)) if (real_sq or imag_sq) else 0.0
+        except Exception:
+            return 0.0
+    
+    def is_valid(self) -> Tuple[bool, str]:
+        """Validate quantum state properties."""
+        try:
+            if not (0 <= self.purity <= 1):
+                return False, "purity out of [0,1]"
+            if not (0 <= self.w_state_fidelity <= 1):
+                return False, "w_state_fidelity out of [0,1]"
+            if not (0 <= self.coherence_l1 <= 1):
+                return False, "coherence_l1 out of [0,1]"
+            norm = self.frobenius_norm()
+            if norm > 1.05:
+                return False, f"Frobenius norm {norm:.4f} exceeds 1.05"
+            return True, "valid"
+        except Exception as e:
+            return False, str(e)
+
+class OracleSSEBridge:
+    """Oracle-side snapshot capture: intercepts every measurement, validates, signs, enqueues."""
+    def __init__(self, oracle_signer=None, max_queue_size: int = 100):
+        self.oracle_signer = oracle_signer
+        self.snapshot_queue = queue.Queue(maxsize=max_queue_size)
+        self.sequence_counter = 0
+        self.last_timestamp_ns = 0
+        self.lock = threading.RLock()
+        self.validation_errors = 0
+        self.validation_ok = 0
+        logger.info("[OracleSSEBridge] initialized (max_queue_size={})".format(max_queue_size))
+    
+    def capture_snapshot(self, oracle_measurement: Dict[str, Any]) -> Optional[QuantumSnapshot]:
+        """Capture → validate → sign → enqueue snapshot."""
+        try:
+            with self.lock:
+                self.sequence_counter += 1
+            ts_ns = oracle_measurement.get('timestamp_ns', int(time.time() * 1e9))
+            if ts_ns <= self.last_timestamp_ns:
+                ts_ns = self.last_timestamp_ns + 1
+            self.last_timestamp_ns = ts_ns
+            snapshot_id = hashlib.sha256(f"{ts_ns}:{self.sequence_counter}".encode()).hexdigest()[:16]
+            dm_real = oracle_measurement.get('density_matrix_real', [0.0]*64)
+            dm_imag = oracle_measurement.get('density_matrix_imag', [0.0]*64)
+            if not isinstance(dm_real, list) or len(dm_real) != 64:
+                dm_real = [0.0]*64
+            if not isinstance(dm_imag, list) or len(dm_imag) != 64:
+                dm_imag = [0.0]*64
+            snap = QuantumSnapshot(snapshot_id=snapshot_id,timestamp_ns=ts_ns,density_matrix_real=dm_real,density_matrix_imag=dm_imag,w_state_hex=oracle_measurement.get('w_state_hex', ''),w_state_fidelity=float(oracle_measurement.get('w_state_fidelity', 0.0)),purity=float(oracle_measurement.get('purity', 0.0)),coherence_l1=float(oracle_measurement.get('coherence_l1', 0.0)),von_neumann_entropy=float(oracle_measurement.get('von_neumann_entropy', 0.0)),sequence_num=self.sequence_counter)
+            is_valid, msg = snap.is_valid()
+            if not is_valid:
+                self.validation_errors += 1
+                logger.debug(f"[OracleSSEBridge] validation failed: {msg}")
+                return None
+            self.validation_ok += 1
+            if self.oracle_signer:
+                try:
+                    sig_payload = f"{snap.snapshot_id}:{snap.timestamp_ns}:{snap.w_state_fidelity}"
+                    sig_bytes = self.oracle_signer.sign_message(sig_payload.encode())
+                    snap.oracle_signature = sig_bytes.hex() if sig_bytes else None
+                except Exception:
+                    pass
+            try:
+                self.snapshot_queue.put_nowait(snap)
+            except queue.Full:
+                try:
+                    self.snapshot_queue.get_nowait()
+                    self.snapshot_queue.put_nowait(snap)
+                except Exception:
+                    pass
+            return snap
+        except Exception as e:
+            self.validation_errors += 1
+            logger.debug(f"[OracleSSEBridge] capture failed: {e}")
+            return None
+    
+    def get_next_snapshot(self, timeout: float = 0.05) -> Optional[QuantumSnapshot]:
+        """Non-blocking snapshot retrieval."""
+        try:
+            return self.snapshot_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Diagnostics."""
+        total = self.validation_ok + self.validation_errors
+        return {"validation_ok": self.validation_ok,"validation_errors": self.validation_errors,"success_rate": (self.validation_ok / total * 100) if total > 0 else 0.0,"queue_depth": self.snapshot_queue.qsize()}
+
 getcontext().prec = 150
 
 if not logging.getLogger().hasHandlers():
@@ -1725,6 +1837,9 @@ class OracleWStateManager:
         self._w_state_measurement_cycle: int = 0
         self._w_state_lock = threading.Lock()
         
+        # ← SSE STREAMING BRIDGE (Real-time density matrix → server → client)
+        self.sse_bridge = OracleSSEBridge(oracle_signer=self.oracle_signer, max_queue_size=100)
+        
         # ThreadPoolExecutor for parallel measurement execution
         self._pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="OracleMeasure")
         self._worker_init_args = None
@@ -2346,6 +2461,19 @@ class OracleWStateManager:
             try:
                 snapshot = self._extract_snapshot()
                 if snapshot:
+                    # ← SSE STREAMING: Capture snapshot for real-time client delivery
+                    measurement = {
+                        'timestamp_ns': snapshot.timestamp_ns,
+                        'density_matrix_real': getattr(snapshot, '_dm_re_list', [0.0]*64),
+                        'density_matrix_imag': getattr(snapshot, '_dm_im_list', [0.0]*64),
+                        'w_state_hex': snapshot.w_state_hex or '',
+                        'w_state_fidelity': snapshot.w_state_fidelity,
+                        'purity': snapshot.purity,
+                        'coherence_l1': snapshot.coherence_l1,
+                        'von_neumann_entropy': snapshot.von_neumann_entropy,
+                    }
+                    self.sse_bridge.capture_snapshot(measurement)
+                    
                     try: self.stream_queue.put_nowait(snapshot)
                     except queue.Full:
                         try: self.stream_queue.get_nowait(); self.stream_queue.put_nowait(snapshot)
