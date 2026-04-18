@@ -2778,16 +2778,9 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
                 result["lattice_error"] = str(le)
 
-        # ── WIRE FULL 64³ DENSITY_MATRIX_HEX ───────────────────────────────
-        try:
-            snap_full = _generate_snapshot_64x64x64()
-            if snap_full and snap_full.get('density_matrix_hex'):
-                result["density_matrix_hex"] = snap_full['density_matrix_hex']
-                result["tensor_dim"]         = 64
-                result["tensor_shape"]       = [64, 64, 64]
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: 64³ density matrix included ({len(snap_full['density_matrix_hex'])} hex chars)")
-        except Exception as dme:
-            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: DM (non-fatal): {dme}")
+        # ── 16³ DENSITY MATRIX VIA SSE STREAM ─────────────────────────────────
+        # Clients fetch 16³ via /rpc/oracle/snapshot (SSE stream endpoint)
+        # No legacy 64³/32³ included in metrics responses
         
         # ── COMPACT W-STATE AMPLITUDES (8 complex doubles = 256 hex chars) ──────
         try:
@@ -4888,8 +4881,8 @@ _RPC_METHODS: Dict[str, Any] = {
     # ── NEW: Density Matrix Snapshot Streaming ──────────────────────────────────
     "qtcl_getLatestDMSnapshot": _rpc_getLatestDMSnapshot,
     "qtcl_getLatestDMSnapshots": _rpc_getLatestDMSnapshots,
-    # ── NEW: Client Tripartite Oracle Push ──────────────────────────────────────
-    "qtcl_pushOracleDM": _rpc_pushOracleDM,
+    # DEPRECATED: qtcl_pushOracleDM (replaced by SSE stream /rpc/oracle/snapshot for 16³ tensors)
+    # "qtcl_pushOracleDM": _rpc_pushOracleDM,
     # ── NEW: Transaction Explorer ─────────────────────────────────────────────────
     "qtcl_getTransactions":   _rpc_getTransactions,
     # P2P DHT methods
@@ -5596,13 +5589,30 @@ _metrics_stream_lock = _threading_module.RLock()
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
-    """
-    Deprecated: Use /rpc/oracle/snapshot/stream instead.
-    Redirects to the 16³ SSE stream endpoint.
-    """
+    """SSE stream: Real-time 16³ density matrix snapshots for client processing."""
     if request.method == "OPTIONS":
         return "", 204
-    return rpc_oracle_snapshot_stream()
+
+    def sse_generator():
+        timeout = 0.1  # 100ms per frame
+        while True:
+            try:
+                frame = _sse_snapshot_queue.get(timeout=timeout)
+                if frame:
+                    yield f"data: {json.dumps(frame)}\n\n"
+            except _queue_module.Empty:
+                yield ": heartbeat\n\n"
+            except GeneratorExit:
+                break
+            except Exception as e:
+                logger.debug(f"[SSE] Stream error: {e}")
+                break
+
+    return Response(sse_generator(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": "*",
+    })
 
 @app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
 def rpc_metrics_push():
@@ -5813,29 +5823,6 @@ def _enqueue_snapshot_for_sse(snapshot: dict) -> None:
     except Exception as e:
         logger.debug(f"[SSE-QUEUE] Enqueue failed: {e}")
 
-@app.route("/rpc/oracle/snapshot/stream", methods=["GET"])
-def rpc_oracle_snapshot_stream():
-    """SSE stream: Real-time 16³ density matrix snapshots for client processing."""
-    def sse_generator():
-        timeout = 0.1  # 100ms per frame
-        while True:
-            try:
-                frame = _sse_snapshot_queue.get(timeout=timeout)
-                if frame:
-                    yield f"data: {json.dumps(frame)}\n\n"
-            except _queue_module.Empty:
-                yield ": heartbeat\n\n"
-            except GeneratorExit:
-                break
-            except Exception as e:
-                logger.debug(f"[SSE] Stream error: {e}")
-                break
-
-    return Response(sse_generator(), mimetype="text/event-stream", headers={
-        "Cache-Control": "no-cache",
-        "X-Accel-Buffering": "no",
-        "Access-Control-Allow-Origin": "*",
-    })
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════════════════
