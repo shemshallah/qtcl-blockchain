@@ -4471,8 +4471,7 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
         2. Upsert into _CLIENT_DM_POOL keyed by oracle_addr.
         3. Evict oldest entries if pool > _CLIENT_POOL_MAX.
         4. Re-average pool -> _client_consensus_dm_re/_im/_fid.
-        5. Push composite snapshot into _DM_SNAPSHOT_RING.
-        6. Return {accepted, pool_size, client_consensus_fidelity}.
+        5. Return {accepted, pool_size, client_consensus_fidelity}.
     """
     global _client_consensus_dm_re, _client_consensus_dm_im
     global _client_consensus_fid, _client_pool_count
