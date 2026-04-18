@@ -5512,9 +5512,17 @@ def _dm_sse_worker():
 
             now_ts = time.time()
             if now_ts - last_dm_send_ts >= dm_send_interval:
-                # Use COMPACT 4³ tensor instead of massive 32³
-                tensor_hex = _get_compact_lattice_tensor_hex()
-                w_hex = _get_w_state_hex()
+                # ✅ CRITICAL FIX: Use tensor from oracle snapshot, NOT recompute from LATTICE
+                # The oracle provides density_tensor_hex in the snapshot already
+                tensor_hex = snap.get('density_tensor_hex', '')
+                w_hex = snap.get('w_state_hex', '') or _get_w_state_hex()
+                
+                # If oracle didn't provide tensor, fall back to LATTICE (but warn)
+                if not tensor_hex:
+                    tensor_hex = _get_compact_lattice_tensor_hex()
+                    if tensor_hex:
+                        logger.debug("[MUX-DM] Using LATTICE fallback tensor (oracle tensor missing)")
+                
                 last_dm_send_ts = now_ts
 
                 if tensor_hex or w_hex:
@@ -5523,7 +5531,7 @@ def _dm_sse_worker():
                         'packet_type': 'tensor',
                         'density_tensor_hex': tensor_hex,
                         'w_state_hex': w_hex,
-                        'tensor_dim': 4,
+                        'tensor_dim': 4 if len(tensor_hex) < 2000 else 32,
                         'timestamp_ns': snap.get('timestamp_ns', int(time.time() * 1e9)),
                         'w_state_fidelity': snap.get('w_state_fidelity'),
                         'purity': snap.get('purity'),
@@ -5532,6 +5540,12 @@ def _dm_sse_worker():
                     }
                     try:
                         _snapshot_sse_queue.put_nowait(dm_snap)
+                        # Log first few sends
+                        if not hasattr(_dm_sse_worker, '_sent_count'):
+                            _dm_sse_worker._sent_count = 0
+                        if _dm_sse_worker._sent_count < 3:
+                            logger.info(f"[MUX-DM] Snapshot #{_dm_sse_worker._sent_count+1} sent to SSE queue | tensor_len={len(tensor_hex)} w_len={len(w_hex)}")
+                            _dm_sse_worker._sent_count += 1
                     except _queue_module.Full:
                         pass
 
@@ -5595,6 +5609,15 @@ def _enqueue_snapshot_for_streaming(snapshot: dict) -> None:
     """Called by oracle.py/lattice_controller.py every ~50ms."""
     try:
         _snapshot_multiplexer_queue.put_nowait(snapshot)
+        # Log first few snapshots to verify flow
+        if not hasattr(_enqueue_snapshot_for_streaming, '_logged_count'):
+            _enqueue_snapshot_for_streaming._logged_count = 0
+        if _enqueue_snapshot_for_streaming._logged_count < 3:
+            _log_count = _enqueue_snapshot_for_streaming._logged_count
+            _tensor_present = bool(snapshot.get('density_tensor_hex'))
+            _w_present = bool(snapshot.get('w_state_hex'))
+            logger.info(f"[MUX-ENQUEUE] Snapshot #{_log_count+1} queued | tensor={_tensor_present} w_state={_w_present}")
+            _enqueue_snapshot_for_streaming._logged_count += 1
     except _queue_module.Full:
         try:
             _snapshot_multiplexer_queue.get_nowait()
