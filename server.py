@@ -1671,6 +1671,9 @@ def _suphttp_cfg():
         if not m:
             raise EnvironmentError("DATABASE_URL invalid format")
         user, pw, host, port, db = m.groups()
+        # Strip query parameters from database name
+        if "?" in db:
+            db = db.split("?")[0]
         _SUPHTTP_CFG.update(
             {
                 "host": host,

@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 from collections import deque, OrderedDict
 from decimal import Decimal, getcontext
 from enum import Enum
+
 try:
     from hyp_engine_compat import get_hyp_engine
 except ImportError:
@@ -61,9 +62,11 @@ except ImportError:
 # SSE STREAMING INFRASTRUCTURE (Real-time density matrix → server → client)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class QuantumSnapshot:
     """Immutable quantum state snapshot with cryptographic proof."""
+
     snapshot_id: str
     timestamp_ns: int
     density_matrix_real: List[float]
@@ -75,7 +78,7 @@ class QuantumSnapshot:
     von_neumann_entropy: float
     oracle_signature: Optional[str] = None
     sequence_num: int = 0
-    
+
     def frobenius_norm(self) -> float:
         """‖ρ‖_F = √(Σ|ρ_ij|²) — must be ≤ 1.0 for valid density matrix."""
         try:
@@ -84,7 +87,7 @@ class QuantumSnapshot:
             return float(np.sqrt(real_sq + imag_sq)) if (real_sq or imag_sq) else 0.0
         except Exception:
             return 0.0
-    
+
     def is_valid(self) -> Tuple[bool, str]:
         """Validate quantum state properties."""
         try:
@@ -101,8 +104,10 @@ class QuantumSnapshot:
         except Exception as e:
             return False, str(e)
 
+
 class OracleSSEBridge:
     """Oracle-side snapshot capture: intercepts every measurement, validates, signs, enqueues."""
+
     def __init__(self, oracle_signer=None, max_queue_size: int = 100):
         self.oracle_signer = oracle_signer
         self.snapshot_queue = queue.Queue(maxsize=max_queue_size)
@@ -111,25 +116,44 @@ class OracleSSEBridge:
         self.lock = threading.RLock()
         self.validation_errors = 0
         self.validation_ok = 0
-        logger.info("[OracleSSEBridge] initialized (max_queue_size={})".format(max_queue_size))
-    
-    def capture_snapshot(self, oracle_measurement: Dict[str, Any]) -> Optional[QuantumSnapshot]:
+        logger.info(
+            "[OracleSSEBridge] initialized (max_queue_size={})".format(max_queue_size)
+        )
+
+    def capture_snapshot(
+        self, oracle_measurement: Dict[str, Any]
+    ) -> Optional[QuantumSnapshot]:
         """Capture → validate → sign → enqueue snapshot."""
         try:
             with self.lock:
                 self.sequence_counter += 1
-            ts_ns = oracle_measurement.get('timestamp_ns', int(time.time() * 1e9))
+            ts_ns = oracle_measurement.get("timestamp_ns", int(time.time() * 1e9))
             if ts_ns <= self.last_timestamp_ns:
                 ts_ns = self.last_timestamp_ns + 1
             self.last_timestamp_ns = ts_ns
-            snapshot_id = hashlib.sha256(f"{ts_ns}:{self.sequence_counter}".encode()).hexdigest()[:16]
-            dm_real = oracle_measurement.get('density_matrix_real', [0.0]*64)
-            dm_imag = oracle_measurement.get('density_matrix_imag', [0.0]*64)
+            snapshot_id = hashlib.sha256(
+                f"{ts_ns}:{self.sequence_counter}".encode()
+            ).hexdigest()[:16]
+            dm_real = oracle_measurement.get("density_matrix_real", [0.0] * 64)
+            dm_imag = oracle_measurement.get("density_matrix_imag", [0.0] * 64)
             if not isinstance(dm_real, list) or len(dm_real) != 64:
-                dm_real = [0.0]*64
+                dm_real = [0.0] * 64
             if not isinstance(dm_imag, list) or len(dm_imag) != 64:
-                dm_imag = [0.0]*64
-            snap = QuantumSnapshot(snapshot_id=snapshot_id,timestamp_ns=ts_ns,density_matrix_real=dm_real,density_matrix_imag=dm_imag,w_state_hex=oracle_measurement.get('w_state_hex', ''),w_state_fidelity=float(oracle_measurement.get('w_state_fidelity', 0.0)),purity=float(oracle_measurement.get('purity', 0.0)),coherence_l1=float(oracle_measurement.get('coherence_l1', 0.0)),von_neumann_entropy=float(oracle_measurement.get('von_neumann_entropy', 0.0)),sequence_num=self.sequence_counter)
+                dm_imag = [0.0] * 64
+            snap = QuantumSnapshot(
+                snapshot_id=snapshot_id,
+                timestamp_ns=ts_ns,
+                density_matrix_real=dm_real,
+                density_matrix_imag=dm_imag,
+                w_state_hex=oracle_measurement.get("w_state_hex", ""),
+                w_state_fidelity=float(oracle_measurement.get("w_state_fidelity", 0.0)),
+                purity=float(oracle_measurement.get("purity", 0.0)),
+                coherence_l1=float(oracle_measurement.get("coherence_l1", 0.0)),
+                von_neumann_entropy=float(
+                    oracle_measurement.get("von_neumann_entropy", 0.0)
+                ),
+                sequence_num=self.sequence_counter,
+            )
             is_valid, msg = snap.is_valid()
             if not is_valid:
                 self.validation_errors += 1
@@ -156,63 +180,97 @@ class OracleSSEBridge:
             self.validation_errors += 1
             logger.debug(f"[OracleSSEBridge] capture failed: {e}")
             return None
-    
+
     def get_next_snapshot(self, timeout: float = 0.05) -> Optional[QuantumSnapshot]:
         """Non-blocking snapshot retrieval."""
         try:
             return self.snapshot_queue.get(timeout=timeout)
         except queue.Empty:
             return None
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Diagnostics."""
         total = self.validation_ok + self.validation_errors
-        return {"validation_ok": self.validation_ok,"validation_errors": self.validation_errors,"success_rate": (self.validation_ok / total * 100) if total > 0 else 0.0,"queue_depth": self.snapshot_queue.qsize()}
+        return {
+            "validation_ok": self.validation_ok,
+            "validation_errors": self.validation_errors,
+            "success_rate": (self.validation_ok / total * 100) if total > 0 else 0.0,
+            "queue_depth": self.snapshot_queue.qsize(),
+        }
+
 
 getcontext().prec = 150
 
 if not logging.getLogger().hasHandlers():
-    logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+    logging.basicConfig(
+        level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s"
+    )
 logger = logging.getLogger(__name__)
 
 # ─── Oracle address registry ──────────────────────────────────────────────────
 
+
 def _parse_db_url(url: str = None) -> dict:
     """Parse DATABASE_URL into connection params for psycopg2."""
     import re
-    url = url or os.getenv('DATABASE_URL', '')
-    if not url or url.startswith('sqlite'):
+    from urllib.parse import parse_qs
+
+    url = url or os.getenv("DATABASE_URL", "")
+    if not url or url.startswith("sqlite"):
         return None
-    m = re.match(r'postgresql://([^:]+):([^@]+)@([^:/]+):?(\d*)/?(.*)', url)
+    m = re.match(r"postgresql://([^:]+):([^@]+)@([^:/]+):?(\d*)/?(.*)", url)
     if not m:
         return None
     user, pw, host, port, db = m.groups()
-    return {
-        'host': host,
-        'port': int(port) if port else 5432,
-        'database': db or 'postgres',
-        'user': user,
-        'password': pw,
+
+    # Handle query parameters (e.g., ?sslmode=require&channel_binding=require)
+    query_params = {}
+    if "?" in db:
+        db, query_string = db.split("?", 1)
+        parsed = parse_qs(query_string)
+        # Flatten single-value lists
+        for k, v in parsed.items():
+            if v:
+                query_params[k] = v[0]
+
+    result = {
+        "host": host,
+        "port": int(port) if port else 5432,
+        "database": db or "postgres",
+        "user": user,
+        "password": pw,
     }
+    # Add query params (sslmode, channel_binding, etc.)
+    result.update(query_params)
+    return result
+
 
 def get_all_oracle_addresses_batch() -> Dict[int, str]:
     """Batch-fetch all 5 oracle addresses in a single DB query."""
-    _ROLES = ['PRIMARY_LATTICE', 'SECONDARY_LATTICE', 'VALIDATION', 'ARBITER', 'METRICS']
-    fallbacks = {i+1: f'qtcl1{_ROLES[i].lower()[:12]}_{i+1:02d}' for i in range(5)}
+    _ROLES = [
+        "PRIMARY_LATTICE",
+        "SECONDARY_LATTICE",
+        "VALIDATION",
+        "ARBITER",
+        "METRICS",
+    ]
+    fallbacks = {i + 1: f"qtcl1{_ROLES[i].lower()[:12]}_{i + 1:02d}" for i in range(5)}
     try:
         db_params = _parse_db_url()
         if db_params:
-            conn = psycopg2.connect(**db_params, connect_timeout=2, options='-c statement_timeout=5000')
+            conn = psycopg2.connect(
+                **db_params, connect_timeout=2, options="-c statement_timeout=5000"
+            )
         else:
             conn = psycopg2.connect(
-                host=os.getenv('POOLER_HOST'),
-                port=int(os.getenv('POOLER_PORT', 5432)),
-                database=os.getenv('POSTGRES_DB', 'postgres'),
-                user=os.getenv('POSTGRES_USER', 'postgres'),
-                password=os.getenv('POSTGRES_PASSWORD', ''),
+                host=os.getenv("POOLER_HOST"),
+                port=int(os.getenv("POOLER_PORT", 5432)),
+                database=os.getenv("POSTGRES_DB", "postgres"),
+                user=os.getenv("POSTGRES_USER", "postgres"),
+                password=os.getenv("POSTGRES_PASSWORD", ""),
                 connect_timeout=2,
             )
-        if not os.getenv('POSTGRES_PASSWORD', ''):
+        if not os.getenv("POSTGRES_PASSWORD", ""):
             return fallbacks
         conn.set_session(autocommit=True)
         cur = conn.cursor()
@@ -222,10 +280,11 @@ def get_all_oracle_addresses_batch() -> Dict[int, str]:
             ORDER BY oracle_id
         """)
         rows = cur.fetchall()
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
         addresses = {}
         for oid, addr in rows:
-            idx = int(oid.split('_')[1])
+            idx = int(oid.split("_")[1])
             addresses[idx] = addr
         for idx in range(1, 6):
             if idx not in addresses:
@@ -234,31 +293,39 @@ def get_all_oracle_addresses_batch() -> Dict[int, str]:
     except Exception:
         return fallbacks
 
+
 # ─── W-state validator ────────────────────────────────────────────────────────
+
 
 class UnifiedWStateValidator:
     """Single canonical W-state validator for the entire system."""
-    def __init__(self, mode: str = 'normal'):
+
+    def __init__(self, mode: str = "normal"):
         from globals import WSTATE_MODE, WSTATE_FIDELITY_THRESHOLD
+
         self.mode = mode or WSTATE_MODE
-        self.threshold = {'strict': 0.80, 'normal': 0.75, 'relaxed': 0.70}.get(
-            self.mode, WSTATE_FIDELITY_THRESHOLD)
+        self.threshold = {"strict": 0.80, "normal": 0.75, "relaxed": 0.70}.get(
+            self.mode, WSTATE_FIDELITY_THRESHOLD
+        )
 
     def validate(self, fidelity: float, coherence: float = None):
         if not isinstance(fidelity, (int, float)) or not (0 <= fidelity <= 1):
-            return False, 0.0, {'error': 'Invalid fidelity'}
+            return False, 0.0, {"error": "Invalid fidelity"}
         if fidelity < self.threshold:
-            return False, fidelity, {'error': f'Below threshold {self.threshold:.2f}'}
+            return False, fidelity, {"error": f"Below threshold {self.threshold:.2f}"}
         quality = fidelity
         if coherence and 0 <= coherence <= 1:
             quality = (fidelity + coherence) / 2
-        return True, quality, {'valid': True, 'quality': quality}
+        return True, quality, {"valid": True, "quality": quality}
+
 
 _validator = UnifiedWStateValidator()
+
 
 def validate_w_state(fidelity: float, coherence: float = None):
     """Canonical W-state validator (Oracle, Server, Miner, Lattice all use this)."""
     return _validator.validate(fidelity, coherence)[:2]
+
 
 # ─── Quantum imports (fatal if missing) ──────────────────────────────────────
 
@@ -268,7 +335,13 @@ try:
     from qiskit import QuantumCircuit
     from qiskit.quantum_info import Statevector, DensityMatrix
     from qiskit_aer import AerSimulator
-    from qiskit_aer.noise import NoiseModel, depolarizing_error, amplitude_damping_error, phase_damping_error
+    from qiskit_aer.noise import (
+        NoiseModel,
+        depolarizing_error,
+        amplitude_damping_error,
+        phase_damping_error,
+    )
+
     QISKIT_AVAILABLE = True
     logger.info("[ORACLE] ✅ Qiskit/AER available — quantum simulation enabled")
 except ImportError as _e:
@@ -285,8 +358,9 @@ except ImportError as _e:
 
 _HYP_ENGINE_INSTANCE: Optional[Any] = None
 _HYP_ENGINE_INIT_LOCK = threading.Lock()
-_HYP_SIGNER_INSTANCE: Optional['HypOracleSigner'] = None
+_HYP_SIGNER_INSTANCE: Optional["HypOracleSigner"] = None
 _HYP_SIGNER_INIT_LOCK = threading.Lock()
+
 
 def _lazy_init_hyp_engine():
     """Thread-safe lazy initialization of HypΓ engine."""
@@ -297,14 +371,18 @@ def _lazy_init_hyp_engine():
                 try:
                     # ✅ FIXED: Import from hlwe package
                     from hlwe.hyp_engine import HypGammaEngine as HypEngine
+
                     _HYP_ENGINE_INSTANCE = HypEngine()
-                    logger.info("[HYP-ORACLE] ✅ HypΓ engine online — Schnorr-Γ + GeodesicLWE active")
+                    logger.info(
+                        "[HYP-ORACLE] ✅ HypΓ engine online — Schnorr-Γ + GeodesicLWE active"
+                    )
                 except Exception as e:
                     logger.error(f"[HYP-ORACLE] Engine init failed: {e}")
                     _HYP_ENGINE_INSTANCE = False  # sentinel: don't retry
     return _HYP_ENGINE_INSTANCE if _HYP_ENGINE_INSTANCE is not False else None
 
-def _get_hyp_signer() -> Optional['HypOracleSigner']:
+
+def _get_hyp_signer() -> Optional["HypOracleSigner"]:
     """Get oracle's HypΓ signer instance."""
     global _HYP_SIGNER_INSTANCE
     if _HYP_SIGNER_INSTANCE is None:
@@ -315,15 +393,16 @@ def _get_hyp_signer() -> Optional['HypOracleSigner']:
                     _HYP_SIGNER_INSTANCE = HypOracleSigner(engine)
     return _HYP_SIGNER_INSTANCE
 
+
 # ─── Oracle C acceleration layer ──────────────────────────────────────────────
 # Compiled once at import via cffi. Provides C-speed hot paths for the
 # 5-node measurement loop: enforce_dm, w3_fidelity, purity, coherence_l1.
 # Falls back silently if clang/cffi unavailable (Qiskit path still works).
 # ─────────────────────────────────────────────────────────────────────────────
 
-_OC_LIB   = None   # cffi compiled library handle
-_OC_FFI   = None   # cffi FFI instance
-_OC_OK    = False  # True once C layer is compiled and self-tested
+_OC_LIB = None  # cffi compiled library handle
+_OC_FFI = None  # cffi FFI instance
+_OC_OK = False  # True once C layer is compiled and self-tested
 
 _OC_CDEFS = """
 /* 8×8 = 64 complex128 DM passed as flat re[64] + im[64] arrays (row-major).  */
@@ -643,47 +722,62 @@ void qtcl_oracle_measure(const double *re_in, const double *im_in,
 }
 """
 
+
 def _compile_oracle_c_layer():
     """Compile optional C acceleration layer (silent operation, fallback always active)."""
     global _OC_LIB, _OC_FFI, _OC_OK
     try:
         import tempfile, subprocess, os as _os, glob as _glob
-        for _pattern in [_os.path.join(_os.getcwd(), '__pycache__', '_cffi__*.c'),
-                         _os.path.join(_os.getcwd(), '__pycache__', '_cffi__*.so'),
-                         '/workspace/__pycache__/_cffi__*.c',
-                         '/workspace/__pycache__/_cffi__*.so']:
+
+        for _pattern in [
+            _os.path.join(_os.getcwd(), "__pycache__", "_cffi__*.c"),
+            _os.path.join(_os.getcwd(), "__pycache__", "_cffi__*.so"),
+            "/workspace/__pycache__/_cffi__*.c",
+            "/workspace/__pycache__/_cffi__*.so",
+        ]:
             for _f in _glob.glob(_pattern):
-                try: _os.remove(_f)
-                except OSError: pass
+                try:
+                    _os.remove(_f)
+                except OSError:
+                    pass
         from cffi import FFI as _CFFI
+
         _ffi = _CFFI()
         _ffi.cdef(_OC_CDEFS)
-        src_file = _os.path.join(tempfile.gettempdir(), 'qtcl_oracle_accel.c')
-        so_file  = _os.path.join(tempfile.gettempdir(), 'qtcl_oracle_accel.so')
-        with open(src_file, 'w') as _sf:
+        src_file = _os.path.join(tempfile.gettempdir(), "qtcl_oracle_accel.c")
+        so_file = _os.path.join(tempfile.gettempdir(), "qtcl_oracle_accel.so")
+        with open(src_file, "w") as _sf:
             _sf.write(_OC_CSRC)
         compiled = False
-        for _cc in [_os.getenv('CC', 'gcc'), 'gcc', 'cc']:
+        for _cc in [_os.getenv("CC", "gcc"), "gcc", "cc"]:
             try:
-                ret = subprocess.run([_cc, '-O2', '-shared', '-fPIC', '-o', so_file, src_file, '-lm'],
-                                   capture_output=True, timeout=4)
+                ret = subprocess.run(
+                    [_cc, "-O2", "-shared", "-fPIC", "-o", so_file, src_file, "-lm"],
+                    capture_output=True,
+                    timeout=4,
+                )
                 if ret.returncode == 0:
                     compiled = True
                     break
-            except: continue
-        if not compiled: return
+            except:
+                continue
+        if not compiled:
+            return
         _lib = _ffi.dlopen(so_file)
-        _w3_flat = [0.0]*64
-        for _i in (1,2,4):
-            for _j in (1,2,4):
-                _w3_flat[_i*8+_j] = 1.0/3.0
-        _re = _ffi.new('double[64]', _w3_flat)
-        _f  = _lib.qtcl_oracle_w3_fidelity(_re)
-        if abs(_f - 1.0) > 0.01: return
+        _w3_flat = [0.0] * 64
+        for _i in (1, 2, 4):
+            for _j in (1, 2, 4):
+                _w3_flat[_i * 8 + _j] = 1.0 / 3.0
+        _re = _ffi.new("double[64]", _w3_flat)
+        _f = _lib.qtcl_oracle_w3_fidelity(_re)
+        if abs(_f - 1.0) > 0.01:
+            return
         _OC_LIB = _lib
         _OC_FFI = _ffi
-        _OC_OK  = True
-    except Exception: pass
+        _OC_OK = True
+    except Exception:
+        pass
+
 
 # KOYEB FIX: background thread — oracle import returns instantly, gunicorn binds port < 2 s
 # PATCH-11: Gate cffi thread on version check.  cffi >= 2.0.0 has no manylinux wheel on
@@ -693,12 +787,16 @@ def _compile_oracle_c_layer():
 def _safe_start_oracle_c_thread():
     try:
         import cffi as _cffi_check
-        _ver = tuple(int(x) for x in _cffi_check.__version__.split('.')[:2])
+
+        _ver = tuple(int(x) for x in _cffi_check.__version__.split(".")[:2])
         if _ver >= (2, 0):
             return
     except ImportError:
         return
-    threading.Thread(target=_compile_oracle_c_layer, daemon=True, name="OracleCCompile").start()
+    threading.Thread(
+        target=_compile_oracle_c_layer, daemon=True, name="OracleCCompile"
+    ).start()
+
 
 _safe_start_oracle_c_thread()
 
@@ -706,12 +804,14 @@ _safe_start_oracle_c_thread()
 # This forces compilation at import time, not in background
 _compile_oracle_c_layer()
 
+
 def _c_dm8_to_flat(rho: np.ndarray):
     """Convert 8×8 numpy complex128 DM to flat re[64], im[64] cffi arrays."""
     _flat = rho.astype(np.complex128).ravel()
-    re = _OC_FFI.new('double[64]', list(_flat.real.tolist()))
-    im = _OC_FFI.new('double[64]', list(_flat.imag.tolist()))
+    re = _OC_FFI.new("double[64]", list(_flat.real.tolist()))
+    im = _OC_FFI.new("double[64]", list(_flat.imag.tolist()))
     return re, im
+
 
 def _c_flat_to_dm8(re, im) -> np.ndarray:
     """Rebuild 8×8 complex128 DM from cffi flat arrays."""
@@ -719,7 +819,10 @@ def _c_flat_to_dm8(re, im) -> np.ndarray:
     c = np.array([float(im[i]) for i in range(64)], dtype=np.float64).reshape(8, 8)
     return (r + 1j * c).astype(np.complex128)
 
-def _c_oracle_measure(rho: np.ndarray, kappa: float, T1: float, T2: float) -> np.ndarray:
+
+def _c_oracle_measure(
+    rho: np.ndarray, kappa: float, T1: float, T2: float
+) -> np.ndarray:
     """
     GIL-free C measurement simulation - hybrid hot path.
     Uses C for fast decoherence simulation, falls back to numpy if unavailable.
@@ -728,30 +831,37 @@ def _c_oracle_measure(rho: np.ndarray, kappa: float, T1: float, T2: float) -> np
     if not _OC_OK or _OC_LIB is None:
         # Fallback to numpy (slower, GIL-bound)
         return rho
-    
+
     try:
         re_in, im_in = _c_dm8_to_flat(rho)
-        re_out = _OC_FFI.new('double[64]')
-        im_out = _OC_FFI.new('double[64]')
-        
+        re_out = _OC_FFI.new("double[64]")
+        im_out = _OC_FFI.new("double[64]")
+
         # Call C function - runs without GIL
         _OC_LIB.qtcl_oracle_measure(re_in, im_in, kappa, T1, T2, re_out, im_out)
-        
+
         # Convert back to numpy
         return _c_flat_to_dm8(re_out, im_out)
     except Exception as e:
         logger.debug(f"[ORACLE-C] measure fallback: {e}")
         return rho
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MULTIPROCESSING ORACLE WORKERS — True parallel AER via multiprocessing
 # Each worker process gets its own OracleNode with independent AER simulator
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_WORKER_NODE: Optional['OracleNode'] = None
+_WORKER_NODE: Optional["OracleNode"] = None
 
-def _oracle_worker_init(oracle_id: int, role: str, kappa: float, 
-                       sigma_offset: float, pre_fetched_address: str) -> None:
+
+def _oracle_worker_init(
+    oracle_id: int,
+    role: str,
+    kappa: float,
+    sigma_offset: float,
+    pre_fetched_address: str,
+) -> None:
     """
     Worker process initializer - called once per worker at pool creation.
     Sets up this process's OracleNode with independent AER simulator.
@@ -764,18 +874,19 @@ def _oracle_worker_init(oracle_id: int, role: str, kappa: float,
         logger.error(f"[ORACLE-WORKER-{oracle_id}] Init failed: {e}")
         _WORKER_NODE = None
 
-def _oracle_worker_measure(args: tuple) -> Optional['BlockFieldReading']:
+
+def _oracle_worker_measure(args: tuple) -> Optional["BlockFieldReading"]:
     """
     Top-level measurement function for multiprocessing.
     Unpacks args, converts shared_pq0 from hex, calls worker node.
     """
     global _WORKER_NODE
     pq_curr, pq_last, shared_pq0_hex, oracle_id = args
-    
+
     if _WORKER_NODE is None:
         logger.error(f"[ORACLE-WORKER-{oracle_id}] No worker node")
         return None
-    
+
     # Convert shared_pq0 from hex to numpy array if provided
     shared_pq0 = None
     if shared_pq0_hex:
@@ -785,17 +896,19 @@ def _oracle_worker_measure(args: tuple) -> Optional['BlockFieldReading']:
             ).reshape(256, 256)
         except Exception as e:
             logger.debug(f"[ORACLE-WORKER-{oracle_id}] shared_pq0 parse: {e}")
-    
+
     try:
         return _WORKER_NODE.measure_block_field(pq_curr, pq_last, shared_pq0, None)
     except Exception as e:
         logger.error(f"[ORACLE-WORKER-{oracle_id}] Measure failed: {e}")
         return None
 
+
 # ─── QRNG singleton ───────────────────────────────────────────────────────────
 
 _ORACLE_QRNG_INSTANCE = None
-_ORACLE_QRNG_LOCK     = threading.Lock()
+_ORACLE_QRNG_LOCK = threading.Lock()
+
 
 def _oracle_qrng_bytes(n: int) -> bytes:
     """Get QRNG bytes — QUANTUM ONLY, fail-fast if ensemble unavailable."""
@@ -805,55 +918,80 @@ def _oracle_qrng_bytes(n: int) -> bytes:
             if _ORACLE_QRNG_INSTANCE is None:
                 try:
                     from qrng_ensemble import QuantumEntropyEnsemble
+
                     _ORACLE_QRNG_INSTANCE = QuantumEntropyEnsemble()
-                    logger.info("[ORACLE] ✅ QRNG ensemble wired — per-call stochastic channels active")
+                    logger.info(
+                        "[ORACLE] ✅ QRNG ensemble wired — per-call stochastic channels active"
+                    )
                 except Exception as _e:
-                    raise RuntimeError(f"[ORACLE] QRNG ensemble unavailable: {_e}. Cannot proceed without quantum entropy.")
+                    raise RuntimeError(
+                        f"[ORACLE] QRNG ensemble unavailable: {_e}. Cannot proceed without quantum entropy."
+                    )
     try:
         # Check if all circuit breakers are open — error instead of fallback
-        if hasattr(_ORACLE_QRNG_INSTANCE, '_sources'):
-            live = [s for s in _ORACLE_QRNG_INSTANCE._sources
-                    if not getattr(s, '_cb_open', False)]
+        if hasattr(_ORACLE_QRNG_INSTANCE, "_sources"):
+            live = [
+                s
+                for s in _ORACLE_QRNG_INSTANCE._sources
+                if not getattr(s, "_cb_open", False)
+            ]
             if not live:
-                raise RuntimeError("[ORACLE] All QRNG circuit breakers open—quantum entropy sources exhausted.")
+                raise RuntimeError(
+                    "[ORACLE] All QRNG circuit breakers open—quantum entropy sources exhausted."
+                )
         return _ORACLE_QRNG_INSTANCE.get_random_bytes(n)
     except Exception as e:
-        raise RuntimeError(f"[ORACLE] QRNG call failed: {e}. Quantum entropy unavailable.")
+        raise RuntimeError(
+            f"[ORACLE] QRNG call failed: {e}. Quantum entropy unavailable."
+        )
+
 
 def _oracle_qrng_gaussian_pair() -> tuple:
     import struct as _s, math as _m
+
     raw = _oracle_qrng_bytes(16)
-    u1  = max((int.from_bytes(raw[0:8], 'big') + 0.5) / (2**64), 1e-300)
-    u2  = (int.from_bytes(raw[8:16], 'big') + 0.5) / (2**64)
-    m   = _m.sqrt(-2.0 * _m.log(u1))
+    u1 = max((int.from_bytes(raw[0:8], "big") + 0.5) / (2**64), 1e-300)
+    u2 = (int.from_bytes(raw[8:16], "big") + 0.5) / (2**64)
+    m = _m.sqrt(-2.0 * _m.log(u1))
     return m * _m.cos(2.0 * _m.pi * u2), m * _m.sin(2.0 * _m.pi * u2)
+
 
 def _oracle_hermitian_perturb(dim: int, epsilon: float) -> np.ndarray:
     """U = exp(iεH), H QRNG-seeded Hermitian traceless."""
     n_off = dim * (dim - 1) // 2
-    raw   = _oracle_qrng_bytes(max((n_off * 2 + dim) * 8, 64))
-    H     = np.zeros((dim, dim), dtype=complex)
-    off   = 0
+    raw = _oracle_qrng_bytes(max((n_off * 2 + dim) * 8, 64))
+    H = np.zeros((dim, dim), dtype=complex)
+    off = 0
+
     def _nf():
         nonlocal off
-        chunk = raw[off:off+8] if off+8 <= len(raw) else _oracle_qrng_bytes(8)
+        chunk = raw[off : off + 8] if off + 8 <= len(raw) else _oracle_qrng_bytes(8)
         off = (off + 8) % max(len(raw), 8)
-        return (struct.unpack('>Q', chunk.ljust(8, b'\x00'))[0] + 0.5) / (2**64) - 0.5
+        return (struct.unpack(">Q", chunk.ljust(8, b"\x00"))[0] + 0.5) / (2**64) - 0.5
+
     for i in range(dim):
-        for j in range(i+1, dim):
-            re = _nf(); im = _nf()
-            H[i,j] = complex(re, im); H[j,i] = complex(re, -im)
-    for i in range(dim): H[i,i] = _nf()
+        for j in range(i + 1, dim):
+            re = _nf()
+            im = _nf()
+            H[i, j] = complex(re, im)
+            H[j, i] = complex(re, -im)
+    for i in range(dim):
+        H[i, i] = _nf()
     H -= (np.trace(H).real / dim) * np.eye(dim, dtype=complex)
-    nrm = np.linalg.norm(H, 'fro')
-    if nrm > 1e-12: H /= nrm
+    nrm = np.linalg.norm(H, "fro")
+    if nrm > 1e-12:
+        H /= nrm
     try:
         from scipy.linalg import expm as _expm
+
         return _expm(1j * epsilon * H)
     except ImportError:
         I = np.eye(dim, dtype=complex)
-        try: return (I + 0.5j*epsilon*H) @ np.linalg.inv(I - 0.5j*epsilon*H)
-        except np.linalg.LinAlgError: return I
+        try:
+            return (I + 0.5j * epsilon * H) @ np.linalg.inv(I - 0.5j * epsilon * H)
+        except np.linalg.LinAlgError:
+            return I
+
 
 def _oracle_enforce_dm(rho: np.ndarray, label: str = "") -> np.ndarray:
     """Hermitian + PSD + trace-normalize. C-accelerated for 8×8; numpy fallback otherwise."""
@@ -868,24 +1006,29 @@ def _oracle_enforce_dm(rho: np.ndarray, label: str = "") -> np.ndarray:
         ev, ec = np.linalg.eigh(rho)
         ev = np.clip(ev, 0.0, None)
         tr = float(np.sum(ev))
-        return ec @ np.diag(ev / tr if tr > 1e-12 else ev + 1.0/dim) @ ec.conj().T
+        return ec @ np.diag(ev / tr if tr > 1e-12 else ev + 1.0 / dim) @ ec.conj().T
     except np.linalg.LinAlgError:
         return np.eye(dim, dtype=complex) / dim
+
 
 _ORACLE_W3_IDEAL = np.zeros((8, 8), dtype=complex)
 for _oi in (1, 2, 4):
     for _oj in (1, 2, 4):
         _ORACLE_W3_IDEAL[_oi, _oj] = 1.0 / 3.0
 
+
 def _oracle_w3_fidelity(rho: np.ndarray) -> float:
     """Tr(ρ·|W3⟩⟨W3|). C-accelerated path; numpy fallback."""
     try:
-        if rho is None or rho.shape != (8, 8): return 0.0
+        if rho is None or rho.shape != (8, 8):
+            return 0.0
         if _OC_OK:
             re, _im = _c_dm8_to_flat(rho)
             return float(_OC_LIB.qtcl_oracle_w3_fidelity(re))
         return float(min(1.0, max(0.0, np.real(np.trace(rho @ _ORACLE_W3_IDEAL)))))
-    except Exception: return 0.0
+    except Exception:
+        return 0.0
+
 
 def _oracle_stochastic_channel(rho: np.ndarray, epsilon: float = 0.03) -> np.ndarray:
     """QRNG-modulated Kraus channel: ρ' = (1-p)ρ + p·U_qrng·ρ·U_qrng†"""
@@ -894,71 +1037,89 @@ def _oracle_stochastic_channel(rho: np.ndarray, epsilon: float = 0.03) -> np.nda
     U = _oracle_hermitian_perturb(rho.shape[0], epsilon=0.06)
     return _oracle_enforce_dm((1.0 - p) * rho + p * (U @ rho @ U.conj().T))
 
+
 def _oracle_revival_unitary(dim: int) -> np.ndarray:
     """QRNG-phase anti-Zeno unitary — constructive interference on W-subspace {1,2,4}."""
     import math as _m
-    raw    = _oracle_qrng_bytes(24)
-    phases = [(struct.unpack('>Q', raw[i*8:i*8+8])[0] / (2**64)) * 2.0 * _m.pi for i in range(3)]
-    U      = np.eye(dim, dtype=complex)
-    widx   = [1, 2, 4]
+
+    raw = _oracle_qrng_bytes(24)
+    phases = [
+        (struct.unpack(">Q", raw[i * 8 : i * 8 + 8])[0] / (2**64)) * 2.0 * _m.pi
+        for i in range(3)
+    ]
+    U = np.eye(dim, dtype=complex)
+    widx = [1, 2, 4]
     for k, idx in enumerate(widx):
         U[idx, idx] = _m.cos(phases[k]) + 1j * _m.sin(phases[k])
     eps = 0.05
     for i in range(3):
         for j in range(3):
             if i != j:
-                ii, jj = widx[i], widx[j]; cp = phases[i] - phases[j]
+                ii, jj = widx[i], widx[j]
+                cp = phases[i] - phases[j]
                 U[ii, jj] += eps * (_m.cos(cp) + 1j * _m.sin(cp))
     try:
-        Q, R = np.linalg.qr(U); dr = np.diag(R)
+        Q, R = np.linalg.qr(U)
+        dr = np.diag(R)
         return Q @ np.diag(dr / (np.abs(dr) + 1e-15))
     except np.linalg.LinAlgError:
         return np.eye(dim, dtype=complex)
 
-def _oracle_amplify_revival(rho: np.ndarray, fidelity: float,
-                             threshold: float = 0.08, gain: float = 3.5) -> tuple:
-    if fidelity >= threshold or rho is None: return rho, False, 0.0
-    U    = _oracle_revival_unitary(rho.shape[0])
+
+def _oracle_amplify_revival(
+    rho: np.ndarray, fidelity: float, threshold: float = 0.08, gain: float = 3.5
+) -> tuple:
+    if fidelity >= threshold or rho is None:
+        return rho, False, 0.0
+    U = _oracle_revival_unitary(rho.shape[0])
     cand = _oracle_enforce_dm(U @ rho @ U.conj().T)
-    df   = _oracle_w3_fidelity(cand) - fidelity
-    if df <= 0: return rho, False, 0.0
-    df   = min(df, 0.04)
-    a    = max(0.05, min(0.85, gain * df / (fidelity + 1e-6)))
-    return _oracle_enforce_dm((1.0-a)*rho + a*cand), True, df
+    df = _oracle_w3_fidelity(cand) - fidelity
+    if df <= 0:
+        return rho, False, 0.0
+    df = min(df, 0.04)
+    a = max(0.05, min(0.85, gain * df / (fidelity + 1e-6)))
+    return _oracle_enforce_dm((1.0 - a) * rho + a * cand), True, df
+
 
 def _oracle_resurrect(rho: np.ndarray, fidelity: float, inject: float = 0.25) -> tuple:
-    if fidelity >= 0.10 or rho is None: return rho, False, fidelity
+    if fidelity >= 0.10 or rho is None:
+        return rho, False, fidelity
     z0, _ = _oracle_qrng_gaussian_pair()
-    s     = max(0.10, min(0.60, inject * (1.0 + 0.2 * z0)))
-    dim   = rho.shape[0]
-    tgt   = 0.90 * _ORACLE_W3_IDEAL + 0.10 * (np.eye(dim, dtype=complex) / dim)
-    out   = _oracle_enforce_dm(
-                _oracle_hermitian_perturb(dim, 0.02) @
-                ((1.0-s)*rho + s*tgt) @
-                _oracle_hermitian_perturb(dim, 0.02).conj().T
-            )
+    s = max(0.10, min(0.60, inject * (1.0 + 0.2 * z0)))
+    dim = rho.shape[0]
+    tgt = 0.90 * _ORACLE_W3_IDEAL + 0.10 * (np.eye(dim, dtype=complex) / dim)
+    out = _oracle_enforce_dm(
+        _oracle_hermitian_perturb(dim, 0.02)
+        @ ((1.0 - s) * rho + s * tgt)
+        @ _oracle_hermitian_perturb(dim, 0.02).conj().T
+    )
     return out, True, _oracle_w3_fidelity(out)
+
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-MEASUREMENT_TIMEOUT          = 2    # 2s cap — fast for AER single shot
+MEASUREMENT_TIMEOUT = 2  # 2s cap — fast for AER single shot
 
-W_STATE_STREAM_INTERVAL_MS   = 10  # Original - true quantum takes time
-LATTICE_REFRESH_INTERVAL_MS  = 50
-AER_NOISE_KAPPA              = 0.005
-NUM_QUBITS_WSTATE            = 3
-W_STATE_FIDELITY_THRESHOLD   = 0.85
-BUFFER_SIZE_METRICS_WSTATE   = 10  # Reduced to 10, rest persisted to Supabase
+W_STATE_STREAM_INTERVAL_MS = 10  # Original - true quantum takes time
+LATTICE_REFRESH_INTERVAL_MS = 50
+AER_NOISE_KAPPA = 0.005
+NUM_QUBITS_WSTATE = 3
+W_STATE_FIDELITY_THRESHOLD = 0.85
+BUFFER_SIZE_METRICS_WSTATE = 10  # Reduced to 10, rest persisted to Supabase
 
-QTCL_PURPOSE      = 838
-QTCL_COIN         = 0
-HARDENED_OFFSET   = 0x80000000
-SEED_HMAC_KEY     = b"QTCL hyperbolic {8,3} oracle seed"
-CHILD_HMAC_KEY    = b"QTCL child key derivation"
-ADDRESS_PREFIX    = "qtcl1"
+QTCL_PURPOSE = 838
+QTCL_COIN = 0
+HARDENED_OFFSET = 0x80000000
+SEED_HMAC_KEY = b"QTCL hyperbolic {8,3} oracle seed"
+CHILD_HMAC_KEY = b"QTCL child key derivation"
+ADDRESS_PREFIX = "qtcl1"
 
 _ORACLE_ROLES = [
-    "PRIMARY_LATTICE", "SECONDARY_LATTICE", "VALIDATION", "ARBITER", "METRICS",
+    "PRIMARY_LATTICE",
+    "SECONDARY_LATTICE",
+    "VALIDATION",
+    "ARBITER",
+    "METRICS",
 ]
 
 # Pre-computed ideal 3-qubit W-state DM (module-level, computed once)
@@ -973,15 +1134,16 @@ _W_THETA_1 = float(np.arccos(np.sqrt(1.0 / 2.0)))
 
 # ─── Data structures ──────────────────────────────────────────────────────────
 
+
 @dataclass
 class OracleKeyPair:
-    private_key : bytes
-    public_key  : bytes
-    chain_code  : bytes
-    depth       : int   = 0
-    index       : int   = 0
-    fingerprint : bytes = field(default_factory=lambda: b'\x00'*4)
-    path        : str   = "m"
+    private_key: bytes
+    public_key: bytes
+    chain_code: bytes
+    depth: int = 0
+    index: int = 0
+    fingerprint: bytes = field(default_factory=lambda: b"\x00" * 4)
+    path: str = "m"
 
     def address(self) -> str:
         return ADDRESS_PREFIX + hashlib.sha3_256(self.public_key).digest()[:20].hex()
@@ -990,46 +1152,66 @@ class OracleKeyPair:
         return hashlib.sha3_256(self.public_key).digest()[:4]
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"public_key_hex": self.public_key.hex(), "depth": self.depth,
-                "index": self.index, "path": self.path, "address": self.address()}
+        return {
+            "public_key_hex": self.public_key.hex(),
+            "depth": self.depth,
+            "index": self.index,
+            "path": self.path,
+            "address": self.address(),
+        }
+
 
 @dataclass
 class DensityMatrixSnapshot:
     """Complete W-state snapshot with HypΓ cryptographic signature."""
-    timestamp_ns          : int
-    density_matrix        : np.ndarray
-    density_matrix_hex    : str
-    purity                : float
-    von_neumann_entropy   : float
-    coherence_l1          : float
-    coherence_renyi       : float
-    coherence_geometric   : float
-    quantum_discord       : float
-    w_state_fidelity      : float
-    measurement_counts    : Dict[str, int]
-    aer_noise_state       : Dict[str, Any]
+
+    timestamp_ns: int
+    density_matrix: np.ndarray
+    density_matrix_hex: str
+    purity: float
+    von_neumann_entropy: float
+    coherence_l1: float
+    coherence_renyi: float
+    coherence_geometric: float
+    quantum_discord: float
+    w_state_fidelity: float
+    measurement_counts: Dict[str, int]
+    aer_noise_state: Dict[str, Any]
     lattice_refresh_counter: int
-    w_state_strength      : float
-    phase_coherence       : float
-    entanglement_witness  : float
-    trace_purity          : float
-    w_entropy_hash        : str                      = ""
-    oracle_address        : Optional[str]            = None
-    signature_valid       : bool                     = False
-    bell_test             : Optional[Dict[str, Any]] = None
+    w_state_strength: float
+    phase_coherence: float
+    entanglement_witness: float
+    trace_purity: float
+    w_entropy_hash: str = ""
+    oracle_address: Optional[str] = None
+    signature_valid: bool = False
+    bell_test: Optional[Dict[str, Any]] = None
 
     def to_json(self) -> str:
-        return json.dumps({
-            "timestamp_ns": self.timestamp_ns, "density_matrix_hex": self.density_matrix_hex,
-            "purity": self.purity, "von_neumann_entropy": self.von_neumann_entropy,
-            "coherence_l1": self.coherence_l1, "coherence_renyi": self.coherence_renyi,
-            "coherence_geometric": self.coherence_geometric, "quantum_discord": self.quantum_discord,
-            "w_state_fidelity": self.w_state_fidelity, "measurement_counts": self.measurement_counts,
-            "aer_noise_state": self.aer_noise_state, "lattice_refresh_counter": self.lattice_refresh_counter,
-            "w_state_strength": self.w_state_strength, "phase_coherence": self.phase_coherence,
-            "entanglement_witness": self.entanglement_witness, "trace_purity": self.trace_purity, "oracle_address": self.oracle_address,
-            "signature_valid": self.signature_valid, "mermin_test": self.bell_test,
-        })
+        return json.dumps(
+            {
+                "timestamp_ns": self.timestamp_ns,
+                "density_matrix_hex": self.density_matrix_hex,
+                "purity": self.purity,
+                "von_neumann_entropy": self.von_neumann_entropy,
+                "coherence_l1": self.coherence_l1,
+                "coherence_renyi": self.coherence_renyi,
+                "coherence_geometric": self.coherence_geometric,
+                "quantum_discord": self.quantum_discord,
+                "w_state_fidelity": self.w_state_fidelity,
+                "measurement_counts": self.measurement_counts,
+                "aer_noise_state": self.aer_noise_state,
+                "lattice_refresh_counter": self.lattice_refresh_counter,
+                "w_state_strength": self.w_state_strength,
+                "phase_coherence": self.phase_coherence,
+                "entanglement_witness": self.entanglement_witness,
+                "trace_purity": self.trace_purity,
+                "oracle_address": self.oracle_address,
+                "signature_valid": self.signature_valid,
+                "mermin_test": self.bell_test,
+            }
+        )
+
 
 @dataclass
 class P2PClientSync:
@@ -1040,48 +1222,58 @@ class P2PClientSync:
     local_state_fidelity: float
     sync_error_count: int = 0
 
+
 @dataclass
 class BlockFieldReading:
-    oracle_id           : int
-    pq_curr             : int
-    pq_last             : int
-    entropy             : float
-    fidelity            : float
-    coherence           : float
-    timestamp_ns        : int
-    oracle_dm           : Optional[np.ndarray] = field(default=None, repr=False)
-    pq0_oracle_fidelity : float = 0.0
-    pq0_IV_fidelity     : float = 0.0
-    pq0_V_fidelity      : float = 0.0
-    mermin_violation    : float = 0.0
+    oracle_id: int
+    pq_curr: int
+    pq_last: int
+    entropy: float
+    fidelity: float
+    coherence: float
+    timestamp_ns: int
+    oracle_dm: Optional[np.ndarray] = field(default=None, repr=False)
+    pq0_oracle_fidelity: float = 0.0
+    pq0_IV_fidelity: float = 0.0
+    pq0_V_fidelity: float = 0.0
+    mermin_violation: float = 0.0
+
 
 @dataclass
 class TemporalAnchorPoint:
-    wall_clock_ns         : int
-    coherence_at_emission : float
-    decoherence_tau_ms    : float = 100.0
-    block_height          : int   = 0
-    w_entropy_hash        : str   = ""
-    temporal_anchor_id    : str   = field(
-        default_factory=lambda: hashlib.sha3_256(secrets.token_bytes(32)).hexdigest()[:16]
+    wall_clock_ns: int
+    coherence_at_emission: float
+    decoherence_tau_ms: float = 100.0
+    block_height: int = 0
+    w_entropy_hash: str = ""
+    temporal_anchor_id: str = field(
+        default_factory=lambda: hashlib.sha3_256(secrets.token_bytes(32)).hexdigest()[
+            :16
+        ]
     )
 
     def infer_elapsed_time_ms(self, c: float) -> float:
         if c > self.coherence_at_emission * 1.01:
             raise ValueError(f"Impossible coherence increase: {c:.4f}")
-        if c <= 0 or self.coherence_at_emission <= 0: return float('inf')
-        return max(0.0, -self.decoherence_tau_ms * np.log(c / self.coherence_at_emission))
+        if c <= 0 or self.coherence_at_emission <= 0:
+            return float("inf")
+        return max(
+            0.0, -self.decoherence_tau_ms * np.log(c / self.coherence_at_emission)
+        )
 
     def is_stale(self, c: float, max_age_ms: float = 2000.0) -> bool:
         return self.infer_elapsed_time_ms(c) > max_age_ms
 
-    def to_dict(self) -> Dict[str, Any]: return asdict(self)
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
     @staticmethod
-    def from_dict(d: Dict[str, Any]) -> 'TemporalAnchorPoint':
+    def from_dict(d: Dict[str, Any]) -> "TemporalAnchorPoint":
         return TemporalAnchorPoint(**d)
 
+
 # ─── Quantum information metrics ──────────────────────────────────────────────
+
 
 class QuantumInformationMetrics:
     @staticmethod
@@ -1089,7 +1281,8 @@ class QuantumInformationMetrics:
         try:
             ev = np.maximum(np.linalg.eigvalsh(dm), 1e-15)
             return float(np.real(-np.sum(ev * np.log2(ev))))
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def coherence_l1_norm(dm: np.ndarray) -> float:
@@ -1098,17 +1291,19 @@ class QuantumInformationMetrics:
                 re, im = _c_dm8_to_flat(dm)
                 return float(_OC_LIB.qtcl_oracle_coherence_l1(re, im))
             n = dm.shape[0]
-            coh = sum(abs(dm[i,j]) for i in range(n) for j in range(n) if i != j)
+            coh = sum(abs(dm[i, j]) for i in range(n) for j in range(n) if i != j)
             return min(1.0, float(coh) / (2.0 * n))
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def coherence_renyi(dm: np.ndarray, order: float = 2) -> float:
         try:
             ev = np.maximum(np.linalg.eigvalsh(np.diag(np.diag(dm))), 1e-15)
-            tp = np.sum(ev ** order)
+            tp = np.sum(ev**order)
             return float((1 / (1 - order)) * np.log2(tp)) if tp > 0 else 0.0
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def coherence_geometric(dm: np.ndarray) -> float:
@@ -1116,7 +1311,8 @@ class QuantumInformationMetrics:
             diff = dm - np.diag(np.diag(dm))
             ev = np.linalg.eigvalsh(diff @ np.conj(diff.T))
             return float(0.5 * np.sum(np.sqrt(np.maximum(ev, 0))))
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def purity(dm: np.ndarray) -> float:
@@ -1125,50 +1321,72 @@ class QuantumInformationMetrics:
                 re, im = _c_dm8_to_flat(dm)
                 return float(_OC_LIB.qtcl_oracle_purity(re, im))
             return min(1.0, max(0.0, float(np.real(np.trace(dm @ dm)))))
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def quantum_discord(dm: np.ndarray) -> float:
         try:
-            if dm is None or dm.shape[0] < 2: return 0.0
+            if dm is None or dm.shape[0] < 2:
+                return 0.0
             return float(max(0.0, 0.4))
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def w_state_fidelity_to_ideal(dm: np.ndarray) -> float:
         """F = Tr(ρ @ ρ_W) where |W⟩=(|001⟩+|010⟩+|100⟩)/√3. C-accelerated."""
         try:
-            if dm is None or dm.shape[0] != 8: return 0.0
+            if dm is None or dm.shape[0] != 8:
+                return 0.0
             if _OC_OK:
                 re, _im = _c_dm8_to_flat(dm)
                 return float(_OC_LIB.qtcl_oracle_w3_fidelity(re))
             return float(min(1.0, max(0.0, np.real(np.trace(dm @ _W_IDEAL_DM)))))
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def w_state_strength(dm: np.ndarray, counts: Dict[str, int]) -> float:
         try:
-            if not counts: return 0.0
+            if not counts:
+                return 0.0
             total = sum(counts.values())
-            if total == 0: return 0.0
+            if total == 0:
+                return 0.0
             w = counts.get("100", 0) + counts.get("010", 0) + counts.get("001", 0)
             return float(w / total)
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def phase_coherence(dm: np.ndarray) -> float:
         try:
-            if dm is None or dm.shape[0] < 2: return 0.0
-            off = sum(abs(dm[i,j]) for i in range(dm.shape[0]) for j in range(i+1, dm.shape[0]))
+            if dm is None or dm.shape[0] < 2:
+                return 0.0
+            off = sum(
+                abs(dm[i, j])
+                for i in range(dm.shape[0])
+                for j in range(i + 1, dm.shape[0])
+            )
             return float(min(1.0, off / dm.shape[0]))
-        except: return 0.0
+        except:
+            return 0.0
 
     @staticmethod
     def entanglement_witness(dm: np.ndarray) -> float:
         try:
-            if dm is None or dm.shape[0] < 4: return 0.0
-            return float(min(1.0, QuantumInformationMetrics.von_neumann_entropy(dm) / np.log2(dm.shape[0])))
-        except: return 0.0
+            if dm is None or dm.shape[0] < 4:
+                return 0.0
+            return float(
+                min(
+                    1.0,
+                    QuantumInformationMetrics.von_neumann_entropy(dm)
+                    / np.log2(dm.shape[0]),
+                )
+            )
+        except:
+            return 0.0
 
     @staticmethod
     def trace_purity(dm: np.ndarray) -> float:
@@ -1196,7 +1414,7 @@ class QuantumInformationMetrics:
         try:
             if dm is None or dm.shape[0] < 2:
                 return 0.0
-            dim  = dm.shape[0]
+            dim = dm.shape[0]
             half = dim // 2
             rho_a = np.zeros((half, half), dtype=complex)
             rho_b = np.zeros((dim - half, dim - half), dtype=complex)
@@ -1208,14 +1426,16 @@ class QuantumInformationMetrics:
                 for j in range(dim - half):
                     for k in range(half):
                         rho_b[i, j] += dm[i * 2 + k, j * 2 + k]
-            s_a  = QuantumInformationMetrics.von_neumann_entropy(rho_a)
-            s_b  = QuantumInformationMetrics.von_neumann_entropy(rho_b)
+            s_a = QuantumInformationMetrics.von_neumann_entropy(rho_a)
+            s_b = QuantumInformationMetrics.von_neumann_entropy(rho_b)
             s_ab = QuantumInformationMetrics.von_neumann_entropy(dm)
             return float(max(0.0, s_a + s_b - s_ab))
         except Exception:
             return 0.0
 
+
 # ─── HD key derivation (BIP32-style, hash-based) ─────────────────────────────
+
 
 class HDKeyring:
     def __init__(self, seed: bytes, passphrase: str = ""):
@@ -1224,28 +1444,45 @@ class HDKeyring:
         if passphrase:
             salt = hashlib.sha3_256(seed).digest()
             hardened_seed = hashlib.scrypt(
-                passphrase.encode("utf-8"), salt=salt, n=16384, r=8, p=1, dklen=64)
+                passphrase.encode("utf-8"), salt=salt, n=16384, r=8, p=1, dklen=64
+            )
         else:
             hardened_seed = seed
-        raw = hmac.new(SEED_HMAC_KEY, hardened_seed, digestmod=hashlib.sha3_512).digest()
+        raw = hmac.new(
+            SEED_HMAC_KEY, hardened_seed, digestmod=hashlib.sha3_512
+        ).digest()
         self.master = OracleKeyPair(
-            private_key=raw[:32], public_key=self._h2p(raw[:32]),
-            chain_code=raw[32:], depth=0, index=0,
-            fingerprint=b'\x00'*4, path="m",
+            private_key=raw[:32],
+            public_key=self._h2p(raw[:32]),
+            chain_code=raw[32:],
+            depth=0,
+            index=0,
+            fingerprint=b"\x00" * 4,
+            path="m",
         )
 
     def _h2p(self, pk: bytes) -> bytes:
         h = hashlib.sha3_256(pk).digest()
         return bytes([0x02 if h[-1] % 2 == 0 else 0x03]) + h
 
-    def derive_child_key(self, parent: OracleKeyPair, idx: int, hardened: bool = False) -> OracleKeyPair:
-        data = (bytes([0x00]) + parent.private_key + struct.pack(">I", idx | HARDENED_OFFSET)
-                if hardened else parent.public_key + struct.pack(">I", idx))
+    def derive_child_key(
+        self, parent: OracleKeyPair, idx: int, hardened: bool = False
+    ) -> OracleKeyPair:
+        data = (
+            bytes([0x00])
+            + parent.private_key
+            + struct.pack(">I", idx | HARDENED_OFFSET)
+            if hardened
+            else parent.public_key + struct.pack(">I", idx)
+        )
         raw = hmac.new(parent.chain_code, data, digestmod=hashlib.sha3_512).digest()
         child_pk = raw[:32]
         return OracleKeyPair(
-            private_key=child_pk, public_key=self._h2p(child_pk),
-            chain_code=raw[32:], depth=parent.depth+1, index=idx,
+            private_key=child_pk,
+            public_key=self._h2p(child_pk),
+            chain_code=raw[32:],
+            depth=parent.depth + 1,
+            index=idx,
             fingerprint=parent.fingerprint_bytes(),
             path=f"{parent.path}/{idx}{'h' if hardened else ''}",
         )
@@ -1257,141 +1494,179 @@ class HDKeyring:
             cur = self.derive_child_key(cur, int(part.rstrip("'")), hardened)
         return cur
 
-    def derive_address_key(self, account: int = 0, change: int = 0, index: int = 0) -> OracleKeyPair:
-        return self.derive_path(f"m/{QTCL_PURPOSE}'/{QTCL_COIN}'/{account}'/{change}/{index}")
+    def derive_address_key(
+        self, account: int = 0, change: int = 0, index: int = 0
+    ) -> OracleKeyPair:
+        return self.derive_path(
+            f"m/{QTCL_PURPOSE}'/{QTCL_COIN}'/{account}'/{change}/{index}"
+        )
+
 
 class HypOracleSigner:
     """Post-quantum oracle signing via HypΓ Schnorr-Γ cryptosystem.
-    
+
     Every oracle action signed: snapshots, blocks, transactions, price attestations.
     Private key: random 512-bit walk index (or loaded from ORACLE_MASTER_SEED_HEX)
     Address: SHA3-256(SHA3-256(public_key_bytes)).hex() — 64 hex chars
     Signature: R‖Z‖c where R=commitment, Z=response, c=256-bit Fiat-Shamir challenge
     """
-    
+
     def __init__(self, hyp_engine: Any = None):
         self._engine = hyp_engine
         self._keypair = None
         self._address = None
         self._lock = threading.RLock()
         self._init_keypair()
-    
+
     def _init_keypair(self):
         """Load or generate oracle keypair — thread-safe singleton."""
         with self._lock:
             if self._keypair is not None:
                 return
-            
+
             seed_hex = os.getenv("ORACLE_MASTER_SEED_HEX")
             if seed_hex:
                 try:
                     seed = bytes.fromhex(seed_hex)
-                    if self._engine and hasattr(self._engine, 'generate_keypair_from_seed'):
+                    if self._engine and hasattr(
+                        self._engine, "generate_keypair_from_seed"
+                    ):
                         self._keypair = self._engine.generate_keypair_from_seed(seed)
                     else:
-                        self._keypair = self._engine.generate_keypair() if self._engine else None
-                    logger.info(f"[HYP-ORACLE] ✅ Keypair loaded from ORACLE_MASTER_SEED_HEX")
+                        self._keypair = (
+                            self._engine.generate_keypair() if self._engine else None
+                        )
+                    logger.info(
+                        f"[HYP-ORACLE] ✅ Keypair loaded from ORACLE_MASTER_SEED_HEX"
+                    )
                 except Exception as e:
                     logger.warning(f"[HYP-ORACLE] Seed load failed: {e}")
-                    self._keypair = self._engine.generate_keypair() if self._engine else None
+                    self._keypair = (
+                        self._engine.generate_keypair() if self._engine else None
+                    )
             else:
-                self._keypair = self._engine.generate_keypair() if self._engine else None
-            
-            if self._keypair and hasattr(self._keypair, 'address'):
+                self._keypair = (
+                    self._engine.generate_keypair() if self._engine else None
+                )
+
+            if self._keypair and hasattr(self._keypair, "address"):
                 self._address = self._keypair.address
-            elif self._keypair and 'address' in self._keypair:
-                self._address = self._keypair['address']
+            elif self._keypair and "address" in self._keypair:
+                self._address = self._keypair["address"]
             else:
                 self._address = "qtcl_oracle_default"
-            
+
             logger.info(f"[HYP-ORACLE] Oracle address: {self._address}")
-    
-    def sign_snapshot(self, snapshot: 'DensityMatrixSnapshot') -> Optional[dict]:
+
+    def sign_snapshot(self, snapshot: "DensityMatrixSnapshot") -> Optional[dict]:
         """Sign quantum state snapshot with oracle attestation."""
         try:
             with self._lock:
                 if not self._engine or not self._keypair:
                     return None
-                
+
                 msg = hashlib.sha3_256(
                     (snapshot.density_matrix_hex + str(snapshot.timestamp_ns)).encode()
                 ).digest()
-                
-                sig = self._engine.sign_hash(msg, self._keypair.private_key if hasattr(self._keypair, 'private_key') else self._keypair['private_key'])
+
+                sig = self._engine.sign_hash(
+                    msg,
+                    self._keypair.private_key
+                    if hasattr(self._keypair, "private_key")
+                    else self._keypair["private_key"],
+                )
                 return {
-                    'signature': sig.get('signature', ''),
-                    'challenge': sig.get('challenge', ''),
-                    'timestamp': sig.get('timestamp', ''),
-                    'oracle_address': self._address,
-                    'snapshot_hash': msg.hex(),
+                    "signature": sig.get("signature", ""),
+                    "challenge": sig.get("challenge", ""),
+                    "timestamp": sig.get("timestamp", ""),
+                    "oracle_address": self._address,
+                    "snapshot_hash": msg.hex(),
                 }
         except Exception as e:
             logger.error(f"[HYP-ORACLE] Snapshot signing failed: {e}")
             return None
-    
+
     def sign_block(self, block_hash: str, block_height: int) -> Optional[dict]:
         """Sign block with oracle attestation (quantum state binding)."""
         try:
             with self._lock:
                 if not self._engine or not self._keypair:
                     return None
-                
+
                 msg = bytes.fromhex(block_hash)
-                sig = self._engine.sign_hash(msg, self._keypair.private_key if hasattr(self._keypair, 'private_key') else self._keypair['private_key'])
+                sig = self._engine.sign_hash(
+                    msg,
+                    self._keypair.private_key
+                    if hasattr(self._keypair, "private_key")
+                    else self._keypair["private_key"],
+                )
                 return {
-                    'signature': sig.get('signature', ''),
-                    'challenge': sig.get('challenge', ''),
-                    'timestamp': sig.get('timestamp', ''),
-                    'oracle_address': self._address,
-                    'block_height': block_height,
+                    "signature": sig.get("signature", ""),
+                    "challenge": sig.get("challenge", ""),
+                    "timestamp": sig.get("timestamp", ""),
+                    "oracle_address": self._address,
+                    "block_height": block_height,
                 }
         except Exception as e:
             logger.error(f"[HYP-ORACLE] Block signing failed: {e}")
             return None
-    
+
     def sign_transaction(self, tx_hash: str) -> Optional[dict]:
         """Sign transaction with oracle attestation."""
         try:
             with self._lock:
                 if not self._engine or not self._keypair:
                     return None
-                
+
                 msg = bytes.fromhex(tx_hash)
-                sig = self._engine.sign_hash(msg, self._keypair.private_key if hasattr(self._keypair, 'private_key') else self._keypair['private_key'])
+                sig = self._engine.sign_hash(
+                    msg,
+                    self._keypair.private_key
+                    if hasattr(self._keypair, "private_key")
+                    else self._keypair["private_key"],
+                )
                 return {
-                    'signature': sig.get('signature', ''),
-                    'challenge': sig.get('challenge', ''),
-                    'timestamp': sig.get('timestamp', ''),
-                    'oracle_address': self._address,
+                    "signature": sig.get("signature", ""),
+                    "challenge": sig.get("challenge", ""),
+                    "timestamp": sig.get("timestamp", ""),
+                    "oracle_address": self._address,
                 }
         except Exception as e:
             logger.error(f"[HYP-ORACLE] Transaction signing failed: {e}")
             return None
-    
+
     def sign_price_attestation(self, price_vector: dict) -> Optional[dict]:
         """Sign Pyth price attestation with oracle signature."""
         try:
             with self._lock:
                 if not self._engine or not self._keypair:
                     return None
-                
-                msg = hashlib.sha3_256(json.dumps(price_vector, sort_keys=True).encode()).digest()
-                sig = self._engine.sign_hash(msg, self._keypair.private_key if hasattr(self._keypair, 'private_key') else self._keypair['private_key'])
+
+                msg = hashlib.sha3_256(
+                    json.dumps(price_vector, sort_keys=True).encode()
+                ).digest()
+                sig = self._engine.sign_hash(
+                    msg,
+                    self._keypair.private_key
+                    if hasattr(self._keypair, "private_key")
+                    else self._keypair["private_key"],
+                )
                 return {
-                    'signature': sig.get('signature', ''),
-                    'challenge': sig.get('challenge', ''),
-                    'timestamp': sig.get('timestamp', ''),
-                    'oracle_address': self._address,
-                    'price_hash': msg.hex(),
+                    "signature": sig.get("signature", ""),
+                    "challenge": sig.get("challenge", ""),
+                    "timestamp": sig.get("timestamp", ""),
+                    "oracle_address": self._address,
+                    "price_hash": msg.hex(),
                 }
         except Exception as e:
             logger.error(f"[HYP-ORACLE] Price attestation signing failed: {e}")
             return None
-    
+
     def get_oracle_address(self) -> str:
         """Get oracle's canonical address."""
         with self._lock:
             return self._address if self._address else "qtcl_oracle_default"
+
 
 # ─── OracleNode ───────────────────────────────────────────────────────────────
 
@@ -1403,9 +1678,11 @@ class HypOracleSigner:
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
 @dataclass
 class RpcMeasurementSubscriber:
     """One RPC client subscribed to oracle measurements."""
+
     client_id: str
     callback_url: str
     burst_mode: bool = False
@@ -1415,9 +1692,11 @@ class RpcMeasurementSubscriber:
     last_error: Optional[str] = None
     registered_at_ns: int = field(default_factory=lambda: time.time_ns())
 
+
 @dataclass
 class RpcBroadcastEvent:
     """One broadcast event logged to ring buffer."""
+
     timestamp_ns: int
     cycle: int
     broadcast_count: int
@@ -1426,30 +1705,30 @@ class RpcBroadcastEvent:
     elapsed_ms: float
     snapshot_json: str = ""  # NEW: Store the serialized snapshot
 
+
 class OracleNode:
     """One of five oracle nodes — owns an isolated AerSimulator."""
 
     def __init__(self, oracle_id: int, role: str, pre_fetched_address: str = None):
-        self.oracle_id    = oracle_id
-        self.role         = role
-        self.noise_seed   = (0xDEAD_BEEF + oracle_id * 0x1337) & 0xFFFF_FFFF
-        self.sigma_offset = oracle_id * 8.0 / 5.0   # 0.0, 1.6, 3.2, 4.8, 6.4
-        self.kappa        = self.sigma_offset
-        self.T1            = 0.001    # Will be overwritten in _init_aer
-        self.T2            = 0.0005   # Will be overwritten in _init_aer
+        self.oracle_id = oracle_id
+        self.role = role
+        self.noise_seed = (0xDEAD_BEEF + oracle_id * 0x1337) & 0xFFFF_FFFF
+        self.sigma_offset = oracle_id * 8.0 / 5.0  # 0.0, 1.6, 3.2, 4.8, 6.4
+        self.kappa = self.sigma_offset
+        self.T1 = 0.001  # Will be overwritten in _init_aer
+        self.T2 = 0.0005  # Will be overwritten in _init_aer
 
         self.oracle_address = (
-            pre_fetched_address or
-            f'qtcl1{role.lower()[:12]}_{oracle_id+1:02d}'
+            pre_fetched_address or f"qtcl1{role.lower()[:12]}_{oracle_id + 1:02d}"
         )
 
-        self.aer:           Optional[object]          = None
-        self.noise_model:   Optional[object]          = None
-        self._lock                                    = threading.Lock()
-        self.last_fidelity:     float                 = 0.0
-        self.last_snapshot:     Optional[DensityMatrixSnapshot] = None
-        self.measurement_count: int                   = 0
-        self._dm: Optional[np.ndarray]               = self._qrng_initial_dm()
+        self.aer: Optional[object] = None
+        self.noise_model: Optional[object] = None
+        self._lock = threading.Lock()
+        self.last_fidelity: float = 0.0
+        self.last_snapshot: Optional[DensityMatrixSnapshot] = None
+        self.measurement_count: int = 0
+        self._dm: Optional[np.ndarray] = self._qrng_initial_dm()
         self._init_aer()
 
     def _qrng_initial_dm(self) -> np.ndarray:
@@ -1458,57 +1737,72 @@ class OracleNode:
             for _rj in (1, 2, 4):
                 rho[_ri, _rj] = 1.0 / 3.0
         init_purity = float(np.real(np.trace(rho @ rho)))
-        logger.info(f"[ORACLE-{self.oracle_id}] INIT STEP 1: Pure W-state | Purity={init_purity:.8f}")
+        logger.info(
+            f"[ORACLE-{self.oracle_id}] INIT STEP 1: Pure W-state | Purity={init_purity:.8f}"
+        )
         try:
             U = _oracle_hermitian_perturb(8, epsilon=0.15)
             rho = U @ rho @ U.conj().T
             rho = 0.5 * (rho + rho.conj().T)
             tr = float(np.real(np.trace(rho)))
-            if tr > 1e-12: rho /= tr
+            if tr > 1e-12:
+                rho /= tr
             purity = float(np.real(np.trace(rho @ rho)))
-            logger.info(f"[ORACLE-{self.oracle_id}] INIT STEP 2: After QRNG unitary | Purity={purity:.8f}")
+            logger.info(
+                f"[ORACLE-{self.oracle_id}] INIT STEP 2: After QRNG unitary | Purity={purity:.8f}"
+            )
             if purity < 0.75:
                 rho = np.zeros((8, 8), dtype=complex)
                 for _ri in (1, 2, 4):
-                    for _rj in (1, 2, 4): rho[_ri, _rj] = 1.0 / 3.0
+                    for _rj in (1, 2, 4):
+                        rho[_ri, _rj] = 1.0 / 3.0
                 purity = 1.0
-            logger.info(f"[ORACLE-{self.oracle_id}] INIT COMPLETE | Purity={purity:.8f} | INDEPENDENT state ✓")
+            logger.info(
+                f"[ORACLE-{self.oracle_id}] INIT COMPLETE | Purity={purity:.8f} | INDEPENDENT state ✓"
+            )
             return rho
         except Exception as exc:
             logger.error(f"[ORACLE-{self.oracle_id}] QRNG init exception: {exc}")
             rho = np.zeros((8, 8), dtype=complex)
             for _ri in (1, 2, 4):
-                for _rj in (1, 2, 4): rho[_ri, _rj] = 1.0 / 3.0
+                for _rj in (1, 2, 4):
+                    rho[_ri, _rj] = 1.0 / 3.0
             return rho
 
     def _init_aer(self) -> None:
-        if not QISKIT_AVAILABLE: return
+        if not QISKIT_AVAILABLE:
+            return
         try:
-            raw   = _oracle_qrng_bytes(24)
-            mults = [(int.from_bytes(raw[i*8:(i+1)*8], 'big') / (2**64)) * 0.4 + 0.8 for i in range(3)]
+            raw = _oracle_qrng_bytes(24)
+            mults = [
+                (int.from_bytes(raw[i * 8 : (i + 1) * 8], "big") / (2**64)) * 0.4 + 0.8
+                for i in range(3)
+            ]
             k_base = 0.004 + self.oracle_id * 0.0002
             a_base = 0.001 + self.oracle_id * 0.0001
             p_base = 0.0005
-            k_eff  = k_base * mults[0]
-            a_eff  = a_base * mults[1]
-            p_eff  = p_base * mults[2]
+            k_eff = k_base * mults[0]
+            a_eff = a_base * mults[1]
+            p_eff = p_base * mults[2]
             self.T1 = a_eff  # Store for C layer
             self.T2 = p_eff  # Store for C layer
             nm = NoiseModel()
-            nm.add_all_qubit_quantum_error(depolarizing_error(k_eff, 1),       ["rx", "rz", "ry", "x"])
+            nm.add_all_qubit_quantum_error(
+                depolarizing_error(k_eff, 1), ["rx", "rz", "ry", "x"]
+            )
             nm.add_all_qubit_quantum_error(depolarizing_error(k_eff * 1.5, 2), ["cx"])
-            nm.add_all_qubit_quantum_error(amplitude_damping_error(a_eff),     ["measure"])
-            nm.add_all_qubit_quantum_error(phase_damping_error(p_eff),         ["id"])
+            nm.add_all_qubit_quantum_error(amplitude_damping_error(a_eff), ["measure"])
+            nm.add_all_qubit_quantum_error(phase_damping_error(p_eff), ["id"])
             self.noise_model = nm
             # AER with noise - truly quantum, no optimizations that alter behavior
-            self.aer = AerSimulator(method='density_matrix', noise_model=nm)
+            self.aer = AerSimulator(method="density_matrix", noise_model=nm)
             logger.info(
-                f"[ORACLE-NODE-{self.oracle_id+1}:{self.role}] "
+                f"[ORACLE-NODE-{self.oracle_id + 1}:{self.role}] "
                 f"AER ready (density_matrix+Kraus | κ={k_eff:.5f} T1={a_eff:.5f} "
                 f"T2={p_eff:.5f} | σ_offset={self.sigma_offset:.2f})"
             )
         except Exception as exc:
-            logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] AER init failed: {exc}")
+            logger.warning(f"[ORACLE-NODE-{self.oracle_id + 1}] AER init failed: {exc}")
 
     # ── Self-measurement ───────────────────────────────────────────────────────
 
@@ -1520,32 +1814,46 @@ class OracleNode:
             shared_pq0 = None
             try:
                 from globals import get_lattice as _glf
+
                 _lat = _glf()
-                if _lat and hasattr(_lat, 'get_block_field_pq0'):
+                if _lat and hasattr(_lat, "get_block_field_pq0"):
                     shared_pq0 = _lat.get_block_field_pq0()
-            except Exception: pass
+            except Exception:
+                pass
             if shared_pq0 is None:
                 shared_pq0 = self._dm
 
             qc_dm = QuantumCircuit(NUM_QUBITS_WSTATE)
             if shared_pq0 is not None:
-                try: qc_dm.set_density_matrix(DensityMatrix(shared_pq0))
-                except Exception: pass
-            qc_dm.ry(_W_THETA_0, 0); qc_dm.cx(0, 1)
-            qc_dm.ry(_W_THETA_1, 1); qc_dm.cx(1, 2)
+                try:
+                    qc_dm.set_density_matrix(DensityMatrix(shared_pq0))
+                except Exception:
+                    pass
+            qc_dm.ry(_W_THETA_0, 0)
+            qc_dm.cx(0, 1)
+            qc_dm.ry(_W_THETA_1, 1)
+            qc_dm.cx(1, 2)
             qc_dm.save_density_matrix()
 
             dm_result = self.aer.run(qc_dm).result()
             _d = dm_result.data(0)
-            _raw = _d['density_matrix'] if isinstance(_d, dict) and 'density_matrix' in _d else _d
+            _raw = (
+                _d["density_matrix"]
+                if isinstance(_d, dict) and "density_matrix" in _d
+                else _d
+            )
             dm_array = np.array(DensityMatrix(_raw).data, dtype=complex)
 
             qc_meas = QuantumCircuit(NUM_QUBITS_WSTATE, NUM_QUBITS_WSTATE)
             if shared_pq0 is not None:
-                try: qc_meas.set_density_matrix(DensityMatrix(shared_pq0))
-                except Exception: pass
-            qc_meas.ry(_W_THETA_0, 0); qc_meas.cx(0, 1)
-            qc_meas.ry(_W_THETA_1, 1); qc_meas.cx(1, 2)
+                try:
+                    qc_meas.set_density_matrix(DensityMatrix(shared_pq0))
+                except Exception:
+                    pass
+            qc_meas.ry(_W_THETA_0, 0)
+            qc_meas.cx(0, 1)
+            qc_meas.ry(_W_THETA_1, 1)
+            qc_meas.cx(1, 2)
             qc_meas.measure(range(NUM_QUBITS_WSTATE), range(NUM_QUBITS_WSTATE))
             counts = dict(self.aer.run(qc_meas, shots=1024).result().get_counts())
 
@@ -1554,11 +1862,12 @@ class OracleNode:
             lattice_recovery_amplification = 1.0
             try:
                 from globals import get_lattice as _glf2
+
                 _lat2 = _glf2()
-                if _lat2 and hasattr(_lat2, 'sigma_engine'):
+                if _lat2 and hasattr(_lat2, "sigma_engine"):
                     stats = _lat2.sigma_engine.get_statistics()
-                    sigma_mod8 = stats.get('sigma_mod8', 0)
-                    lat_f = stats.get('avg_recovery_fidelity', 0.70)
+                    sigma_mod8 = stats.get("sigma_mod8", 0)
+                    lat_f = stats.get("avg_recovery_fidelity", 0.70)
                     F_baseline = 0.70
                     if lat_f > F_baseline:
                         lattice_recovery_amplification = lat_f / F_baseline
@@ -1570,61 +1879,72 @@ class OracleNode:
                             sigma_g2=float((sigma_mod8 + 4) % 8),
                             mi=mi,
                         )
-            except Exception: pass
+            except Exception:
+                pass
 
             dm_array = _oracle_stochastic_channel(dm_array, epsilon=0.03)
             F = _oracle_w3_fidelity(dm_array)
             if F < 0.08:
                 dm_array, revived, dF = _oracle_amplify_revival(dm_array, F)
                 if revived:
-                    logger.info(f"[ORACLE-NODE-{self.oracle_id+1}] 🔄 Revival: F={F:.4f}→{F+dF:.4f}")
+                    logger.info(
+                        f"[ORACLE-NODE-{self.oracle_id + 1}] 🔄 Revival: F={F:.4f}→{F + dF:.4f}"
+                    )
                 F2 = _oracle_w3_fidelity(dm_array)
                 if F2 < 0.10:
                     dm_array, _, _ = _oracle_resurrect(dm_array, F2)
 
             QIM = QuantumInformationMetrics
             snap = DensityMatrixSnapshot(
-                timestamp_ns         = time.time_ns(),
-                density_matrix       = dm_array,
-                density_matrix_hex   = dm_array.tobytes().hex(),
-                purity               = QIM.purity(dm_array),
-                von_neumann_entropy  = QIM.von_neumann_entropy(dm_array),
-                coherence_l1         = QIM.coherence_l1_norm(dm_array),
-                coherence_renyi      = QIM.coherence_renyi(dm_array),
-                coherence_geometric  = QIM.coherence_geometric(dm_array),
-                quantum_discord      = QIM.quantum_discord(dm_array),
-                w_state_fidelity     = QIM.w_state_fidelity_to_ideal(dm_array)
-                                       * lattice_recovery_amplification
-                                       * (1.0 + sigma_mi_boost),
-                measurement_counts   = counts,
-                aer_noise_state      = {
-                    "oracle_id": self.oracle_id + 1, "role": self.role,
-                    "kappa": self.kappa, "sigma_beating_active": sigma_mi_boost > 0.0,
+                timestamp_ns=time.time_ns(),
+                density_matrix=dm_array,
+                density_matrix_hex=dm_array.tobytes().hex(),
+                purity=QIM.purity(dm_array),
+                von_neumann_entropy=QIM.von_neumann_entropy(dm_array),
+                coherence_l1=QIM.coherence_l1_norm(dm_array),
+                coherence_renyi=QIM.coherence_renyi(dm_array),
+                coherence_geometric=QIM.coherence_geometric(dm_array),
+                quantum_discord=QIM.quantum_discord(dm_array),
+                w_state_fidelity=QIM.w_state_fidelity_to_ideal(dm_array)
+                * lattice_recovery_amplification
+                * (1.0 + sigma_mi_boost),
+                measurement_counts=counts,
+                aer_noise_state={
+                    "oracle_id": self.oracle_id + 1,
+                    "role": self.role,
+                    "kappa": self.kappa,
+                    "sigma_beating_active": sigma_mi_boost > 0.0,
                     "sigma_mi_boost": sigma_mi_boost,
                     "lattice_recovery_amplification": lattice_recovery_amplification,
                 },
-                lattice_refresh_counter = self.measurement_count,
-                w_state_strength        = QIM.w_state_strength(dm_array, counts),
-                phase_coherence         = QIM.phase_coherence(dm_array),
-                entanglement_witness    = QIM.entanglement_witness(dm_array),
-                trace_purity            = QIM.trace_purity(dm_array),
+                lattice_refresh_counter=self.measurement_count,
+                w_state_strength=QIM.w_state_strength(dm_array, counts),
+                phase_coherence=QIM.phase_coherence(dm_array),
+                entanglement_witness=QIM.entanglement_witness(dm_array),
+                trace_purity=QIM.trace_purity(dm_array),
             )
             snap.oracle_address = self.oracle_address
             with self._lock:
-                self._dm           = dm_array
+                self._dm = dm_array
                 self.last_fidelity = snap.w_state_fidelity
                 self.last_snapshot = snap
                 self.measurement_count += 1
             return snap
         except Exception as exc:
-            logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] measure_self failed: {exc}")
+            logger.error(
+                f"[ORACLE-NODE-{self.oracle_id + 1}] measure_self failed: {exc}"
+            )
             return None
 
     # ── Block-field measurement ────────────────────────────────────────────────
 
-    def measure_block_field(self, pq_curr: int, pq_last: int,
-                            shared_pq0: Optional[np.ndarray] = None,
-                            lattice: Optional[Any] = None) -> Optional[BlockFieldReading]:
+    def measure_block_field(
+        self,
+        pq_curr: int,
+        pq_last: int,
+        shared_pq0: Optional[np.ndarray] = None,
+        lattice: Optional[Any] = None,
+    ) -> Optional[BlockFieldReading]:
         """
         Oracle measurement of the lattice W-state.
 
@@ -1647,40 +1967,52 @@ class OracleNode:
             if _lat is None:
                 try:
                     from globals import get_lattice as _glf
-                    _lat = _glf()
-                except Exception: pass
-            if _lat is None: return None
 
-            lattice_dm = getattr(_lat, 'current_density_matrix', None)
-            if lattice_dm is None or not hasattr(lattice_dm, 'shape'): return None
-            if lattice_dm.shape != (256, 256): return None
+                    _lat = _glf()
+                except Exception:
+                    pass
+            if _lat is None:
+                return None
+
+            lattice_dm = getattr(_lat, "current_density_matrix", None)
+            if lattice_dm is None or not hasattr(lattice_dm, "shape"):
+                return None
+            if lattice_dm.shape != (256, 256):
+                return None
 
             # Enforce valid density matrix
             lattice_dm = lattice_dm.copy()
             tr = float(np.real(np.trace(lattice_dm)))
-            if tr > 1e-12: lattice_dm /= tr
+            if tr > 1e-12:
+                lattice_dm /= tr
             lattice_dm = 0.5 * (lattice_dm + lattice_dm.conj().T)
 
             # ── AER circuit: id gates so the Kraus noise model fires ──────────
             # Each oracle node has distinct κ/T1/T2 from _init_aer (QRNG-seeded).
             # The per-oracle seed below further differentiates the noise realisation.
             aer_start = time.time_ns()
-            
+
             # USE C LAYER WHEN AVAILABLE - bypasses GIL, much faster
             # Force C layer - no AER fallback
-            _c_available = _OC_OK and _OC_LIB is not None and hasattr(_OC_LIB, 'qtcl_oracle_measure')
+            _c_available = (
+                _OC_OK
+                and _OC_LIB is not None
+                and hasattr(_OC_LIB, "qtcl_oracle_measure")
+            )
             if not _c_available:
                 evolved = lattice_dm.copy()
             else:
                 try:
                     # Use C Lindblad solver - bypasses GIL, ~100x faster
-                    evolved = _c_oracle_measure(lattice_dm, self.kappa, self.T1, self.T2)
+                    evolved = _c_oracle_measure(
+                        lattice_dm, self.kappa, self.T1, self.T2
+                    )
                 except Exception as _e:
                     # Emergency fallback - use simple identity (no evolution)
                     evolved = lattice_dm.copy()
 
             # ── Fidelity: Tr(evolved_8q @ w8_target) — full 8-qubit ──────────
-            w8_target = getattr(_lat, '_w8_target', None)
+            w8_target = getattr(_lat, "_w8_target", None)
             if w8_target is None:
                 w8_target = np.zeros((256, 256), dtype=np.complex128)
                 for _i in [1 << k for k in range(8)]:
@@ -1690,15 +2022,17 @@ class OracleNode:
 
             # ── Coherence: L1 off-diagonal / 7.0 (W8 subspace normalisation) ─
             _w8_idx = [1 << k for k in range(8)]
-            coh_raw = sum(abs(evolved[i, j]) for i in _w8_idx for j in _w8_idx if i != j)
+            coh_raw = sum(
+                abs(evolved[i, j]) for i in _w8_idx for j in _w8_idx if i != j
+            )
             coherence = float(min(1.0, coh_raw / 7.0))
 
             # ── Entropy: full 8-qubit von-Neumann ─────────────────────────────
-            ev_e    = np.maximum(np.linalg.eigvalsh(evolved), 1e-15)
+            ev_e = np.maximum(np.linalg.eigvalsh(evolved), 1e-15)
             entropy = float(-np.sum(ev_e * np.log2(ev_e)))
 
             with self._lock:
-                self._dm           = evolved
+                self._dm = evolved
                 self.last_fidelity = fidelity
                 self.measurement_count += 1
 
@@ -1709,7 +2043,7 @@ class OracleNode:
             # subspace where qubits 3-7 are all zero, which for |W_8> is exactly
             # proportional to |W_3><W_3| (purity=1.0, Mermin M≈3.046). ✓
             sub_8x8 = evolved[0:8, 0:8].copy()
-            sub_tr  = float(np.real(np.trace(sub_8x8)))
+            sub_tr = float(np.real(np.trace(sub_8x8)))
             if sub_tr > 1e-12:
                 sub_8x8 /= sub_tr
             sub_8x8 = 0.5 * (sub_8x8 + sub_8x8.conj().T)
@@ -1747,88 +2081,106 @@ class OracleNode:
                 except Exception:
                     return 0.0
 
-            pq0_coh  = _w3_leg_coherence(oracle_dm_3q, 1, 2)   # leg |001⟩↔|010⟩
-            pqIV_coh = _w3_leg_coherence(oracle_dm_3q, 1, 4)   # leg |001⟩↔|100⟩
-            pqV_coh  = _w3_leg_coherence(oracle_dm_3q, 2, 4)   # leg |010⟩↔|100⟩
+            pq0_coh = _w3_leg_coherence(oracle_dm_3q, 1, 2)  # leg |001⟩↔|010⟩
+            pqIV_coh = _w3_leg_coherence(oracle_dm_3q, 1, 4)  # leg |001⟩↔|100⟩
+            pqV_coh = _w3_leg_coherence(oracle_dm_3q, 2, 4)  # leg |010⟩↔|100⟩
 
             return BlockFieldReading(
-                oracle_id           = self.oracle_id,
-                pq_curr             = pq_curr,
-                pq_last             = pq_last,
-                entropy             = round(entropy,    6),
-                fidelity            = round(fidelity,   6),
-                coherence           = round(coherence,  6),
-                timestamp_ns        = time.time_ns(),
-                oracle_dm           = oracle_dm_3q,
-                pq0_oracle_fidelity = round(pq0_coh,    6),
-                pq0_IV_fidelity     = round(pqIV_coh,   6),
-                pq0_V_fidelity      = round(pqV_coh,    6),
+                oracle_id=self.oracle_id,
+                pq_curr=pq_curr,
+                pq_last=pq_last,
+                entropy=round(entropy, 6),
+                fidelity=round(fidelity, 6),
+                coherence=round(coherence, 6),
+                timestamp_ns=time.time_ns(),
+                oracle_dm=oracle_dm_3q,
+                pq0_oracle_fidelity=round(pq0_coh, 6),
+                pq0_IV_fidelity=round(pqIV_coh, 6),
+                pq0_V_fidelity=round(pqV_coh, 6),
             )
         except Exception as exc:
-            logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] measure_block_field failed: {exc}")
+            logger.error(
+                f"[ORACLE-NODE-{self.oracle_id + 1}] measure_block_field failed: {exc}"
+            )
             return None
 
     @staticmethod
     def _partial_trace_8q_to_3q(dm_256: np.ndarray) -> np.ndarray:
         try:
             from qiskit.quantum_info import DensityMatrix as QDM, partial_trace
-            return np.array(partial_trace(QDM(dm_256), list(range(3, 8))).data, dtype=complex)
+
+            return np.array(
+                partial_trace(QDM(dm_256), list(range(3, 8))).data, dtype=complex
+            )
         except Exception:
             dm_8 = np.zeros((8, 8), dtype=complex)
             for i in range(8):
                 for j in range(8):
                     for k in range(32):
-                        dm_8[i,j] += dm_256[i*32+k, j*32+k]
+                        dm_8[i, j] += dm_256[i * 32 + k, j * 32 + k]
             tr = float(np.real(np.trace(dm_8)))
-            if tr > 1e-12: dm_8 /= tr
+            if tr > 1e-12:
+                dm_8 /= tr
             return dm_8
 
-    def rebuild_entanglement(self, consensus_dm: np.ndarray, alpha: float = 0.35) -> None:
+    def rebuild_entanglement(
+        self, consensus_dm: np.ndarray, alpha: float = 0.35
+    ) -> None:
         with self._lock:
-            if self._dm is None or consensus_dm is None: return
-            if self._dm.shape != consensus_dm.shape: return
+            if self._dm is None or consensus_dm is None:
+                return
+            if self._dm.shape != consensus_dm.shape:
+                return
             try:
                 blended = (1.0 - alpha) * self._dm + alpha * consensus_dm
                 tr = np.trace(blended)
-                if abs(tr) > 1e-12: blended /= tr
+                if abs(tr) > 1e-12:
+                    blended /= tr
                 self._dm = blended
             except Exception as exc:
-                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] rebuild_entanglement failed: {exc}")
+                logger.warning(
+                    f"[ORACLE-NODE-{self.oracle_id + 1}] rebuild_entanglement failed: {exc}"
+                )
+
 
 # ─── Oracle W-State Manager (5-node cluster) ──────────────────────────────────
+
 
 class OracleWStateManager:
     """5-node Byzantine oracle cluster manager."""
 
     def __init__(self):
-        self.running      = False
+        self.running = False
         self.boot_time_ns = time.time_ns()
 
         oracle_addresses = get_all_oracle_addresses_batch()
         self.nodes: List[OracleNode] = [
-            OracleNode(oracle_id=i, role=_ORACLE_ROLES[i],
-                       pre_fetched_address=oracle_addresses.get(i+1))
+            OracleNode(
+                oracle_id=i,
+                role=_ORACLE_ROLES[i],
+                pre_fetched_address=oracle_addresses.get(i + 1),
+            )
             for i in range(5)
         ]
 
         self.current_density_matrix: Optional[DensityMatrixSnapshot] = None
         self.density_matrix_buffer: deque = deque(maxlen=BUFFER_SIZE_METRICS_WSTATE)
-        self.stream_queue:  queue.Queue   = queue.Queue(maxsize=100)
-        self.stream_thread:  Optional[threading.Thread] = None
+        self.stream_queue: queue.Queue = queue.Queue(maxsize=100)
+        self.stream_thread: Optional[threading.Thread] = None
         self.refresh_thread: Optional[threading.Thread] = None
         self.lattice_refresh_counter = 0
         self.p2p_clients: Dict[str, P2PClientSync] = {}
-        self.oracle_signer: Optional['OracleEngine'] = None
-        self._state_lock  = threading.Lock()
+        self.oracle_signer: Optional["OracleEngine"] = None
+        self._state_lock = threading.Lock()
         self._client_lock = threading.Lock()
         self._pq_curr: int = 1
         self._pq_last: int = 0
-        self._pq_lock  = threading.Lock()
+        self._pq_lock = threading.Lock()
         self.temporal_anchors: OrderedDict[str, TemporalAnchorPoint] = OrderedDict()
         self.temporal_anchor_buffer: deque = deque(maxlen=10)  # Reduced to 10
         self.current_block_height: int = 0
         self._temporal_lock = threading.RLock()
-        self._pair_idx: int = 0          # kept for any external callers referencing it
+        self._pair_idx: int = 0  # kept for any external callers referencing it
         self._pair_lock = threading.Lock()
         self.block_field_readings: Dict[int, BlockFieldReading] = {}
         self._bf_lock = threading.Lock()
@@ -1836,15 +2188,21 @@ class OracleWStateManager:
         self._lattice_w_coherence: float = 0.0
         self._w_state_measurement_cycle: int = 0
         self._w_state_lock = threading.Lock()
-        
+
         # ← SSE STREAMING BRIDGE (Real-time density matrix → server → client)
-        self.sse_bridge = OracleSSEBridge(oracle_signer=self.oracle_signer, max_queue_size=100)
-        
+        self.sse_bridge = OracleSSEBridge(
+            oracle_signer=self.oracle_signer, max_queue_size=100
+        )
+
         # ThreadPoolExecutor for parallel measurement execution
-        self._pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="OracleMeasure")
+        self._pool = ThreadPoolExecutor(
+            max_workers=5, thread_name_prefix="OracleMeasure"
+        )
         self._worker_init_args = None
-        
-        self._mermin_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MerminAsync")
+
+        self._mermin_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="MerminAsync"
+        )
         self._mermin_future: Optional[Any] = None
         self._last_mermin: Optional[dict] = None
         # Warm-start: best Mermin angles from last successful optimisation
@@ -1862,7 +2220,7 @@ class OracleWStateManager:
             self._pq_curr = max(1, int(pq_curr))
             self._pq_last = max(0, int(pq_last))
 
-    def set_oracle_signer(self, oracle_engine: 'OracleEngine'):
+    def set_oracle_signer(self, oracle_engine: "OracleEngine"):
         self.oracle_signer = oracle_engine
         logger.info("[ORACLE CLUSTER] Signer wired — snapshot authentication enabled")
 
@@ -1885,7 +2243,8 @@ class OracleWStateManager:
         ready = sum(1 for n in self.nodes if n.aer is not None)
         if ready < 5:
             raise RuntimeError(
-                f"[ORACLE CLUSTER] FATAL: Only {ready}/5 nodes have AER. All 5 required.")
+                f"[ORACLE CLUSTER] FATAL: Only {ready}/5 nodes have AER. All 5 required."
+            )
         logger.info("[ORACLE CLUSTER] ✅ All 5 nodes have AER simulators")
         return True
 
@@ -1893,24 +2252,32 @@ class OracleWStateManager:
 
     @staticmethod
     def _bloch3(theta: float, phi: float) -> np.ndarray:
-        _sx = np.array([[0,1],[1,0]], dtype=complex)
-        _sy = np.array([[0,-1j],[1j,0]], dtype=complex)
-        _sz = np.array([[1,0],[0,-1]], dtype=complex)
+        _sx = np.array([[0, 1], [1, 0]], dtype=complex)
+        _sy = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        _sz = np.array([[1, 0], [0, -1]], dtype=complex)
         st, ct = np.sin(theta), np.cos(theta)
-        sp, cp = np.sin(phi),   np.cos(phi)
-        return st*cp*_sx + st*sp*_sy + ct*_sz
+        sp, cp = np.sin(phi), np.cos(phi)
+        return st * cp * _sx + st * sp * _sy + ct * _sz
 
     @staticmethod
     def _mermin_value(rho8: np.ndarray, angles: np.ndarray) -> float:
         b3 = OracleWStateManager._bloch3
-        A1=b3(angles[0],angles[1]); A2=b3(angles[2],angles[3]); A3=b3(angles[4],angles[5])
-        B1=b3(angles[6],angles[7]); B2=b3(angles[8],angles[9]); B3=b3(angles[10],angles[11])
-        def E(M1,M2,M3): return float(np.real(np.trace(rho8 @ np.kron(np.kron(M1,M2),M3))))
-        return -E(A1,A2,A3) + E(A1,B2,B3) + E(B1,A2,B3) + E(B1,B2,A3)
+        A1 = b3(angles[0], angles[1])
+        A2 = b3(angles[2], angles[3])
+        A3 = b3(angles[4], angles[5])
+        B1 = b3(angles[6], angles[7])
+        B2 = b3(angles[8], angles[9])
+        B3 = b3(angles[10], angles[11])
+
+        def E(M1, M2, M3):
+            return float(np.real(np.trace(rho8 @ np.kron(np.kron(M1, M2), M3))))
+
+        return -E(A1, A2, A3) + E(A1, B2, B3) + E(B1, A2, B3) + E(B1, B2, A3)
 
     @staticmethod
-    def _optimize_mermin_angles(rho8: np.ndarray, n_restarts: int = 18,
-                                 warm_start: Optional[np.ndarray] = None) -> tuple:
+    def _optimize_mermin_angles(
+        rho8: np.ndarray, n_restarts: int = 18, warm_start: Optional[np.ndarray] = None
+    ) -> tuple:
         """
         Adaptive Nelder-Mead maximisation of the Mermin parameter M.
 
@@ -1938,9 +2305,9 @@ class OracleWStateManager:
         except ImportError:
             return OracleWStateManager._mermin_grid_fallback(rho8)
 
-        W3_MAX   = 3.046
+        W3_MAX = 3.046
         EARLY_EXIT = W3_MAX * 0.95
-        best_M   = 0.0
+        best_M = 0.0
         best_ang = np.zeros(12)
         total_it = 0
 
@@ -1949,21 +2316,30 @@ class OracleWStateManager:
             if restart_idx == 0 and warm_start is not None:
                 x0 = warm_start.copy()
                 # Small perturbation so we don't re-explore the same local minimum
-                x0 += (np.frombuffer(os.urandom(12), dtype=np.uint8).astype(float)
-                       / 255.0 - 0.5) * 0.3
+                x0 += (
+                    np.frombuffer(os.urandom(12), dtype=np.uint8).astype(float) / 255.0
+                    - 0.5
+                ) * 0.3
             else:
-                x0 = (np.frombuffer(os.urandom(96), dtype=np.uint8).astype(float)
-                      / 255.0)[:12] * np.pi
+                x0 = (
+                    np.frombuffer(os.urandom(96), dtype=np.uint8).astype(float) / 255.0
+                )[:12] * np.pi
 
             result = _sp_min(
                 lambda a: -abs(OracleWStateManager._mermin_value(rho8, a)),
-                x0, method="Nelder-Mead",
-                options={"maxiter": 400, "xatol": 1e-6, "fatol": 1e-7, "adaptive": True},
+                x0,
+                method="Nelder-Mead",
+                options={
+                    "maxiter": 400,
+                    "xatol": 1e-6,
+                    "fatol": 1e-7,
+                    "adaptive": True,
+                },
             )
             total_it += result.nit
             M_cand = abs(OracleWStateManager._mermin_value(rho8, result.x))
             if M_cand > best_M:
-                best_M   = M_cand
+                best_M = M_cand
                 best_ang = result.x.copy()
             if best_M >= EARLY_EXIT:
                 break
@@ -1972,27 +2348,43 @@ class OracleWStateManager:
 
     @staticmethod
     def _mermin_grid_fallback(rho8: np.ndarray) -> tuple:
-        pts = np.linspace(0, np.pi, 6); best_M = 0.0; best_ang = np.zeros(12)
+        pts = np.linspace(0, np.pi, 6)
+        best_M = 0.0
+        best_ang = np.zeros(12)
         for ta in pts:
             for tb in pts:
-                ang = np.array([ta,np.pi/4]*3 + [tb,np.pi/4]*3)
+                ang = np.array([ta, np.pi / 4] * 3 + [tb, np.pi / 4] * 3)
                 M = abs(OracleWStateManager._mermin_value(rho8, ang))
-                if M > best_M: best_M = M; best_ang = ang.copy()
+                if M > best_M:
+                    best_M = M
+                    best_ang = ang.copy()
         return best_M, best_ang, 36
 
-    def _build_mermin_result(self, dm_8x8: np.ndarray, M: float, angles: np.ndarray,
-                              iters: int, avg_fidelity: float,
-                              per_node: List[Dict[str, Any]]) -> dict:
+    def _build_mermin_result(
+        self,
+        dm_8x8: np.ndarray,
+        M: float,
+        angles: np.ndarray,
+        iters: int,
+        avg_fidelity: float,
+        per_node: List[Dict[str, Any]],
+    ) -> dict:
         """Build the Mermin result dict from a completed optimisation."""
-        W3_MAX  = 3.046
-        M_pct   = round(100.0 * M / W3_MAX, 2)
+        W3_MAX = 3.046
+        M_pct = round(100.0 * M / W3_MAX, 2)
         ghz_pct = round(100.0 * M / 4.0, 2)
-        if   M >= W3_MAX*0.98: verdict = "W-STATE MAXIMUM — perfect tripartite entanglement"
-        elif M >= 2.8:         verdict = "STRONG Mermin violation — high W-state entanglement"
-        elif M >= 2.4:         verdict = "CLEAR Mermin violation — quantum correlations certified"
-        elif M >= 2.1:         verdict = "Mermin violation — 3-qubit non-classicality confirmed"
-        elif M >  2.0:         verdict = "Marginal Mermin violation — weakly entangled W-state"
-        else:                  verdict = "No violation — classical or separable (F too low)"
+        if M >= W3_MAX * 0.98:
+            verdict = "W-STATE MAXIMUM — perfect tripartite entanglement"
+        elif M >= 2.8:
+            verdict = "STRONG Mermin violation — high W-state entanglement"
+        elif M >= 2.4:
+            verdict = "CLEAR Mermin violation — quantum correlations certified"
+        elif M >= 2.1:
+            verdict = "Mermin violation — 3-qubit non-classicality confirmed"
+        elif M > 2.0:
+            verdict = "Marginal Mermin violation — weakly entangled W-state"
+        else:
+            verdict = "No violation — classical or separable (F too low)"
 
         emoji = "🔔" if M > 2.0 else "📉"
         logger.debug(
@@ -2000,44 +2392,72 @@ class OracleWStateManager:
             f"{verdict} | F={avg_fidelity:.4f} | iters={iters}"
         )
         return {
-            "M":              M_pct,
-            "M_value":        round(M, 6),
-            "is_quantum":     M > 2.0,
-            "w3_max_pct":     M_pct,
-            "ghz_max_pct":    ghz_pct,
+            "M": M_pct,
+            "M_value": round(M, 6),
+            "is_quantum": M > 2.0,
+            "w3_max_pct": M_pct,
+            "ghz_max_pct": ghz_pct,
             "classical_bound": 2.0,
-            "w3_optimal":     round(W3_MAX, 4),
+            "w3_optimal": round(W3_MAX, 4),
             "optimal_angles": [round(float(a), 6) for a in angles],
-            "angle_degrees":  [round(float(a)*180.0/np.pi % 360, 2) for a in angles],
-            "angle_labels":   ["θA1","φA1","θA2","φA2","θA3","φA3",
-                               "θB1","φB1","θB2","φB2","θB3","φB3"],
-            "iterations":              iters,
-            "block_field_fidelity":    round(avg_fidelity, 6),
-            "verdict":                 verdict,
-            "inequality":              "Mermin-3qubit",
-            "measured_on":             "block_field_consensus_oracle_dm",
+            "angle_degrees": [round(float(a) * 180.0 / np.pi % 360, 2) for a in angles],
+            "angle_labels": [
+                "θA1",
+                "φA1",
+                "θA2",
+                "φA2",
+                "θA3",
+                "φA3",
+                "θB1",
+                "φB1",
+                "θB2",
+                "φB2",
+                "θB3",
+                "φB3",
+            ],
+            "iterations": iters,
+            "block_field_fidelity": round(avg_fidelity, 6),
+            "verdict": verdict,
+            "inequality": "Mermin-3qubit",
+            "measured_on": "block_field_consensus_oracle_dm",
             "per_node_fidelities": [
-                {"oracle_id": n["oracle_id"], "role": n["role"], "fidelity": n["fidelity"]}
+                {
+                    "oracle_id": n["oracle_id"],
+                    "role": n["role"],
+                    "fidelity": n["fidelity"],
+                }
                 for n in per_node
             ],
         }
 
-    def _run_mermin_on_consensus_dm(self, dm_8x8: np.ndarray, avg_fidelity: float,
-                                     per_node: List[Dict[str, Any]]) -> dict:
+    def _run_mermin_on_consensus_dm(
+        self, dm_8x8: np.ndarray, avg_fidelity: float, per_node: List[Dict[str, Any]]
+    ) -> dict:
         """Backward-compat wrapper — prefer calling _build_mermin_result directly."""
         try:
             M, angles, iters = self._optimize_mermin_angles(dm_8x8)
-            return self._build_mermin_result(dm_8x8, M, angles, iters, avg_fidelity, per_node)
+            return self._build_mermin_result(
+                dm_8x8, M, angles, iters, avg_fidelity, per_node
+            )
         except Exception as exc:
             logger.warning(f"[MERMIN-TEST] failed: {exc}")
             return {
-                "M_value": 0.0, "M": 0.0, "is_quantum": False,
-                "w3_max_pct": 0.0, "ghz_max_pct": 0.0,
-                "classical_bound": 2.0, "w3_optimal": 3.046,
-                "optimal_angles": [], "angle_degrees": [], "angle_labels": [],
-                "iterations": 0, "block_field_fidelity": avg_fidelity,
-                "verdict": f"test_error: {exc}", "inequality": "Mermin-3qubit",
-                "measured_on": "block_field_consensus_oracle_dm", "per_node_fidelities": [],
+                "M_value": 0.0,
+                "M": 0.0,
+                "is_quantum": False,
+                "w3_max_pct": 0.0,
+                "ghz_max_pct": 0.0,
+                "classical_bound": 2.0,
+                "w3_optimal": 3.046,
+                "optimal_angles": [],
+                "angle_degrees": [],
+                "angle_labels": [],
+                "iterations": 0,
+                "block_field_fidelity": avg_fidelity,
+                "verdict": f"test_error: {exc}",
+                "inequality": "Mermin-3qubit",
+                "measured_on": "block_field_consensus_oracle_dm",
+                "per_node_fidelities": [],
             }
 
     # ── Core measurement cycle ────────────────────────────────────────────────
@@ -2057,6 +2477,7 @@ class OracleWStateManager:
         if LATTICE is None:
             try:
                 from globals import get_lattice as _glf
+
                 LATTICE = _glf()
             except Exception as _e:
                 logger.error(f"[ORACLE CLUSTER] ❌ get_lattice() exception: {_e}")
@@ -2072,8 +2493,8 @@ class OracleWStateManager:
                 self._last_lattice_none_warn_ts = _now
             return None
 
-        cdm = getattr(LATTICE, 'current_density_matrix', None)
-        if cdm is None or not hasattr(cdm, 'shape') or cdm.shape != (256, 256):
+        cdm = getattr(LATTICE, "current_density_matrix", None)
+        if cdm is None or not hasattr(cdm, "shape") or cdm.shape != (256, 256):
             logger.debug("[ORACLE CLUSTER] Lattice DM not ready (shape check failed)")
             return None
 
@@ -2095,20 +2516,24 @@ class OracleWStateManager:
 
         # ── Step 3: All-5 simultaneous block-field measurement ───────────────
         bf_start_ns = time.time_ns()
-        
+
         # Guard: check pool state before submitting (prevents hang on shutdown)
         if self._pool is None:
-            logger.warning("[ORACLE CLUSTER] Pool is None, skipping block-field measurement")
+            logger.warning(
+                "[ORACLE CLUSTER] Pool is None, skipping block-field measurement"
+            )
             return None
-        
+
         try:
             # Use ThreadPoolExecutor (lower memory overhead than multiprocessing)
             bf_futures = {
-                self._pool.submit(node.measure_block_field, pq_curr, pq_last, shared_pq0, LATTICE): node
+                self._pool.submit(
+                    node.measure_block_field, pq_curr, pq_last, shared_pq0, LATTICE
+                ): node
                 for node in self.nodes
             }
         except RuntimeError as e:
-            if 'cannot schedule new futures' in str(e):
+            if "cannot schedule new futures" in str(e):
                 logger.debug(f"[ORACLE CLUSTER] Executor shutdown detected: {e}")
                 return None
             raise
@@ -2122,25 +2547,32 @@ class OracleWStateManager:
                         with self._bf_lock:
                             self.block_field_readings[r.oracle_id] = r
                 except Exception as exc:
-                    logger.error(f"[ORACLE CLUSTER] Oracle-{bf_futures[fut].oracle_id+1} BF exception: {exc}")
+                    logger.error(
+                        f"[ORACLE CLUSTER] Oracle-{bf_futures[fut].oracle_id + 1} BF exception: {exc}"
+                    )
         except TimeoutError:
             unfinished = [f for f in bf_futures if not f.done()]
-            logger.error(f"[ORACLE CLUSTER] Stream error: {len(unfinished)} (of 5) futures unfinished (timeout={MEASUREMENT_TIMEOUT}s)")
+            logger.error(
+                f"[ORACLE CLUSTER] Stream error: {len(unfinished)} (of 5) futures unfinished (timeout={MEASUREMENT_TIMEOUT}s)"
+            )
             for f in bf_futures:
                 if not f.done():
                     node_idx = bf_futures[f].oracle_id + 1
                     logger.warning(f"[ORACLE CLUSTER] Timeout on oracle_{node_idx}")
             for f in unfinished:
                 f.cancel()
-        
+
         bf_ms = (time.time_ns() - bf_start_ns) / 1e6
 
         if len(readings) < 3:
             logger.warning(
-                f"[ORACLE CLUSTER] Only {len(readings)}/5 readings — need ≥3, skipping cycle")
+                f"[ORACLE CLUSTER] Only {len(readings)}/5 readings — need ≥3, skipping cycle"
+            )
             # Fallback: if we have at least 1 reading, use it with degraded consensus
             if len(readings) >= 1:
-                logger.info(f"[ORACLE CLUSTER] Using degraded fallback with {len(readings)} reading(s)")
+                logger.info(
+                    f"[ORACLE CLUSTER] Using degraded fallback with {len(readings)} reading(s)"
+                )
                 r = readings[0]
                 cons_fidelity = r.fidelity
                 cons_coherence = r.coherence
@@ -2168,15 +2600,16 @@ class OracleWStateManager:
         accepted = readings_sorted[1:4] if n >= 4 else readings_sorted
 
         def _median(vals):
-            s = sorted(vals); m = len(s)
-            return s[m//2] if m % 2 else (s[m//2-1] + s[m//2]) * 0.5
+            s = sorted(vals)
+            m = len(s)
+            return s[m // 2] if m % 2 else (s[m // 2 - 1] + s[m // 2]) * 0.5
 
-        cons_fidelity  = _median([r.fidelity  for r in accepted])
+        cons_fidelity = _median([r.fidelity for r in accepted])
         cons_coherence = _median([r.coherence for r in accepted])
-        cons_entropy   = _median([r.entropy   for r in accepted])
+        cons_entropy = _median([r.entropy for r in accepted])
         cons_pq0_oracle = _median([r.pq0_oracle_fidelity for r in accepted])
-        cons_pq0_IV     = _median([r.pq0_IV_fidelity     for r in accepted])
-        cons_pq0_V      = _median([r.pq0_V_fidelity      for r in accepted])
+        cons_pq0_IV = _median([r.pq0_IV_fidelity for r in accepted])
+        cons_pq0_V = _median([r.pq0_V_fidelity for r in accepted])
 
         oracle_dms = [r.oracle_dm for r in accepted if r.oracle_dm is not None]
         if not oracle_dms:
@@ -2185,7 +2618,7 @@ class OracleWStateManager:
 
         try:
             dm_mean = np.mean(np.stack(oracle_dms, axis=0), axis=0)
-            dm_mean = 0.5 * (dm_mean + dm_mean.conj().T)   # hermitian symmetry
+            dm_mean = 0.5 * (dm_mean + dm_mean.conj().T)  # hermitian symmetry
             tr = float(np.real(np.trace(dm_mean)))
             if tr < 1e-12:
                 logger.error("[ORACLE CLUSTER] ❌ Consensus DM has zero trace")
@@ -2201,7 +2634,11 @@ class OracleWStateManager:
             current_cycle = self.lattice_refresh_counter
 
         per_node_info = [
-            {"oracle_id": r.oracle_id+1, "role": _ORACLE_ROLES[r.oracle_id], "fidelity": r.fidelity}
+            {
+                "oracle_id": r.oracle_id + 1,
+                "role": _ORACLE_ROLES[r.oracle_id],
+                "fidelity": r.fidelity,
+            }
             for r in sorted(readings, key=lambda r: r.oracle_id)
         ]
 
@@ -2211,49 +2648,59 @@ class OracleWStateManager:
         # not a stale copy. Atomicity: build → store → fire async job.
         QIM = QuantumInformationMetrics
         bf_agg = {
-            "pq_curr": pq_curr, "pq_last": pq_last,
-            "block_field_fidelity":  round(float(cons_fidelity),  6),
+            "pq_curr": pq_curr,
+            "pq_last": pq_last,
+            "block_field_fidelity": round(float(cons_fidelity), 6),
             "block_field_coherence": round(float(cons_coherence), 6),
-            "block_field_entropy":   round(float(cons_entropy),   6),
-            "node_count": len(readings), "accepted_count": len(accepted),
+            "block_field_entropy": round(float(cons_entropy), 6),
+            "node_count": len(readings),
+            "accepted_count": len(accepted),
             "per_node": [
                 {
-                    "oracle_id": r.oracle_id+1, "role": _ORACLE_ROLES[r.oracle_id],
-                    "fidelity": r.fidelity, "coherence": r.coherence, "entropy": r.entropy,
+                    "oracle_id": r.oracle_id + 1,
+                    "role": _ORACLE_ROLES[r.oracle_id],
+                    "fidelity": r.fidelity,
+                    "coherence": r.coherence,
+                    "entropy": r.entropy,
                     "pq0_oracle_fidelity": r.pq0_oracle_fidelity,
-                    "pq0_IV_fidelity": r.pq0_IV_fidelity, "pq0_V_fidelity": r.pq0_V_fidelity,
-                    "in_consensus": r in accepted, "mermin_violation": r.mermin_violation,
+                    "pq0_IV_fidelity": r.pq0_IV_fidelity,
+                    "pq0_V_fidelity": r.pq0_V_fidelity,
+                    "in_consensus": r in accepted,
+                    "mermin_violation": r.mermin_violation,
                 }
                 for r in sorted(readings, key=lambda r: r.oracle_id)
             ],
         }
 
         snapshot = DensityMatrixSnapshot(
-            timestamp_ns          = time.time_ns(),
-            density_matrix        = dm_mean,
-            density_matrix_hex    = dm_mean.tobytes().hex(),
-            purity                = QIM.purity(dm_mean),
-            von_neumann_entropy   = float(cons_entropy),
-            coherence_l1          = float(cons_coherence),
-            coherence_renyi       = QIM.coherence_renyi(dm_mean),
-            coherence_geometric   = QIM.coherence_geometric(dm_mean),
-            quantum_discord       = QIM.quantum_discord(dm_mean),
-            w_state_fidelity      = float(cons_fidelity),
-            measurement_counts    = {},
-            aer_noise_state       = {
-                "consensus": True, "accepted_nodes": [r.oracle_id+1 for r in accepted],
-                "all_node_count": len(readings), "pq_curr": pq_curr, "pq_last": pq_last,
+            timestamp_ns=time.time_ns(),
+            density_matrix=dm_mean,
+            density_matrix_hex=dm_mean.tobytes().hex(),
+            purity=QIM.purity(dm_mean),
+            von_neumann_entropy=float(cons_entropy),
+            coherence_l1=float(cons_coherence),
+            coherence_renyi=QIM.coherence_renyi(dm_mean),
+            coherence_geometric=QIM.coherence_geometric(dm_mean),
+            quantum_discord=QIM.quantum_discord(dm_mean),
+            w_state_fidelity=float(cons_fidelity),
+            measurement_counts={},
+            aer_noise_state={
+                "consensus": True,
+                "accepted_nodes": [r.oracle_id + 1 for r in accepted],
+                "all_node_count": len(readings),
+                "pq_curr": pq_curr,
+                "pq_last": pq_last,
                 "pq0_oracle_fidelity": round(float(cons_pq0_oracle), 6),
-                "pq0_IV_fidelity":     round(float(cons_pq0_IV),     6),
-                "pq0_V_fidelity":      round(float(cons_pq0_V),      6),
+                "pq0_IV_fidelity": round(float(cons_pq0_IV), 6),
+                "pq0_V_fidelity": round(float(cons_pq0_V), 6),
                 "measurement_type": "block_field_5qubit_composite",
                 "block_field": bf_agg,
             },
-            lattice_refresh_counter = current_cycle,
-            w_state_strength        = QIM.w_state_strength(dm_mean, {}),
-            phase_coherence         = QIM.phase_coherence(dm_mean),
-            entanglement_witness    = QIM.entanglement_witness(dm_mean),
-            trace_purity            = QIM.trace_purity(dm_mean),
+            lattice_refresh_counter=current_cycle,
+            w_state_strength=QIM.w_state_strength(dm_mean, {}),
+            phase_coherence=QIM.phase_coherence(dm_mean),
+            entanglement_witness=QIM.entanglement_witness(dm_mean),
+            trace_purity=QIM.trace_purity(dm_mean),
         )
 
         # Include last Mermin result if available
@@ -2273,14 +2720,20 @@ class OracleWStateManager:
         # Warm-start means angles drift <0.01 rad/cycle → converges in 1-2 iterations.
         # NOW fires AFTER snapshot is stored, so callback updates the stored snapshot.
         with self._state_lock:
-            _mermin_pending = self._mermin_future is not None and not self._mermin_future.done()
+            _mermin_pending = (
+                self._mermin_future is not None and not self._mermin_future.done()
+            )
 
         if not _mermin_pending:
-            _dm_snap  = dm_mean.copy()
+            _dm_snap = dm_mean.copy()
             _fid_snap = float(cons_fidelity)
             _pni_snap = list(per_node_info)
             with self._state_lock:
-                _warm = self._best_mermin_angles.copy() if self._best_mermin_angles is not None else None
+                _warm = (
+                    self._best_mermin_angles.copy()
+                    if self._best_mermin_angles is not None
+                    else None
+                )
 
             def _async_mermin_callback(res):
                 """Update snapshot with Mermin result (thread-safe)."""
@@ -2292,8 +2745,11 @@ class OracleWStateManager:
                 try:
                     _r = 6 if _fid_snap >= 0.80 else (3 if _fid_snap >= 0.70 else 2)
                     M, angles, iters = OracleWStateManager._optimize_mermin_angles(
-                        _dm_snap, n_restarts=_r, warm_start=_warm)
-                    res = self._build_mermin_result(_dm_snap, M, angles, iters, _fid_snap, _pni_snap)
+                        _dm_snap, n_restarts=_r, warm_start=_warm
+                    )
+                    res = self._build_mermin_result(
+                        _dm_snap, M, angles, iters, _fid_snap, _pni_snap
+                    )
                     with self._state_lock:
                         self._best_mermin_angles = angles.copy()
                         self._last_mermin = res
@@ -2307,7 +2763,8 @@ class OracleWStateManager:
                 try:
                     if self._mermin_executor._shutdown:
                         self._mermin_executor = ThreadPoolExecutor(
-                            max_workers=1, thread_name_prefix="MerminAsync")
+                            max_workers=1, thread_name_prefix="MerminAsync"
+                        )
                 except Exception:
                     pass
                 try:
@@ -2321,15 +2778,18 @@ class OracleWStateManager:
         # Called immediately after snapshot construction — non-blocking.
         try:
             import sys as _sys
-            _server_mod = _sys.modules.get('server')
-            if _server_mod and hasattr(_server_mod, '_enqueue_snapshot_for_streaming'):
+
+            _server_mod = _sys.modules.get("server")
+            if _server_mod and hasattr(_server_mod, "_enqueue_snapshot_for_streaming"):
                 # Build the dictionary snapshot for the multiplexer
                 # Build 16³ volumetric tensor — the PRIMARY transmitted quantum state
-                _tensor_hex = ''
+                _tensor_hex = ""
                 try:
                     # Oracle dm_mean is 8×8 (W3 subspace). Kron-upsample 8→32, then downsample to 16.
-                    _dm32 = np.kron(dm_mean.astype(np.complex64),
-                                    np.ones((4, 4), dtype=np.complex64))
+                    _dm32 = np.kron(
+                        dm_mean.astype(np.complex64),
+                        np.ones((4, 4), dtype=np.complex64),
+                    )
                     _tr32 = float(np.real(np.trace(_dm32)))
                     if _tr32 > 1e-12:
                         _dm32 /= _tr32
@@ -2337,7 +2797,9 @@ class OracleWStateManager:
                     _N16 = 16
                     _idx = np.arange(_N16, dtype=np.float32)
                     _dist = np.abs(_idx[:, None] - _idx[None, :])
-                    _lambdas = np.exp(np.linspace(np.log(1.0), np.log(float(_N16)), _N16))
+                    _lambdas = np.exp(
+                        np.linspace(np.log(1.0), np.log(float(_N16)), _N16)
+                    )
                     _mag16 = np.abs(_dm32)[:16, :16]  # Downsample dm32 to 16×16
                     _t16 = np.zeros((_N16, _N16, _N16), dtype=np.float32)
                     for _z in range(_N16):
@@ -2352,11 +2814,15 @@ class OracleWStateManager:
                     pass  # non-fatal
 
                 # Build W-state hex from density matrix diagonal elements
-                _w_hex = ''
+                _w_hex = ""
                 try:
                     import struct
+
                     # Extract diagonal elements as W-state amplitudes (8 most significant)
-                    if hasattr(snapshot, 'density_matrix') and snapshot.density_matrix is not None:
+                    if (
+                        hasattr(snapshot, "density_matrix")
+                        and snapshot.density_matrix is not None
+                    ):
                         dm = snapshot.density_matrix
                         # Take diagonal and normalize
                         diag = np.diag(dm)[:8]  # First 8 diagonal elements
@@ -2368,35 +2834,35 @@ class OracleWStateManager:
                         for i in range(min(8, len(diag))):
                             re = float(diag[i].real)
                             im = float(diag[i].imag)
-                            _w_data.extend(struct.pack('>dd', re, im))
+                            _w_data.extend(struct.pack(">dd", re, im))
                         _w_hex = _w_data.hex()
                 except Exception as _w_err:
                     logger.debug(f"[ORACLE] W-state build failed: {_w_err}")
-                
+
                 _mux_snapshot = {
-                    'timestamp_ns': snapshot.timestamp_ns,
-                    'lattice_refresh_counter': snapshot.lattice_refresh_counter,
-                    'w_state_fidelity': snapshot.w_state_fidelity,
-                    'purity': snapshot.purity,
-                    'coherence_l1': snapshot.coherence_l1,
-                    'von_neumann_entropy': snapshot.von_neumann_entropy,
-                    'coherence_renyi': snapshot.coherence_renyi,
-                    'coherence_geometric': snapshot.coherence_geometric,
-                    'quantum_discord': snapshot.quantum_discord,
-                    'w_state_strength': snapshot.w_state_strength,
-                    'phase_coherence': snapshot.phase_coherence,
-                    'entanglement_witness': snapshot.entanglement_witness,
-                    'trace_purity': snapshot.trace_purity,
-                    'aer_noise_state': snapshot.aer_noise_state,
-                    'measurement_counts': snapshot.measurement_counts,
-                    'bell_test': snapshot.bell_test,
-                    'mermin_test': snapshot.bell_test,
-                    'oracle_id': None,  # Not per-node, consensus snapshot
-                    'oracle_address': snapshot.oracle_address,
-                    'signature_valid': snapshot.signature_valid,
-                    'density_tensor_hex': _tensor_hex,
-                    'tensor_dim': 16 if _tensor_hex else 0,
-                    'w_state_hex': _w_hex,  # ✅ ADDED: W-state for client
+                    "timestamp_ns": snapshot.timestamp_ns,
+                    "lattice_refresh_counter": snapshot.lattice_refresh_counter,
+                    "w_state_fidelity": snapshot.w_state_fidelity,
+                    "purity": snapshot.purity,
+                    "coherence_l1": snapshot.coherence_l1,
+                    "von_neumann_entropy": snapshot.von_neumann_entropy,
+                    "coherence_renyi": snapshot.coherence_renyi,
+                    "coherence_geometric": snapshot.coherence_geometric,
+                    "quantum_discord": snapshot.quantum_discord,
+                    "w_state_strength": snapshot.w_state_strength,
+                    "phase_coherence": snapshot.phase_coherence,
+                    "entanglement_witness": snapshot.entanglement_witness,
+                    "trace_purity": snapshot.trace_purity,
+                    "aer_noise_state": snapshot.aer_noise_state,
+                    "measurement_counts": snapshot.measurement_counts,
+                    "bell_test": snapshot.bell_test,
+                    "mermin_test": snapshot.bell_test,
+                    "oracle_id": None,  # Not per-node, consensus snapshot
+                    "oracle_address": snapshot.oracle_address,
+                    "signature_valid": snapshot.signature_valid,
+                    "density_tensor_hex": _tensor_hex,
+                    "tensor_dim": 16 if _tensor_hex else 0,
+                    "w_state_hex": _w_hex,  # ✅ ADDED: W-state for client
                 }
                 _server_mod._broadcast_snapshot_to_database(_mux_snapshot)
                 if current_cycle % 100 == 0:
@@ -2409,34 +2875,39 @@ class OracleWStateManager:
         # which the frontend needs to display individual oracle status
         try:
             import sys
-            _mod = sys.modules.get('server')
-            if _mod and hasattr(_mod, '_broadcast_snapshot_to_database'):
+
+            _mod = sys.modules.get("server")
+            if _mod and hasattr(_mod, "_broadcast_snapshot_to_database"):
                 snapshot_dict = {
-                    'timestamp_ns': snapshot.timestamp_ns,
-                    'oracle_id': snapshot.oracle_id,
-                    'density_tensor_hex': _tensor_hex,  # Use local 16³ tensor generated above
-                    'tensor_dim': 16,
-                    'purity': snapshot.purity,
-                    'w_state_fidelity': snapshot.w_state_fidelity,
-                    'von_neumann_entropy': snapshot.von_neumann_entropy,
-                    'coherence_l1': snapshot.coherence_l1,
-                    'coherence_renyi': getattr(snapshot, 'coherence_renyi', None),
-                    'coherence_geometric': getattr(snapshot, 'coherence_geometric', None),
-                    'quantum_discord': getattr(snapshot, 'quantum_discord', None),
-                    'w_state_strength': snapshot.w_state_strength,
-                    'phase_coherence': snapshot.phase_coherence,
-                    'entanglement_witness': snapshot.entanglement_witness,
-                    'trace_purity': snapshot.trace_purity,
-                    'signature_valid': getattr(snapshot, 'signature_valid', False),
-                    'oracle_address': getattr(snapshot, 'oracle_address', None),
-                    'aer_noise_state': snapshot.aer_noise_state,
-                    'measurement_counts': snapshot.measurement_counts,
-                    'mermin_test': getattr(snapshot, 'bell_test', None),
-                    'lattice_refresh_counter': snapshot.lattice_refresh_counter,
-                    'w_state_hex': _w_hex,  # Include W-state for RPC response
+                    "timestamp_ns": snapshot.timestamp_ns,
+                    "oracle_id": snapshot.oracle_id,
+                    "density_tensor_hex": _tensor_hex,  # Use local 16³ tensor generated above
+                    "tensor_dim": 16,
+                    "purity": snapshot.purity,
+                    "w_state_fidelity": snapshot.w_state_fidelity,
+                    "von_neumann_entropy": snapshot.von_neumann_entropy,
+                    "coherence_l1": snapshot.coherence_l1,
+                    "coherence_renyi": getattr(snapshot, "coherence_renyi", None),
+                    "coherence_geometric": getattr(
+                        snapshot, "coherence_geometric", None
+                    ),
+                    "quantum_discord": getattr(snapshot, "quantum_discord", None),
+                    "w_state_strength": snapshot.w_state_strength,
+                    "phase_coherence": snapshot.phase_coherence,
+                    "entanglement_witness": snapshot.entanglement_witness,
+                    "trace_purity": snapshot.trace_purity,
+                    "signature_valid": getattr(snapshot, "signature_valid", False),
+                    "oracle_address": getattr(snapshot, "oracle_address", None),
+                    "aer_noise_state": snapshot.aer_noise_state,
+                    "measurement_counts": snapshot.measurement_counts,
+                    "mermin_test": getattr(snapshot, "bell_test", None),
+                    "lattice_refresh_counter": snapshot.lattice_refresh_counter,
+                    "w_state_hex": _w_hex,  # Include W-state for RPC response
                 }
                 _mod._broadcast_snapshot_to_database(snapshot_dict)
-                logger.debug(f"[ORACLE] ✅ Broadcasted authoritative snapshot with per_node")
+                logger.debug(
+                    f"[ORACLE] ✅ Broadcasted authoritative snapshot with per_node"
+                )
         except Exception as _bc_err:
             logger.debug(f"[ORACLE] Broadcast skip: {_bc_err}")
 
@@ -2445,7 +2916,7 @@ class OracleWStateManager:
             try:
                 sig = self.oracle_signer.sign_w_state_snapshot(snapshot)
                 if sig:
-                    snapshot.oracle_address  = self.oracle_signer.oracle_address
+                    snapshot.oracle_address = self.oracle_signer.oracle_address
                     snapshot.signature_valid = True
             except Exception as exc:
                 logger.warning(f"[ORACLE CLUSTER] Snapshot signing failed: {exc}")
@@ -2456,7 +2927,11 @@ class OracleWStateManager:
             f"Readings={len(readings)}/5 accepted={len(accepted)} | "
             f"F={cons_fidelity:.4f} C={cons_coherence:.6f} | "
             f"Total={total_ms:.1f}ms BF={bf_ms:.1f}ms"
-            + (f" | M={mermin_result['M_value']:.3f}" if mermin_result else " | M=pending")
+            + (
+                f" | M={mermin_result['M_value']:.3f}"
+                if mermin_result
+                else " | M=pending"
+            )
         )
         return snapshot
 
@@ -2467,50 +2942,63 @@ class OracleWStateManager:
         quantum state to console — everything an HTTP client needs to reconstruct entanglement."""
         CONSOLE_EVERY = 10
         cycles_ok = 0
-        logger.info("[ORACLE CLUSTER] 📡 Measurement stream started (5-node simultaneous)")
+        logger.info(
+            "[ORACLE CLUSTER] 📡 Measurement stream started (5-node simultaneous)"
+        )
         while self.running:
             try:
                 snapshot = self._extract_snapshot()
                 if snapshot:
                     # ← SSE STREAMING: Capture snapshot for real-time client delivery
                     measurement = {
-                        'timestamp_ns': snapshot.timestamp_ns,
-                        'density_matrix_real': getattr(snapshot, '_dm_re_list', [0.0]*64),
-                        'density_matrix_imag': getattr(snapshot, '_dm_im_list', [0.0]*64),
-                        'w_state_hex': snapshot.w_state_hex or '',
-                        'w_state_fidelity': snapshot.w_state_fidelity,
-                        'purity': snapshot.purity,
-                        'coherence_l1': snapshot.coherence_l1,
-                        'von_neumann_entropy': snapshot.von_neumann_entropy,
+                        "timestamp_ns": snapshot.timestamp_ns,
+                        "density_matrix_real": getattr(
+                            snapshot, "_dm_re_list", [0.0] * 64
+                        ),
+                        "density_matrix_imag": getattr(
+                            snapshot, "_dm_im_list", [0.0] * 64
+                        ),
+                        "w_state_hex": snapshot.w_state_hex or "",
+                        "w_state_fidelity": snapshot.w_state_fidelity,
+                        "purity": snapshot.purity,
+                        "coherence_l1": snapshot.coherence_l1,
+                        "von_neumann_entropy": snapshot.von_neumann_entropy,
                     }
                     self.sse_bridge.capture_snapshot(measurement)
-                    
-                    try: self.stream_queue.put_nowait(snapshot)
+
+                    try:
+                        self.stream_queue.put_nowait(snapshot)
                     except queue.Full:
-                        try: self.stream_queue.get_nowait(); self.stream_queue.put_nowait(snapshot)
-                        except Exception: pass
-                    
+                        try:
+                            self.stream_queue.get_nowait()
+                            self.stream_queue.put_nowait(snapshot)
+                        except Exception:
+                            pass
+
                     # ─── RPC BROADCAST (INTEGRATED): Oracle-primary measurement distribution ────────
                     # Non-blocking: call broadcaster to push snapshot to RPC subscribers
                     # + queue for async DB persistence. Returns immediately (<50ms).
                     try:
                         broadcaster = get_oracle_measurement_broadcaster()
                         bcast_result = broadcaster.broadcast_oracle_snapshot(snapshot)
-                        subs_count = bcast_result.get('broadcast_count', 0)
-                        db_queued = bcast_result.get('queued_for_db', False)
-                        elapsed_ms = bcast_result.get('elapsed_ms', 0)
-                        failed_count = len(bcast_result.get('failed_clients', []))
+                        subs_count = bcast_result.get("broadcast_count", 0)
+                        db_queued = bcast_result.get("queued_for_db", False)
+                        elapsed_ms = bcast_result.get("elapsed_ms", 0)
+                        failed_count = len(bcast_result.get("failed_clients", []))
                     except Exception as bcast_e:
-                        logger.error(f"[ORACLE CLUSTER] RPC broadcast error (non-blocking): {bcast_e}", exc_info=False)
+                        logger.error(
+                            f"[ORACLE CLUSTER] RPC broadcast error (non-blocking): {bcast_e}",
+                            exc_info=False,
+                        )
                     # ─────────────────────────────────────────────────────────────────────────────
-                    
+
                     self._broadcast_to_clients(snapshot)
                     cycles_ok += 1
-                    
+
                     # Status log every 100 steps
                     if cycles_ok % 100 == 0:
-                        bf  = snapshot.aer_noise_state.get("block_field", {})
-                        pq0_o  = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
+                        bf = snapshot.aer_noise_state.get("block_field", {})
+                        pq0_o = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
                         logger.info(
                             f"[ORACLE-MULTIPLEX] step={cycles_ok} | "
                             f"cycle={snapshot.lattice_refresh_counter} | "
@@ -2519,57 +3007,94 @@ class OracleWStateManager:
                             f"entropy={snapshot.von_neumann_entropy:.6f} | "
                             f"pq0={pq0_o:.4f}"
                         )
-                    
+
                     if cycles_ok % CONSOLE_EVERY == 0:
-                        bf  = snapshot.aer_noise_state.get("block_field", {})
+                        bf = snapshot.aer_noise_state.get("block_field", {})
                         mrt = snapshot.bell_test or self._last_mermin or {}
                         per = bf.get("per_node", [])
-                        pq0_o  = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
+                        pq0_o = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
                         pq0_iv = snapshot.aer_noise_state.get("pq0_IV_fidelity", 0)
-                        pq0_v  = snapshot.aer_noise_state.get("pq0_V_fidelity", 0)
-                        node_f = " | ".join(f"{n.get('fidelity',0):.4f}" for n in per)
-                        node_c = " | ".join(f"{n.get('coherence',0):.4f}" for n in per)
+                        pq0_v = snapshot.aer_noise_state.get("pq0_V_fidelity", 0)
+                        node_f = " | ".join(f"{n.get('fidelity', 0):.4f}" for n in per)
+                        node_c = " | ".join(f"{n.get('coherence', 0):.4f}" for n in per)
                         sep = "=" * 72
                         logger.debug(
                             "\n" + sep + "\n"
-                            "[ORACLE-SNAPSHOT] cycle=" + str(snapshot.lattice_refresh_counter) +
-                            " ts=" + str(snapshot.timestamp_ns) + "\n"
-                            "  Consensus : F=" + f"{snapshot.w_state_fidelity:.6f}" +
-                            "  C=" + f"{snapshot.coherence_l1:.6f}" +
-                            "  S=" + f"{snapshot.von_neumann_entropy:.6f}" +
-                            "  purity=" + f"{snapshot.purity:.6f}" + "\n"
-                            "  W-state   : strength=" + f"{snapshot.w_state_strength:.6f}" +
-                            "  phase_coh=" + f"{snapshot.phase_coherence:.6f}" +
-                            "  witness=" + f"{snapshot.entanglement_witness:.6f}" + "\n"
-                            "  pq0       : oracle=" + f"{pq0_o:.4f}" +
-                            "  IV=" + f"{pq0_iv:.4f}" + "  V=" + f"{pq0_v:.4f}" + "\n"
-                            "  Block     : pq_last=" + str(bf.get("pq_last",0)) +
-                            "->pq_curr=" + str(bf.get("pq_curr",0)) +
-                            "  entropy=" + f"{bf.get('block_field_entropy',0):.6f}" + "\n"
+                            "[ORACLE-SNAPSHOT] cycle="
+                            + str(snapshot.lattice_refresh_counter)
+                            + " ts="
+                            + str(snapshot.timestamp_ns)
+                            + "\n"
+                            "  Consensus : F="
+                            + f"{snapshot.w_state_fidelity:.6f}"
+                            + "  C="
+                            + f"{snapshot.coherence_l1:.6f}"
+                            + "  S="
+                            + f"{snapshot.von_neumann_entropy:.6f}"
+                            + "  purity="
+                            + f"{snapshot.purity:.6f}"
+                            + "\n"
+                            "  W-state   : strength="
+                            + f"{snapshot.w_state_strength:.6f}"
+                            + "  phase_coh="
+                            + f"{snapshot.phase_coherence:.6f}"
+                            + "  witness="
+                            + f"{snapshot.entanglement_witness:.6f}"
+                            + "\n"
+                            "  pq0       : oracle="
+                            + f"{pq0_o:.4f}"
+                            + "  IV="
+                            + f"{pq0_iv:.4f}"
+                            + "  V="
+                            + f"{pq0_v:.4f}"
+                            + "\n"
+                            "  Block     : pq_last="
+                            + str(bf.get("pq_last", 0))
+                            + "->pq_curr="
+                            + str(bf.get("pq_curr", 0))
+                            + "  entropy="
+                            + f"{bf.get('block_field_entropy', 0):.6f}"
+                            + "\n"
                             "  Per-node F: " + node_f + "\n"
                             "  Per-node C: " + node_c + "\n"
-                            "  Mermin    : M=" + f"{mrt.get('M_value',0):.4f}" +
-                            "  quantum=" + str(mrt.get("is_quantum",False)) +
-                            "  " + str(mrt.get("verdict","pending")) + "\n"
-                            "  DM-hex[:32]: " + snapshot.density_matrix_hex[:64] + "\n" +
-                            sep
+                            "  Mermin    : M="
+                            + f"{mrt.get('M_value', 0):.4f}"
+                            + "  quantum="
+                            + str(mrt.get("is_quantum", False))
+                            + "  "
+                            + str(mrt.get("verdict", "pending"))
+                            + "\n"
+                            "  DM-hex[:32]: "
+                            + snapshot.density_matrix_hex[:64]
+                            + "\n"
+                            + sep
                         )
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
             except Exception as exc:
                 _exc_str = str(exc)
-                if 'cannot schedule new futures' in _exc_str:
+                if "cannot schedule new futures" in _exc_str:
                     # Check if Python interpreter is shutting down — if so, exit cleanly
                     import sys as _sys
-                    if getattr(_sys, 'is_finalizing', lambda: False)() or                        'interpreter shutdown' in _exc_str:
-                        logger.debug("[ORACLE CLUSTER] Interpreter shutdown — stream worker exiting")
-                        return   # clean exit during process teardown
+
+                    if (
+                        getattr(_sys, "is_finalizing", lambda: False)()
+                        or "interpreter shutdown" in _exc_str
+                    ):
+                        logger.debug(
+                            "[ORACLE CLUSTER] Interpreter shutdown — stream worker exiting"
+                        )
+                        return  # clean exit during process teardown
                     # Worker recycle (not interpreter shutdown) — recreate executor
                     try:
                         self._pool = ThreadPoolExecutor(
-                            max_workers=5, thread_name_prefix="OracleMeasure")
+                            max_workers=5, thread_name_prefix="OracleMeasure"
+                        )
                         self._mermin_executor = ThreadPoolExecutor(
-                            max_workers=1, thread_name_prefix="MerminAsync")
-                        logger.info("[ORACLE CLUSTER] 🔄 Executors resurrected after shutdown")
+                            max_workers=1, thread_name_prefix="MerminAsync"
+                        )
+                        logger.info(
+                            "[ORACLE CLUSTER] 🔄 Executors resurrected after shutdown"
+                        )
                     except Exception as _re:
                         logger.debug(f"[ORACLE CLUSTER] executor resurrect: {_re}")
                     time.sleep(1.0)
@@ -2580,8 +3105,10 @@ class OracleWStateManager:
     def _refresh_worker(self):
         logger.info("[ORACLE CLUSTER] 🔄 Housekeeping worker started")
         while self.running:
-            try: time.sleep(LATTICE_REFRESH_INTERVAL_MS / 1000.0)
-            except Exception: time.sleep(0.1)
+            try:
+                time.sleep(LATTICE_REFRESH_INTERVAL_MS / 1000.0)
+            except Exception:
+                time.sleep(0.1)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -2590,22 +3117,28 @@ class OracleWStateManager:
             logger.warning("[ORACLE CLUSTER] Already running")
             return True
         try:
-            logger.info("[ORACLE CLUSTER] 🚀 Booting 5-node block-field measurement cluster...")
+            logger.info(
+                "[ORACLE CLUSTER] 🚀 Booting 5-node block-field measurement cluster..."
+            )
             self.setup_quantum_backend()
-            
+
             # ThreadPoolExecutor already created in __init__
             # Just verify it's alive
             if self._pool._shutdown:
-                self._pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="OracleMeasure")
-            
+                self._pool = ThreadPoolExecutor(
+                    max_workers=5, thread_name_prefix="OracleMeasure"
+                )
+
             logger.info("[ORACLE CLUSTER] 🔄 ThreadPoolExecutor ready (5 workers)")
-            
+
             self.running = True
             self.stream_thread = threading.Thread(
-                target=self._stream_worker, daemon=True, name="OracleClusterStream")
+                target=self._stream_worker, daemon=True, name="OracleClusterStream"
+            )
             self.stream_thread.start()
             self.refresh_thread = threading.Thread(
-                target=self._refresh_worker, daemon=True, name="OracleClusterRefresh")
+                target=self._refresh_worker, daemon=True, name="OracleClusterRefresh"
+            )
             self.refresh_thread.start()
             logger.info("[ORACLE CLUSTER] ✨ 5-node pair-rotation measurement active")
             return True
@@ -2615,7 +3148,9 @@ class OracleWStateManager:
 
     def stop(self):
         """DISABLED: Oracle runs forever. Daemon threads will die with the process."""
-        logger.warning("[ORACLE CLUSTER] stop() called but IGNORED — oracle runs forever")
+        logger.warning(
+            "[ORACLE CLUSTER] stop() called but IGNORED — oracle runs forever"
+        )
         # Do nothing. The Oracle measurement loop is a daemon thread.
         # When the process is SIGKILL'd by Koyeb, it dies with the process.
         # We NEVER voluntarily shut down the quantum engines.
@@ -2632,87 +3167,116 @@ class OracleWStateManager:
         with self._state_lock, self._temporal_lock:
             # Primary: use current_density_matrix if available
             s = self.current_density_matrix
-            
+
             # Fallback: if current is None but buffer has data, use most recent buffer entry
             if s is None and self.density_matrix_buffer:
                 try:
                     s = self.density_matrix_buffer[-1]
-                    logger.debug(f"[ORACLE] get_latest_density_matrix: current_density_matrix was None, using buffer fallback")
+                    logger.debug(
+                        f"[ORACLE] get_latest_density_matrix: current_density_matrix was None, using buffer fallback"
+                    )
                 except (IndexError, AttributeError):
                     s = None
-            
+
             # Hard fail if no data available
             if s is None:
-                logger.warning(f"[ORACLE] get_latest_density_matrix: No snapshots available (current=None, buffer empty)")
+                logger.warning(
+                    f"[ORACLE] get_latest_density_matrix: No snapshots available (current=None, buffer empty)"
+                )
                 return None
-            
-            latest_anchor = self.temporal_anchor_buffer[-1] if self.temporal_anchor_buffer else None
+
+            latest_anchor = (
+                self.temporal_anchor_buffer[-1] if self.temporal_anchor_buffer else None
+            )
             bf = s.aer_noise_state.get("block_field", {})
-            mermin = getattr(s, 'bell_test', None) or self._last_mermin
+            mermin = getattr(s, "bell_test", None) or self._last_mermin
             return {
-                "timestamp_ns": s.timestamp_ns, "density_matrix_hex": s.density_matrix_hex,
-                "purity": s.purity, "von_neumann_entropy": s.von_neumann_entropy,
-                "coherence_l1": s.coherence_l1, "coherence_renyi": s.coherence_renyi,
-                "coherence_geometric": s.coherence_geometric, "quantum_discord": s.quantum_discord,
-                "w_state_fidelity": s.w_state_fidelity, "measurement_counts": s.measurement_counts,
+                "timestamp_ns": s.timestamp_ns,
+                "density_matrix_hex": s.density_matrix_hex,
+                "purity": s.purity,
+                "von_neumann_entropy": s.von_neumann_entropy,
+                "coherence_l1": s.coherence_l1,
+                "coherence_renyi": s.coherence_renyi,
+                "coherence_geometric": s.coherence_geometric,
+                "quantum_discord": s.quantum_discord,
+                "w_state_fidelity": s.w_state_fidelity,
+                "measurement_counts": s.measurement_counts,
                 "aer_noise_state": s.aer_noise_state,
                 "lattice_refresh_counter": s.lattice_refresh_counter,
-                "w_state_strength": s.w_state_strength, "phase_coherence": s.phase_coherence,
-                "entanglement_witness": s.entanglement_witness, "trace_purity": s.trace_purity,
-                "oracle_address": s.oracle_address, "signature_valid": s.signature_valid,
+                "w_state_strength": s.w_state_strength,
+                "phase_coherence": s.phase_coherence,
+                "entanglement_witness": s.entanglement_witness,
+                "trace_purity": s.trace_purity,
+                "oracle_address": s.oracle_address,
+                "signature_valid": s.signature_valid,
                 "temporal_anchor": latest_anchor.to_dict() if latest_anchor else None,
-                "mermin_test": mermin, "bell_test": mermin,
-                "pq0_oracle_fidelity": s.aer_noise_state.get("pq0_oracle_fidelity", 0.0),
-                "pq0_IV_fidelity":     s.aer_noise_state.get("pq0_IV_fidelity",     0.0),
-                "pq0_V_fidelity":      s.aer_noise_state.get("pq0_V_fidelity",      0.0),
+                "mermin_test": mermin,
+                "bell_test": mermin,
+                "pq0_oracle_fidelity": s.aer_noise_state.get(
+                    "pq0_oracle_fidelity", 0.0
+                ),
+                "pq0_IV_fidelity": s.aer_noise_state.get("pq0_IV_fidelity", 0.0),
+                "pq0_V_fidelity": s.aer_noise_state.get("pq0_V_fidelity", 0.0),
                 "block_field": {
-                    "pq_curr":   bf.get("pq_curr",              0),
-                    "pq_last":   bf.get("pq_last",              0),
-                    "entropy":   bf.get("block_field_entropy",   0.0),
-                    "fidelity":  bf.get("block_field_fidelity",  0.0),
+                    "pq_curr": bf.get("pq_curr", 0),
+                    "pq_last": bf.get("pq_last", 0),
+                    "entropy": bf.get("block_field_entropy", 0.0),
+                    "fidelity": bf.get("block_field_fidelity", 0.0),
                     "coherence": bf.get("block_field_coherence", 0.0),
-                    "per_node":  bf.get("per_node",             []),
-                    "node_count":bf.get("node_count",            0),
-                    "accepted":  bf.get("accepted_count",        0),
+                    "per_node": bf.get("per_node", []),
+                    "node_count": bf.get("node_count", 0),
+                    "accepted": bf.get("accepted_count", 0),
                 },
             }
 
     def get_density_matrix_stream(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self._state_lock:
             return [
-                {"timestamp_ns": s.timestamp_ns, "purity": s.purity,
-                 "w_state_fidelity": s.w_state_fidelity, "coherence_l1": s.coherence_l1,
-                 "quantum_discord": s.quantum_discord, "measurement_counts": s.measurement_counts,
-                 "signature_valid": s.signature_valid, "oracle_address": s.oracle_address}
+                {
+                    "timestamp_ns": s.timestamp_ns,
+                    "purity": s.purity,
+                    "w_state_fidelity": s.w_state_fidelity,
+                    "coherence_l1": s.coherence_l1,
+                    "quantum_discord": s.quantum_discord,
+                    "measurement_counts": s.measurement_counts,
+                    "signature_valid": s.signature_valid,
+                    "oracle_address": s.oracle_address,
+                }
                 for s in list(self.density_matrix_buffer)[-limit:]
             ]
 
-    def sync_w_state_measurement_with_lattice(self, lattice_sync_info: Dict[str, Any]) -> Dict[str, Any]:
-        if not lattice_sync_info or 'fidelity' not in lattice_sync_info:
-            return {'aligned': False, 'reason': 'invalid_sync_info'}
-        lat_f = float(lattice_sync_info.get('fidelity', 0.0))
-        lat_c = float(lattice_sync_info.get('coherence', 0.0))
-        lat_cycle = int(lattice_sync_info.get('cycle', 0))
+    def sync_w_state_measurement_with_lattice(
+        self, lattice_sync_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if not lattice_sync_info or "fidelity" not in lattice_sync_info:
+            return {"aligned": False, "reason": "invalid_sync_info"}
+        lat_f = float(lattice_sync_info.get("fidelity", 0.0))
+        lat_c = float(lattice_sync_info.get("coherence", 0.0))
+        lat_cycle = int(lattice_sync_info.get("cycle", 0))
         try:
             with self._state_lock:
                 if self.current_density_matrix is None:
-                    return {'aligned': False, 'reason': 'no_consensus_state'}
+                    return {"aligned": False, "reason": "no_consensus_state"}
                 oracle_f = float(self.current_density_matrix.w_state_fidelity)
                 oracle_c = float(self.current_density_matrix.coherence_l1)
             with self._w_state_lock:
-                self._lattice_w_fidelity  = lat_f
+                self._lattice_w_fidelity = lat_f
                 self._lattice_w_coherence = lat_c
                 self._w_state_measurement_cycle = lat_cycle
             result = {
-                'aligned': abs(oracle_f-lat_f) <= 0.05 and abs(oracle_c-lat_c) <= 0.03,
-                'lattice_cycle': lat_cycle,
-                'lattice_fidelity': lat_f, 'lattice_coherence': lat_c,
-                'oracle_fidelity': oracle_f, 'oracle_coherence': oracle_c,
-                'fidelity_delta': abs(oracle_f-lat_f), 'coherence_delta': abs(oracle_c-lat_c),
+                "aligned": abs(oracle_f - lat_f) <= 0.05
+                and abs(oracle_c - lat_c) <= 0.03,
+                "lattice_cycle": lat_cycle,
+                "lattice_fidelity": lat_f,
+                "lattice_coherence": lat_c,
+                "oracle_fidelity": oracle_f,
+                "oracle_coherence": oracle_c,
+                "fidelity_delta": abs(oracle_f - lat_f),
+                "coherence_delta": abs(oracle_c - lat_c),
             }
             return result
         except Exception as e:
-            return {'aligned': False, 'reason': str(e)}
+            return {"aligned": False, "reason": str(e)}
 
     def _broadcast_to_clients(self, snapshot: DensityMatrixSnapshot):
         with self._client_lock:
@@ -2721,25 +3285,40 @@ class OracleWStateManager:
                 sync.last_sync_ns = time.time_ns()
         try:
             from globals import record_quantum_witness
+
             record_quantum_witness(
                 block_height=self.current_block_height,
                 block_hash=hashlib.sha3_256(
-                    json.dumps({'height': self.current_block_height,
-                                'fidelity': snapshot.w_state_fidelity}, sort_keys=True).encode()
+                    json.dumps(
+                        {
+                            "height": self.current_block_height,
+                            "fidelity": snapshot.w_state_fidelity,
+                        },
+                        sort_keys=True,
+                    ).encode()
                 ).hexdigest(),
                 w_state_fidelity=snapshot.w_state_fidelity,
                 timestamp_ns=snapshot.timestamp_ns,
             )
-        except Exception: pass
+        except Exception:
+            pass
 
     def create_temporal_anchor(self, snapshot=None) -> Optional[TemporalAnchorPoint]:
         with self._state_lock, self._temporal_lock:
-            if snapshot is None: snapshot = self.current_density_matrix
-            if snapshot is None: return None
-            c_base = snapshot.coherence_geometric if snapshot.coherence_geometric > 0 else snapshot.coherence_l1
+            if snapshot is None:
+                snapshot = self.current_density_matrix
+            if snapshot is None:
+                return None
+            c_base = (
+                snapshot.coherence_geometric
+                if snapshot.coherence_geometric > 0
+                else snapshot.coherence_l1
+            )
             anchor = TemporalAnchorPoint(
-                wall_clock_ns=int(time.time_ns()), coherence_at_emission=c_base,
-                block_height=self.current_block_height, w_entropy_hash=snapshot.w_entropy_hash,
+                wall_clock_ns=int(time.time_ns()),
+                coherence_at_emission=c_base,
+                block_height=self.current_block_height,
+                w_entropy_hash=snapshot.w_entropy_hash,
                 temporal_anchor_id=hashlib.sha3_256(
                     f"{snapshot.w_entropy_hash}:{self.current_block_height}:{time.time_ns()}".encode()
                 ).hexdigest()[:16],
@@ -2750,51 +3329,70 @@ class OracleWStateManager:
 
     def register_p2p_client(self, client_id: str) -> bool:
         with self._client_lock:
-            if client_id in self.p2p_clients: return False
-            self.p2p_clients[client_id] = P2PClientSync(client_id, 0, time.time_ns(), "establishing", 0.0)
+            if client_id in self.p2p_clients:
+                return False
+            self.p2p_clients[client_id] = P2PClientSync(
+                client_id, 0, time.time_ns(), "establishing", 0.0
+            )
             return True
 
     def update_p2p_client_status(self, client_id: str, fidelity: float) -> bool:
         with self._client_lock:
-            if client_id not in self.p2p_clients: return False
+            if client_id not in self.p2p_clients:
+                return False
             s = self.p2p_clients[client_id]
-            s.local_state_fidelity = fidelity; s.last_sync_ns = time.time_ns()
-            s.entanglement_status = "synced" if fidelity >= W_STATE_FIDELITY_THRESHOLD else "establishing"
+            s.local_state_fidelity = fidelity
+            s.last_sync_ns = time.time_ns()
+            s.entanglement_status = (
+                "synced" if fidelity >= W_STATE_FIDELITY_THRESHOLD else "establishing"
+            )
             return True
 
     def get_status(self) -> Dict[str, Any]:
         with self._state_lock:
             dm = self.current_density_matrix
-            if dm is None: return {"status": "initializing"}
-            with self._bf_lock: bf_snap = dict(self.block_field_readings)
-            with self._pq_lock: pq_curr, pq_last = self._pq_curr, self._pq_last
+            if dm is None:
+                return {"status": "initializing"}
+            with self._bf_lock:
+                bf_snap = dict(self.block_field_readings)
+            with self._pq_lock:
+                pq_curr, pq_last = self._pq_curr, self._pq_last
             bf_agg = dm.aer_noise_state.get("block_field", {})
             return {
                 "status": "running" if self.running else "stopped",
                 "uptime_ns": time.time_ns() - self.boot_time_ns,
-                "w_state_fidelity": dm.w_state_fidelity, "purity": dm.purity,
+                "w_state_fidelity": dm.w_state_fidelity,
+                "purity": dm.purity,
                 "lattice_refresh_counter": self.lattice_refresh_counter,
                 "buffer_size": len(self.density_matrix_buffer),
                 "latest_snapshot_signed": dm.signature_valid,
                 "nodes": [
-                    {"oracle_id": n.oracle_id+1, "role": n.role, "aer_ready": n.aer is not None,
-                     "last_fidelity": round(n.last_fidelity,6), "measurements": n.measurement_count}
+                    {
+                        "oracle_id": n.oracle_id + 1,
+                        "role": n.role,
+                        "aer_ready": n.aer is not None,
+                        "last_fidelity": round(n.last_fidelity, 6),
+                        "measurements": n.measurement_count,
+                    }
                     for n in self.nodes
                 ],
                 "block_field": {
-                    "pq_curr": pq_curr, "pq_last": pq_last,
-                    "entropy":   bf_agg.get("block_field_entropy",   0.0),
-                    "fidelity":  bf_agg.get("block_field_fidelity",  0.0),
+                    "pq_curr": pq_curr,
+                    "pq_last": pq_last,
+                    "entropy": bf_agg.get("block_field_entropy", 0.0),
+                    "fidelity": bf_agg.get("block_field_fidelity", 0.0),
                     "coherence": bf_agg.get("block_field_coherence", 0.0),
-                    "per_node":  bf_agg.get("per_node",             []),
+                    "per_node": bf_agg.get("per_node", []),
                 },
             }
 
+
 # ─── Oracle Engine (master singleton) ────────────────────────────────────────
+
 
 class OracleEngine:
     """Master oracle: HypΓ post-quantum signing for all oracle actions.
-    
+
     Manages keys, signs transactions/blocks/snapshots/prices with Schnorr-Γ.
     Keypair loaded from ORACLE_MASTER_SEED_HEX or generated fresh.
     Every action cryptographically bound to quantum state at oracle time.
@@ -2803,10 +3401,10 @@ class OracleEngine:
     def __init__(self):
         # CRITICAL: Initialize ALL attributes FIRST before ANY risky calls.
         # If any setup code raises, attributes must exist to prevent AttributeError.
-        self._init_lock   = threading.Lock()
-        self._keyring:    Optional[HDKeyring]    = None
+        self._init_lock = threading.Lock()
+        self._keyring: Optional[HDKeyring] = None
         self._hyp_signer: Optional[HypOracleSigner] = None
-        self._signer      = None  # legacy HLWE signer — None until externally injected
+        self._signer = None  # legacy HLWE signer — None until externally injected
         self._lattice_ref = None
         self._address_index: Dict[str, int] = {}
         self._next_index = 0
@@ -2816,24 +3414,30 @@ class OracleEngine:
             hyp_engine = _lazy_init_hyp_engine()
             if hyp_engine:
                 self._hyp_signer = HypOracleSigner(hyp_engine)
-                logger.info(f"[ORACLE] ✅ HypΓ signer online — oracle={self._hyp_signer.get_oracle_address()}")
+                logger.info(
+                    f"[ORACLE] ✅ HypΓ signer online — oracle={self._hyp_signer.get_oracle_address()}"
+                )
         except Exception as e:
             logger.error(f"[ORACLE] HypΓ signer init failed (will use fallback): {e}")
             self._hyp_signer = None
-        
+
         seed_hex = os.getenv("ORACLE_MASTER_SEED_HEX")
         if seed_hex:
             try:
                 seed = bytes.fromhex(seed_hex)
                 self._keyring = HDKeyring(seed, os.getenv("ORACLE_PASSPHRASE", ""))
-                logger.info(f"[ORACLE] ✅ Master seed loaded | address={self._keyring.master.address()}")
+                logger.info(
+                    f"[ORACLE] ✅ Master seed loaded | address={self._keyring.master.address()}"
+                )
             except Exception as e:
                 logger.error(f"[ORACLE] Failed to load seed: {e}")
                 self._create_new_seed()
         else:
             self._create_new_seed()
         if self._keyring:
-            logger.info(f"[ORACLE] ✅ Keyring ready | address={self._keyring.master.address()}")
+            logger.info(
+                f"[ORACLE] ✅ Keyring ready | address={self._keyring.master.address()}"
+            )
 
     def _create_new_seed(self):
         seed = secrets.token_bytes(32)
@@ -2849,7 +3453,11 @@ class OracleEngine:
         """Gracefully shut down oracle — stop RPC broadcast controller."""
         try:
             broadcaster = get_oracle_measurement_broadcaster()
-            if broadcaster and hasattr(broadcaster, 'stop') and callable(broadcaster.stop):
+            if (
+                broadcaster
+                and hasattr(broadcaster, "stop")
+                and callable(broadcaster.stop)
+            ):
                 broadcaster.stop()
                 logger.info("[ORACLE] ✅ RPC broadcast controller stopped")
         except Exception as e:
@@ -2865,18 +3473,24 @@ class OracleEngine:
                 result = self._lattice_ref.w_state_constructor.measure_oracle_pqivv_w()
                 if result and result.get("counts"):
                     return hashlib.sha3_256(
-                        json.dumps(result["counts"], sort_keys=True).encode() +
-                        str(result.get("w_state_strength", 0)).encode() +
-                        str(time.time_ns()).encode()
+                        json.dumps(result["counts"], sort_keys=True).encode()
+                        + str(result.get("w_state_strength", 0)).encode()
+                        + str(time.time_ns()).encode()
                     ).digest()
-            except Exception: pass
+            except Exception:
+                pass
         return secrets.token_bytes(32)
 
-    def sign_transaction(self, tx_hash: str, sender_address: str,
-                         account: int = 0, change: int = 0,
-                         index: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def sign_transaction(
+        self,
+        tx_hash: str,
+        sender_address: str,
+        account: int = 0,
+        change: int = 0,
+        index: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if hasattr(self, '_hyp_signer') and self._hyp_signer:
+        if hasattr(self, "_hyp_signer") and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_transaction(tx_hash)
             if hyp_sig:
                 return hyp_sig
@@ -2887,62 +3501,76 @@ class OracleEngine:
                         self._address_index[sender_address] = self._next_index
                         self._next_index += 1
                     index = self._address_index[sender_address]
-            if not hasattr(self, '_signer') or not self._signer:
+            if not hasattr(self, "_signer") or not self._signer:
                 return None
-            return self._signer.sign_transaction(tx_hash, sender_address, account, change, index,
-                                                  self._get_w_entropy())
+            return self._signer.sign_transaction(
+                tx_hash, sender_address, account, change, index, self._get_w_entropy()
+            )
         except Exception as e:
             logger.error(f"[ORACLE] TX signing failed: {e}")
             return None
 
-    def sign_block(self, block_hash: str, block_height: int) -> Optional[Dict[str, Any]]:
+    def sign_block(
+        self, block_hash: str, block_height: int
+    ) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if hasattr(self, '_hyp_signer') and self._hyp_signer:
+        if hasattr(self, "_hyp_signer") and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_block(block_hash, block_height)
             if hyp_sig:
                 return hyp_sig
         try:
-            if not hasattr(self, '_signer') or not self._signer:
+            if not hasattr(self, "_signer") or not self._signer:
                 return None
-            return self._signer.sign_message(block_hash, self._keyring.master, self._get_w_entropy())
+            return self._signer.sign_message(
+                block_hash, self._keyring.master, self._get_w_entropy()
+            )
         except Exception as e:
             logger.error(f"[ORACLE] Block signing failed: {e}")
             return None
 
-    def sign_w_state_snapshot(self, snapshot: DensityMatrixSnapshot) -> Optional[Dict[str, Any]]:
+    def sign_w_state_snapshot(
+        self, snapshot: DensityMatrixSnapshot
+    ) -> Optional[Dict[str, Any]]:
         # Try HypΓ first
-        if hasattr(self, '_hyp_signer') and self._hyp_signer:
+        if hasattr(self, "_hyp_signer") and self._hyp_signer:
             hyp_sig = self._hyp_signer.sign_snapshot(snapshot)
             if hyp_sig:
                 return hyp_sig
         try:
-            if not hasattr(self, '_signer') or not self._signer:
+            if not hasattr(self, "_signer") or not self._signer:
                 return None
             h = hashlib.sha3_256(
                 (snapshot.density_matrix_hex + str(snapshot.timestamp_ns)).encode()
             ).hexdigest()
-            return self._signer.sign_message(h, self._keyring.master, self._get_w_entropy())
+            return self._signer.sign_message(
+                h, self._keyring.master, self._get_w_entropy()
+            )
         except Exception as e:
             logger.error(f"[ORACLE] Snapshot signing failed: {e}")
             return None
-    
+
     def sign_price_attestation(self, price_vector: dict) -> Optional[dict]:
         """Sign Pyth price attestation with HypΓ."""
         if self._hyp_signer:
             return self._hyp_signer.sign_price_attestation(price_vector)
         return None
 
-    def verify_transaction(self, tx_hash: str, sig_dict: Dict[str, Any],
-                            sender_address: str) -> Tuple[bool, str]:
+    def verify_transaction(
+        self, tx_hash: str, sig_dict: Dict[str, Any], sender_address: str
+    ) -> Tuple[bool, str]:
         try:
             if self._hyp_signer and self._hyp_signer._engine:
-                ok = self._hyp_signer._engine.verify_signature(tx_hash, sig_dict, sender_address)
+                ok = self._hyp_signer._engine.verify_signature(
+                    tx_hash, sig_dict, sender_address
+                )
                 return (True, "valid") if ok else (False, "invalid_signature")
             return False, "no_signer_available"
         except Exception as e:
             return False, f"verification exception: {e}"
 
-    def verify_block(self, block_hash: str, sig_dict: Dict[str, Any]) -> Tuple[bool, str]:
+    def verify_block(
+        self, block_hash: str, sig_dict: Dict[str, Any]
+    ) -> Tuple[bool, str]:
         try:
             if self._hyp_signer and self._hyp_signer._engine:
                 ok = self._hyp_signer._engine.verify_signature(block_hash, sig_dict)
@@ -2951,62 +3579,81 @@ class OracleEngine:
         except Exception as e:
             return False, f"block verification exception: {e}"
 
-    def new_address(self, account: int = 0, change: int = 0) -> Tuple[str, OracleKeyPair]:
+    def new_address(
+        self, account: int = 0, change: int = 0
+    ) -> Tuple[str, OracleKeyPair]:
         with self._init_lock:
-            index = self._next_index; self._next_index += 1
+            index = self._next_index
+            self._next_index += 1
         kp = self._keyring.derive_address_key(account, change, index)
         addr = kp.address()
         self._address_index[addr] = index
         return addr, kp
 
     def derive_stable_miner_id(self, public_key_hex: str) -> str:
-        try: return hashlib.sha256(public_key_hex.encode()).hexdigest()[:16]
-        except: return secrets.token_hex(8)
+        try:
+            return hashlib.sha256(public_key_hex.encode()).hexdigest()[:16]
+        except:
+            return secrets.token_hex(8)
 
-    def register_miner(self, public_key_hex: str, wallet_address: str) -> Dict[str, Any]:
+    def register_miner(
+        self, public_key_hex: str, wallet_address: str
+    ) -> Dict[str, Any]:
         try:
             miner_id = self.derive_stable_miner_id(public_key_hex)
             return {
-                'miner_id': miner_id, 'public_key': public_key_hex,
-                'wallet_address': wallet_address, 'registered_at': time.time(),
-                'oracle_difficulty': 20, 'status': 'registered',
+                "miner_id": miner_id,
+                "public_key": public_key_hex,
+                "wallet_address": wallet_address,
+                "registered_at": time.time(),
+                "oracle_difficulty": 20,
+                "status": "registered",
             }
         except Exception as e:
-            return {'status': 'error', 'message': str(e)}
+            return {"status": "error", "message": str(e)}
 
     @property
     def oracle_address(self) -> str:
         """Primary oracle address — HypΓ cryptographic identity."""
         if self._hyp_signer:
             return self._hyp_signer.get_oracle_address()
-        return self._keyring.master.address() if self._keyring else "qtcl_oracle_default"
+        return (
+            self._keyring.master.address() if self._keyring else "qtcl_oracle_default"
+        )
 
     def get_status(self) -> Dict[str, Any]:
         return {
-            "oracle_address":   self.oracle_address,
+            "oracle_address": self.oracle_address,
             "hyp_signer_active": self._hyp_signer is not None,
-            "master_depth":     0,
+            "master_depth": 0,
             "addresses_issued": self._next_index,
-            "lattice_wired":    self._lattice_ref is not None,
-            "signing_scheme":   "HypΓ-Schnorr (post-quantum)",  # sole signing method
-            "derivation":       f"m/{QTCL_PURPOSE}'/{QTCL_COIN}'/account'/change/index",
-            "timestamp":        time.time(),
+            "lattice_wired": self._lattice_ref is not None,
+            "signing_scheme": "HypΓ-Schnorr (post-quantum)",  # sole signing method
+            "derivation": f"m/{QTCL_PURPOSE}'/{QTCL_COIN}'/account'/change/index",
+            "timestamp": time.time(),
         }
 
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def json_stable_bytes(obj) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
+
 # ─── Module-level singletons (lazy initialization) ──────────────────────────────────────────────────
+
 
 class _LazyOracle:
     """Lazy wrapper to prevent blocking at import time."""
+
     _instance = None
+
     def __getattr__(self, name):
         if _LazyOracle._instance is None:
             _LazyOracle._instance = OracleEngine()
         return getattr(_LazyOracle._instance, name)
+
 
 ORACLE_W_STATE_MANAGER = OracleWStateManager()
 ORACLE = _LazyOracle()
@@ -3042,69 +3689,74 @@ _PYTH_LOGGER = logging.getLogger("qtcl.pyth")
 
 # ─── Pyth Hermes endpoint ─────────────────────────────────────────────────────
 _PYTH_HERMES_BASE = "https://hermes.pyth.network/api/latest_price_feeds"
-_PYTH_TIMEOUT_S   = 4.0    # Hard deadline — Hermes p95 latency ≪ 1 s globally
+_PYTH_TIMEOUT_S = 4.0  # Hard deadline — Hermes p95 latency ≪ 1 s globally
 
 # ─── Official Pyth Mainnet price feed IDs ────────────────────────────────────
 PYTH_FEED_IDS: Dict[str, str] = {
-    "BTC":   "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
-    "ETH":   "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
-    "SOL":   "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
-    "BNB":   "0x2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
-    "AVAX":  "0x93da3352f9f1d105fdfe4971cfa80e9dd777bfc5d0f683ebb6e1294b92137bb7",
+    "BTC": "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+    "ETH": "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+    "SOL": "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+    "BNB": "0x2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
+    "AVAX": "0x93da3352f9f1d105fdfe4971cfa80e9dd777bfc5d0f683ebb6e1294b92137bb7",
     "MATIC": "0x5de33a9112c2b700b8d30b8a3402c103578ccfa2765696471cc672bd5cf6ac52",
-    "LINK":  "0x8ac0c70fff57e9aefdf5edf44b51d62c2d433653cbb2cf5cc06bb115af04d221",
-    "ADA":   "0x2a01deaec9e51a579277b34b122399984d0bbf57e2458a7e42fecd2829867a0d",
-    "DOT":   "0xca3eed9b267293f6595901c734c7525ce8ef49adafe8284606ceb307afa2ca5b",
-    "ATOM":  "0xb00b60f88b03a6a625a8d1c048c3f66653edf217439983d037e7522c4e798130",
+    "LINK": "0x8ac0c70fff57e9aefdf5edf44b51d62c2d433653cbb2cf5cc06bb115af04d221",
+    "ADA": "0x2a01deaec9e51a579277b34b122399984d0bbf57e2458a7e42fecd2829867a0d",
+    "DOT": "0xca3eed9b267293f6595901c734c7525ce8ef49adafe8284606ceb307afa2ca5b",
+    "ATOM": "0xb00b60f88b03a6a625a8d1c048c3f66653edf217439983d037e7522c4e798130",
 }
+
 
 @dataclass
 class PythPriceFeed:
     """Single price feed attestation from Pyth Hermes."""
-    symbol:        str
-    feed_id:       str
-    price:         float          # USD, exponent applied
-    conf:          float          # ±confidence USD
-    expo:          int            # raw Pyth exponent
-    publish_time:  int            # UNIX timestamp from Pyth attestation
-    age_seconds:   float          # seconds since attestation (at fetch time)
-    status:        str            # "trading" | "halted" | "unknown"
-    raw_price:     int            # raw i64 from Pyth (pre-exponent)
-    raw_conf:      int            # raw u64 confidence
+
+    symbol: str
+    feed_id: str
+    price: float  # USD, exponent applied
+    conf: float  # ±confidence USD
+    expo: int  # raw Pyth exponent
+    publish_time: int  # UNIX timestamp from Pyth attestation
+    age_seconds: float  # seconds since attestation (at fetch time)
+    status: str  # "trading" | "halted" | "unknown"
+    raw_price: int  # raw i64 from Pyth (pre-exponent)
+    raw_conf: int  # raw u64 confidence
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "symbol":       self.symbol,
-            "feed_id":      self.feed_id,
-            "price_usd":    self.price,
-            "confidence":   self.conf,
-            "expo":         self.expo,
+            "symbol": self.symbol,
+            "feed_id": self.feed_id,
+            "price_usd": self.price,
+            "confidence": self.conf,
+            "expo": self.expo,
             "publish_time": self.publish_time,
-            "age_seconds":  round(self.age_seconds, 3),
-            "status":       self.status,
+            "age_seconds": round(self.age_seconds, 3),
+            "status": self.status,
         }
+
 
 @dataclass
 class PythAtomicSnapshot:
     """Immutable atomic price snapshot — all feeds fetched in single round-trip."""
-    snapshot_id:   str                        # hex(sha256(canonical_repr))
-    fetch_time_ns: int                        # monotonic fetch timestamp (ns)
-    feeds:         Dict[str, PythPriceFeed]   # symbol → PriceFeed
-    outliers:      List[str]                  # symbols rejected by Byzantine filter
-    hermes_ok:     bool                       # False if stale cache served
-    hyp_sig:       Optional[str] = None       # HypΓ oracle signature (if available)
-    qtcl_version:  str = "QTCL-PYTH-v2"
+
+    snapshot_id: str  # hex(sha256(canonical_repr))
+    fetch_time_ns: int  # monotonic fetch timestamp (ns)
+    feeds: Dict[str, PythPriceFeed]  # symbol → PriceFeed
+    outliers: List[str]  # symbols rejected by Byzantine filter
+    hermes_ok: bool  # False if stale cache served
+    hyp_sig: Optional[str] = None  # HypΓ oracle signature (if available)
+    qtcl_version: str = "QTCL-PYTH-v2"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "snapshot_id":   self.snapshot_id,
+            "snapshot_id": self.snapshot_id,
             "fetch_time_ns": self.fetch_time_ns,
-            "feeds":         {s: f.to_dict() for s, f in self.feeds.items()},
-            "outliers":      self.outliers,
-            "hermes_ok":     self.hermes_ok,
-            "hyp_sig":       self.hyp_sig,
-            "qtcl_version":  self.qtcl_version,
+            "feeds": {s: f.to_dict() for s, f in self.feeds.items()},
+            "outliers": self.outliers,
+            "hermes_ok": self.hermes_ok,
+            "hyp_sig": self.hyp_sig,
+            "qtcl_version": self.qtcl_version,
         }
+
 
 class PythPriceOracle:
     """
@@ -3119,17 +3771,17 @@ class PythPriceOracle:
         btc    = snap.feeds["BTC"].price
     """
 
-    _CACHE_TTL_S    = 5.0     # seconds before re-fetching Hermes
-    _BYZANTINE_SIGMA = 2.0    # reject feeds > 2σ from median price
-    _MAX_STALE_S    = 60.0    # refuse to serve cache older than this
+    _CACHE_TTL_S = 5.0  # seconds before re-fetching Hermes
+    _BYZANTINE_SIGMA = 2.0  # reject feeds > 2σ from median price
+    _MAX_STALE_S = 60.0  # refuse to serve cache older than this
 
     def __init__(self) -> None:
-        self._lock:         threading.RLock             = threading.RLock()
-        self._cache:        Optional[PythAtomicSnapshot] = None
-        self._cache_ts:     float                       = 0.0     # wall time of last fetch
-        self._fetch_count:  int                         = 0
-        self._error_count:  int                         = 0
-        self._last_error:   Optional[str]               = None
+        self._lock: threading.RLock = threading.RLock()
+        self._cache: Optional[PythAtomicSnapshot] = None
+        self._cache_ts: float = 0.0  # wall time of last fetch
+        self._fetch_count: int = 0
+        self._error_count: int = 0
+        self._last_error: Optional[str] = None
         _PYTH_LOGGER.info("[PYTH] ✅ PythPriceOracle initialized (Hermes direct)")
 
     # ─── Public API ───────────────────────────────────────────────────────────
@@ -3171,7 +3823,7 @@ class PythPriceOracle:
         # Slow path: fetch from Hermes
         snap = self._fetch_from_hermes(symbols, now)
         with self._lock:
-            self._cache    = snap
+            self._cache = snap
             self._cache_ts = now
         return snap
 
@@ -3189,12 +3841,12 @@ class PythPriceOracle:
         with self._lock:
             cache_age = time.time() - self._cache_ts if self._cache_ts else None
             return {
-                "fetch_count":  self._fetch_count,
-                "error_count":  self._error_count,
-                "last_error":   self._last_error,
-                "cache_age_s":  round(cache_age, 3) if cache_age is not None else None,
-                "cache_valid":  self._cache is not None,
-                "feed_count":   len(self._cache.feeds) if self._cache else 0,
+                "fetch_count": self._fetch_count,
+                "error_count": self._error_count,
+                "last_error": self._last_error,
+                "cache_age_s": round(cache_age, 3) if cache_age is not None else None,
+                "cache_valid": self._cache is not None,
+                "feed_count": len(self._cache.feeds) if self._cache else 0,
             }
 
     # ─── Internal ─────────────────────────────────────────────────────────────
@@ -3208,12 +3860,15 @@ class PythPriceOracle:
         fetch_ns = time.monotonic_ns()
         try:
             feed_ids = [PYTH_FEED_IDS[s] for s in symbols]
-            params   = "&".join(f"ids[]={fid}" for fid in feed_ids)
-            url      = f"{_PYTH_HERMES_BASE}?{params}"
+            params = "&".join(f"ids[]={fid}" for fid in feed_ids)
+            url = f"{_PYTH_HERMES_BASE}?{params}"
 
             req = urllib.request.Request(
                 url,
-                headers={"Accept": "application/json", "User-Agent": "QTCL/2.0 PythOracle"},
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "QTCL/2.0 PythOracle",
+                },
             )
             with urllib.request.urlopen(req, timeout=_PYTH_TIMEOUT_S) as resp:
                 raw = json.loads(resp.read().decode())
@@ -3232,7 +3887,7 @@ class PythPriceOracle:
         except Exception as exc:
             with self._lock:
                 self._error_count += 1
-                self._last_error   = str(exc)
+                self._last_error = str(exc)
 
             _PYTH_LOGGER.warning(f"[PYTH] Hermes fetch failed: {exc}")
 
@@ -3242,8 +3897,12 @@ class PythPriceOracle:
                     self._cache is not None
                     and (time.time() - self._cache_ts) < self._MAX_STALE_S
                 ):
-                    _PYTH_LOGGER.warning("[PYTH] Serving stale cache (Hermes unreachable)")
-                    return self._filtered_snapshot(self._cache, symbols, hermes_ok=False)
+                    _PYTH_LOGGER.warning(
+                        "[PYTH] Serving stale cache (Hermes unreachable)"
+                    )
+                    return self._filtered_snapshot(
+                        self._cache, symbols, hermes_ok=False
+                    )
 
             # Empty snapshot — Hermes down and no usable cache
             return self._build_snapshot({}, [], fetch_ns, hermes_ok=False)
@@ -3259,7 +3918,9 @@ class PythPriceOracle:
         id_to_sym = {PYTH_FEED_IDS[s]: s for s in symbols}
         parsed: Dict[str, PythPriceFeed] = {}
 
-        entries = raw if isinstance(raw, list) else raw.get("parsed", raw.get("data", []))
+        entries = (
+            raw if isinstance(raw, list) else raw.get("parsed", raw.get("data", []))
+        )
 
         for entry in entries:
             try:
@@ -3271,28 +3932,28 @@ class PythPriceOracle:
                     continue
 
                 price_data = entry.get("price", {})
-                raw_price  = int(price_data.get("price", 0))
-                raw_conf   = int(price_data.get("conf",  0))
-                expo       = int(price_data.get("expo",  -8))
-                pub_time   = int(price_data.get("publish_time", int(fetch_wall)))
-                status     = price_data.get("status", "trading")
+                raw_price = int(price_data.get("price", 0))
+                raw_conf = int(price_data.get("conf", 0))
+                expo = int(price_data.get("expo", -8))
+                pub_time = int(price_data.get("publish_time", int(fetch_wall)))
+                status = price_data.get("status", "trading")
 
-                scale = 10 ** expo
+                scale = 10**expo
                 price_usd = raw_price * scale
-                conf_usd  = raw_conf  * scale
-                age_s     = fetch_wall - pub_time
+                conf_usd = raw_conf * scale
+                age_s = fetch_wall - pub_time
 
                 parsed[sym] = PythPriceFeed(
-                    symbol       = sym,
-                    feed_id      = fid,
-                    price        = price_usd,
-                    conf         = conf_usd,
-                    expo         = expo,
-                    publish_time = pub_time,
-                    age_seconds  = age_s,
-                    status       = status,
-                    raw_price    = raw_price,
-                    raw_conf     = raw_conf,
+                    symbol=sym,
+                    feed_id=fid,
+                    price=price_usd,
+                    conf=conf_usd,
+                    expo=expo,
+                    publish_time=pub_time,
+                    age_seconds=age_s,
+                    status=status,
+                    raw_price=raw_price,
+                    raw_conf=raw_conf,
                 )
             except Exception as e:
                 _PYTH_LOGGER.debug(f"[PYTH] Parse error on entry: {e}")
@@ -3301,11 +3962,11 @@ class PythPriceOracle:
         outliers: List[str] = []
         if len(parsed) >= 3:
             prices = [f.price for f in parsed.values()]
-            med    = statistics.median(prices)
+            med = statistics.median(prices)
             # Use MAD-based scale (robust against extreme outliers)
             deviations = [abs(p - med) for p in prices]
             mad = statistics.median(deviations) or 1.0
-            mad_scale = 1.4826 * mad   # consistent with normal distribution σ
+            mad_scale = 1.4826 * mad  # consistent with normal distribution σ
 
             for sym, feed in list(parsed.items()):
                 z_score = abs(feed.price - med) / mad_scale
@@ -3329,32 +3990,37 @@ class PythPriceOracle:
         """Construct and HypΓ-sign an atomic snapshot."""
         # Canonical repr for snapshot ID
         canon = json.dumps(
-            {s: {"price": f.price, "conf": f.conf, "publish_time": f.publish_time}
-             for s, f in sorted(feeds.items())},
+            {
+                s: {"price": f.price, "conf": f.conf, "publish_time": f.publish_time}
+                for s, f in sorted(feeds.items())
+            },
             sort_keys=True,
         )
-        snap_id = hashlib.sha256(
-            f"{fetch_ns}:{canon}".encode()
-        ).hexdigest()
+        snap_id = hashlib.sha256(f"{fetch_ns}:{canon}".encode()).hexdigest()
 
         # HypΓ signature (non-blocking — if ORACLE not yet ready, skip)
         hyp_sig: Optional[str] = None
         try:
             from oracle import ORACLE as _eng
+
             if _eng is not None:
                 sig_bytes = _eng.sign(snap_id.encode())
                 if sig_bytes:
-                    hyp_sig = sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes)
+                    hyp_sig = (
+                        sig_bytes.hex()
+                        if isinstance(sig_bytes, bytes)
+                        else str(sig_bytes)
+                    )
         except Exception:
             pass  # Signature is advisory — never block price delivery
 
         return PythAtomicSnapshot(
-            snapshot_id   = snap_id,
-            fetch_time_ns = fetch_ns,
-            feeds         = feeds,
-            outliers      = outliers,
-            hermes_ok     = hermes_ok,
-            hyp_sig       = hyp_sig,
+            snapshot_id=snap_id,
+            fetch_time_ns=fetch_ns,
+            feeds=feeds,
+            outliers=outliers,
+            hermes_ok=hermes_ok,
+            hyp_sig=hyp_sig,
         )
 
     def _filtered_snapshot(
@@ -3366,13 +4032,14 @@ class PythPriceOracle:
         """Return a view of snap filtered to requested symbols."""
         filtered_feeds = {s: f for s, f in snap.feeds.items() if s in symbols}
         return PythAtomicSnapshot(
-            snapshot_id   = snap.snapshot_id,
-            fetch_time_ns = snap.fetch_time_ns,
-            feeds         = filtered_feeds,
-            outliers      = snap.outliers,
-            hermes_ok     = hermes_ok if hermes_ok is not None else snap.hermes_ok,
-            hyp_sig       = snap.hyp_sig,
+            snapshot_id=snap.snapshot_id,
+            fetch_time_ns=snap.fetch_time_ns,
+            feeds=filtered_feeds,
+            outliers=snap.outliers,
+            hermes_ok=hermes_ok if hermes_ok is not None else snap.hermes_ok,
+            hyp_sig=snap.hyp_sig,
         )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RPC BROADCAST CONTROLLER
@@ -3383,9 +4050,11 @@ import queue as queue_module
 from collections import deque
 from dataclasses import dataclass as dc_dataclass
 
+
 @dc_dataclass
 class MeasurementSubscriber:
     """One RPC client subscribed to oracle measurements."""
+
     client_id: str
     callback_url: str
     burst_mode: bool = False
@@ -3394,10 +4063,11 @@ class MeasurementSubscriber:
     error_count: int = 0
     last_error: Optional[str] = None
     registered_at_ns: int = 0
-    
+
     def __post_init__(self):
         if self.registered_at_ns == 0:
             self.registered_at_ns = time.time_ns()
+
 
 class RpcBroadcastController:
     """
@@ -3405,6 +4075,7 @@ class RpcBroadcastController:
     PRIMARY ENTRY POINT: broadcast_oracle_snapshot(snapshot: DensityMatrixSnapshot)
     Called immediately after Oracle._extract_snapshot() completes.
     """
+
     def __init__(self):
         self._subscribers: Dict[str, MeasurementSubscriber] = {}
         self._sub_lock = threading.RLock()
@@ -3414,9 +4085,12 @@ class RpcBroadcastController:
         self._persist_thread: Optional[threading.Thread] = None
         self._running = False
         self._metrics = {
-            'broadcasts_sent': 0, 'broadcasts_failed': 0,
-            'db_writes_queued': 0, 'db_writes_failed': 0, 'db_writes_success': 0,
-            'ring_buffer_events': 0,
+            "broadcasts_sent": 0,
+            "broadcasts_failed": 0,
+            "db_writes_queued": 0,
+            "db_writes_failed": 0,
+            "db_writes_success": 0,
+            "ring_buffer_events": 0,
         }
         self._metrics_lock = threading.RLock()
         logger.info("[RPC-BROADCAST] 🚀 RpcBroadcastController initialized")
@@ -3451,34 +4125,39 @@ class RpcBroadcastController:
         """
         start_ns = time.time_ns()
         result = {
-            'broadcast_count': 0, 'failed_clients': [], 'queued_for_db': False,
-            'ring_logged': False, 'elapsed_ms': 0.0, 'snapshot_count': 0,
+            "broadcast_count": 0,
+            "failed_clients": [],
+            "queued_for_db": False,
+            "ring_logged": False,
+            "elapsed_ms": 0.0,
+            "snapshot_count": 0,
         }
         if snapshot is None:
             return result
 
         try:
             snapshot_json = self._serialize_snapshot(snapshot)
-            cycle = getattr(snapshot, 'lattice_refresh_counter', 0)
+            cycle = getattr(snapshot, "lattice_refresh_counter", 0)
             ts_ns = snapshot.timestamp_ns
-            aer_noise = getattr(snapshot, 'aer_noise_state', {}) or {}
-            bf = aer_noise.get('block_field', {}) or {}
-            mermin = getattr(snapshot, 'bell_test', {}) or {}
+            aer_noise = getattr(snapshot, "aer_noise_state", {}) or {}
+            bf = aer_noise.get("block_field", {}) or {}
+            mermin = getattr(snapshot, "bell_test", {}) or {}
 
             event = {
-                'cycle': cycle, 'timestamp_ns': ts_ns,
-                'broadcast_count': len(self._subscribers),
-                'snapshot_json': snapshot_json,
-                'snapshot_data': self._extract_snapshot_data(snapshot),
+                "cycle": cycle,
+                "timestamp_ns": ts_ns,
+                "broadcast_count": len(self._subscribers),
+                "snapshot_json": snapshot_json,
+                "snapshot_data": self._extract_snapshot_data(snapshot),
             }
 
             # Ring buffer (fast polling reads)
             with self._ring_lock:
                 self._ring_buffer.append(event)
-                result['ring_logged'] = True
+                result["ring_logged"] = True
                 with self._metrics_lock:
-                    self._metrics['ring_buffer_events'] = len(self._ring_buffer)
-                    result['snapshot_count'] = len(self._ring_buffer)
+                    self._metrics["ring_buffer_events"] = len(self._ring_buffer)
+                    result["snapshot_count"] = len(self._ring_buffer)
 
             # ── PATCH-ORACLE-1: Populate server._latest_snapshot ──────────────
             # Build the full dict that /rpc/oracle/snapshot returns to pollers.
@@ -3488,140 +4167,163 @@ class RpcBroadcastController:
             try:
                 _server_snap = {
                     # Core quantum state
-                    'timestamp_ns':        ts_ns,
-                    'oracle_id':           cycle,
-                    'lattice_refresh_counter': cycle,
-                    'w_state_fidelity':    getattr(snapshot, 'w_state_fidelity', 0.0),
-                    'coherence_l1':        getattr(snapshot, 'coherence_l1', 0.0),
-                    'von_neumann_entropy': getattr(snapshot, 'von_neumann_entropy', 0.0),
-                    'purity':              getattr(snapshot, 'purity', 0.0),
-                    'trace_purity':        getattr(snapshot, 'trace_purity', 0.0),
-                    'w_state_strength':    getattr(snapshot, 'w_state_strength', 0.0),
-                    'phase_coherence':     getattr(snapshot, 'phase_coherence', 0.0),
-                    'entanglement_witness':getattr(snapshot, 'entanglement_witness', 0.0),
-                    'coherence_renyi':     getattr(snapshot, 'coherence_renyi', 0.0),
-                    'coherence_geometric': getattr(snapshot, 'coherence_geometric', 0.0),
-                    'quantum_discord':     getattr(snapshot, 'quantum_discord', 0.0),
+                    "timestamp_ns": ts_ns,
+                    "oracle_id": cycle,
+                    "lattice_refresh_counter": cycle,
+                    "w_state_fidelity": getattr(snapshot, "w_state_fidelity", 0.0),
+                    "coherence_l1": getattr(snapshot, "coherence_l1", 0.0),
+                    "von_neumann_entropy": getattr(
+                        snapshot, "von_neumann_entropy", 0.0
+                    ),
+                    "purity": getattr(snapshot, "purity", 0.0),
+                    "trace_purity": getattr(snapshot, "trace_purity", 0.0),
+                    "w_state_strength": getattr(snapshot, "w_state_strength", 0.0),
+                    "phase_coherence": getattr(snapshot, "phase_coherence", 0.0),
+                    "entanglement_witness": getattr(
+                        snapshot, "entanglement_witness", 0.0
+                    ),
+                    "coherence_renyi": getattr(snapshot, "coherence_renyi", 0.0),
+                    "coherence_geometric": getattr(
+                        snapshot, "coherence_geometric", 0.0
+                    ),
+                    "quantum_discord": getattr(snapshot, "quantum_discord", 0.0),
                     # Density matrix
-                    'density_matrix_hex':  getattr(snapshot, 'density_matrix_hex', ''),
+                    "density_matrix_hex": getattr(snapshot, "density_matrix_hex", ""),
                     # Block-field pseudoqubits — needed by miner for pq_curr/pq_last display
-                    'pq_curr':             bf.get('pq_curr', 0),
-                    'pq_last':             bf.get('pq_last', 0),
-                    'pq0_oracle_fidelity': aer_noise.get('pq0_oracle_fidelity', 0.0),
-                    'pq0_IV_fidelity':     aer_noise.get('pq0_IV_fidelity', 0.0),
-                    'pq0_V_fidelity':      aer_noise.get('pq0_V_fidelity', 0.0),
-                    'oracle_address':      getattr(snapshot, 'oracle_address', None),
-                    'signature_valid':     getattr(snapshot, 'signature_valid', False),
+                    "pq_curr": bf.get("pq_curr", 0),
+                    "pq_last": bf.get("pq_last", 0),
+                    "pq0_oracle_fidelity": aer_noise.get("pq0_oracle_fidelity", 0.0),
+                    "pq0_IV_fidelity": aer_noise.get("pq0_IV_fidelity", 0.0),
+                    "pq0_V_fidelity": aer_noise.get("pq0_V_fidelity", 0.0),
+                    "oracle_address": getattr(snapshot, "oracle_address", None),
+                    "signature_valid": getattr(snapshot, "signature_valid", False),
                     # Noise / measurement
-                    'aer_noise_state':     aer_noise,
-                    'measurement_counts':  getattr(snapshot, 'measurement_counts', {}),
+                    "aer_noise_state": aer_noise,
+                    "measurement_counts": getattr(snapshot, "measurement_counts", {}),
                     # Mermin / Bell
-                    'mermin_test':         mermin,
-                    'bell_test':           mermin,
+                    "mermin_test": mermin,
+                    "bell_test": mermin,
                     # Status helpers
-                    'status':              'ok',
-                    'oracle_running':      True,
+                    "status": "ok",
+                    "oracle_running": True,
                 }
                 from server import _cache_snapshot as _srv_cache
+
                 _srv_cache(_server_snap)
             except ImportError:
-                pass   # server not importable during tests — harmless
+                pass  # server not importable during tests — harmless
             except Exception as _ce:
-                logger.debug(f"[RPC-BROADCAST] _cache_snapshot wire failed (non-fatal): {_ce}")
+                logger.debug(
+                    f"[RPC-BROADCAST] _cache_snapshot wire failed (non-fatal): {_ce}"
+                )
             # ─────────────────────────────────────────────────────────────────
 
             # Queue for async DB (non-blocking)
             try:
                 self._persist_queue.put_nowait(event)
-                result['queued_for_db'] = True
+                result["queued_for_db"] = True
                 with self._metrics_lock:
-                    self._metrics['db_writes_queued'] += 1
+                    self._metrics["db_writes_queued"] += 1
             except queue_module.Full:
-                logger.warning("[RPC-BROADCAST] Persistence queue full, dropping oldest")
+                logger.warning(
+                    "[RPC-BROADCAST] Persistence queue full, dropping oldest"
+                )
                 try:
                     self._persist_queue.get_nowait()
                     self._persist_queue.put_nowait(event)
-                    result['queued_for_db'] = True
+                    result["queued_for_db"] = True
                 except Exception as e:
                     logger.error(f"[RPC-BROADCAST] Failed to queue: {e}")
 
             with self._sub_lock:
                 subscribers = dict(self._subscribers)
-            result['broadcast_count'] = len(subscribers)
-            result['elapsed_ms'] = (time.time_ns() - start_ns) / 1e6
+            result["broadcast_count"] = len(subscribers)
+            result["elapsed_ms"] = (time.time_ns() - start_ns) / 1e6
 
         except Exception as e:
-            logger.error(f"[RPC-BROADCAST] broadcast_oracle_snapshot failed: {e}", exc_info=False)
-            result['elapsed_ms'] = (time.time_ns() - start_ns) / 1e6
+            logger.error(
+                f"[RPC-BROADCAST] broadcast_oracle_snapshot failed: {e}", exc_info=False
+            )
+            result["elapsed_ms"] = (time.time_ns() - start_ns) / 1e6
 
         return result
 
     def _serialize_snapshot(self, snapshot) -> str:
         """Convert DensityMatrixSnapshot to JSON."""
         try:
-            if hasattr(snapshot, 'to_json'):
+            if hasattr(snapshot, "to_json"):
                 return snapshot.to_json()
-            
+
             data = {
-                'timestamp_ns': snapshot.timestamp_ns,
-                'lattice_refresh_counter': getattr(snapshot, 'lattice_refresh_counter', 0),
-                'density_matrix_hex': getattr(snapshot, 'density_matrix_hex', ''),
-                'w_state_fidelity': getattr(snapshot, 'w_state_fidelity', 0.0),
-                'coherence_l1': getattr(snapshot, 'coherence_l1', 0.0),
-                'von_neumann_entropy': getattr(snapshot, 'von_neumann_entropy', 0.0),
-                'purity': getattr(snapshot, 'purity', 0.0),
-                'w_state_strength': getattr(snapshot, 'w_state_strength', 0.0),
-                'phase_coherence': getattr(snapshot, 'phase_coherence', 0.0),
-                'entanglement_witness': getattr(snapshot, 'entanglement_witness', 0.0),
-                'trace_purity': getattr(snapshot, 'trace_purity', 0.0),
-                'coherence_renyi': getattr(snapshot, 'coherence_renyi', 0.0),
-                'coherence_geometric': getattr(snapshot, 'coherence_geometric', 0.0),
-                'quantum_discord': getattr(snapshot, 'quantum_discord', 0.0),
-                'measurement_counts': getattr(snapshot, 'measurement_counts', {}),
-                'aer_noise_state': getattr(snapshot, 'aer_noise_state', {}),
-                'oracle_address': getattr(snapshot, 'oracle_address', None),
-                'signature_valid': getattr(snapshot, 'signature_valid', False),
-                'mermin_test': getattr(snapshot, 'bell_test', None),
+                "timestamp_ns": snapshot.timestamp_ns,
+                "lattice_refresh_counter": getattr(
+                    snapshot, "lattice_refresh_counter", 0
+                ),
+                "density_matrix_hex": getattr(snapshot, "density_matrix_hex", ""),
+                "w_state_fidelity": getattr(snapshot, "w_state_fidelity", 0.0),
+                "coherence_l1": getattr(snapshot, "coherence_l1", 0.0),
+                "von_neumann_entropy": getattr(snapshot, "von_neumann_entropy", 0.0),
+                "purity": getattr(snapshot, "purity", 0.0),
+                "w_state_strength": getattr(snapshot, "w_state_strength", 0.0),
+                "phase_coherence": getattr(snapshot, "phase_coherence", 0.0),
+                "entanglement_witness": getattr(snapshot, "entanglement_witness", 0.0),
+                "trace_purity": getattr(snapshot, "trace_purity", 0.0),
+                "coherence_renyi": getattr(snapshot, "coherence_renyi", 0.0),
+                "coherence_geometric": getattr(snapshot, "coherence_geometric", 0.0),
+                "quantum_discord": getattr(snapshot, "quantum_discord", 0.0),
+                "measurement_counts": getattr(snapshot, "measurement_counts", {}),
+                "aer_noise_state": getattr(snapshot, "aer_noise_state", {}),
+                "oracle_address": getattr(snapshot, "oracle_address", None),
+                "signature_valid": getattr(snapshot, "signature_valid", False),
+                "mermin_test": getattr(snapshot, "bell_test", None),
             }
             return json.dumps(data)
         except Exception as e:
             logger.error(f"[RPC-BROADCAST] Serialization failed: {e}")
-            return '{}'
+            return "{}"
 
     def _extract_snapshot_data(self, snapshot) -> Dict[str, Any]:
         """Extract key snapshot fields for DB persistence."""
-        aer_noise = getattr(snapshot, 'aer_noise_state', {})
-        bf = aer_noise.get('block_field', {})
-        mermin = getattr(snapshot, 'bell_test', {}) or {}
-        pq0_o = aer_noise.get('pq0_oracle_fidelity', 0.0)
-        pq0_iv = aer_noise.get('pq0_IV_fidelity', 0.0)
-        pq0_v = aer_noise.get('pq0_V_fidelity', 0.0)
+        aer_noise = getattr(snapshot, "aer_noise_state", {})
+        bf = aer_noise.get("block_field", {})
+        mermin = getattr(snapshot, "bell_test", {}) or {}
+        pq0_o = aer_noise.get("pq0_oracle_fidelity", 0.0)
+        pq0_iv = aer_noise.get("pq0_IV_fidelity", 0.0)
+        pq0_v = aer_noise.get("pq0_V_fidelity", 0.0)
 
         return {
-            'timestamp_ns': snapshot.timestamp_ns,
-            'lattice_quantum': {
-                'fidelity': getattr(snapshot, 'w_state_fidelity', 0.0),
-                'coherence': getattr(snapshot, 'coherence_l1', 0.0),
+            "timestamp_ns": snapshot.timestamp_ns,
+            "lattice_quantum": {
+                "fidelity": getattr(snapshot, "w_state_fidelity", 0.0),
+                "coherence": getattr(snapshot, "coherence_l1", 0.0),
             },
-            'consensus': {
-                'w_state_fidelity': getattr(snapshot, 'w_state_fidelity', 0.0),
-                'coherence': getattr(snapshot, 'coherence_l1', 0.0),
-                'purity': getattr(snapshot, 'purity', 0.0),
+            "consensus": {
+                "w_state_fidelity": getattr(snapshot, "w_state_fidelity", 0.0),
+                "coherence": getattr(snapshot, "coherence_l1", 0.0),
+                "purity": getattr(snapshot, "purity", 0.0),
             },
-            'mermin_test': {
-                'M_value': mermin.get('M_value', 0.0),
-                'quantum': mermin.get('quantum', False),
-                'verdict': mermin.get('verdict', ''),
+            "mermin_test": {
+                "M_value": mermin.get("M_value", 0.0),
+                "quantum": mermin.get("quantum", False),
+                "verdict": mermin.get("verdict", ""),
             },
-            'pq0_components': {
-                'oracle': pq0_o, 'IV': pq0_iv, 'V': pq0_v,
+            "pq0_components": {
+                "oracle": pq0_o,
+                "IV": pq0_iv,
+                "V": pq0_v,
             },
-            'oracle_measurements': [
-                {'fidelity': n.get('fidelity', 0.0), 'coherence': n.get('coherence', 0.0)}
-                for n in bf.get('per_node', [])
+            "oracle_measurements": [
+                {
+                    "fidelity": n.get("fidelity", 0.0),
+                    "coherence": n.get("coherence", 0.0),
+                }
+                for n in bf.get("per_node", [])
             ],
-            'block_field': {'pq_last': bf.get('pq_last', 0), 'pq_curr': bf.get('pq_curr', 0)},
-            'chirp_number': getattr(snapshot, 'lattice_refresh_counter', 0),
+            "block_field": {
+                "pq_last": bf.get("pq_last", 0),
+                "pq_curr": bf.get("pq_curr", 0),
+            },
+            "chirp_number": getattr(snapshot, "lattice_refresh_counter", 0),
         }
 
     def _persist_worker(self) -> None:
@@ -3633,29 +4335,34 @@ class RpcBroadcastController:
                     event = self._persist_queue.get(timeout=1.0)
                 except queue_module.Empty:
                     continue
-                
+
                 if self._persist_snapshot_to_db(event):
                     with self._metrics_lock:
-                        self._metrics['db_writes_success'] += 1
+                        self._metrics["db_writes_success"] += 1
                 else:
                     with self._metrics_lock:
-                        self._metrics['db_writes_failed'] += 1
+                        self._metrics["db_writes_failed"] += 1
             except Exception as e:
-                logger.error(f"[RPC-BROADCAST] Persist worker error: {e}", exc_info=False)
+                logger.error(
+                    f"[RPC-BROADCAST] Persist worker error: {e}", exc_info=False
+                )
                 time.sleep(0.1)
 
     def _persist_snapshot_to_db(self, event: Dict[str, Any]) -> bool:
         """Write one snapshot event to quantum_snapshots table via _persist_chirp_snapshot."""
         try:
             from server import _persist_chirp_snapshot
-            snap = event.get('snapshot_data', {})
-            snap['timestamp_ns'] = event.get('timestamp_ns', time.time_ns())
-            snap['chirp_number'] = event.get('cycle', 0)
-            snap['snapshot_json'] = event.get('snapshot_json', '{}')
+
+            snap = event.get("snapshot_data", {})
+            snap["timestamp_ns"] = event.get("timestamp_ns", time.time_ns())
+            snap["chirp_number"] = event.get("cycle", 0)
+            snap["snapshot_json"] = event.get("snapshot_json", "{}")
             _persist_chirp_snapshot(snap)
             return True
         except ImportError:
-            logger.debug("[RPC-BROADCAST] server module not available for DB persistence")
+            logger.debug(
+                "[RPC-BROADCAST] server module not available for DB persistence"
+            )
             return False
         except Exception as e:
             logger.error(f"[RPC-BROADCAST] DB persistence failed: {e}", exc_info=False)
@@ -3666,13 +4373,19 @@ class RpcBroadcastController:
         with self._ring_lock:
             return list(reversed(list(self._ring_buffer)[:max_events]))
 
-    def register_subscriber(self, client_id: str, callback_url: str, burst_mode: bool = False) -> bool:
+    def register_subscriber(
+        self, client_id: str, callback_url: str, burst_mode: bool = False
+    ) -> bool:
         """Subscribe to oracle measurements."""
         with self._sub_lock:
             if client_id in self._subscribers:
                 return False
-            self._subscribers[client_id] = MeasurementSubscriber(client_id, callback_url, burst_mode)
-            logger.info(f"[RPC-BROADCAST] ✅ Registered subscriber: {client_id} @ {callback_url}")
+            self._subscribers[client_id] = MeasurementSubscriber(
+                client_id, callback_url, burst_mode
+            )
+            logger.info(
+                f"[RPC-BROADCAST] ✅ Registered subscriber: {client_id} @ {callback_url}"
+            )
             return True
 
     def unregister_subscriber(self, client_id: str) -> bool:
@@ -3694,9 +4407,11 @@ class RpcBroadcastController:
         with self._metrics_lock:
             return dict(self._metrics)
 
+
 # ─── Module-level RPC broadcast singleton ───────────────────────────────────
 _RPC_BROADCAST_CONTROLLER: Optional[RpcBroadcastController] = None
 _RPC_BROADCAST_LOCK = threading.Lock()
+
 
 def get_oracle_measurement_broadcaster() -> RpcBroadcastController:
     """Get or create the RpcBroadcastController singleton."""
@@ -3708,6 +4423,9 @@ def get_oracle_measurement_broadcaster() -> RpcBroadcastController:
                 _RPC_BROADCAST_CONTROLLER.start()
     return _RPC_BROADCAST_CONTROLLER
 
+
 # ─── Module-level Pyth singleton ─────────────────────────────────────────────
 PYTH_ORACLE = PythPriceOracle()
-_PYTH_LOGGER.info("[PYTH] 🔮 PYTH_ORACLE singleton ready — enterprise Pyth integration active")
+_PYTH_LOGGER.info(
+    "[PYTH] 🔮 PYTH_ORACLE singleton ready — enterprise Pyth integration active"
+)

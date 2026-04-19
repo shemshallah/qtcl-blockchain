@@ -59,8 +59,10 @@ try:
     from hyp_tessellation import HyperbolicTessellation
     from hyp_lwe import GeodesicLWE, GeodesicLWEKeypair
     from hyp_ldpc import LDPCCode
+
     # ✅ FIXED: Import from hlwe package
     from hlwe.hyp_engine import HypGammaEngine
+
     HYPGAMMA_AVAILABLE = True
     logger = logging.getLogger(__name__)
     logger.info("✅ HypΓ cryptosystem imported successfully")
@@ -77,41 +79,47 @@ HYP_WALLET_AVAILABLE = False
 HYP_ENGINE: Optional[Any] = None
 HYP_KEYPAIR: Optional[Any] = None
 
+
 def _init_hyp_wallet() -> bool:
     """
     Initialize wallet directly from hyp_engine — no separate module needed.
     Uses existing HypGammaEngine for key generation and signing.
     """
     global HYP_WALLET_AVAILABLE, HYP_ENGINE, HYP_KEYPAIR
-    
+
     if HYP_WALLET_AVAILABLE and HYP_ENGINE is not None:
         return True
-    
+
     try:
         # Import directly from existing hlwe module
         from hlwe.hyp_engine import HypEngine, HypKeyPair
-        
+
         # Initialize engine
         HYP_ENGINE = HypEngine()
-        
+
         # Generate or load keypair
         # Check for existing wallet file at ~/.qtcl/wallet.json
         import os
-        _wallet_path = os.path.expanduser('~/.qtcl/wallet.json')
-        
+
+        _wallet_path = os.path.expanduser("~/.qtcl/wallet.json")
+
         if os.path.exists(_wallet_path):
             logger.info(f"[HYP-WALLET] 📍 Found wallet at {_wallet_path}")
-            logger.info(f"[HYP-WALLET]    Load with: from hlwe.hyp_engine import HypEngine; e=HypEngine(); kp=e.generate_keypair()")
+            logger.info(
+                f"[HYP-WALLET]    Load with: from hlwe.hyp_engine import HypEngine; e=HypEngine(); kp=e.generate_keypair()"
+            )
             # Generate temporary keypair for now - proper loading requires password
             HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
         else:
             # Generate new keypair
             HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
-            logger.info(f"[HYP-WALLET] ✅ Generated new keypair: {HYP_KEYPAIR.address[:22]}...")
-        
+            logger.info(
+                f"[HYP-WALLET] ✅ Generated new keypair: {HYP_KEYPAIR.address[:22]}..."
+            )
+
         HYP_WALLET_AVAILABLE = True
         return True
-        
+
     except ImportError as _e:
         logger.warning(f"[HYP-WALLET] ⚠️  hyp_engine not available: {_e}")
         return False
@@ -119,43 +127,45 @@ def _init_hyp_wallet() -> bool:
         logger.warning(f"[HYP-WALLET] ⚠️  Init failed: {_e}")
         return False
 
+
 def _get_miner_wallet() -> Optional[Any]:
     """Get or initialize miner wallet using existing hyp_engine."""
     global HYP_ENGINE, HYP_KEYPAIR
-    
+
     if not _init_hyp_wallet():
         return None
-    
+
     # Return a simple wrapper that matches expected interface
     class SimpleWallet:
         def __init__(self, engine, keypair):
             self._engine = engine
             self._keypair = keypair
-        
+
         def is_initialized(self) -> bool:
             return self._keypair is not None
-        
+
         def get_address(self) -> str:
             return self._keypair.address if self._keypair else ""
-        
+
         def sign_block(self, block_dict: Dict[str, Any]) -> Dict[str, Any]:
             """Sign block using existing hyp_engine.sign_block."""
             if not self._engine or not self._keypair:
                 raise RuntimeError("Wallet not initialized")
-            
+
             # Use engine's sign_block method
             sig = self._engine.sign_block(block_dict, self._keypair.private_key)
-            
+
             return {
-                'hyp_signature': sig,
-                'miner_public_key_hex': self._keypair.public_key,
-                'miner_address': self._keypair.address,
+                "hyp_signature": sig,
+                "miner_public_key_hex": self._keypair.public_key,
+                "miner_address": self._keypair.address,
             }
-    
+
     return SimpleWallet(HYP_ENGINE, HYP_KEYPAIR)
 
+
 # NumPy 2.0 compatibility
-if hasattr(np, 'trapezoid'):
+if hasattr(np, "trapezoid"):
     _np_trapz = np.trapezoid
 else:
     _np_trapz = np.trapz
@@ -165,8 +175,7 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] %(name)s [%(levelname)s]: %(message)s'
+        level=logging.INFO, format="[%(asctime)s] %(name)s [%(levelname)s]: %(message)s"
     )
 
 logger = logging.getLogger(__name__)
@@ -177,6 +186,7 @@ logger = logging.getLogger(__name__)
 _hyp_gamma_instance = None
 _hyp_gamma_lock = threading.Lock()
 
+
 def _init_hyp_gamma():
     """Lazy-init HypΓ engine (thread-safe)"""
     global _hyp_gamma_instance
@@ -185,14 +195,17 @@ def _init_hyp_gamma():
             if _hyp_gamma_instance is None:
                 try:
                     tess = HyperbolicTessellation(depth=8)
-                    ldpc = LDPCCode(n=1024, rate=0.625)
+                    ldpc = LDPCCode(n=1024)  # Default rate is 0.625 (d_v=3, d_c=8)
                     lwe = GeodesicLWE(tessellation=tess, ldpc_code=ldpc, sigma=2.5)
                     _hyp_gamma_instance = HypGammaEngine(lwe=lwe, tessellation=tess)
-                    logger.info("✅ HypΓ engine initialized (tessellation depth=8, LDPC n=1024)")
+                    logger.info(
+                        "✅ HypΓ engine initialized (tessellation depth=8, LDPC n=1024)"
+                    )
                 except Exception as e:
                     logger.warning(f"⚠️  HypΓ initialization failed: {e}")
                     _hyp_gamma_instance = "STUB"
     return _hyp_gamma_instance if _hyp_gamma_instance != "STUB" else None
+
 
 def _generate_hyp_witness(block_data: str) -> str:
     """Generate GeodesicLWE witness for block"""
@@ -201,10 +214,15 @@ def _generate_hyp_witness(block_data: str) -> str:
         try:
             witness_bytes = hashlib.sha3_256(block_data.encode()).digest()
             witness_obj = engine.lwe.encrypt(witness_bytes[:8])
-            return witness_obj.to_hex() if hasattr(witness_obj, 'to_hex') else hashlib.sha3_256(block_data.encode()).hexdigest()
+            return (
+                witness_obj.to_hex()
+                if hasattr(witness_obj, "to_hex")
+                else hashlib.sha3_256(block_data.encode()).hexdigest()
+            )
         except Exception as e:
             logger.warning(f"HypΓ witness generation failed: {e}, falling back to SHA3")
     return hashlib.sha3_256(block_data.encode()).hexdigest()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BLOCK FIELD ENTROPY POOL INTEGRATION
@@ -212,18 +230,27 @@ def _generate_hyp_witness(block_data: str) -> str:
 
 try:
     from globals import get_block_field_entropy, get_entropy_pool_manager
+
     ENTROPY_AVAILABLE = True
 except ImportError:
     ENTROPY_AVAILABLE = False
+
     def get_block_field_entropy():
         """Quantum entropy only—FAIL-FAST if unavailable"""
-        raise RuntimeError("[LATTICE] Block field entropy pool unavailable. QTCL requires quantum entropy sources.")
+        raise RuntimeError(
+            "[LATTICE] Block field entropy pool unavailable. QTCL requires quantum entropy sources."
+        )
+
     def get_entropy_pool_manager():
         """Stub for compatibility"""
         return None
 
-logger.info("[LATTICE] Block field entropy pool integration: {}".format(
-    "✅ Available" if ENTROPY_AVAILABLE else "⚠️  Fallback mode"))
+
+logger.info(
+    "[LATTICE] Block field entropy pool integration: {}".format(
+        "✅ Available" if ENTROPY_AVAILABLE else "⚠️  Fallback mode"
+    )
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QISKIT + QISKIT-AER — GRANULAR IMPORTS WITH DIAGNOSTICS
@@ -238,13 +265,14 @@ logger.info("[LATTICE] Block field entropy pool integration: {}".format(
 #   • AerSimulator lives in qiskit_aer (separate pip package).
 # ─────────────────────────────────────────────────────────────────────────────
 
-QISKIT_AVAILABLE   = False
+QISKIT_AVAILABLE = False
 QISKIT_AER_AVAILABLE = False
 
 # ── Core Qiskit ──────────────────────────────────────────────────────────────
 try:
     from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile
     from qiskit.quantum_info import Statevector, DensityMatrix
+
     QISKIT_AVAILABLE = True
     logger.info("✅ qiskit core imported successfully")
 except ImportError as _qiskit_err:
@@ -252,24 +280,47 @@ except ImportError as _qiskit_err:
         f"⚠️  qiskit core not available ({_qiskit_err}). "
         "Install: pip install qiskit>=1.0.0"
     )
+
     # Minimal stubs so module-level class definitions don't NameError
     class QuantumCircuit:  # noqa: F811
-        def __init__(self, *a, name=None, **kw): self.name = name or "stub"
-        def h(self, *a): pass
-        def cx(self, *a): pass
-        def ry(self, *a): pass
-        def rz(self, *a): pass
-        def ch(self, *a): pass
-        def measure(self, *a): pass
+        def __init__(self, *a, name=None, **kw):
+            self.name = name or "stub"
+
+        def h(self, *a):
+            pass
+
+        def cx(self, *a):
+            pass
+
+        def ry(self, *a):
+            pass
+
+        def rz(self, *a):
+            pass
+
+        def ch(self, *a):
+            pass
+
+        def measure(self, *a):
+            pass
+
     class QuantumRegister:  # noqa: F811
-        def __init__(self, *a, **kw): pass
+        def __init__(self, *a, **kw):
+            pass
+
     class ClassicalRegister:  # noqa: F811
-        def __init__(self, *a, **kw): pass
-    def transpile(circuit, **kw): return circuit
+        def __init__(self, *a, **kw):
+            pass
+
+    def transpile(circuit, **kw):
+        return circuit
+
     class Statevector:  # noqa: F811
         pass
+
     class DensityMatrix:  # noqa: F811
         pass
+
 
 # ── Qiskit AER simulator ──────────────────────────────────────────────────────
 try:
@@ -280,6 +331,7 @@ try:
         amplitude_damping_error,
         phase_damping_error,
     )
+
     QISKIT_AER_AVAILABLE = True
     logger.info("✅ qiskit-aer imported successfully")
 except ImportError as _aer_err:
@@ -287,15 +339,28 @@ except ImportError as _aer_err:
         f"⚠️  qiskit-aer not available ({_aer_err}). "
         "Install: pip install qiskit-aer>=0.14.0"
     )
+
     # Provide no-op stubs so the rest of the module doesn't NameError
     class AerSimulator:  # noqa: F811
-        def __init__(self, **kwargs): pass
-        def run(self, *a, **kw): return None
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, *a, **kw):
+            return None
+
     class NoiseModel:  # noqa: F811
-        def add_quantum_error(self, *a, **kw): pass
-    def depolarizing_error(*a, **kw): return None
-    def amplitude_damping_error(*a, **kw): return None
-    def phase_damping_error(*a, **kw): return None
+        def add_quantum_error(self, *a, **kw):
+            pass
+
+    def depolarizing_error(*a, **kw):
+        return None
+
+    def amplitude_damping_error(*a, **kw):
+        return None
+
+    def phase_damping_error(*a, **kw):
+        return None
+
 
 # Overall flag used in guards throughout the file
 QISKIT_AVAILABLE = QISKIT_AVAILABLE and QISKIT_AER_AVAILABLE
@@ -308,6 +373,7 @@ try:
     from psycopg2 import sql, errors as psycopg2_errors
     from psycopg2.pool import ThreadedConnectionPool
     from psycopg2.extras import RealDictCursor
+
     DB_AVAILABLE = True
 except ImportError:
     DB_AVAILABLE = False
@@ -321,23 +387,29 @@ NUMPY_AVAILABLE = True
 # CONSTANTS — CLAY MATHEMATICS / PHYSICS PARAMETERS
 # ════════════════════════════════════════════════════════════════════════════════
 
-HBAR      = 1.0
-KB        = 1.0
-TEMP_K    = 5.0
-BETA      = 1.0 / TEMP_K
+HBAR = 1.0
+KB = 1.0
+TEMP_K = 5.0
+BETA = 1.0 / TEMP_K
 
 # Drude-Lorentz bath parameters (MUSEUM-GRADE: realistic frequencies for 10ms timescale)
-BATH_ETA      = 0.40   # ↑ FIXED: 0.12 → 0.40 (stronger system-bath coupling)
-BATH_OMEGA_C  = 1256.64   # ↑ FIXED: 6.283 → 1256.64 (200 Hz cutoff for observable memory at 10ms)
-BATH_OMEGA_0  = 628.32    # ↑ FIXED: 3.14159 → 628.32 (100 Hz Lorentz oscillations visible in ρ(t))
-BATH_GAMMA_R  = 0.85      # ↑ FIXED: 0.50 → 0.85 (higher damping for realistic decoherence envelope)
+BATH_ETA = 0.40  # ↑ FIXED: 0.12 → 0.40 (stronger system-bath coupling)
+BATH_OMEGA_C = (
+    1256.64  # ↑ FIXED: 6.283 → 1256.64 (200 Hz cutoff for observable memory at 10ms)
+)
+BATH_OMEGA_0 = (
+    628.32  # ↑ FIXED: 3.14159 → 628.32 (100 Hz Lorentz oscillations visible in ρ(t))
+)
+BATH_GAMMA_R = (
+    0.85  # ↑ FIXED: 0.50 → 0.85 (higher damping for realistic decoherence envelope)
+)
 
 # Non-Markovian memory kernel (MUSEUM-GRADE: strong enough for entanglement revivals)
-KAPPA_MEMORY  = 0.35  # ↑ FIXED: 0.11 → 0.35 (35% non-Markovian contribution, observable)
-MEMORY_DEPTH  = 50    # ↑ FIXED: 30 → 50 (deeper history for multi-time-scale effects)
+KAPPA_MEMORY = 0.35  # ↑ FIXED: 0.11 → 0.35 (35% non-Markovian contribution, observable)
+MEMORY_DEPTH = 50  # ↑ FIXED: 30 → 50 (deeper history for multi-time-scale effects)
 
 # Entanglement revival
-REVIVAL_THRESHOLD   = 0.08
+REVIVAL_THRESHOLD = 0.08
 # ══════════════════════════════════════════════════════════════════════════════════
 # 🔬 REAL QUANTUM HARDWARE PARAMETERS — RIGETTI ANKAA-3 VALIDATED
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -368,9 +440,9 @@ REVIVAL_THRESHOLD   = 0.08
 # ══════════════════════════════════════════════════════════════════════════════════
 
 # QUANTUM HARDWARE TIMESCALES (Rigetti Ankaa-3 — REAL VALUES)
-T1_NS              = 100_000.0  # 100 μs thermal relaxation (conservative)
-T2_NS              = 12_000.0   # 12 μs coherence time (measured on hardware)
-CYCLE_TIME_NS      = 72.0       # 72 ns per gate (native Ankaa-3 timing)
+T1_NS = 100_000.0  # 100 μs thermal relaxation (conservative)
+T2_NS = 12_000.0  # 12 μs coherence time (measured on hardware)
+CYCLE_TIME_NS = 72.0  # 72 ns per gate (native Ankaa-3 timing)
 
 # RECOVERY AMPLITUDES (CRITICAL FOR F > 0.7)
 #
@@ -384,15 +456,15 @@ CYCLE_TIME_NS      = 72.0       # 72 ns per gate (native Ankaa-3 timing)
 #   Physics: F_after = (1-a)·F_before + a·F_W
 #           For a=0.18, F_before=0.70: F_after = 0.82·0.70 + 0.18·1.0 = 0.754 > 0.71 ✓
 #
-REVIVAL_STRENGTH   = 0.75       # W-state injection amplitude (INCREASED from 0.45)
-REVIVAL_MIN_FLOOR  = 0.18       # Minimum amplitude to prevent collapse (NEW)
-HAHN_AMPLITUDE     = 0.85       # π-pulse recovery amplitude (proven @ σ=4)
-REVIVAL_DECAY_RATE = 0.15       # Legacy parameter (kept for compatibility)
-REVIVAL_AMPLIFIER  = 3.5        # Neural network boost factor
+REVIVAL_STRENGTH = 0.75  # W-state injection amplitude (INCREASED from 0.45)
+REVIVAL_MIN_FLOOR = 0.18  # Minimum amplitude to prevent collapse (NEW)
+HAHN_AMPLITUDE = 0.85  # π-pulse recovery amplitude (proven @ σ=4)
+REVIVAL_DECAY_RATE = 0.15  # Legacy parameter (kept for compatibility)
+REVIVAL_AMPLIFIER = 3.5  # Neural network boost factor
 
 # Pseudoqubit lattice
 TOTAL_PSEUDOQUBITS = 106_496
-NUM_BATCHES        = 52
+NUM_BATCHES = 52
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGMA PROTOCOL: HAHN ECHO + PARAMETRIC BEATING
@@ -400,10 +472,10 @@ NUM_BATCHES        = 52
 # F(σ) = cos²(πσ/8) verified to 14 decimal places on real Rigetti hardware
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SIGMA_PROTOCOL_ENABLED = True   # ← Master switch: Hahn + Revival + Beating
+SIGMA_PROTOCOL_ENABLED = True  # ← Master switch: Hahn + Revival + Beating
 
 # Noise model parameters
-DEPOLARIZING_RATE  = 0.001
+DEPOLARIZING_RATE = 0.001
 AMPLITUDE_DAMPING_RATE = 0.001
 PHASE_DAMPING_RATE = 0.002
 
@@ -411,13 +483,13 @@ PHASE_DAMPING_RATE = 0.002
 NUM_TOTAL_QUBITS = 8
 AER_SHOTS = 1000
 AER_SEED = 42
-CIRCUIT_TRANSPILE = False          # transpile once at AER init, not per-call
+CIRCUIT_TRANSPILE = False  # transpile once at AER init, not per-call
 CIRCUIT_OPTIMIZATION_LEVEL = 2
 
 # Spatial-temporal field parameters
-SPATIAL_LATTICE_SIZE = 10.0        # Size of spatial lattice
-TEMPORAL_RESOLUTION = 0.001        # Millisecond precision
-ROUTE_DIMENSION = 3                # 3D spatial routing
+SPATIAL_LATTICE_SIZE = 10.0  # Size of spatial lattice
+TEMPORAL_RESOLUTION = 0.001  # Millisecond precision
+ROUTE_DIMENSION = 3  # 3D spatial routing
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ENUMS
@@ -427,9 +499,11 @@ ROUTE_DIMENSION = 3                # 3D spatial routing
 # LAYER 1: HYPERBOLIC FIELD GEOMETRY
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class FieldGeometry:
     """Hyperbolic field topology between lattice points (pq_last → pq_curr)"""
+
     field_id: str
     pq_last: int
     pq_curr: int
@@ -441,6 +515,7 @@ class FieldGeometry:
 
     def to_dict(self) -> Dict:
         return asdict(self)
+
 
 class HyperbolicFieldEngine:
     """
@@ -454,15 +529,19 @@ class HyperbolicFieldEngine:
     """
 
     # {8,3} constants — Coxeter 1954, Beardon 1983
-    _HYPER_83_EDGE      = 1.5320919978040694   # edge length in hyperbolic space
-    _HYPER_83_TANH_HALF = 0.6498786979946062   # tanh(EDGE/2) — ring radial growth
-    _HYPER_83_LAMBDA    = 3.7320508075688773   # 2+√3 — tiles-per-ring growth factor
+    _HYPER_83_EDGE = 1.5320919978040694  # edge length in hyperbolic space
+    _HYPER_83_TANH_HALF = 0.6498786979946062  # tanh(EDGE/2) — ring radial growth
+    _HYPER_83_LAMBDA = 3.7320508075688773  # 2+√3 — tiles-per-ring growth factor
 
     def __init__(self):
         self.fields: Dict[str, FieldGeometry] = {}
-        logger.info("[LAYER-1] HyperbolicFieldEngine initialized ({8,3} geodesic geometry)")
+        logger.info(
+            "[LAYER-1] HyperbolicFieldEngine initialized ({8,3} geodesic geometry)"
+        )
 
-    def generate_field(self, pq_last: int, pq_curr: int, entropy_seed: str) -> FieldGeometry:
+    def generate_field(
+        self, pq_last: int, pq_curr: int, entropy_seed: str
+    ) -> FieldGeometry:
         """
         Generate field topology between lattice points using true {8,3} geodesics.
 
@@ -470,11 +549,11 @@ class HyperbolicFieldEngine:
         for the geodesic distance calculation so the geometry matches the server's
         oracle measurements exactly.
         """
-        field_id     = str(uuid.uuid4())
-        distance     = self._hyperbolic_distance(pq_last, pq_curr)
+        field_id = str(uuid.uuid4())
+        distance = self._hyperbolic_distance(pq_last, pq_curr)
         route_points = self._enumerate_route(pq_last, pq_curr, entropy_seed)
-        route_hash   = self._hash_route(route_points)
-        geodesic     = self._geodesic_length(route_points)
+        route_hash = self._hash_route(route_points)
+        geodesic = self._geodesic_length(route_points)
 
         geometry = FieldGeometry(
             field_id=field_id,
@@ -507,23 +586,23 @@ class HyperbolicFieldEngine:
         if pq_id == 0:
             return (0.0, 0.0, 0.0)
         TANH_HALF = HyperbolicFieldEngine._HYPER_83_TANH_HALF
-        LAMBDA    = HyperbolicFieldEngine._HYPER_83_LAMBDA
-        PHI_STEP  = 0.4487989505128276  # π/7
+        LAMBDA = HyperbolicFieldEngine._HYPER_83_LAMBDA
+        PHI_STEP = 0.4487989505128276  # π/7
 
         # Determine ring number by cumulative count
-        ring       = 1
-        ring_size  = 8
+        ring = 1
+        ring_size = 8
         cumulative = 0
         while cumulative + ring_size < pq_id:
             cumulative += ring_size
-            ring       += 1
-            ring_size   = max(8, int(8.0 * (LAMBDA ** (ring - 1)) + 0.5))
+            ring += 1
+            ring_size = max(8, int(8.0 * (LAMBDA ** (ring - 1)) + 0.5))
 
         pos_in_ring = pq_id - cumulative - 1  # 0-indexed position within ring
-        r   = math.tanh(ring * (HyperbolicFieldEngine._HYPER_83_EDGE / 2.0))
-        r   = min(r, 0.9999)
+        r = math.tanh(ring * (HyperbolicFieldEngine._HYPER_83_EDGE / 2.0))
+        r = min(r, 0.9999)
         theta = 2.0 * math.pi * pos_in_ring / max(ring_size, 1)
-        phi   = math.pi / 2.0 + ring * PHI_STEP
+        phi = math.pi / 2.0 + ring * PHI_STEP
         return (r, theta, phi)
 
     @staticmethod
@@ -554,7 +633,7 @@ class HyperbolicFieldEngine:
         r2_sq = b2[0] ** 2
         diff_sq = sum((c1[i] - c2[i]) ** 2 for i in range(3))
         denom = max((1.0 - r1_sq) * (1.0 - r2_sq), 1e-15)
-        arg   = 1.0 + 2.0 * diff_sq / denom
+        arg = 1.0 + 2.0 * diff_sq / denom
         try:
             return 2.0 * math.acosh(max(1.0, arg))
         except ValueError:
@@ -566,19 +645,19 @@ class HyperbolicFieldEngine:
         Deterministic geodesic route from pq_last to pq_curr seeded by entropy.
         Waypoints are chosen to approximate the {8,3} geodesic path.
         """
-        route      = [pq_last]
-        steps      = abs(pq_curr - pq_last)
-        direction  = 1 if pq_curr > pq_last else -1
-        seed_hash  = int(hashlib.sha3_256(entropy_seed.encode()).hexdigest()[:8], 16)
-        current    = pq_last
+        route = [pq_last]
+        steps = abs(pq_curr - pq_last)
+        direction = 1 if pq_curr > pq_last else -1
+        seed_hash = int(hashlib.sha3_256(entropy_seed.encode()).hexdigest()[:8], 16)
+        current = pq_last
 
         n_waypoints = min(steps - 1, 8)  # cap at 8 interior waypoints
         if n_waypoints > 0:
             stride = max(1, steps // (n_waypoints + 1))
             for i in range(1, n_waypoints + 1):
-                jitter  = int((seed_hash >> (i % 32)) & 0x3) - 1  # −1,0,0,1
-                target  = pq_last + direction * stride * i + jitter
-                target  = max(min(pq_last, pq_curr), min(max(pq_last, pq_curr), target))
+                jitter = int((seed_hash >> (i % 32)) & 0x3) - 1  # −1,0,0,1
+                target = pq_last + direction * stride * i + jitter
+                target = max(min(pq_last, pq_curr), min(max(pq_last, pq_curr), target))
                 if target != current and target != pq_curr:
                     route.append(target)
                     current = target
@@ -599,17 +678,20 @@ class HyperbolicFieldEngine:
     @staticmethod
     def _hash_route(route: List[int]) -> str:
         """Deterministic SHA3-256 route hash."""
-        return hashlib.sha3_256(','.join(map(str, route)).encode()).hexdigest()[:32]
+        return hashlib.sha3_256(",".join(map(str, route)).encode()).hexdigest()[:32]
+
 
 class BathSpectralDensity(str, Enum):
     OHMIC = "ohmic"
     SUB_OHMIC = "sub_ohmic"
     SUPER_OHMIC = "super_ohmic"
 
+
 class QuantumCircuitType(Enum):
     W_STATE_TRIPARTITE_ORACLE = "w_state_tripartite_oracle"
     QRNG_INTERFERENCE = "qrng_interference"
     CUSTOM = "custom"
+
 
 class NoiseChannelType(Enum):
     DEPOLARIZING = "depolarizing"
@@ -618,9 +700,11 @@ class NoiseChannelType(Enum):
     BIT_FLIP = "bit_flip"
     MEASUREMENT_ERROR = "measurement_error"
 
+
 # ════════════════════════════════════════════════════════════════════════════════
 # DATABASE CONFIGURATION (PostgreSQL/Supabase)
 # ════════════════════════════════════════════════════════════════════════════════
+
 
 class DatabaseConfig:
     """
@@ -635,19 +719,19 @@ class DatabaseConfig:
     """
 
     # ── DATABASE_URL ───────────────────────────────────────────────────────────
-    DATABASE_URL = os.getenv('DATABASE_URL', '')
+    DATABASE_URL = os.getenv("DATABASE_URL", "")
     # ── Host ──────────────────────────────────────────────────────────────────
-    HOST     = (os.getenv('POOLER_HOST')     or os.getenv('DB_HOST',     'localhost'))
+    HOST = os.getenv("POOLER_HOST") or os.getenv("DB_HOST", "localhost")
     # ── Port ──────────────────────────────────────────────────────────────────
-    PORT     = int(os.getenv('POOLER_PORT')  or os.getenv('DB_PORT',     '5432'))
+    PORT = int(os.getenv("POOLER_PORT") or os.getenv("DB_PORT", "5432"))
     # ── Credentials ───────────────────────────────────────────────────────────
-    USER     = (os.getenv('POOLER_USER')     or os.getenv('DB_USER',     'postgres'))
-    PASSWORD = (os.getenv('POOLER_PASSWORD') or os.getenv('DB_PASSWORD', ''))
-    DATABASE = (os.getenv('POOLER_DB')       or os.getenv('DB_NAME',     'postgres'))
+    USER = os.getenv("POOLER_USER") or os.getenv("DB_USER", "postgres")
+    PASSWORD = os.getenv("POOLER_PASSWORD") or os.getenv("DB_PASSWORD", "")
+    DATABASE = os.getenv("POOLER_DB") or os.getenv("DB_NAME", "postgres")
     # ── Pool & misc ───────────────────────────────────────────────────────────
-    POOL_SIZE    = int(os.getenv('DB_POOL_SIZE', '5'))
-    TIMEOUT      = int(os.getenv('DB_TIMEOUT',   '10'))
-    USE_POSTGRES = os.getenv('DB_USE_POSTGRES', 'true').lower() == 'true'
+    POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+    TIMEOUT = int(os.getenv("DB_TIMEOUT", "10"))
+    USE_POSTGRES = os.getenv("DB_USE_POSTGRES", "true").lower() == "true"
 
     # Convenience: build a full DSN string the way server.py does (shared path)
     @classmethod
@@ -687,13 +771,16 @@ class DatabaseConfig:
         )
         return True
 
+
 # ════════════════════════════════════════════════════════════════════════════════
 # SPATIAL-TEMPORAL FIELD SYSTEM (NEW)
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class PseudoqubitLocation:
     """3D spatial + temporal location of a pseudoqubit"""
+
     pq_id: int
     x: float
     y: float
@@ -701,17 +788,21 @@ class PseudoqubitLocation:
     t: float = field(default_factory=time.time)
     coherence: float = 0.9
     label: str = ""  # "oracle", "virtual", "inversevirtual", etc.
-    
-    def distance_to(self, other: 'PseudoqubitLocation') -> float:
+
+    def distance_to(self, other: "PseudoqubitLocation") -> float:
         """Euclidean distance in 3D space (temporal not included)"""
-        return math.sqrt((self.x - other.x)**2 + (self.y - other.y)**2 + (self.z - other.z)**2)
-    
+        return math.sqrt(
+            (self.x - other.x) ** 2 + (self.y - other.y) ** 2 + (self.z - other.z) ** 2
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
 
 @dataclass
 class Block:
     """Block = field/space between two pseudoqubits"""
+
     block_id: str
     pq_from: int
     pq_to: int
@@ -721,13 +812,15 @@ class Block:
     field_value: Optional[Dict[str, Any]] = None  # Transaction data encoded in field
     w_state_signature: Optional[Dict[str, Any]] = None
     timestamp: float = field(default_factory=time.time)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
 
 @dataclass
 class Route:
     """Route through pseudoqubit lattice"""
+
     route_id: str
     path: List[int]  # Sequence of pq_ids
     hops: int = field(init=False)
@@ -736,55 +829,57 @@ class Route:
     blocks: List[Block] = field(default_factory=list)
     w_state_history: List[Dict[str, Any]] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
-    
+
     def __post_init__(self):
         self.hops = len(self.path) - 1
-    
+
     def add_block(self, block: Block) -> None:
         """Add block to route"""
         self.blocks.append(block)
         self.total_distance += block.spatial_distance
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
-            'route_id': self.route_id,
-            'path': self.path,
-            'hops': self.hops,
-            'total_distance': self.total_distance,
-            'transaction_order': self.transaction_order,
-            'blocks': [b.to_dict() for b in self.blocks],
-            'w_state_history': self.w_state_history,
-            'timestamp': self.timestamp,
+            "route_id": self.route_id,
+            "path": self.path,
+            "hops": self.hops,
+            "total_distance": self.total_distance,
+            "transaction_order": self.transaction_order,
+            "blocks": [b.to_dict() for b in self.blocks],
+            "w_state_history": self.w_state_history,
+            "timestamp": self.timestamp,
         }
+
 
 class SpatialTemporalField:
     """Manages spatial-temporal field of pseudoqubits"""
-    
+
     def __init__(self):
         self.locations: Dict[int, PseudoqubitLocation] = {}
         self.blocks: Dict[str, Block] = {}
         self.routes: Dict[str, Route] = {}
         self.lock = threading.RLock()
-    
-    def register_pseudoqubit(self, pq_id: int, x: float, y: float, z: float, 
-                            label: str = "") -> PseudoqubitLocation:
+
+    def register_pseudoqubit(
+        self, pq_id: int, x: float, y: float, z: float, label: str = ""
+    ) -> PseudoqubitLocation:
         """Register a pseudoqubit at (x, y, z)"""
         with self.lock:
             loc = PseudoqubitLocation(pq_id=pq_id, x=x, y=y, z=z, label=label)
             self.locations[pq_id] = loc
             return loc
-    
+
     def create_block(self, pq_from: int, pq_to: int, temporal_seq: int) -> Block:
         """Create block between two pseudoqubits"""
         with self.lock:
             if pq_from not in self.locations or pq_to not in self.locations:
                 raise ValueError(f"Pseudoqubits {pq_from} or {pq_to} not registered")
-            
+
             loc_from = self.locations[pq_from]
             loc_to = self.locations[pq_to]
-            
+
             distance = loc_from.distance_to(loc_to)
-            
+
             block_id = f"block_{pq_from}_{pq_to}_{temporal_seq}"
             block = Block(
                 block_id=block_id,
@@ -793,39 +888,39 @@ class SpatialTemporalField:
                 spatial_distance=distance,
                 temporal_sequence=temporal_seq,
             )
-            
+
             self.blocks[block_id] = block
             return block
-    
+
     def create_route(self, path: List[int]) -> Route:
         """Create route through pseudoqubits"""
         with self.lock:
             route_id = str(uuid.uuid4())
             route = Route(route_id=route_id, path=path)
-            
+
             # Create blocks for each hop
             for i, (from_id, to_id) in enumerate(zip(path[:-1], path[1:])):
                 block = self.create_block(from_id, to_id, i)
                 route.add_block(block)
-            
+
             self.routes[route_id] = route
             return route
-    
+
     def get_pseudoqubit(self, pq_id: int) -> Optional[PseudoqubitLocation]:
         """Get pseudoqubit location"""
         with self.lock:
             return self.locations.get(pq_id)
-    
+
     def get_block(self, block_id: str) -> Optional[Block]:
         """Get block"""
         with self.lock:
             return self.blocks.get(block_id)
-    
+
     def get_route(self, route_id: str) -> Optional[Route]:
         """Get route"""
         with self.lock:
             return self.routes.get(route_id)
-    
+
     def update_block_field(self, block_id: str, field_data: Dict[str, Any]) -> bool:
         """Update field value in block (encode transaction data)"""
         with self.lock:
@@ -834,19 +929,21 @@ class SpatialTemporalField:
                 block.field_value = field_data
                 return True
             return False
-    
+
     def get_all_locations(self) -> List[PseudoqubitLocation]:
         """Get all pseudoqubit locations"""
         with self.lock:
             return list(self.locations.values())
 
+
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 1: DATABASE CONNECTOR (ASYNC STREAMING)
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 class QuantumDatabaseConnector:
     """Async quantum metrics streaming to PostgreSQL/Supabase."""
-    
+
     def __init__(self, config: DatabaseConfig = None):
         self.config = config or DatabaseConfig()
         self.pool = None
@@ -854,13 +951,13 @@ class QuantumDatabaseConnector:
         self.logger_thread = None
         self.running = False
         self.lock = threading.RLock()
-        self.stats = {'inserts_succeeded': 0, 'inserts_failed': 0, 'queue_depth': 0}
+        self.stats = {"inserts_succeeded": 0, "inserts_failed": 0, "queue_depth": 0}
         self._sqlite_conn = None  # SQLite fallback
         if DB_AVAILABLE:
             self._initialize_pool()
         # Always initialize SQLite fallback
         self._init_sqlite()
-    
+
     def _initialize_pool(self):
         """
         Prefer injected cursor from server.py's get_db_cursor() over direct pool.
@@ -869,12 +966,18 @@ class QuantumDatabaseConnector:
         """
         try:
             self.pool = ThreadedConnectionPool(
-                minconn=1, maxconn=self.config.POOL_SIZE,
-                host=self.config.HOST, user=self.config.USER,
-                password=self.config.PASSWORD, database=self.config.DATABASE,
-                port=self.config.PORT, connect_timeout=self.config.TIMEOUT,
+                minconn=1,
+                maxconn=self.config.POOL_SIZE,
+                host=self.config.HOST,
+                user=self.config.USER,
+                password=self.config.PASSWORD,
+                database=self.config.DATABASE,
+                port=self.config.PORT,
+                connect_timeout=self.config.TIMEOUT,
             )
-            logger.info("[DB] QuantumDatabaseConnector pool initialized (standalone mode)")
+            logger.info(
+                "[DB] QuantumDatabaseConnector pool initialized (standalone mode)"
+            )
         except Exception as e:
             logger.warning(
                 f"[DB] QuantumDatabaseConnector pool failed ({e}); "
@@ -890,7 +993,7 @@ class QuantumDatabaseConnector:
         """
         self._cursor_func = cursor_func
         logger.info("[DB] QuantumDatabaseConnector: server cursor injected")
-    
+
     def inject_db_pool(self, pool) -> None:
         """
         Inject server's db_pool for direct block persistence.
@@ -898,18 +1001,21 @@ class QuantumDatabaseConnector:
         """
         self._db_pool = pool
         logger.info("[DB] QuantumDatabaseConnector: server db_pool injected")
-    
+
     def _init_sqlite(self):
         """Initialize SQLite fallback for block persistence."""
         try:
             import sqlite3
+
             # Use /tmp on Koyeb (always writable) or data/ locally
-            if os.path.exists('/workspace'):
+            if os.path.exists("/workspace"):
                 # Running on Koyeb - use /tmp which is writable
-                db_path = '/tmp/qtcl.db'
+                db_path = "/tmp/qtcl.db"
             else:
                 # Running locally - use data/ directory
-                db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'qtcl.db')
+                db_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "data", "qtcl.db"
+                )
                 os.makedirs(os.path.dirname(db_path), exist_ok=True)
             self._sqlite_conn = sqlite3.connect(db_path, check_same_thread=False)
             # Create blocks table if not exists
@@ -936,34 +1042,36 @@ class QuantumDatabaseConnector:
         except Exception as e:
             logger.warning(f"[DB] SQLite fallback init failed: {e}")
             self._sqlite_conn = None
-    
+
     def _sqlite_execute(self, query: str, params: Tuple = None) -> bool:
         """Execute query on SQLite."""
         if not self._sqlite_conn:
             return False
         try:
             # Convert PostgreSQL %s placeholders to SQLite ?
-            sql = query.replace('%s', '?')
+            sql = query.replace("%s", "?")
             self._sqlite_conn.execute(sql, params or ())
             self._sqlite_conn.commit()
             return True
         except Exception as e:
             logger.debug(f"[DB-SQLITE] Execute failed: {e}")
             return False
-    
+
     def _sqlite_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
         """Fetch all results from SQLite."""
         if not self._sqlite_conn:
             return []
         try:
-            sql = query.replace('%s', '?')
+            sql = query.replace("%s", "?")
             cursor = self._sqlite_conn.execute(sql, params or ())
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            columns = (
+                [desc[0] for desc in cursor.description] if cursor.description else []
+            )
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
         except Exception as e:
             logger.debug(f"[DB-SQLITE] Fetch failed: {e}")
             return []
-    
+
     def execute(self, query: str, params: Tuple = None) -> bool:
         """Execute query using injected pool, pool, or SQLite fallback."""
         if self._db_pool:
@@ -1002,7 +1110,7 @@ class QuantumDatabaseConnector:
                     self.pool.putconn(conn)
         # SQLite fallback
         return self._sqlite_execute(query, params)
-    
+
     def execute_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
         """Execute query and fetch all results using injected pool or SQLite fallback."""
         if self._db_pool:
@@ -1013,7 +1121,9 @@ class QuantumDatabaseConnector:
                 cursor.execute(query, params or ())
                 results = cursor.fetchall()
                 cursor.close()
-                logger.debug(f"[DB-FETCH] Success: {len(results)} rows from {query[:60]}...")
+                logger.debug(
+                    f"[DB-FETCH] Success: {len(results)} rows from {query[:60]}..."
+                )
                 return [dict(r) for r in results]
             except Exception as e:
                 logger.error(f"[DB-FETCH] Failed: {query[:60]}... Error: {e}")
@@ -1037,7 +1147,7 @@ class QuantumDatabaseConnector:
                     self.pool.putconn(conn)
         # SQLite fallback
         return self._sqlite_fetch_all(query, params)
-    
+
     def execute(self, query: str, params: Tuple = None) -> bool:
         if not self.pool:
             return False
@@ -1056,7 +1166,7 @@ class QuantumDatabaseConnector:
         finally:
             if conn:
                 self.pool.putconn(conn)
-    
+
     def execute_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
         if not self.pool:
             return []
@@ -1073,14 +1183,14 @@ class QuantumDatabaseConnector:
         finally:
             if conn:
                 self.pool.putconn(conn)
-    
+
     def queue_metric(self, metric: Dict[str, Any]) -> bool:
         try:
             self.log_queue.put_nowait(metric)
             return True
         except queue.Full:
             return False
-    
+
     def _logger_worker(self):
         batch = []
         last_flush = time.time()
@@ -1096,12 +1206,12 @@ class QuantumDatabaseConnector:
                         self._batch_insert_metrics(batch)
                         batch = []
                         last_flush = time.time()
-                self.stats['queue_depth'] = self.log_queue.qsize()
+                self.stats["queue_depth"] = self.log_queue.qsize()
             except Exception:
                 time.sleep(0.5)
         if batch:
             self._batch_insert_metrics(batch)
-    
+
     def _batch_insert_metrics(self, metrics: List[Dict[str, Any]]):
         if not metrics or not self.pool:
             return
@@ -1110,43 +1220,46 @@ class QuantumDatabaseConnector:
             conn = self.pool.getconn()
             cursor = conn.cursor()
             columns = list(metrics[0].keys())
-            placeholders = ','.join(['%s'] * len(columns))
+            placeholders = ",".join(["%s"] * len(columns))
             insert_sql = f"INSERT INTO quantum_metrics ({','.join(columns)}) VALUES ({placeholders})"
             values = [[m.get(col) for col in columns] for m in metrics]
             cursor.executemany(insert_sql, values)
             conn.commit()
-            self.stats['inserts_succeeded'] += len(metrics)
+            self.stats["inserts_succeeded"] += len(metrics)
             cursor.close()
         except Exception:
             if conn:
                 conn.rollback()
-            self.stats['inserts_failed'] += len(metrics)
+            self.stats["inserts_failed"] += len(metrics)
         finally:
             if conn:
                 self.pool.putconn(conn)
-    
+
     def start_logger(self):
         with self.lock:
             if not self.running and self.pool:
                 self.running = True
                 self.logger_thread = threading.Thread(
-                    target=self._logger_worker, daemon=True, name='QuantumDatabaseLogger'
+                    target=self._logger_worker,
+                    daemon=True,
+                    name="QuantumDatabaseLogger",
                 )
                 self.logger_thread.start()
-    
+
     def stop_logger(self):
         with self.lock:
             self.running = False
         if self.logger_thread:
             self.logger_thread.join(timeout=5)
-    
+
     def get_stats(self) -> Dict[str, Any]:
         return dict(self.stats)
-    
+
     def close(self):
         self.stop_logger()
         if self.pool:
             self.pool.closeall()
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1161,23 +1274,60 @@ except ImportError:
     # Fallback stub if oracle.py is unavailable (should not happen in production)
     class QuantumInformationMetrics:  # type: ignore
         @staticmethod
-        def von_neumann_entropy(dm): import numpy as np; ev=np.maximum(np.linalg.eigvalsh(dm),1e-15); return float(-np.sum(ev*np.log2(ev))) if dm is not None else 0.0
-        @staticmethod
-        def coherence_l1_norm(dm): return float(sum(abs(dm[i,j]) for i in range(dm.shape[0]) for j in range(dm.shape[0]) if i!=j)) if dm is not None else 0.0
-        @staticmethod
-        def purity(dm): import numpy as np; return float(min(1.0,max(0.0,np.real(np.trace(dm@dm))))) if dm is not None else 0.0
-        @staticmethod
-        def state_fidelity(r1,r2):
+        def von_neumann_entropy(dm):
             import numpy as np
+
+            ev = np.maximum(np.linalg.eigvalsh(dm), 1e-15)
+            return float(-np.sum(ev * np.log2(ev))) if dm is not None else 0.0
+
+        @staticmethod
+        def coherence_l1_norm(dm):
+            return (
+                float(
+                    sum(
+                        abs(dm[i, j])
+                        for i in range(dm.shape[0])
+                        for j in range(dm.shape[0])
+                        if i != j
+                    )
+                )
+                if dm is not None
+                else 0.0
+            )
+
+        @staticmethod
+        def purity(dm):
+            import numpy as np
+
+            return (
+                float(min(1.0, max(0.0, np.real(np.trace(dm @ dm)))))
+                if dm is not None
+                else 0.0
+            )
+
+        @staticmethod
+        def state_fidelity(r1, r2):
+            import numpy as np
+
             try:
-                ev,ec=np.linalg.eigh(r1); ev=np.maximum(ev,0); sr=ec@np.diag(np.sqrt(ev))@ec.conj().T
-                p=sr@r2@sr; ep=np.linalg.eigvalsh(p); ep=np.maximum(ep,0)
-                return float(min(1.0,max(0.0,float(np.sum(np.sqrt(ep)))**2)))
-            except: return 0.0
+                ev, ec = np.linalg.eigh(r1)
+                ev = np.maximum(ev, 0)
+                sr = ec @ np.diag(np.sqrt(ev)) @ ec.conj().T
+                p = sr @ r2 @ sr
+                ep = np.linalg.eigvalsh(p)
+                ep = np.maximum(ep, 0)
+                return float(min(1.0, max(0.0, float(np.sum(np.sqrt(ep))) ** 2)))
+            except:
+                return 0.0
+
         @staticmethod
-        def quantum_discord(dm): return 0.0
+        def quantum_discord(dm):
+            return 0.0
+
         @staticmethod
-        def mutual_information(dm): return 0.0
+        def mutual_information(dm):
+            return 0.0
+
 
 QUANTUM_METRICS = QuantumInformationMetrics()
 
@@ -1185,64 +1335,73 @@ QUANTUM_METRICS = QuantumInformationMetrics()
 # SECTION 3: NON-MARKOVIAN NOISE BATH SYSTEM (COMPREHENSIVE)
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 class NonMarkovianNoiseBath:
     """Non-Markovian noise bath with memory kernel"""
-    
-    def __init__(self, memory_kernel: float = KAPPA_MEMORY, coupling_strength: float = 0.05):
+
+    def __init__(
+        self, memory_kernel: float = KAPPA_MEMORY, coupling_strength: float = 0.05
+    ):
         self.memory_kernel = memory_kernel
         self.coupling_strength = coupling_strength
         self.history = deque(maxlen=MEMORY_DEPTH)
         self.lock = threading.RLock()
         self.noise_model = None
         self._init_noise_model()
-    
+
     def _init_noise_model(self):
         """Initialize Qiskit noise model"""
         if not QISKIT_AVAILABLE:
             return
-        
+
         try:
             self.noise_model = NoiseModel()
-            
+
             # Single-qubit errors
             depol_error = depolarizing_error(DEPOLARIZING_RATE, 1)
             amp_error = amplitude_damping_error(AMPLITUDE_DAMPING_RATE)
             phase_error = phase_damping_error(PHASE_DAMPING_RATE)
-            
+
             for qubit in range(NUM_TOTAL_QUBITS):
                 try:
-                    self.noise_model.add_quantum_error(depol_error, 'u1', [qubit])
-                    self.noise_model.add_quantum_error(depol_error, 'u2', [qubit])
-                    self.noise_model.add_quantum_error(depol_error, 'u3', [qubit])
+                    self.noise_model.add_quantum_error(depol_error, "u1", [qubit])
+                    self.noise_model.add_quantum_error(depol_error, "u2", [qubit])
+                    self.noise_model.add_quantum_error(depol_error, "u3", [qubit])
                 except TypeError:
                     try:
-                        self.noise_model.add_quantum_error(depol_error, ['u1', 'u2', 'u3'])
+                        self.noise_model.add_quantum_error(
+                            depol_error, ["u1", "u2", "u3"]
+                        )
                     except:
                         pass
-                
+
                 try:
-                    self.noise_model.add_quantum_error(amp_error, 'reset', [qubit])
+                    self.noise_model.add_quantum_error(amp_error, "reset", [qubit])
                 except:
                     pass
-                
+
                 try:
-                    self.noise_model.add_quantum_error(phase_error, 'measure', [qubit])
+                    self.noise_model.add_quantum_error(phase_error, "measure", [qubit])
                 except:
                     pass
-            
+
             # Two-qubit errors
             two_qubit_error = depolarizing_error(DEPOLARIZING_RATE * 2, 2)
             for q1 in range(NUM_TOTAL_QUBITS):
                 for q2 in range(q1 + 1, NUM_TOTAL_QUBITS):
                     try:
-                        self.noise_model.add_quantum_error(two_qubit_error, 'cx', [q1, q2])
+                        self.noise_model.add_quantum_error(
+                            two_qubit_error, "cx", [q1, q2]
+                        )
                     except:
                         pass
-            
-            logger.info(f"✅ Non-Markovian noise bath initialized (κ={self.memory_kernel})")
+
+            logger.info(
+                f"✅ Non-Markovian noise bath initialized (κ={self.memory_kernel})"
+            )
         except Exception as e:
             logger.warning(f"⚠️ Noise model initialization failed: {e}")
-    
+
     def ornstein_uhlenbeck_kernel(self, tau: float, t: float) -> float:
         """
         K(τ) = base_Drude-Lorentz + Σ_k A_k · Gauss(τ - 2^k·dt)
@@ -1263,66 +1422,70 @@ class NonMarkovianNoiseBath:
             omega_c = BATH_OMEGA_C
             omega_0 = BATH_OMEGA_0
             gamma_r = BATH_GAMMA_R
-            eta     = BATH_ETA
+            eta = BATH_ETA
 
             # ── Base Drude-Lorentz term ─────────────────────────────────────
-            exp_term  = eta * omega_c ** 2 * np.exp(-omega_c * tau)
-            cos_term  = np.cos(omega_0 * tau)
-            sin_term  = (gamma_r / omega_0) * np.sin(omega_0 * tau) if omega_0 != 0 else 0.0
-            base      = exp_term * (cos_term + sin_term)
+            exp_term = eta * omega_c**2 * np.exp(-omega_c * tau)
+            cos_term = np.cos(omega_0 * tau)
+            sin_term = (
+                (gamma_r / omega_0) * np.sin(omega_0 * tau) if omega_0 != 0 else 0.0
+            )
+            base = exp_term * (cos_term + sin_term)
 
             # ── Power-of-2 Gaussian resonances ─────────────────────────────
             # tau_k = 2^k * CYCLE_TIME  (k = 0 → 1 cycle, k=7 → 128 cycles)
             # sigma_k = 0.30 * tau_k    (30% relative width — narrow enough to
             #                            localise the peak, wide enough to be
             #                            numerically visible given dt=10ms history)
-            dt_s      = CYCLE_TIME_NS / 1e9
+            dt_s = CYCLE_TIME_NS / 1e9
             resonance = 0.0
             for k in range(8):
-                tau_k   = float(1 << k) * dt_s      # 2^k × 10ms
+                tau_k = float(1 << k) * dt_s  # 2^k × 10ms
                 sigma_k = tau_k * 0.30
-                amp_k   = 0.15 / (k + 1)
-                resonance += amp_k * np.exp(-((tau - tau_k) ** 2) / (2.0 * sigma_k ** 2))
+                amp_k = 0.15 / (k + 1)
+                resonance += amp_k * np.exp(-((tau - tau_k) ** 2) / (2.0 * sigma_k**2))
 
             return abs(base) + resonance
         except Exception:
             return 0.0
-    
+
     def compute_decoherence_function(self, t: float, t_dephase: float = 100.0) -> float:
         """
         Compute realistic decoherence with T1/T2 lifetimes and non-Markovian memory.
-        
+
         D(t) = exp(-t/T₁) × exp(-t/T₂²) + κ × [1 - exp(-t/T₂)]
-        
+
         MUSEUM-GRADE: Uses actual quantum relaxation times, strong memory effects
         """
         try:
             # T1/T2 lifetimes in seconds
             T1_s = T1_NS / 1e9
             T2_s = T2_NS / 1e9
-            
+
             # 1️⃣ MARKOVIAN: Standard exponential decay (dominates early times)
             # Energy decay: exp(-t/T₁)
             # Phase decay: exp(-t/T₂²) [superfluid-like quadratic phase decay]
             energy_decay = np.exp(-t / max(T1_s, 1e-6))
-            phase_decay = np.exp(-(t / max(T2_s, 1e-6)) ** 2)
+            phase_decay = np.exp(-((t / max(T2_s, 1e-6)) ** 2))
             markovian = energy_decay * phase_decay
-            
+
             # 2️⃣ NON-MARKOVIAN: Memory kernel contribution (rises slowly, causes revivals)
             # Strong memory: κ × [1 - exp(-t/T₂)] = κ at long times
             memory = self.memory_kernel * (1.0 - np.exp(-t / max(T2_s, 1e-6)))
-            
+
             # 3️⃣ COMBINED: Non-Markovian reduces pure decay (memory reverses some dephasing)
             # At short times: D ≈ markovian (memory negligible)
             # At long times: D ≈ markovian × (1 - κ) + memory ≈ constant (revival floor)
             total = markovian * (1.0 - memory) + memory
-            
+
             return float(np.clip(total, 0.0, 1.0))
         except Exception as e:
             logger.debug(f"[NOISE] Decoherence computation failed: {e}")
             return 1.0
-    
-    def apply_memory_effect(self, density_matrix: np.ndarray, time_step: float) -> np.ndarray:
+
+    def apply_memory_effect(
+        self, density_matrix: np.ndarray, time_step: float
+    ) -> np.ndarray:
         """
         Apply dephasing + amplitude damping to 64³ 3D density tensor.
         Simplified for 3D arrays (no 2D matrix operations like diag/eigh).
@@ -1332,14 +1495,14 @@ class NonMarkovianNoiseBath:
 
         try:
             with self.lock:
-                T2_s = T2_NS  / 1e9
-                T1_s = T1_NS  / 1e9
-                dt   = float(time_step)
+                T2_s = T2_NS / 1e9
+                T1_s = T1_NS / 1e9
+                dt = float(time_step)
 
                 # Dephasing: decay off-diagonal coherences
-                gamma_phi   = 1.0 / max(T2_s, 1e-9)
+                gamma_phi = 1.0 / max(T2_s, 1e-9)
                 deph_factor = float(np.exp(-gamma_phi * dt))
-                result      = deph_factor * density_matrix
+                result = deph_factor * density_matrix
 
                 # Amplitude damping: decay overall magnitude
                 amp_factor = float(np.exp(-dt / max(T1_s, 1e-9)))
@@ -1351,24 +1514,29 @@ class NonMarkovianNoiseBath:
 
                 # Non-Markovian memory revival: blend with past state
                 if len(self.history) > 2:
-                    hist_list  = list(self.history)
-                    dt_s       = CYCLE_TIME_NS / 1e9
-                    mem_accum  = np.zeros_like(density_matrix)
+                    hist_list = list(self.history)
+                    dt_s = CYCLE_TIME_NS / 1e9
+                    mem_accum = np.zeros_like(density_matrix)
                     norm_accum = 0.0
                     seen_cycles: set = set()
                     for k in range(4):  # Reduced lookback for 3D tensors
                         target_idx = _current_cycle - (1 << k)
-                        if target_idx < 0: break
+                        if target_idx < 0:
+                            break
                         best = min(hist_list, key=lambda x: abs(x[0] - target_idx))
-                        if best[0] in seen_cycles: continue
+                        if best[0] in seen_cycles:
+                            continue
                         seen_cycles.add(best[0])
-                        tau        = max((_current_cycle - best[0]) * dt_s, 1e-9)
-                        K_tau      = abs(self.ornstein_uhlenbeck_kernel(tau, tau))
+                        tau = max((_current_cycle - best[0]) * dt_s, 1e-9)
+                        K_tau = abs(self.ornstein_uhlenbeck_kernel(tau, tau))
                         mem_accum += K_tau * best[1]
                         norm_accum += K_tau
-                    if norm_accum > 1e-12: mem_accum /= norm_accum
+                    if norm_accum > 1e-12:
+                        mem_accum /= norm_accum
                     revival_weight = min(self.memory_kernel * 0.20, 0.10)
-                    result = (1.0 - revival_weight) * result + revival_weight * mem_accum
+                    result = (
+                        1.0 - revival_weight
+                    ) * result + revival_weight * mem_accum
 
                 # Hermitianize for 3D tensor
                 result = 0.5 * (result + np.conj(np.transpose(result, (1, 0, 2))))
@@ -1388,6 +1556,7 @@ class NonMarkovianNoiseBath:
         """Return Qiskit noise model."""
         return self.noise_model
 
+
 # Global noise bath
 NOISE_BATH = NonMarkovianNoiseBath()
 
@@ -1395,14 +1564,17 @@ NOISE_BATH = NonMarkovianNoiseBath()
 # SECTION 4: QUANTUM CIRCUIT BUILDERS (W-STATE TRIPARTITE + QRNG)
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 class QuantumCircuitBuilders:
     """Advanced quantum circuit construction"""
-    
+
     @staticmethod
-    def build_oracle_pqivv_w(circuit: QuantumCircuit,
-                             oracle_qubit: int,
-                             inversevirtual_qubit: int,
-                             virtual_qubit: int) -> QuantumCircuit:
+    def build_oracle_pqivv_w(
+        circuit: QuantumCircuit,
+        oracle_qubit: int,
+        inversevirtual_qubit: int,
+        virtual_qubit: int,
+    ) -> QuantumCircuit:
         """
         Build tripartite W-state for pq0: |W⟩ = (1/√3)(|100⟩ + |010⟩ + |001⟩)
 
@@ -1417,24 +1589,24 @@ class QuantumCircuitBuilders:
         """
         try:
             qubits = [oracle_qubit, inversevirtual_qubit, virtual_qubit]
-            
+
             if len(qubits) < 3:
                 logger.warning("oracle_pqivv_w requires 3 qubits")
                 return circuit
-            
+
             # W-state construction via controlled rotations
             # |W⟩ = (1/√3)(|100⟩ + |010⟩ + |001⟩)
-            
+
             # First qubit in superposition
-            circuit.ry(math.acos(math.sqrt(2/3)), qubits[0])
-            
+            circuit.ry(math.acos(math.sqrt(2 / 3)), qubits[0])
+
             # Controlled rotation on second qubit
             circuit.cx(qubits[0], qubits[1])
-            circuit.ry(math.acos(math.sqrt(1/2)), qubits[1])
-            
+            circuit.ry(math.acos(math.sqrt(1 / 2)), qubits[1])
+
             # Controlled rotation on third qubit
             circuit.cx(qubits[1], qubits[2])
-            
+
             # Entanglement purification
             for q in qubits:
                 circuit.h(q)
@@ -1442,80 +1614,93 @@ class QuantumCircuitBuilders:
             circuit.cx(qubits[1], qubits[2])
             for q in qubits:
                 circuit.h(q)
-            
+
             # Measure all three qubits
             circuit.measure(qubits, qubits)
-            
-            logger.debug(f"✅ Built oracle_pqivv_w: pq0_oracle[leg0] | pq0_IV[leg1] | pq0_V[leg2] — all tripartite legs of pq0, co-located at origin")
-            
+
+            logger.debug(
+                f"✅ Built oracle_pqivv_w: pq0_oracle[leg0] | pq0_IV[leg1] | pq0_V[leg2] — all tripartite legs of pq0, co-located at origin"
+            )
+
             return circuit
-            
+
         except Exception as e:
             logger.error(f"oracle_pqivv_w construction failed: {e}")
             return circuit
-    
+
     @staticmethod
-    def build_qrng_interference_circuit(circuit: QuantumCircuit, num_qubits: int,
-                                       phases: Optional[List[float]] = None) -> QuantumCircuit:
+    def build_qrng_interference_circuit(
+        circuit: QuantumCircuit, num_qubits: int, phases: Optional[List[float]] = None
+    ) -> QuantumCircuit:
         """Build QRNG interference circuit"""
         try:
             if phases is None:
                 phases = [random.random() * 2 * math.pi for _ in range(num_qubits)]
-            
+
             for i, phase in enumerate(phases[:num_qubits]):
                 circuit.h(i)
                 circuit.rz(phase, i)
-            
+
             for i in range(num_qubits - 1):
-                circuit.ch(i, i+1)
-            
+                circuit.ch(i, i + 1)
+
             for qubit in range(num_qubits):
                 circuit.h(qubit)
-            
+
             for qubit in range(num_qubits):
                 circuit.measure(qubit, qubit)
-            
+
             return circuit
         except:
             return circuit
-    
+
     @staticmethod
-    def build_custom_circuit(circuit_type: QuantumCircuitType, num_qubits: int,
-                            depth: int = 10, parameters: Optional[Dict] = None) -> QuantumCircuit:
+    def build_custom_circuit(
+        circuit_type: QuantumCircuitType,
+        num_qubits: int,
+        depth: int = 10,
+        parameters: Optional[Dict] = None,
+    ) -> QuantumCircuit:
         """Build custom quantum circuit"""
         try:
             if num_qubits < 1 or num_qubits > NUM_TOTAL_QUBITS:
                 num_qubits = NUM_TOTAL_QUBITS
-            
+
             circuit = QuantumCircuit(num_qubits, num_qubits, name=circuit_type.value)
-            
+
             if circuit_type == QuantumCircuitType.W_STATE_TRIPARTITE_ORACLE:
                 return QuantumCircuitBuilders.build_oracle_pqivv_w(circuit, 0, 1, 2)
             elif circuit_type == QuantumCircuitType.QRNG_INTERFERENCE:
-                return QuantumCircuitBuilders.build_qrng_interference_circuit(circuit, num_qubits)
+                return QuantumCircuitBuilders.build_qrng_interference_circuit(
+                    circuit, num_qubits
+                )
             else:
                 for _ in range(depth):
                     for qubit in range(num_qubits):
                         circuit.h(qubit)
                         circuit.rz(random.random() * 2 * math.pi, qubit)
                     for i in range(num_qubits - 1):
-                        circuit.cx(i, i+1)
+                        circuit.cx(i, i + 1)
                 return circuit
         except Exception as e:
             logger.error(f"Circuit build error: {e}")
             return QuantumCircuit(num_qubits, num_qubits)
 
+
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 5: QUANTUM EXECUTION ENGINE (4 WSGI THREADS)
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 class QuantumExecutionEngine:
     """Quantum execution engine with 4 WSGI threads"""
-    
+
     def __init__(self, num_threads: int = 4):
         self.num_threads = num_threads
         try:
-            self.executor = ThreadPoolExecutor(max_workers=num_threads, thread_name_prefix="QUANTUM")
+            self.executor = ThreadPoolExecutor(
+                max_workers=num_threads, thread_name_prefix="QUANTUM"
+            )
         except TypeError:
             self.executor = ThreadPoolExecutor(max_workers=num_threads)
         self.simulator = None
@@ -1526,26 +1711,26 @@ class QuantumExecutionEngine:
         self.active_executions = {}
         self.metrics = []
         self._init_simulators()
-    
+
     def _init_simulators(self):
         """Initialize Qiskit AER simulators"""
         if not QISKIT_AVAILABLE:
             logger.warning("⚠️ Qiskit not available - simulators disabled")
             return
-        
+
         try:
             sim_kwargs = {
-                'method': 'density_matrix',
-                'shots': AER_SHOTS,
-                'noise_model': NOISE_BATH.get_noise_model(),
+                "method": "density_matrix",
+                "shots": AER_SHOTS,
+                "noise_model": NOISE_BATH.get_noise_model(),
             }
 
             try:
-                sim_kwargs['seed_simulator'] = AER_SEED
+                sim_kwargs["seed_simulator"] = AER_SEED
                 self.aer_simulator = AerSimulator(**sim_kwargs)
             except TypeError:
                 logger.debug(f"seed_simulator not supported, continuing without seed")
-                del sim_kwargs['seed_simulator']
+                del sim_kwargs["seed_simulator"]
                 self.aer_simulator = AerSimulator(**sim_kwargs)
 
             # Pre-transpile the canonical W-state circuit once at init.
@@ -1556,61 +1741,74 @@ class QuantumExecutionEngine:
                     _wqc = QuantumCircuit(3, 3, name="W_pretranspile")
                     _wqc = QuantumCircuitBuilders.build_oracle_pqivv_w(_wqc, 0, 1, 2)
                     self._w_state_transpiled = transpile(
-                        _wqc, self.aer_simulator,
-                        optimization_level=CIRCUIT_OPTIMIZATION_LEVEL
+                        _wqc,
+                        self.aer_simulator,
+                        optimization_level=CIRCUIT_OPTIMIZATION_LEVEL,
                     )
                     logger.info("✅ W-state circuit pre-transpiled and cached")
                 except Exception as _te:
                     logger.debug(f"W-state pre-transpile failed: {_te}")
                     self._w_state_transpiled = None
 
-            logger.info(f"✅ Qiskit AER simulators initialized ({self.num_threads} threads)")
+            logger.info(
+                f"✅ Qiskit AER simulators initialized ({self.num_threads} threads)"
+            )
         except Exception as e:
             logger.error(f"❌ AER initialization failed: {str(e)[:200]}")
-    
-    def execute_circuit(self, circuit: QuantumCircuit, shots: Optional[int] = None,
-                       noise_model: bool = True) -> Dict[str, Any]:
+
+    def execute_circuit(
+        self,
+        circuit: QuantumCircuit,
+        shots: Optional[int] = None,
+        noise_model: bool = True,
+    ) -> Dict[str, Any]:
         """Execute quantum circuit with optional noise"""
         try:
             shots = shots or AER_SHOTS
-            
+
             if CIRCUIT_TRANSPILE:
-                circuit = transpile(circuit, optimization_level=CIRCUIT_OPTIMIZATION_LEVEL)
-            
+                circuit = transpile(
+                    circuit, optimization_level=CIRCUIT_OPTIMIZATION_LEVEL
+                )
+
             if noise_model and self.aer_simulator:
                 result = self.aer_simulator.run(circuit, shots=shots).result()
             else:
                 logger.warning("No simulator available")
                 return None
-            
+
             counts = {}
-            if hasattr(result, 'get_counts'):
+            if hasattr(result, "get_counts"):
                 try:
                     counts = result.get_counts()
                 except Exception:
                     counts = {}
-            
+
             statevector = None
             density_matrix = None
             try:
-                statevector = result.data(0).statevector if hasattr(result, 'data') else None
+                statevector = (
+                    result.data(0).statevector if hasattr(result, "data") else None
+                )
             except:
                 pass
-            
+
             return {
-                'counts': counts,
-                'statevector': statevector,
-                'density_matrix': density_matrix,
-                'execution_time_ms': getattr(result, 'time_taken', 0) * 1000
+                "counts": counts,
+                "statevector": statevector,
+                "density_matrix": density_matrix,
+                "execution_time_ms": getattr(result, "time_taken", 0) * 1000,
             }
         except Exception as e:
             logger.error(f"Execution error: {e}")
             return None
-    
-    def execute_async(self, circuit: QuantumCircuit, callback: Optional[Callable] = None) -> str:
+
+    def execute_async(
+        self, circuit: QuantumCircuit, callback: Optional[Callable] = None
+    ) -> str:
         """Execute circuit asynchronously"""
         execution_id = str(uuid.uuid4())
-        
+
         def _execute():
             try:
                 results = self.execute_circuit(circuit)
@@ -1618,13 +1816,13 @@ class QuantumExecutionEngine:
                     callback(execution_id, results)
             except Exception as e:
                 logger.error(f"Async execution failed: {e}")
-        
+
         with self.lock:
             future = self.executor.submit(_execute)
             self.active_executions[execution_id] = future
-        
+
         return execution_id
-    
+
     def get_execution_result(self, execution_id: str) -> Optional[Dict]:
         """Get result of async execution"""
         try:
@@ -1638,19 +1836,23 @@ class QuantumExecutionEngine:
         except:
             return None
 
+
 # ════════════════════════════════════════════════════════════════════════════════
 # HYPERBOLIC ROUTER REFUNCTIONED FOR SPATIAL-TEMPORAL FIELD MANAGEMENT
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 class HyperbolicRouter:
     """Refunctioned hyperbolic router for spatial-temporal field + route management"""
-    
+
     def __init__(self, field: SpatialTemporalField):
         self.field = field
         self.lock = threading.RLock()
-    
+
     @staticmethod
-    def euclidean_to_hyperbolic(point: np.ndarray, curvature: float = -1.0) -> np.ndarray:
+    def euclidean_to_hyperbolic(
+        point: np.ndarray, curvature: float = -1.0
+    ) -> np.ndarray:
         """Map Euclidean to hyperbolic (Poincaré ball)"""
         try:
             norm = np.linalg.norm(point)
@@ -1659,28 +1861,30 @@ class HyperbolicRouter:
             return point / (1.0 - np.dot(point, point) + 1e-10)
         except:
             return point
-    
+
     @staticmethod
-    def hyperbolic_distance(p1: np.ndarray, p2: np.ndarray, curvature: float = -1.0) -> float:
+    def hyperbolic_distance(
+        p1: np.ndarray, p2: np.ndarray, curvature: float = -1.0
+    ) -> float:
         """Compute hyperbolic distance (Poincaré metric)"""
         try:
             p1_norm = np.linalg.norm(p1)
             p2_norm = np.linalg.norm(p2)
-            
+
             if p1_norm >= 1.0 or p2_norm >= 1.0:
                 return np.inf
-            
+
             numerator = 2 * np.linalg.norm(p1 - p2)
-            denominator = (1 - p1_norm ** 2) * (1 - p2_norm ** 2)
-            
+            denominator = (1 - p1_norm**2) * (1 - p2_norm**2)
+
             if denominator <= 0:
                 return np.inf
-            
+
             arg = 1 + numerator / denominator
             return math.acosh(arg)
         except:
             return np.inf
-    
+
     def compute_route_distance(self, route: Route) -> float:
         """Compute total hyperbolic distance along route"""
         try:
@@ -1693,40 +1897,44 @@ class HyperbolicRouter:
             return total
         except:
             return 0.0
-    
+
     def find_shortest_route(self, start_pq: int, end_pq: int) -> Optional[Route]:
         """Find shortest route in hyperbolic space (Dijkstra-like)"""
         try:
             with self.lock:
                 locs = self.field.get_all_locations()
-                
+
                 # Simple greedy nearest-neighbor routing
                 path = [start_pq]
                 current = start_pq
                 unvisited = set(loc.pq_id for loc in locs if loc.pq_id != start_pq)
-                
+
                 while current != end_pq and unvisited:
                     current_loc = self.field.get_pseudoqubit(current)
-                    
+
                     nearest = min(
                         unvisited,
-                        key=lambda pq_id: current_loc.distance_to(self.field.get_pseudoqubit(pq_id))
+                        key=lambda pq_id: current_loc.distance_to(
+                            self.field.get_pseudoqubit(pq_id)
+                        ),
                     )
-                    
+
                     path.append(nearest)
                     unvisited.discard(nearest)
                     current = nearest
-                
+
                 if current == end_pq:
                     route = self.field.create_route(path)
                     return route
-                
+
                 return None
         except Exception as e:
             logger.error(f"Route computation failed: {e}")
             return None
-    
-    def encode_transaction_in_block(self, block_id: str, tx_data: Dict[str, Any]) -> bool:
+
+    def encode_transaction_in_block(
+        self, block_id: str, tx_data: Dict[str, Any]
+    ) -> bool:
         """Encode transaction data in block field"""
         try:
             with self.lock:
@@ -1734,26 +1942,28 @@ class HyperbolicRouter:
         except:
             return False
 
+
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 6: W-STATE CONSTRUCTOR (REFACTORED)
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 class WStateConstructor:
     """W-state constructor for tripartite oracle-PQ-IV-V system"""
-    
+
     def __init__(self, field: SpatialTemporalField):
         self.field = field
         self.current_state = None
         self.timestamp = time.time()
         self.lock = threading.RLock()
-        self._engine: Optional['QuantumExecutionEngine'] = None  # cached — init once
+        self._engine: Optional["QuantumExecutionEngine"] = None  # cached — init once
 
-    def _get_engine(self) -> 'QuantumExecutionEngine':
+    def _get_engine(self) -> "QuantumExecutionEngine":
         """Return cached execution engine, creating once on first call."""
         if self._engine is None:
             self._engine = QuantumExecutionEngine()
         return self._engine
-    
+
     def construct_oracle_pqivv_w(self) -> QuantumCircuit:
         """Build oracle-PQ-InverseVirtual-Virtual W-state"""
         try:
@@ -1763,7 +1973,7 @@ class WStateConstructor:
         except Exception as e:
             logger.error(f"W-state construction failed: {e}")
             return None
-    
+
     def measure_oracle_pqivv_w(self) -> Dict[str, Any]:
         """Measure oracle-PQIVV W-state"""
         try:
@@ -1771,44 +1981,48 @@ class WStateConstructor:
                 qc = self.construct_oracle_pqivv_w()
                 if not qc:
                     return None
-                
+
                 results = self._get_engine().execute_circuit(qc, shots=1000)
-                
+
                 if not results:
                     return None
-                
-                counts = results.get('counts', {})
-                
+
+                counts = results.get("counts", {})
+
                 # Compute W-state strength
                 # W-state for 3 qubits has exactly one '1' in binary string ('001', '010', '100')
-                w_state_counts = {k: v for k, v in counts.items() if k.count('1') == 1}
+                w_state_counts = {k: v for k, v in counts.items() if k.count("1") == 1}
                 w_strength = sum(w_state_counts.values()) / 1000.0
-                
+
                 if w_strength == 0 and counts:
-                    logger.debug(f"[QUANTUM-W] Zero strength detected. Counts keys: {list(counts.keys())}")
-                
+                    logger.debug(
+                        f"[QUANTUM-W] Zero strength detected. Counts keys: {list(counts.keys())}"
+                    )
+
                 return {
-                    'counts': counts,
-                    'w_state_strength': w_strength,
-                    'oracle_pqivv_signature': w_state_counts,
-                    'timestamp': time.time(),
+                    "counts": counts,
+                    "w_state_strength": w_strength,
+                    "oracle_pqivv_signature": w_state_counts,
+                    "timestamp": time.time(),
                 }
         except Exception as e:
             logger.error(f"W-state measurement failed: {e}")
             return None
 
+
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 7: PSEUDOQUBIT COHERENCE MANAGER
 # ════════════════════════════════════════════════════════════════════════════════
 
+
 class QuantumLatticeController:
     """PRIMARY QUANTUM LATTICE CONTROL SYSTEM (REFACTORED FOR SPATIAL-TEMPORAL FIELDS)"""
-    
+
     def __init__(self):
         # Spatial-temporal field system
         self.field = SpatialTemporalField()
         self.router = HyperbolicRouter(self.field)
-        
+
         # Quantum subsystems
         self.execution_engine = QuantumExecutionEngine(num_threads=4)
         self.w_state_constructor = WStateConstructor(self.field)
@@ -1837,10 +2051,12 @@ class QuantumLatticeController:
                         _dx = (i - _cx) / 20.0
                         _dy = (j - _cy) / 20.0
                         _dz = (k - _cz) / 20.0
-                        _r2 = _dx*_dx + _dy*_dy + _dz*_dz
+                        _r2 = _dx * _dx + _dy * _dy + _dz * _dz
                         _envelope = np.exp(-_r2 / 2.0)
                         _phase = 2 * np.pi * _m / _num_modes
-                        self.current_density_matrix[i, j, k] += (_envelope / _num_modes) * np.exp(1j * _phase)
+                        self.current_density_matrix[i, j, k] += (
+                            _envelope / _num_modes
+                        ) * np.exp(1j * _phase)
 
         # Normalize: trace = 1 (proper density matrix for quantum state)
         _norm = np.sum(np.abs(self.current_density_matrix) ** 2)
@@ -1860,15 +2076,21 @@ class QuantumLatticeController:
         self.cycle_count = 0
 
         # ── Blockchain subsystems (initialised in start()) ────────────────────
-        self.db_connector:  Optional['QuantumDatabaseConnector'] = None
-        self.validator:     Optional['IndividualValidator']       = None
-        self.block_manager: Optional['BlockManager']              = None
+        self.db_connector: Optional["QuantumDatabaseConnector"] = None
+        self.validator: Optional["IndividualValidator"] = None
+        self.block_manager: Optional["BlockManager"] = None
         self._init_blockchain()
 
-        logger.info("✨ QUANTUM LATTICE CONTROLLER INITIALIZED (SPATIAL-TEMPORAL FIELD MODEL)")
+        logger.info(
+            "✨ QUANTUM LATTICE CONTROLLER INITIALIZED (SPATIAL-TEMPORAL FIELD MODEL)"
+        )
         logger.info(f"   Coherence target: 0.900 | Fidelity target: 0.992")
-        logger.info(f"   Memory kernel: κ={KAPPA_MEMORY} | Revival gain: {REVIVAL_AMPLIFIER}x")
-        logger.info(f"   Pseudoqubits: {TOTAL_PSEUDOQUBITS:,} in {NUM_BATCHES} batches × {TOTAL_PSEUDOQUBITS // NUM_BATCHES}")
+        logger.info(
+            f"   Memory kernel: κ={KAPPA_MEMORY} | Revival gain: {REVIVAL_AMPLIFIER}x"
+        )
+        logger.info(
+            f"   Pseudoqubits: {TOTAL_PSEUDOQUBITS:,} in {NUM_BATCHES} batches × {TOTAL_PSEUDOQUBITS // NUM_BATCHES}"
+        )
         logger.info(f"   W-state: tripartite oracle|IV|V implicit per pseudoqubit")
         logger.info(f"   Routing: hyperbolic spatial-temporal field management")
 
@@ -1884,22 +2106,23 @@ class QuantumLatticeController:
                 self.db_connector.start_logger()
                 logger.info("[BLOCKCHAIN] DB connector initialised")
             except Exception as e:
-                logger.warning(f"[BLOCKCHAIN] DB connector failed ({e}); running in-memory only")
+                logger.warning(
+                    f"[BLOCKCHAIN] DB connector failed ({e}); running in-memory only"
+                )
                 self.db_connector = None
 
         # Validator
         self.validator = IndividualValidator(
-            validator_id    = str(uuid.uuid4())[:16],
-            miner_address   = "miner_" + hashlib.sha3_256(
-                str(time.time()).encode()
-            ).hexdigest()[:16],
+            validator_id=str(uuid.uuid4())[:16],
+            miner_address="miner_"
+            + hashlib.sha3_256(str(time.time()).encode()).hexdigest()[:16],
         )
         logger.info(f"[BLOCKCHAIN] Validator ready: {self.validator.miner_address}")
 
         # BlockManager
         self.block_manager = BlockManager(self.db_connector, self.validator)
         logger.info("[BLOCKCHAIN] BlockManager created (not yet started)")
-    
+
     def initialize_spatial_lattice(self) -> None:
         """
         Register all 106,496 pseudoqubits on the vertices of the {8,3}
@@ -1938,16 +2161,16 @@ class QuantumLatticeController:
         adjacent pqs are in the same or adjacent batches.
         """
         try:
-            PQ_PER_BATCH = TOTAL_PSEUDOQUBITS // NUM_BATCHES    # 2048
+            PQ_PER_BATCH = TOTAL_PSEUDOQUBITS // NUM_BATCHES  # 2048
 
             # ── {8,3} Poincaré-disk vertex generator ─────────────────────────
             # Fundamental vertex distance from origin (hyperbolic):
             #   cosh(d) = cos(π/q) / sin(π/p)   for {p,q}={8,3}
-            p, q    = 8, 3
-            cos_d   = math.cos(math.pi / q) / math.sin(math.pi / p)
-            d_fund  = math.acosh(cos_d)                     # hyperbolic distance
+            p, q = 8, 3
+            cos_d = math.cos(math.pi / q) / math.sin(math.pi / p)
+            d_fund = math.acosh(cos_d)  # hyperbolic distance
             # Poincaré disk radius for this distance:
-            r_fund  = math.tanh(d_fund / 2.0)               # |z| in disk model
+            r_fund = math.tanh(d_fund / 2.0)  # |z| in disk model
 
             # Edge step = vertex distance (in {8,3} the edge length equals the
             # centre-to-vertex distance to first order — close enough for BFS stepping)
@@ -1988,20 +2211,21 @@ class QuantumLatticeController:
             #      relative to the incoming edge direction.
             # We track: vertex position (complex), parent direction angle (float)
 
-            EPSILON     = 1e-9
-            MAX_RADIUS  = 1.0 - 1e-6     # stay inside Poincaré disk
+            EPSILON = 1e-9
+            MAX_RADIUS = 1.0 - 1e-6  # stay inside Poincaré disk
 
             # BFS generates TOTAL_PSEUDOQUBITS-1 vertices.
             # pq0 is reserved for the oracle at the origin (not a tessellation vertex).
             BFS_TARGET = TOTAL_PSEUDOQUBITS - 1
 
-            visited: dict = {}   # snap(z) → bfs_index (0-based)
+            visited: dict = {}  # snap(z) → bfs_index (0-based)
 
             def snap(z: complex) -> complex:
                 """Round to 8 decimal places for deduplication."""
                 return complex(round(z.real, 8), round(z.imag, 8))
 
             from collections import deque as _deque
+
             bfs: _deque = _deque()
 
             for v in central_verts:
@@ -2042,7 +2266,10 @@ class QuantumLatticeController:
             # It is NOT a tessellation vertex; it is the unique oracle node.
             # Its W-state triplet (IV, V) are implicit sub-qubits at the same point.
             self.field.register_pseudoqubit(
-                0, 0.0, 0.0, 0.0,
+                0,
+                0.0,
+                0.0,
+                0.0,
                 label="pq0_oracle",
             )
             logger.info(
@@ -2059,11 +2286,17 @@ class QuantumLatticeController:
 
             # ── Register pq1 and pq2 — Block-0 endpoints ─────────────────────
             for special_id in (1, 2):
-                bfs_idx = special_id - 1   # pq1 ← BFS[0], pq2 ← BFS[1]
-                z = id_to_z[bfs_idx] if bfs_idx < len(id_to_z) else central_verts[bfs_idx]
+                bfs_idx = special_id - 1  # pq1 ← BFS[0], pq2 ← BFS[1]
+                z = (
+                    id_to_z[bfs_idx]
+                    if bfs_idx < len(id_to_z)
+                    else central_verts[bfs_idx]
+                )
                 self.field.register_pseudoqubit(
                     special_id,
-                    float(z.real), float(z.imag), 0.0,
+                    float(z.real),
+                    float(z.imag),
+                    0.0,
                     label=f"pq{special_id}_block0_endpoint",
                 )
             logger.debug(
@@ -2074,14 +2307,18 @@ class QuantumLatticeController:
             # ── Register pq3 … TOTAL_PSEUDOQUBITS-1 in batches ───────────────
             for batch_idx in range(NUM_BATCHES):
                 batch_start = batch_idx * PQ_PER_BATCH
-                batch_end   = batch_start + PQ_PER_BATCH
+                batch_end = batch_start + PQ_PER_BATCH
 
-                for pq_id in range(max(3, batch_start), min(batch_end, TOTAL_PSEUDOQUBITS)):
-                    bfs_idx = pq_id - 1   # shift: pq_id=3 → BFS[2], etc.
+                for pq_id in range(
+                    max(3, batch_start), min(batch_end, TOTAL_PSEUDOQUBITS)
+                ):
+                    bfs_idx = pq_id - 1  # shift: pq_id=3 → BFS[2], etc.
                     z = id_to_z[bfs_idx] if bfs_idx < len(id_to_z) else complex(0)
                     self.field.register_pseudoqubit(
                         pq_id,
-                        float(z.real), float(z.imag), 0.0,
+                        float(z.real),
+                        float(z.imag),
+                        0.0,
                         label=f"b{batch_idx:02d}_pq{pq_id}",
                     )
 
@@ -2100,7 +2337,7 @@ class QuantumLatticeController:
         except Exception as e:
             logger.error(f"Spatial lattice initialization failed: {e}")
             logger.error(traceback.format_exc())
-    
+
     def start(self):
         """
         Start the quantum lattice.
@@ -2122,24 +2359,26 @@ class QuantumLatticeController:
             self.maintenance_thread = threading.Thread(
                 target=self._maintenance_loop,
                 daemon=True,
-                name='QuantumLatticeMaintenanceThread',
+                name="QuantumLatticeMaintenanceThread",
             )
             self.maintenance_thread.start()
             logger.info("[START] Quantum lattice maintenance loop running")
 
             # ── Phase 3: blockchain (BlockManager) ───────────────────────────
             if self.block_manager is not None:
-                self.block_manager._lattice_ref = self   # live quantum snapshots
+                self.block_manager._lattice_ref = self  # live quantum snapshots
                 self.block_manager.start()
                 logger.info("[START] BlockManager started — chain is live")
-    
+
     def stop(self):
         """DISABLED: Lattice runs forever. Daemon thread will die with the process."""
-        logger.warning("[LATTICE] stop() called but IGNORED — lattice maintenance runs forever")
+        logger.warning(
+            "[LATTICE] stop() called but IGNORED — lattice maintenance runs forever"
+        )
         # Do nothing. The maintenance loop is a daemon thread.
         # When the process is SIGKILL'd by Koyeb, it dies with the process.
         pass
-    
+
     def _maintenance_loop(self):
         """Perpetual non-Markovian coherence maintenance"""
         while self.running:
@@ -2152,7 +2391,9 @@ class QuantumLatticeController:
                 # Compute quantum metrics
                 # FIX: normalise L1-coherence to [0,1] so LATTICE.coherence is always
                 # a physically meaningful [0,1] metric (max for 256-dim = 255).
-                _raw_coh = QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix)
+                _raw_coh = QuantumInformationMetrics.coherence_l1_norm(
+                    self.current_density_matrix
+                )
                 # W8-COHERENCE FIX: the W8 state lives in the 8-state single-excitation
                 # subspace {|1>,|2>,|4>,...,|128>}.  Its max L1 off-diagonal sum is
                 # k*(k-1)/k = k-1 = 7  (not 255, which is the max for a fully-coherent
@@ -2167,7 +2408,7 @@ class QuantumLatticeController:
                 # F(rho, W8) correctly measures how much W-state character we preserve.
                 self.fidelity = QuantumInformationMetrics.state_fidelity(
                     self.current_density_matrix,
-                    self._w8_target          # ← W-state target, not maximally-mixed
+                    self._w8_target,  # ← W-state target, not maximally-mixed
                 )
 
                 # ══════════════════════════════════════════════════════════════════════════
@@ -2188,15 +2429,27 @@ class QuantumLatticeController:
                 fidelity_post_evolution = QuantumInformationMetrics.state_fidelity(
                     self.current_density_matrix, self._w8_target
                 )
-                coherence_post_evolution = float(np.clip(
-                    QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix) / 7.0,
-                    0.0, 1.0
-                ))
+                coherence_post_evolution = float(
+                    np.clip(
+                        QuantumInformationMetrics.coherence_l1_norm(
+                            self.current_density_matrix
+                        )
+                        / 7.0,
+                        0.0,
+                        1.0,
+                    )
+                )
 
                 self.fidelity = fidelity_post_evolution
                 self.coherence = coherence_post_evolution
-                self.w_state_strength = min(1.0, self.coherence * QuantumInformationMetrics.purity(self.current_density_matrix))
-                entropy = QuantumInformationMetrics.von_neumann_entropy(self.current_density_matrix)
+                self.w_state_strength = min(
+                    1.0,
+                    self.coherence
+                    * QuantumInformationMetrics.purity(self.current_density_matrix),
+                )
+                entropy = QuantumInformationMetrics.von_neumann_entropy(
+                    self.current_density_matrix
+                )
 
                 # ════════════════════════════════════════════════════════════════
                 # σ-REVIVAL PULSE (Floquet resonance — period-8 identity on W8)
@@ -2216,11 +2469,14 @@ class QuantumLatticeController:
                     # On hardware: repeated weak measurements + feedback pulses drive
                     # the state toward the target.  Here: convex blend in W8 subspace.
                     # Blend strength scales with how far we are from target (adaptive).
-                    _f_deficit = max(0.0, 0.95 - self.fidelity)           # 0 when F≥0.95
-                    _pump_alpha = min(0.40, _f_deficit * REVIVAL_STRENGTH) # max 40% pump
+                    _f_deficit = max(0.0, 0.95 - self.fidelity)  # 0 when F≥0.95
+                    _pump_alpha = min(
+                        0.40, _f_deficit * REVIVAL_STRENGTH
+                    )  # max 40% pump
                     if _pump_alpha > 0.01:
-                        _rho_pumped = ((1.0 - _pump_alpha) * self.current_density_matrix
-                                       + _pump_alpha * self._w8_target)
+                        _rho_pumped = (
+                            1.0 - _pump_alpha
+                        ) * self.current_density_matrix + _pump_alpha * self._w8_target
                         # Enforce valid DM after blend
                         _rho_pumped = 0.5 * (_rho_pumped + _rho_pumped.conj().T)
                         _ev, _ec = np.linalg.eigh(_rho_pumped)
@@ -2228,9 +2484,13 @@ class QuantumLatticeController:
                         _tr = float(np.sum(_ev))
                         if _tr > 1e-12:
                             _ev /= _tr
-                        self.current_density_matrix = (_ec @ np.diag(_ev) @ _ec.conj().T).astype(np.complex128)
+                        self.current_density_matrix = (
+                            _ec @ np.diag(_ev) @ _ec.conj().T
+                        ).astype(np.complex128)
                     # Recompute metrics after revival pulse + pump
-                    _raw_coh_r = QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix)
+                    _raw_coh_r = QuantumInformationMetrics.coherence_l1_norm(
+                        self.current_density_matrix
+                    )
                     self.coherence = float(np.clip(_raw_coh_r / 7.0, 0.0, 1.0))
                     self.fidelity = QuantumInformationMetrics.state_fidelity(
                         self.current_density_matrix, self._w8_target
@@ -2243,14 +2503,18 @@ class QuantumLatticeController:
                             f"C={coherence_post_evolution:.4f}→{self.coherence:.4f} | "
                             f"pump_α={_pump_alpha:.3f} | Δf={self.fidelity - fidelity_post_evolution:+.4f}"
                         )
-                    entropy = QuantumInformationMetrics.von_neumann_entropy(self.current_density_matrix)
+                    entropy = QuantumInformationMetrics.von_neumann_entropy(
+                        self.current_density_matrix
+                    )
 
                 # 🔍 ENTANGLEMENT REVIVAL DETECTION (Non-Markovian signature)
                 # Track coherence peaks: when C(t) > C(t-1) after decay → revival detected
                 try:
                     if len(self.metrics_history) > 5:
-                        prev_coherence = self.metrics_history[-1]['coherence']
-                        if self.coherence > prev_coherence + 0.01:  # Rising edge (1% threshold)
+                        prev_coherence = self.metrics_history[-1]["coherence"]
+                        if (
+                            self.coherence > prev_coherence + 0.01
+                        ):  # Rising edge (1% threshold)
                             # Check if this is a revival (not just noise)
                             if self.coherence > 0.15:  # Significant coherence
                                 # Log only every 50 entanglement revivals to reduce spam
@@ -2263,56 +2527,56 @@ class QuantumLatticeController:
                                     )
                 except:
                     pass
-                
+
                 # Update batch coherences
                 for batch_id in range(NUM_BATCHES):
                     batch_coherence = self.coherence * (0.8 + 0.4 * (batch_id % 2))
-                
+
                 # Discriminate noise channels
-                
+
                 # Create result record
                 result = {
-                    'cycle': self.cycle_count,
-                    'coherence': self.coherence,
-                    'fidelity': self.fidelity,
-                    'w_state_strength': self.w_state_strength,
-                    'entropy': entropy,
-                    'spatial_field_size': len(self.field.locations),
-                    'routes_active': len(self.field.routes),
-                    'timestamp': time.time(),
+                    "cycle": self.cycle_count,
+                    "coherence": self.coherence,
+                    "fidelity": self.fidelity,
+                    "w_state_strength": self.w_state_strength,
+                    "entropy": entropy,
+                    "spatial_field_size": len(self.field.locations),
+                    "routes_active": len(self.field.routes),
+                    "timestamp": time.time(),
                 }
-                
+
                 self.metrics_history.append(result)
                 self.cycle_count += 1
-                
+
                 # Sleep represents accumulated 72ns cycles (typically ~14 cycles per 1ms polling)
                 time.sleep(CYCLE_TIME_NS / 1e9)
-                
+
             except Exception as e:
                 logger.error(f"[MAINTENANCE] Cycle failed: {e}")
                 time.sleep(0.1)
-    
+
     def measure_qubit(self, qubit_id: int) -> Dict[str, Any]:
         """Measure a single qubit"""
         try:
             qc = QuantumCircuit(1, 1, name=f"Measure_q{qubit_id}")
             qc.measure(0, 0)
-            
+
             result = self.execution_engine.execute_circuit(qc, shots=1000)
-            
+
             return {
-                'qubit_id': qubit_id,
-                'counts': result.get('counts', {}),
-                'measurement_time': time.time(),
+                "qubit_id": qubit_id,
+                "counts": result.get("counts", {}),
+                "measurement_time": time.time(),
             }
         except Exception as e:
             logger.error(f"Measurement failed: {e}")
-            return {'error': str(e)}
-    
+            return {"error": str(e)}
+
     # ════════════════════════════════════════════════════════════════════════════════
     # TRANSACTION QUANTUM ENCODING — COMMENTED OUT (v13)
     # ════════════════════════════════════════════════════════════════════════════════
-    
+
     # @dataclass
     # class TransactionQuantumParameters:
     #     tx_id: str
@@ -2350,22 +2614,24 @@ class QuantumLatticeController:
     #         'note': 'Use spatial-temporal field routing instead',
     #         'recommendation': 'Create route, encode transaction in block fields'
     #     }
-    
+
     # ════════════════════════════════════════════════════════════════════════════════
     # END COMMENTED TRANSACTION CODE
     # ════════════════════════════════════════════════════════════════════════════════
-    
+
     def create_spatial_route(self, start_pq: int, end_pq: int) -> Optional[Route]:
         """Create a spatial route between two pseudoqubits"""
         try:
             route = self.router.find_shortest_route(start_pq, end_pq)
             if route:
-                logger.info(f"✅ Created route {route.route_id}: {start_pq} → {end_pq} ({route.hops} hops)")
+                logger.info(
+                    f"✅ Created route {route.route_id}: {start_pq} → {end_pq} ({route.hops} hops)"
+                )
             return route
         except Exception as e:
             logger.error(f"Route creation failed: {e}")
             return None
-    
+
     def encode_in_route(self, route_id: str, transaction_data: Dict[str, Any]) -> bool:
         """Encode transaction data in route blocks"""
         try:
@@ -2373,49 +2639,53 @@ class QuantumLatticeController:
             if not route:
                 logger.warning(f"Route {route_id} not found")
                 return False
-            
-            route.transaction_order.append(transaction_data.get('tx_id', 'unknown'))
-            
+
+            route.transaction_order.append(transaction_data.get("tx_id", "unknown"))
+
             # Encode in first block's field
             if route.blocks:
                 block = route.blocks[0]
-                success = self.field.update_block_field(block.block_id, transaction_data)
+                success = self.field.update_block_field(
+                    block.block_id, transaction_data
+                )
                 if success:
                     logger.info(f"✅ Encoded transaction in block {block.block_id}")
                 return success
-            
+
             return False
         except Exception as e:
             logger.error(f"Route encoding failed: {e}")
             return False
-    
+
     def measure_oracle_pqivv_w(self) -> Dict[str, Any]:
         """Measure oracle-PQIVV W-state"""
         try:
             result = self.w_state_constructor.measure_oracle_pqivv_w()
-            return result if result else {'error': 'W-state measurement failed'}
+            return result if result else {"error": "W-state measurement failed"}
         except Exception as e:
             logger.error(f"W-state measurement failed: {e}")
-            return {'error': str(e)}
-    
+            return {"error": str(e)}
+
     def get_w_state_measurement_sync(self) -> Dict[str, Any]:
         """
         ✅ ORACLE SYNC: Export W-state measurement checkpoint for oracle alignment.
-        
+
         Oracles must measure W-state fidelity at these sync points to match lattice measurements.
         Returns the current lattice state snapshot for oracle cross-validation.
         """
         return {
-            'cycle': self.cycle_count,
-            'timestamp_ns': self.cycle_count * CYCLE_TIME_NS,
-            'fidelity': float(self.fidelity),
-            'coherence': float(self.coherence),
-            'density_matrix_hex': self.current_density_matrix.tobytes().hex() if hasattr(self.current_density_matrix, 'tobytes') else '',
-            'measurement_type': 'W_STATE_REVIVAL',  # ← Oracles must measure W-state, not pq block-field
-            'is_revival_cycle': (self.cycle_count % 8) == 0,  # SIGMA-REVIVAL at mod 8
+            "cycle": self.cycle_count,
+            "timestamp_ns": self.cycle_count * CYCLE_TIME_NS,
+            "fidelity": float(self.fidelity),
+            "coherence": float(self.coherence),
+            "density_matrix_hex": self.current_density_matrix.tobytes().hex()
+            if hasattr(self.current_density_matrix, "tobytes")
+            else "",
+            "measurement_type": "W_STATE_REVIVAL",  # ← Oracles must measure W-state, not pq block-field
+            "is_revival_cycle": (self.cycle_count % 8) == 0,  # SIGMA-REVIVAL at mod 8
         }
-    
-    def get_block_field_pq0(self) -> 'np.ndarray':
+
+    def get_block_field_pq0(self) -> "np.ndarray":
         """
         Return the canonical 8×8 pq0 W-state density matrix for oracle circuits.
 
@@ -2436,15 +2706,15 @@ class QuantumLatticeController:
         Low F (e.g. after a π-pulse) → more mixed → lower Mermin, flags to daemon.
         """
         import numpy as np
-        
+
         # 🔬 FORCE FRESH QRNG ENTROPY per oracle call
         # This ensures each oracle's noise realization differs, avoiding profiling stuckness.
         try:
             fresh_entropy = globals.QRNG_ENSEMBLE.read(32)  # 32 bytes fresh entropy
-            qrng_seed = int.from_bytes(fresh_entropy[:8], 'little') & 0xFFFFFFFF
+            qrng_seed = int.from_bytes(fresh_entropy[:8], "little") & 0xFFFFFFFF
         except:
             qrng_seed = None
-        
+
         F = float(max(0.0, min(1.0, self.fidelity)))
         # Pure 3-qubit W-state: |W⟩⟨W| full outer product
         w3 = np.zeros((8, 8), dtype=np.complex128)
@@ -2488,8 +2758,13 @@ class QuantumLatticeController:
         dim = rho.shape[0]
         try:
             # ── 1. Extract 8×8 W8-subspace blocks from current rho and target ──
-            rho_sub  = np.array([[rho[ii, jj]          for jj in _W8_IDX] for ii in _W8_IDX], dtype=np.complex128)
-            tgt_sub  = np.array([[self._w8_target[ii, jj] for jj in _W8_IDX] for ii in _W8_IDX], dtype=np.complex128)
+            rho_sub = np.array(
+                [[rho[ii, jj] for jj in _W8_IDX] for ii in _W8_IDX], dtype=np.complex128
+            )
+            tgt_sub = np.array(
+                [[self._w8_target[ii, jj] for jj in _W8_IDX] for ii in _W8_IDX],
+                dtype=np.complex128,
+            )
 
             # ── 2. Build antisymmetric generator G = i(ρ_target - ρ_current) ──
             # G is Hermitian: G† = -i(ρ_target† - ρ_current†) = i(ρ_target - ρ_current) = G ✓
@@ -2499,18 +2774,21 @@ class QuantumLatticeController:
 
             # ── 3. QRNG-jittered pulse angle (±5% hardware-noise analogue) ──
             raw = os.urandom(8)
-            xi  = (int.from_bytes(raw, 'big') / (2**64)) * 2.0 - 1.0   # ξ ∈ [-1, +1]
-            theta = REVIVAL_STRENGTH * (1.0 + 0.05 * xi)               # jittered angle
+            xi = (int.from_bytes(raw, "big") / (2**64)) * 2.0 - 1.0  # ξ ∈ [-1, +1]
+            theta = REVIVAL_STRENGTH * (1.0 + 0.05 * xi)  # jittered angle
 
             # ── 4. U_8 = expm(-i·θ·G) on the 8×8 W8 subspace ──
             # scipy.linalg.expm gives the exact matrix exponential; numpy fallback
             # uses eigendecomposition (both are valid on 8×8).
             try:
                 from scipy.linalg import expm as _expm
+
                 U_8 = _expm(-1j * theta * G)
             except Exception:
                 evals_g, evecs_g = np.linalg.eigh(G)
-                U_8 = evecs_g @ np.diag(np.exp(-1j * theta * evals_g)) @ evecs_g.conj().T
+                U_8 = (
+                    evecs_g @ np.diag(np.exp(-1j * theta * evals_g)) @ evecs_g.conj().T
+                )
 
             # ── 5. Embed U_8 into 256×256 (identity on all other states) ──
             U_full = np.eye(dim, dtype=np.complex128)
@@ -2523,9 +2801,9 @@ class QuantumLatticeController:
 
             # ── 7. Enforce valid DM: Hermitian + PSD clip + trace=1 ──
             rho_new = 0.5 * (rho_new + rho_new.conj().T)
-            ev, ec  = np.linalg.eigh(rho_new)
-            ev      = np.clip(ev, 0.0, None)
-            tr      = float(np.sum(ev))
+            ev, ec = np.linalg.eigh(rho_new)
+            ev = np.clip(ev, 0.0, None)
+            tr = float(np.sum(ev))
             if tr > 1e-12:
                 ev /= tr
             return (ec @ np.diag(ev) @ ec.conj().T).astype(np.complex128)
@@ -2550,58 +2828,74 @@ class QuantumLatticeController:
         cycle_mod8 = self.cycle_count % 8
 
         # Measurement windows: every 8 cycles (SIGMA-REVIVAL) + power-of-2 bursts
-        is_revival   = (cycle_mod8 == 0)
-        is_power_of_2 = (self.cycle_count & (self.cycle_count - 1)) == 0 and self.cycle_count > 0
-        is_window    = is_revival or is_power_of_2
+        is_revival = cycle_mod8 == 0
+        is_power_of_2 = (
+            self.cycle_count & (self.cycle_count - 1)
+        ) == 0 and self.cycle_count > 0
+        is_window = is_revival or is_power_of_2
 
         # Phase label for log readability
-        if   cycle_mod8 == 0: phase_name = 'REVIVAL'
-        elif cycle_mod8 == 4: phase_name = 'ANTI_REVIVAL'
-        elif cycle_mod8 == 2: phase_name = 'RISING'
-        elif cycle_mod8 == 6: phase_name = 'FALLING'
-        else:                 phase_name = 'INTERMEDIATE'
+        if cycle_mod8 == 0:
+            phase_name = "REVIVAL"
+        elif cycle_mod8 == 4:
+            phase_name = "ANTI_REVIVAL"
+        elif cycle_mod8 == 2:
+            phase_name = "RISING"
+        elif cycle_mod8 == 6:
+            phase_name = "FALLING"
+        else:
+            phase_name = "INTERMEDIATE"
 
         # Get current block-field window from BlockManager
         pq_curr = 1
         pq_last = 0
         if self.block_manager:
-            pq_curr = getattr(self.block_manager, 'pq_curr', 1)
-            pq_last = getattr(self.block_manager, 'pq_last', 0)
+            pq_curr = getattr(self.block_manager, "pq_curr", 1)
+            pq_last = getattr(self.block_manager, "pq_last", 0)
 
-        dm_hex = self.current_density_matrix.tobytes().hex() if hasattr(self.current_density_matrix, 'tobytes') else ''
+        dm_hex = (
+            self.current_density_matrix.tobytes().hex()
+            if hasattr(self.current_density_matrix, "tobytes")
+            else ""
+        )
 
         return {
-            'is_measurement_window': is_window,
-            'cycle':               self.cycle_count,
-            'timestamp_ns':        self.cycle_count * CYCLE_TIME_NS,
-            'fidelity':            float(self.fidelity),
-            'coherence':           float(self.coherence),
-            'is_revival':          is_revival,
-            'is_power_of_2_burst': is_power_of_2,
-            'phase_name':          phase_name,
-            'cycle_mod8':          cycle_mod8,
-            'pq_curr':             pq_curr,
-            'pq_last':             pq_last,
-            'w_density_matrix_hex': dm_hex,
+            "is_measurement_window": is_window,
+            "cycle": self.cycle_count,
+            "timestamp_ns": self.cycle_count * CYCLE_TIME_NS,
+            "fidelity": float(self.fidelity),
+            "coherence": float(self.coherence),
+            "is_revival": is_revival,
+            "is_power_of_2_burst": is_power_of_2,
+            "phase_name": phase_name,
+            "cycle_mod8": cycle_mod8,
+            "pq_curr": pq_curr,
+            "pq_last": pq_last,
+            "w_density_matrix_hex": dm_hex,
         }
-    
-    def validate_oracle_w_state_measurement(self, oracle_fidelity: float, oracle_coherence: float, 
-                                            tolerance_f: float = 0.02, tolerance_c: float = 0.01) -> bool:
+
+    def validate_oracle_w_state_measurement(
+        self,
+        oracle_fidelity: float,
+        oracle_coherence: float,
+        tolerance_f: float = 0.02,
+        tolerance_c: float = 0.01,
+    ) -> bool:
         """
         Cross-validate that oracle's W-state measurement matches lattice's.
-        
+
         Args:
             oracle_fidelity: Oracle's measured W-state fidelity
             oracle_coherence: Oracle's measured coherence
             tolerance_f: Allowed deviation in fidelity
             tolerance_c: Allowed deviation in coherence
-        
+
         Returns:
             True if oracle measurement is within tolerance of lattice measurement
         """
         fidelity_match = abs(oracle_fidelity - self.fidelity) <= tolerance_f
         coherence_match = abs(oracle_coherence - self.coherence) <= tolerance_c
-        
+
         if not fidelity_match or not coherence_match:
             logger.warning(
                 f"[LATTICE-ORACLE-SYNC] ⚠️  Measurement divergence detected:\n"
@@ -2610,7 +2904,7 @@ class QuantumLatticeController:
                 f"  Match: F={fidelity_match} C={coherence_match}"
             )
             return False
-        
+
         logger.debug(
             f"[LATTICE-ORACLE-SYNC] ✅ Measurement alignment verified at cycle {self.cycle_count}"
         )
@@ -2618,42 +2912,51 @@ class QuantumLatticeController:
         """Get comprehensive lattice state"""
         try:
             return {
-                'coherence': self.coherence,
-                'fidelity': self.fidelity,
-                'w_state_strength': self.w_state_strength,
-                'cycle': self.cycle_count,
-                'spatial_field': {
-                    'pseudoqubits_registered': len(self.field.locations),
-                    'blocks_created': len(self.field.blocks),
-                    'routes_active': len(self.field.routes),
+                "coherence": self.coherence,
+                "fidelity": self.fidelity,
+                "w_state_strength": self.w_state_strength,
+                "cycle": self.cycle_count,
+                "spatial_field": {
+                    "pseudoqubits_registered": len(self.field.locations),
+                    "blocks_created": len(self.field.blocks),
+                    "routes_active": len(self.field.routes),
                 },
-                'timestamp': time.time(),
+                "timestamp": time.time(),
             }
         except Exception as e:
             logger.error(f"Get state failed: {e}")
-            return {'error': str(e)}
-    
+            return {"error": str(e)}
+
     def get_metrics(self) -> Dict[str, Any]:
         """Get latest quantum metrics"""
         try:
             if not self.metrics_history:
                 return {}
-            
+
             latest = self.metrics_history[-1]
-            
-            coherences = [m.get('coherence', 0) for m in list(self.metrics_history)[-100:] if 'coherence' in m]
-            fidelities = [m.get('fidelity', 0) for m in list(self.metrics_history)[-100:] if 'fidelity' in m]
-            
+
+            coherences = [
+                m.get("coherence", 0)
+                for m in list(self.metrics_history)[-100:]
+                if "coherence" in m
+            ]
+            fidelities = [
+                m.get("fidelity", 0)
+                for m in list(self.metrics_history)[-100:]
+                if "fidelity" in m
+            ]
+
             return {
-                'latest': latest,
-                'avg_coherence_100': np.mean(coherences) if coherences else 0.0,
-                'avg_fidelity_100': np.mean(fidelities) if fidelities else 0.0,
-                'history_size': len(self.metrics_history),
-                'timestamp': time.time(),
+                "latest": latest,
+                "avg_coherence_100": np.mean(coherences) if coherences else 0.0,
+                "avg_fidelity_100": np.mean(fidelities) if fidelities else 0.0,
+                "history_size": len(self.metrics_history),
+                "timestamp": time.time(),
             }
         except Exception as e:
             logger.error(f"Get metrics failed: {e}")
-            return {'error': str(e)}
+            return {"error": str(e)}
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 # BLOCKCHAIN SYSTEMS (ELITE ADDITIONS)
@@ -2662,9 +2965,11 @@ class QuantumLatticeController:
 # These are added to v13 to create a complete blockchain system
 # All v13 quantum systems remain 100% unchanged
 
+
 @dataclass
 class QuantumTransaction:
     """Transaction in the quantum blockchain"""
+
     tx_id: str
     sender_addr: str
     receiver_addr: str
@@ -2674,28 +2979,30 @@ class QuantumTransaction:
     spatial_position: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     fee: int = 1
     signature: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
-            'tx_id': self.tx_id,
-            'sender_addr': self.sender_addr,
-            'receiver_addr': self.receiver_addr,
-            'amount': str(self.amount),
-            'nonce': self.nonce,
-            'timestamp_ns': self.timestamp_ns,
-            'spatial_position': self.spatial_position,
-            'fee': self.fee,
-            'signature': self.signature,
+            "tx_id": self.tx_id,
+            "sender_addr": self.sender_addr,
+            "receiver_addr": self.receiver_addr,
+            "amount": str(self.amount),
+            "nonce": self.nonce,
+            "timestamp_ns": self.timestamp_ns,
+            "spatial_position": self.spatial_position,
+            "fee": self.fee,
+            "signature": self.signature,
         }
-    
+
     @staticmethod
     def compute_hash(tx_dict: Dict[str, Any]) -> str:
         data = json.dumps(tx_dict, sort_keys=True)
-        return hashlib.sha3_256(data.encode('utf-8')).hexdigest()
+        return hashlib.sha3_256(data.encode("utf-8")).hexdigest()
+
 
 @dataclass
 class QuantumBlock:
     """Block in the quantum blockchain"""
+
     block_height: int
     block_hash: str = ""
     parent_hash: str = ""
@@ -2712,76 +3019,77 @@ class QuantumBlock:
     finalized_at: Optional[int] = None
     # ── FIX: fields submitted by miner via /api/submit_block ──────────────────
     w_state_fidelity: float = 0.0
-    w_entropy_hash:   str   = ""
-    pq_curr:          int   = 0
-    pq_last:          int   = 0
-    difficulty_bits:  int   = 5
-    nonce:            int   = 0
-    
+    w_entropy_hash: str = ""
+    pq_curr: int = 0
+    pq_last: int = 0
+    difficulty_bits: int = 5
+    nonce: int = 0
+
     # ═══════════════════════════════════════════════════════════════════════
     # CATHEDRAL-GRADE: Cryptographic Block Signature Fields (HypΓ Schnorr-Γ)
     # These fields enable cryptographic verification of block authenticity
     # ═══════════════════════════════════════════════════════════════════════
-    hyp_signature:        Dict[str, Any] = field(default_factory=dict)
+    hyp_signature: Dict[str, Any] = field(default_factory=dict)
     """HypΓ Schnorr-Γ signature of the block header — proves miner identity."""
-    
+
     miner_public_key_hex: str = ""
     """Miner's public key in hex format (~2000 bits, PSL(2,ℝ) matrix)."""
-    
-    signature_verified:   bool = False
+
+    signature_verified: bool = False
     """Flag indicating whether the block signature has been verified."""
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
-            'block_height': self.block_height,
-            'block_hash': self.block_hash,
-            'parent_hash': self.parent_hash,
-            'miner_address': self.miner_address,
-            'transactions': [tx.to_dict() for tx in self.transactions],
-            'tx_count': self.tx_count,
-            'merkle_root': self.merkle_root,
-            'timestamp_s': self.timestamp_s,
-            'coherence_snapshot': self.coherence_snapshot,
-            'fidelity_snapshot': self.fidelity_snapshot,
-            'w_state_hash': self.w_state_hash,
-            'hyp_witness': self.hyp_witness,
-            'finalized': self.finalized,
-            'finalized_at': self.finalized_at,
+            "block_height": self.block_height,
+            "block_hash": self.block_hash,
+            "parent_hash": self.parent_hash,
+            "miner_address": self.miner_address,
+            "transactions": [tx.to_dict() for tx in self.transactions],
+            "tx_count": self.tx_count,
+            "merkle_root": self.merkle_root,
+            "timestamp_s": self.timestamp_s,
+            "coherence_snapshot": self.coherence_snapshot,
+            "fidelity_snapshot": self.fidelity_snapshot,
+            "w_state_hash": self.w_state_hash,
+            "hyp_witness": self.hyp_witness,
+            "finalized": self.finalized,
+            "finalized_at": self.finalized_at,
         }
-    
+
     def to_header_dict(self) -> Dict[str, Any]:
         """
         Convert block to header dict for signing/submission.
-        
+
         Includes all consensus-critical fields plus crypto signature fields.
         This is what gets sent to _rpc_submitBlock.
         """
         return {
-            'block_height': self.block_height,
-            'block_hash': self.block_hash,
-            'parent_hash': self.parent_hash,
-            'miner_address': self.miner_address,
-            'tx_count': self.tx_count,
-            'merkle_root': self.merkle_root,
-            'timestamp_s': self.timestamp_s,
-            'coherence_snapshot': self.coherence_snapshot,
-            'fidelity_snapshot': self.fidelity_snapshot,
-            'w_state_hash': self.w_state_hash,
-            'hyp_witness': self.hyp_witness,
-            'w_state_fidelity': self.w_state_fidelity,
-            'w_entropy_hash': self.w_entropy_hash,
-            'pq_curr': self.pq_curr,
-            'pq_last': self.pq_last,
-            'difficulty_bits': self.difficulty_bits,
-            'nonce': self.nonce,
+            "block_height": self.block_height,
+            "block_hash": self.block_hash,
+            "parent_hash": self.parent_hash,
+            "miner_address": self.miner_address,
+            "tx_count": self.tx_count,
+            "merkle_root": self.merkle_root,
+            "timestamp_s": self.timestamp_s,
+            "coherence_snapshot": self.coherence_snapshot,
+            "fidelity_snapshot": self.fidelity_snapshot,
+            "w_state_hash": self.w_state_hash,
+            "hyp_witness": self.hyp_witness,
+            "w_state_fidelity": self.w_state_fidelity,
+            "w_entropy_hash": self.w_entropy_hash,
+            "pq_curr": self.pq_curr,
+            "pq_last": self.pq_last,
+            "difficulty_bits": self.difficulty_bits,
+            "nonce": self.nonce,
             # Cryptographic fields for _rpc_submitBlock
-            'hyp_signature': self.hyp_signature if self.hyp_signature else {},
-            'miner_public_key_hex': self.miner_public_key_hex,
+            "hyp_signature": self.hyp_signature if self.hyp_signature else {},
+            "miner_public_key_hex": self.miner_public_key_hex,
         }
+
 
 class IndividualValidator:
     """Individual validator (each peer validates independently, Bitcoin-style)"""
-    
+
     def __init__(self, validator_id: str, miner_address: str):
         self.validator_id = validator_id
         self.miner_address = miner_address
@@ -2790,7 +3098,7 @@ class IndividualValidator:
         self.reputation = 100
         self.is_active = True
         self.lock = threading.RLock()
-    
+
     def validate_transaction(self, tx: QuantumTransaction) -> Tuple[bool, str]:
         """Validate transaction independently"""
         try:
@@ -2803,7 +3111,7 @@ class IndividualValidator:
             return True, ""
         except Exception as e:
             return False, str(e)
-    
+
     def validate_block(self, block: QuantumBlock) -> Tuple[bool, str]:
         """Validate block independently"""
         try:
@@ -2818,18 +3126,21 @@ class IndividualValidator:
             return True, ""
         except Exception as e:
             return False, str(e)
-    
+
     # _compute_merkle_root and _compute_block_hash removed.
     # Merkle: use qtcl_merkle_root() from qtcl_client C layer (qtcl_accel.so).
     # Block hash: computed in server.py submit_block with full canonical fields.
 
+
 class BlockManager:
     """Manages transaction pool and block creation (IF/THEN sealing logic)"""
-    
-    def __init__(self, db_connector: QuantumDatabaseConnector, validator: IndividualValidator):
+
+    def __init__(
+        self, db_connector: QuantumDatabaseConnector, validator: IndividualValidator
+    ):
         self.db = db_connector
         self.validator = validator
-        self._lattice_ref = None          # set by QuantumLatticeController.start()
+        self._lattice_ref = None  # set by QuantumLatticeController.start()
         self.mempool: Dict[str, QuantumTransaction] = {}
         self.pending_block: Optional[QuantumBlock] = None
         self.chain_height = 0
@@ -2850,18 +3161,18 @@ class BlockManager:
         # Testing mode: seal immediately on every single TX (no timeout)
         self.seal_on_every_tx = True
         logger.info("✅ BlockManager initialized (seal_on_every_tx=True)")
-    
+
     def start(self):
         """Start block manager"""
         self._create_genesis_block()
         self._start_seal_monitor()
         logger.info("✅ BlockManager started")
-    
+
     def stop(self):
         """Stop block manager"""
         self._stop_seal_monitor()
         logger.info("✅ BlockManager stopped")
-    
+
     def _create_genesis_block(self):
         """
         Bitcoin-style chain bootstrap.
@@ -2898,35 +3209,35 @@ class BlockManager:
                                 f"📦 [GENESIS] Resuming from SQLite tip: "
                                 f"height={tip_height}  hash={tip_hash[:18]}…"
                             )
-                            self.chain_height        = tip_height + 1
-                            self.current_block_hash  = tip_hash
+                            self.chain_height = tip_height + 1
+                            self.current_block_hash = tip_hash
                             self.pending_block = QuantumBlock(
-                                block_height   = self.chain_height,
-                                parent_hash    = tip_hash,
-                                miner_address  = self.validator.miner_address,
+                                block_height=self.chain_height,
+                                parent_hash=tip_hash,
+                                miner_address=self.validator.miner_address,
                             )
                             return
-                    
+
                     # Fallback to PostgreSQL
                     rows = self.db.execute_fetch_all(
                         "SELECT height, block_hash FROM blocks ORDER BY height DESC LIMIT 1"
                     )
                     if rows:
                         tip = rows[0]
-                        tip_height  = tip.get('height', 0)
-                        tip_hash    = tip.get('block_hash',   '0' * 64)
+                        tip_height = tip.get("height", 0)
+                        tip_hash = tip.get("block_hash", "0" * 64)
                         logger.info(
                             f"📦 [GENESIS] Resuming from DB tip: "
                             f"height={tip_height}  hash={tip_hash[:18]}…"
                         )
-                        self.chain_height        = tip_height + 1
-                        self.current_block_hash  = tip_hash
+                        self.chain_height = tip_height + 1
+                        self.current_block_hash = tip_hash
                         self.pending_block = QuantumBlock(
-                            block_height   = self.chain_height,
-                            parent_hash    = tip_hash,
-                            miner_address  = self.validator.miner_address,
+                            block_height=self.chain_height,
+                            parent_hash=tip_hash,
+                            miner_address=self.validator.miner_address,
                         )
-                        return   # chain already exists — nothing more to do
+                        return  # chain already exists — nothing more to do
                 except Exception as db_err:
                     logger.warning(
                         f"[GENESIS] DB query failed ({db_err}); "
@@ -2934,43 +3245,45 @@ class BlockManager:
                     )
 
             # ── No existing chain → mint deterministic genesis ───────────────
-            GENESIS_TIMESTAMP = 1_700_000_000   # fixed epoch — same on all nodes
-            GENESIS_MERKLE    = hashlib.sha3_256(b"QTCL_GENESIS").hexdigest()
-            GENESIS_WITNESS   = _generate_hyp_witness("GENESIS_WITNESS")
+            GENESIS_TIMESTAMP = 1_700_000_000  # fixed epoch — same on all nodes
+            GENESIS_MERKLE = hashlib.sha3_256(b"QTCL_GENESIS").hexdigest()
+            GENESIS_WITNESS = _generate_hyp_witness("GENESIS_WITNESS")
 
             # Null parent for genesis (traditional blockchain pattern)
-            GENESIS_PARENT = '0' * 64
+            GENESIS_PARENT = "0" * 64
 
             # Compute proper genesis block hash from contents (SHA3-256² for HypΓ)
             genesis_content = f"QTCL_GENESIS:{GENESIS_TIMESTAMP}:{GENESIS_MERKLE}:{GENESIS_WITNESS}:{GENESIS_PARENT}"
-            genesis_hash = hashlib.sha3_256(hashlib.sha3_256(genesis_content.encode()).digest()).hexdigest()
+            genesis_hash = hashlib.sha3_256(
+                hashlib.sha3_256(genesis_content.encode()).digest()
+            ).hexdigest()
 
             genesis = QuantumBlock(
-                block_height       = 0,
-                block_hash         = genesis_hash,
-                parent_hash        = GENESIS_PARENT,
-                miner_address      = self.validator.miner_address,
-                tx_count           = 0,
-                merkle_root        = GENESIS_MERKLE,
-                timestamp_s        = GENESIS_TIMESTAMP,
-                coherence_snapshot = 1.0,
-                fidelity_snapshot  = 1.0,
-                w_state_hash       = GENESIS_WITNESS,
-                hyp_witness       = GENESIS_WITNESS,
-                finalized          = True,
-                finalized_at       = GENESIS_TIMESTAMP,
+                block_height=0,
+                block_hash=genesis_hash,
+                parent_hash=GENESIS_PARENT,
+                miner_address=self.validator.miner_address,
+                tx_count=0,
+                merkle_root=GENESIS_MERKLE,
+                timestamp_s=GENESIS_TIMESTAMP,
+                coherence_snapshot=1.0,
+                fidelity_snapshot=1.0,
+                w_state_hash=GENESIS_WITNESS,
+                hyp_witness=GENESIS_WITNESS,
+                finalized=True,
+                finalized_at=GENESIS_TIMESTAMP,
             )
 
-            self.genesis_block              = genesis
-            self.block_by_height[0]         = genesis
+            self.genesis_block = genesis
+            self.block_by_height[0] = genesis
             self.sealed_blocks.append(genesis)
-            self.chain_height               = 1
-            self.current_block_hash         = genesis_hash
+            self.chain_height = 1
+            self.current_block_hash = genesis_hash
 
             self.pending_block = QuantumBlock(
-                block_height  = 1,
-                parent_hash   = genesis_hash,
-                miner_address = self.validator.miner_address,
+                block_height=1,
+                parent_hash=genesis_hash,
+                miner_address=self.validator.miner_address,
             )
 
             logger.info(
@@ -2993,18 +3306,35 @@ class BlockManager:
                         ON CONFLICT (height) DO NOTHING
                         """,
                         (
-                            0, genesis_hash, GENESIS_PARENT, GENESIS_WITNESS, GENESIS_WITNESS,
-                            GENESIS_TIMESTAMP, 0, GENESIS_MERKLE, 6, 0,
-                            1.0, 1.0, True, GENESIS_TIMESTAMP,
+                            0,
+                            genesis_hash,
+                            GENESIS_PARENT,
+                            GENESIS_WITNESS,
+                            GENESIS_WITNESS,
+                            GENESIS_TIMESTAMP,
+                            0,
+                            GENESIS_MERKLE,
+                            6,
+                            0,
+                            1.0,
+                            1.0,
+                            True,
+                            GENESIS_TIMESTAMP,
                         ),
                     )
                     if success:
-                        logger.info("[GENESIS] ✅ Genesis block persisted to DB (difficulty=6)")
+                        logger.info(
+                            "[GENESIS] ✅ Genesis block persisted to DB (difficulty=6)"
+                        )
                     else:
-                        logger.warning("[GENESIS] ⚠️ DB execute returned False — genesis may not be persisted")
+                        logger.warning(
+                            "[GENESIS] ⚠️ DB execute returned False — genesis may not be persisted"
+                        )
                 except Exception as persist_err:
-                    logger.warning(f"[GENESIS] DB persist failed ({persist_err}); genesis lives in-memory only")
-    
+                    logger.warning(
+                        f"[GENESIS] DB persist failed ({persist_err}); genesis lives in-memory only"
+                    )
+
     def receive_transaction(self, tx: QuantumTransaction) -> bool:
         """
         Receive transaction into mempool.
@@ -3043,7 +3373,7 @@ class BlockManager:
         except Exception as e:
             logger.error(f"❌ TX reception failed: {e}")
             return False
-    
+
     def _start_seal_monitor(self):
         """Start monitor thread"""
         with self.lock:
@@ -3051,17 +3381,17 @@ class BlockManager:
                 return
             self.monitor_running = True
             self.seal_monitor_thread = threading.Thread(
-                target=self._seal_monitor_worker, daemon=True, name='BlockSealMonitor'
+                target=self._seal_monitor_worker, daemon=True, name="BlockSealMonitor"
             )
             self.seal_monitor_thread.start()
-    
+
     def _stop_seal_monitor(self):
         """Stop monitor thread"""
         with self.lock:
             self.monitor_running = False
         if self.seal_monitor_thread:
             self.seal_monitor_thread.join(timeout=5)
-    
+
     def _seal_monitor_worker(self):
         """IF timeout reached OR seal requested → THEN seal block"""
         while self.monitor_running:
@@ -3072,16 +3402,21 @@ class BlockManager:
                         break
                     # In seal_on_every_tx mode: only seal on explicit request
                     # (receive_transaction() handles immediate sealing directly)
-                    if self.seal_requested and \
-                       self.pending_block and len(self.pending_block.transactions) > 0:
-                        logger.info(f"🔐 SEALING BLOCK #{self.pending_block.block_height}")
+                    if (
+                        self.seal_requested
+                        and self.pending_block
+                        and len(self.pending_block.transactions) > 0
+                    ):
+                        logger.info(
+                            f"🔐 SEALING BLOCK #{self.pending_block.block_height}"
+                        )
                         self._seal_current_block()
                         self.seal_requested = False
                 time.sleep(0.1)
             except Exception as e:
                 logger.error(f"❌ Monitor error: {e}")
                 time.sleep(0.5)
-    
+
     def _seal_current_block(self):
         """ATOMIC SEALING OPERATION — compute, finalise, persist."""
         try:
@@ -3089,39 +3424,48 @@ class BlockManager:
                 return
             block = self.pending_block
             block.timestamp_s = int(time.time())
-            block.tx_count    = len(block.transactions)
+            block.tx_count = len(block.transactions)
 
             # ── Merkle root ───────────────────────────────────────────────────
-            tx_hashes        = [QuantumTransaction.compute_hash(tx.to_dict()) for tx in block.transactions]
+            tx_hashes = [
+                QuantumTransaction.compute_hash(tx.to_dict())
+                for tx in block.transactions
+            ]
             block.merkle_root = self.validator._compute_merkle_root(tx_hashes)
 
             # ── Quantum snapshots (live from lattice if wired up) ─────────────
             if self._lattice_ref is not None:
                 try:
                     block.coherence_snapshot = self._lattice_ref.coherence
-                    block.fidelity_snapshot  = self._lattice_ref.fidelity
-                    block.w_state_hash       = hashlib.sha3_256(
-                        json.dumps(self._lattice_ref.get_state(), sort_keys=True).encode()
+                    block.fidelity_snapshot = self._lattice_ref.fidelity
+                    block.w_state_hash = hashlib.sha3_256(
+                        json.dumps(
+                            self._lattice_ref.get_state(), sort_keys=True
+                        ).encode()
                     ).hexdigest()
                 except Exception:
                     block.coherence_snapshot = 0.95
-                    block.fidelity_snapshot  = 0.992
-                    block.w_state_hash       = ""
+                    block.fidelity_snapshot = 0.992
+                    block.w_state_hash = ""
             else:
                 block.coherence_snapshot = 0.95
-                block.fidelity_snapshot  = 0.992
+                block.fidelity_snapshot = 0.992
 
             # ── Oracle signatures + HypΓ witness ──────────────────────────────────
             # Sign the block with the oracle master key (pq0), then generate GeodesicLWE witness
             try:
                 from oracle import ORACLE
+
                 block_sig = ORACLE.sign_block(block.block_hash, block.block_height)
                 if block_sig:
                     block.hyp_witness = _generate_hyp_witness(
-                        json.dumps(block_sig.to_dict(), sort_keys=True) if hasattr(block_sig, 'to_dict') 
+                        json.dumps(block_sig.to_dict(), sort_keys=True)
+                        if hasattr(block_sig, "to_dict")
                         else str(block_sig)
                     )
-                    logger.debug(f"[SEAL] Block oracle-signed + HypΓ witness | path={block_sig.derivation_path if hasattr(block_sig, 'derivation_path') else 'N/A'}")
+                    logger.debug(
+                        f"[SEAL] Block oracle-signed + HypΓ witness | path={block_sig.derivation_path if hasattr(block_sig, 'derivation_path') else 'N/A'}"
+                    )
             except ImportError:
                 logger.debug("[SEAL] oracle.py not available — block unsigned")
             except Exception as oracle_err:
@@ -3129,17 +3473,20 @@ class BlockManager:
 
             # Fallback: HypΓ witness if oracle signing not available
             if not block.hyp_witness:
-                witness_data = json.dumps({
-                    'block_height': block.block_height,
-                    'merkle_root':  block.merkle_root,
-                    'tx_count':     block.tx_count,
-                    'w_state_hash': block.w_state_hash,
-                }, sort_keys=True)
+                witness_data = json.dumps(
+                    {
+                        "block_height": block.block_height,
+                        "merkle_root": block.merkle_root,
+                        "tx_count": block.tx_count,
+                        "w_state_hash": block.w_state_hash,
+                    },
+                    sort_keys=True,
+                )
                 block.hyp_witness = _generate_hyp_witness(witness_data)
 
             # ── Block hash (covers everything) ────────────────────────────────
-            block.block_hash  = self.validator._compute_block_hash(block)
-            
+            block.block_hash = self.validator._compute_block_hash(block)
+
             # ═══════════════════════════════════════════════════════════════════
             # CATHEDRAL-GRADE: HYP-WALLET Block Signing (HypΓ Schnorr-Γ)
             # The block MUST be cryptographically signed by the miner's private key
@@ -3150,25 +3497,27 @@ class BlockManager:
                 if wallet and wallet.is_initialized():
                     # Build header dict for signing
                     header_for_sign = {
-                        'height': block.block_height,
-                        'timestamp_s': block.timestamp_s,
-                        'parent_hash': block.parent_hash,
-                        'merkle_root': block.merkle_root,
-                        'miner_address': block.miner_address,
-                        'difficulty_bits': block.difficulty_bits,
-                        'nonce': block.nonce,
-                        'w_entropy_hash': block.w_entropy_hash,
-                        'w_state_fidelity': block.w_state_fidelity,
+                        "height": block.block_height,
+                        "timestamp_s": block.timestamp_s,
+                        "parent_hash": block.parent_hash,
+                        "merkle_root": block.merkle_root,
+                        "miner_address": block.miner_address,
+                        "difficulty_bits": block.difficulty_bits,
+                        "nonce": block.nonce,
+                        "w_entropy_hash": block.w_entropy_hash,
+                        "w_state_fidelity": block.w_state_fidelity,
                     }
-                    
+
                     # Sign the block
                     sig_package = wallet.sign_block(header_for_sign)
-                    
+
                     # Store signature fields in block
-                    block.hyp_signature = sig_package.get('hyp_signature', {})
-                    block.miner_public_key_hex = sig_package.get('miner_public_key_hex', '')
+                    block.hyp_signature = sig_package.get("hyp_signature", {})
+                    block.miner_public_key_hex = sig_package.get(
+                        "miner_public_key_hex", ""
+                    )
                     block.signature_verified = True
-                    
+
                     logger.info(
                         f"[SEAL] 🔐 Block signed with HYP-WALLET | "
                         f"h={block.block_height} | "
@@ -3183,8 +3532,8 @@ class BlockManager:
             except Exception as wallet_err:
                 logger.error(f"[SEAL] ❌ HYP-WALLET signing failed: {wallet_err}")
                 # Non-fatal: block can still be sealed but won't pass _rpc_submitBlock verification
-            
-            block.finalized   = True
+
+            block.finalized = True
             block.finalized_at = block.timestamp_s
 
             # ── Update in-memory chain ────────────────────────────────────────
@@ -3213,54 +3562,68 @@ class BlockManager:
                             hyp_witness      = EXCLUDED.hyp_witness
                         """,
                         (
-                            block.block_height, block.block_hash, block.parent_hash,
-                            block.w_state_hash, block.timestamp_s, block.tx_count,
-                            block.merkle_root, block.hyp_witness,
+                            block.block_height,
+                            block.block_hash,
+                            block.parent_hash,
+                            block.w_state_hash,
+                            block.timestamp_s,
+                            block.tx_count,
+                            block.merkle_root,
+                            block.hyp_witness,
                         ),
                     )
                 except Exception as db_err:
-                    logger.warning(f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}")
+                    logger.warning(
+                        f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}"
+                    )
 
             # ── Create next pending block ─────────────────────────────────────
             self.pending_block = QuantumBlock(
-                block_height  = self.chain_height,
-                parent_hash   = self.current_block_hash,
-                miner_address = self.validator.miner_address,
+                block_height=self.chain_height,
+                parent_hash=self.current_block_hash,
+                miner_address=self.validator.miner_address,
             )
 
             seal_time = time.time() - self.last_block_time
             self.block_seal_times.append(seal_time)
             self.last_block_time = time.time()
-            self.chain_height   += 1
-            self.blocks_sealed  += 1
+            self.chain_height += 1
+            self.blocks_sealed += 1
 
             # ── Broadcast sealed block to SSE service ──────────────────────────────
             try:
                 import sys
-                _srv = sys.modules.get('server')
-                if _srv and hasattr(_srv, '_push_to_sse_service'):
+
+                _srv = sys.modules.get("server")
+                if _srv and hasattr(_srv, "_push_to_sse_service"):
                     block_event = {
-                        'height': block.block_height,
-                        'block_hash': block.block_hash,
-                        'parent_hash': block.parent_hash,
-                        'timestamp': block.timestamp_s,
-                        'tx_count': block.tx_count,
-                        'w_state_fidelity': getattr(block, 'w_state_fidelity', None),
+                        "height": block.block_height,
+                        "block_hash": block.block_hash,
+                        "parent_hash": block.parent_hash,
+                        "timestamp": block.timestamp_s,
+                        "tx_count": block.tx_count,
+                        "w_state_fidelity": getattr(block, "w_state_fidelity", None),
                         # ═══════════════════════════════════════════════════════════
                         # CATHEDRAL-GRADE: Include cryptographic signature in broadcast
                         # ═══════════════════════════════════════════════════════════
-                        'hyp_signature': block.hyp_signature if block.hyp_signature else None,
-                        'miner_public_key_hex': block.miner_public_key_hex if block.miner_public_key_hex else None,
-                        'signature_verified': block.signature_verified,
+                        "hyp_signature": block.hyp_signature
+                        if block.hyp_signature
+                        else None,
+                        "miner_public_key_hex": block.miner_public_key_hex
+                        if block.miner_public_key_hex
+                        else None,
+                        "signature_verified": block.signature_verified,
                     }
-                    _srv._push_to_sse_service('/push/block', block_event)
-                    logger.debug(f"[BLOCK-BRD] ✅ Pushed block #{block.block_height} to SSE service")
+                    _srv._push_to_sse_service("/push/block", block_event)
+                    logger.debug(
+                        f"[BLOCK-BRD] ✅ Pushed block #{block.block_height} to SSE service"
+                    )
             except Exception as _brd_err:
                 logger.debug(f"[BLOCK-BRD] skip: {_brd_err}")
-            
+
             # ── Submit to server via RPC if configured ───────────────────────────────
             try:
-                if getattr(self, '_auto_submit_to_server', False):
+                if getattr(self, "_auto_submit_to_server", False):
                     self._submit_block_to_server(block)
             except Exception as _submit_err:
                 logger.debug(f"[BLOCK-SUBMIT] Auto-submit skipped: {_submit_err}")
@@ -3272,7 +3635,7 @@ class BlockManager:
             )
 
             # ── Notify registered callback (→ P2P broadcast) ─────────────────
-            cb = getattr(self, 'on_block_sealed', None)
+            cb = getattr(self, "on_block_sealed", None)
             if cb is not None:
                 try:
                     cb(block)
@@ -3281,29 +3644,33 @@ class BlockManager:
         except Exception as e:
             logger.error(f"❌ Sealing failed: {e}")
             logger.error(traceback.format_exc())
-    
+
     def request_block_seal(self):
         """Explicitly request block seal"""
         with self.lock:
             self.seal_requested = True
-    
-    def add_block(self, qblock: 'QuantumBlock') -> bool:
+
+    def add_block(self, qblock: "QuantumBlock") -> bool:
         """Validate and accept a block into the chain."""
         with self.lock:
             try:
-                h  = qblock.block_height
+                h = qblock.block_height
                 wf = float(qblock.w_state_fidelity)
                 pc = int(qblock.pq_curr)
                 pl = int(qblock.pq_last)
 
                 # V1: fidelity
                 if wf < 0.70:
-                    logger.warning(f"[LATTICE] ❌ h={h} REJECTED fidelity={wf:.4f} < 0.70")
+                    logger.warning(
+                        f"[LATTICE] ❌ h={h} REJECTED fidelity={wf:.4f} < 0.70"
+                    )
                     return False
 
                 # V2: pq invariant
                 if pl != pc - 1:
-                    logger.warning(f"[LATTICE] ❌ h={h} REJECTED pq_last={pl} != pq_curr-1={pc-1}")
+                    logger.warning(
+                        f"[LATTICE] ❌ h={h} REJECTED pq_last={pl} != pq_curr-1={pc - 1}"
+                    )
                     return False
 
                 # V3+V4: re-sync height and tip hash from DB, then validate.
@@ -3316,21 +3683,24 @@ class BlockManager:
                             "ORDER BY block_height DESC LIMIT 1"
                         )
                         if rows:
-                            db_h    = int(rows[0]['block_height'])
-                            db_hash = str(rows[0]['block_hash'])
+                            db_h = int(rows[0]["block_height"])
+                            db_hash = str(rows[0]["block_hash"])
                             # When only genesis (height=0) is in DB, the expected
                             # parent for the next block is the null hash, matching
                             # what submit_block and the miner both use.
                             if db_h == 0:
-                                expected_tip = '0' * 64
+                                expected_tip = "0" * 64
                             else:
                                 expected_tip = db_hash
-                            if self.chain_height != db_h + 1 or self.current_block_hash != expected_tip:
+                            if (
+                                self.chain_height != db_h + 1
+                                or self.current_block_hash != expected_tip
+                            ):
                                 logger.info(
-                                    f"[LATTICE] resync: chain_h={self.chain_height}→{db_h+1} "
+                                    f"[LATTICE] resync: chain_h={self.chain_height}→{db_h + 1} "
                                     f"tip={self.current_block_hash[:12]}→{expected_tip[:12]}"
                                 )
-                                self.chain_height       = db_h + 1
+                                self.chain_height = db_h + 1
                                 self.current_block_hash = expected_tip
                     except Exception as e:
                         logger.warning(f"[LATTICE] DB resync error: {e}")
@@ -3344,7 +3714,9 @@ class BlockManager:
                 # Use the DB-resynced expected_tip (set above) as the authoritative
                 # parent reference — NOT the stale in-memory current_block_hash which
                 # diverges across gunicorn workers and after restarts.
-                _authoritative_tip = expected_tip if self.db is not None else self.current_block_hash
+                _authoritative_tip = (
+                    expected_tip if self.db is not None else self.current_block_hash
+                )
                 if qblock.parent_hash != _authoritative_tip:
                     logger.warning(
                         f"[LATTICE] ❌ h={h} REJECTED "
@@ -3354,37 +3726,42 @@ class BlockManager:
 
                 # V5: transactions
                 for tx in qblock.transactions:
-                    if not getattr(tx, 'tx_id', None):
+                    if not getattr(tx, "tx_id", None):
                         logger.warning(f"[LATTICE] ❌ h={h} REJECTED tx missing tx_id")
                         return False
-                    if getattr(tx, 'amount', 0) < 0:
+                    if getattr(tx, "amount", 0) < 0:
                         logger.warning(f"[LATTICE] ❌ h={h} REJECTED tx amount < 0")
                         return False
 
                 self.block_by_height[h] = qblock
                 self.sealed_blocks.append(qblock)
-                self.chain_height       = h + 1
+                self.chain_height = h + 1
                 self.current_block_hash = qblock.block_hash
-                self.blocks_sealed      += 1
-                logger.info(f"[LATTICE] ✅ h={h} ACCEPTED F={wf:.4f} pq={pc}/{pl} txs={len(qblock.transactions)}")
+                self.blocks_sealed += 1
+                logger.info(
+                    f"[LATTICE] ✅ h={h} ACCEPTED F={wf:.4f} pq={pc}/{pl} txs={len(qblock.transactions)}"
+                )
                 return True
 
             except Exception as e:
-                logger.error(f"[LATTICE] ❌ add_block exception: {type(e).__name__}: {e}", exc_info=True)
+                logger.error(
+                    f"[LATTICE] ❌ add_block exception: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
                 return False
-    
+
     def _submit_block_to_server(self, block: QuantumBlock) -> bool:
         """
         Submit a sealed block to the server via RPC.
-        
+
         This method packages the block with its cryptographic signature
         and submits it to _rpc_submitBlock for validation and persistence.
-        
+
         Parameters
         ----------
         block : QuantumBlock
             The sealed block with signature fields populated.
-        
+
         Returns
         -------
         bool
@@ -3392,35 +3769,40 @@ class BlockManager:
         """
         try:
             import sys
-            _srv = sys.modules.get('server')
+
+            _srv = sys.modules.get("server")
             if not _srv:
                 logger.debug("[BLOCK-SUBMIT] Server module not available")
                 return False
-            
+
             # Check if we have the required signature fields
             if not block.hyp_signature or not block.miner_public_key_hex:
                 logger.warning(
                     f"[BLOCK-SUBMIT] ⚠️  Block h={block.block_height} lacks cryptographic signature — "
                     f"submission may be rejected by server"
                 )
-            
+
             # Build RPC params
             header = block.to_header_dict()
             transactions = [tx.to_dict() for tx in block.transactions]
-            
-            params = [{
-                'header': header,
-                'transactions': transactions,
-                'hyp_signature': block.hyp_signature,
-                'miner_public_key_hex': block.miner_public_key_hex,
-            }]
-            
+
+            params = [
+                {
+                    "header": header,
+                    "transactions": transactions,
+                    "hyp_signature": block.hyp_signature,
+                    "miner_public_key_hex": block.miner_public_key_hex,
+                }
+            ]
+
             # Call RPC
-            if hasattr(_srv, '_rpc_submitBlock'):
-                result = _srv._rpc_submitBlock(params, rpc_id=f"block_{block.block_hash[:16]}")
-                
+            if hasattr(_srv, "_rpc_submitBlock"):
+                result = _srv._rpc_submitBlock(
+                    params, rpc_id=f"block_{block.block_hash[:16]}"
+                )
+
                 # Check result
-                if result.get('error'):
+                if result.get("error"):
                     logger.error(
                         f"[BLOCK-SUBMIT] ❌ Server rejected block h={block.block_height}: "
                         f"{result['error']}"
@@ -3433,41 +3815,48 @@ class BlockManager:
                     )
                     return True
             else:
-                logger.debug("[BLOCK-SUBMIT] _rpc_submitBlock not available in server module")
+                logger.debug(
+                    "[BLOCK-SUBMIT] _rpc_submitBlock not available in server module"
+                )
                 return False
-                
+
         except Exception as e:
             logger.error(f"[BLOCK-SUBMIT] ❌ Submission failed: {e}")
             return False
-    
+
     def enable_auto_submit(self, enabled: bool = True):
         """
         Enable/disable automatic block submission to server.
-        
+
         When enabled, sealed blocks are automatically submitted to
         _rpc_submitBlock via the server's RPC interface.
-        
+
         Parameters
         ----------
         enabled : bool
             True to enable auto-submit, False to disable.
         """
         self._auto_submit_to_server = enabled
-        logger.info(f"[BLOCK-SUBMIT] Auto-submit {'enabled' if enabled else 'disabled'}")
-    
+        logger.info(
+            f"[BLOCK-SUBMIT] Auto-submit {'enabled' if enabled else 'disabled'}"
+        )
+
     def get_chain_stats(self) -> Dict[str, Any]:
         """Get chain statistics"""
         with self.lock:
             avg_seal = np.mean(self.block_seal_times) if self.block_seal_times else 0.0
             return {
-                'chain_height': self.chain_height,
-                'blocks_sealed': self.blocks_sealed,
-                'total_transactions': self.total_txs_processed,
-                'avg_block_seal_time_s': avg_seal,
-                'latest_block_hash': self.current_block_hash,
-                'mempool_size': len(self.mempool),
-                'pending_txs': len(self.pending_block.transactions) if self.pending_block else 0,
+                "chain_height": self.chain_height,
+                "blocks_sealed": self.blocks_sealed,
+                "total_transactions": self.total_txs_processed,
+                "avg_block_seal_time_s": avg_seal,
+                "latest_block_hash": self.current_block_hash,
+                "mempool_size": len(self.mempool),
+                "pending_txs": len(self.pending_block.transactions)
+                if self.pending_block
+                else 0,
             }
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 # GLOBAL INSTANCE
@@ -3478,17 +3867,18 @@ db_connector = None
 block_manager = None
 validator = None
 
+
 def initialize_lattice(miner_address: str = ""):
     """Initialize quantum lattice WITH blockchain systems AND HypΓ"""
     global quantum_lattice, db_connector, block_manager, validator
-    
+
     try:
         # Validate database config
         DatabaseConfig.validate()
-        
+
         # Initialize HypΓ engine (lazy, thread-safe)
         _init_hyp_gamma()
-        
+
         # ═══════════════════════════════════════════════════════════════════════
         # CATHEDRAL-GRADE: Initialize HYP-WALLET for cryptographic block signing
         # Uses existing hyp_engine directly — no separate wallet module required
@@ -3499,73 +3889,80 @@ def initialize_lattice(miner_address: str = ""):
                 addr = wallet.get_address()
                 logger.info(f"[INIT] ✅ HYP-WALLET ready | address={addr[:22]}...")
             else:
-                logger.warning("[INIT] ⚠️  HYP-WALLET not available — blocks will lack cryptographic signatures")
-                logger.info("[INIT]    To enable: ensure hlwe/hyp_engine.py is available")
+                logger.warning(
+                    "[INIT] ⚠️  HYP-WALLET not available — blocks will lack cryptographic signatures"
+                )
+                logger.info(
+                    "[INIT]    To enable: ensure hlwe/hyp_engine.py is available"
+                )
         except Exception as wallet_init_err:
-            logger.warning(f"[INIT] ⚠️  HYP-WALLET initialization deferred: {wallet_init_err}")
-        
+            logger.warning(
+                f"[INIT] ⚠️  HYP-WALLET initialization deferred: {wallet_init_err}"
+            )
+
         # Initialize v13 quantum lattice (UNCHANGED)
         quantum_lattice = QuantumLatticeController()
-        
+
         if DB_AVAILABLE:
             db_connector = QuantumDatabaseConnector()
             db_connector.start_logger()
             logger.info("[DB] Database connector initialized")
-        
+
         quantum_lattice.start()
-        
+
         # Initialize blockchain systems (ELITE)
         validator = IndividualValidator(
-            str(uuid.uuid4())[:16],
-            miner_address or "miner_" + str(uuid.uuid4())[:8]
+            str(uuid.uuid4())[:16], miner_address or "miner_" + str(uuid.uuid4())[:8]
         )
         logger.info(f"✅ Validator initialized: {validator.miner_address}")
-        
+
         block_manager = BlockManager(db_connector, validator)
         block_manager.start()
         logger.info(f"✅ Block manager started")
-        
+
         logger.info("🎉 QUANTUM LATTICE ELITE + HypΓ FULLY INITIALIZED")
         return quantum_lattice
-        
+
     except Exception as e:
         logger.error(f"Initialization failed: {e}")
         raise
 
+
 def shutdown_lattice():
     """Shutdown quantum lattice AND blockchain systems"""
     global quantum_lattice, db_connector, block_manager, validator
-    
+
     if block_manager:
         block_manager.stop()
-    
+
     if quantum_lattice:
         quantum_lattice.stop()
-    
+
     if db_connector:
         db_connector.stop_logger()
         db_connector.close()
-    
+
     logger.info("[SHUTDOWN] Quantum lattice elite shutdown complete")
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 # EXPORT FOR WSGI & TESTING
 # ════════════════════════════════════════════════════════════════════════════════
 
-if __name__ == '__main__':
-    lattice = initialize_lattice(miner_address="alice_" + "0"*60)
-    
+if __name__ == "__main__":
+    lattice = initialize_lattice(miner_address="alice_" + "0" * 60)
+
     try:
         # Simulate transaction arrivals — in 1-TX mode each seals immediately
         for i in range(5):
             tx = QuantumTransaction(
-                tx_id         = f"tx_{i:06d}",
-                sender_addr   = "alice_" + "0"*60,
-                receiver_addr = "bob___" + "0"*60,
-                amount        = Decimal("100.0"),
-                nonce         = i,
-                fee           = 1 + i,
-                timestamp_ns  = int(time.time_ns()),
+                tx_id=f"tx_{i:06d}",
+                sender_addr="alice_" + "0" * 60,
+                receiver_addr="bob___" + "0" * 60,
+                amount=Decimal("100.0"),
+                nonce=i,
+                fee=1 + i,
+                timestamp_ns=int(time.time_ns()),
             )
             success = block_manager.receive_transaction(tx)
             print(f"TX {i} accepted: {success} — block seals immediately")
@@ -3584,4 +3981,3 @@ if __name__ == '__main__':
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # AGENT 2: INDIVIDUAL LATTICE METRICS AVERAGER (Museum Grade • θ Deployment Ready)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-
