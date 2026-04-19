@@ -210,9 +210,6 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         except _cf.TimeoutError:
             logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
             return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
-        except TimeoutError as te:
-            logger.warning(f"[RPC] {method} TIMEOUT: {te}")
-            return _rpc_error(-32000, f"RPC timeout: {str(te)}", rpc_id)
         finally:
             executor.shutdown(wait=False)  # Don't block — timeout is real now
     except Exception as e:
