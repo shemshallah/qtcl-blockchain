@@ -7063,23 +7063,70 @@ def _start_p2p_broadcast():
     logger.info(f"[P2P] ✅ DHT broadcaster started (30s interval)")
 
 
-# Handle POST/OTHER methods to /rpc for debugging
-@app.route("/rpc", methods=["POST", "PUT", "DELETE", "PATCH"])
-def rpc_endpoint_post_debug():
-    """Log and reject POST/OTHER requests to /rpc (GET-only endpoint)."""
-    logger.warning(
-        f"[RPC-REJECTED] {request.method} /rpc from {request.remote_addr} | UA: {request.user_agent.string[:50]}..."
-    )
-    return jsonify(
-        {
-            "jsonrpc": "2.0",
-            "error": {
-                "code": -32600,
-                "message": "GET-only endpoint. Use query params: ?method=X&params=JSON",
-            },
-            "id": None,
-        }
-    ), 405
+# Handle POST to /rpc by extracting JSON body and processing (backward compat during migration)
+@app.route("/rpc", methods=["POST"])
+def rpc_endpoint_post():
+    """POST /rpc — Accept JSON body and convert to internal processing (backward compatibility)."""
+    try:
+        # Log POST usage for migration tracking
+        logger.info(
+            f"[RPC-POST] {request.method} /rpc from {request.remote_addr} | UA: {request.user_agent.string[:50]}..."
+        )
+
+        # Parse JSON body
+        req_dict = request.get_json(force=True, silent=True) or {}
+        if not req_dict:
+            return jsonify(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32700, "message": "Parse error: invalid JSON"},
+                    "id": None,
+                }
+            ), 200
+
+        method = req_dict.get("method")
+        params = req_dict.get("params", [])
+        rpc_id = req_dict.get("id", 1)
+
+        # Process same as GET
+        if not method:
+            method_names = sorted(list(_RPC_METHODS.keys()))
+            return jsonify(
+                {
+                    "jsonrpc": _JSONRPC_VERSION,
+                    "result": {
+                        "methods": method_names,
+                        "count": len(method_names),
+                        "endpoint": "/rpc",
+                        "ts": time.time(),
+                    },
+                    "id": rpc_id,
+                }
+            ), 200
+
+        # Dispatch to handler
+        if method not in _RPC_METHODS:
+            return jsonify(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32601, "message": f"Method not found: {method}"},
+                    "id": rpc_id,
+                }
+            ), 200
+
+        handler = _RPC_METHODS[method]
+        result = handler(params, rpc_id)
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"[RPC-POST] Error processing POST /rpc: {e}")
+        return jsonify(
+            {
+                "jsonrpc": "2.0",
+                "error": {"code": -32603, "message": f"Internal error: {str(e)}"},
+                "id": None,
+            }
+        ), 200
 
 
 @app.route("/rpc", methods=["GET"])

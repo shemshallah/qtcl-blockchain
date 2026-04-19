@@ -66,20 +66,25 @@ def application(environ, start_response):
     if path in ("/health", "/health/"):
         return _health_app(environ, start_response)
 
-    # Wait for full app (with timeout)
+    # For /rpc, use extended timeout
+    if path == "/rpc" or path.startswith("/rpc/"):
+        _load_done.wait(timeout=60)
+        if _full_app:
+            return _full_app(environ, start_response)
+        start_response(
+            "503 Service Unavailable", [("Content-Type", "application/json")]
+        )
+        return [
+            b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server starting, retry"},"id":null}'
+        ]
+
+    # Standard timeout for other endpoints
     _load_done.wait(timeout=30)
 
     if _full_app:
         return _full_app(environ, start_response)
 
-    # Not ready - log details to identify source of requests
-    method = environ.get("REQUEST_METHOD", "UNKNOWN")
-    user_agent = environ.get("HTTP_USER_AGENT", "unknown")
-    remote_addr = environ.get("REMOTE_ADDR", "unknown")
-    print(
-        f"[WSGI-503] {method} {path} from {remote_addr} | UA: {user_agent[:50]}...",
-        flush=True,
-    )
+    # Not ready
     start_response("503 Service Unavailable", [("Content-Type", "text/plain")])
     return [b"Server starting, retry in a few seconds..."]
 
