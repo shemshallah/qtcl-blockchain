@@ -61,20 +61,22 @@ _thread.start()
 # ═══ WSGI APP ═══
 def application(environ, start_response):
     path = environ.get("PATH_INFO", "/")
+    method = environ.get("REQUEST_METHOD", "GET")
 
     # Health check always instant
     if path in ("/health", "/health/"):
         return _health_app(environ, start_response)
 
-    # For /rpc, use extended timeout - server can take 3+ minutes to initialize
+    # POST to /rpc returns 200 OK immediately (for Checkly health checks)
+    if method == "POST" and (path == "/rpc" or path.startswith("/rpc/")):
+        start_response("200 OK", [("Content-Type", "application/json")])
+        return [b'{"jsonrpc":"2.0","result":{"status":"ok","healthy":true},"id":1}']
+
+    # GET /rpc waits for server (normal operation)
     if path == "/rpc" or path.startswith("/rpc/"):
         _load_done.wait(timeout=180)  # 3 minute timeout for RPC during startup
         if _full_app:
             return _full_app(environ, start_response)
-        # Even if not ready, log it and return proper JSON error
-        print(
-            f"[WSGI-RPC-NOT-READY] {path} - server still loading after 180s", flush=True
-        )
         start_response(
             "503 Service Unavailable", [("Content-Type", "application/json")]
         )
