@@ -66,16 +66,20 @@ def application(environ, start_response):
     if path in ("/health", "/health/"):
         return _health_app(environ, start_response)
 
-    # For /rpc, use extended timeout
+    # For /rpc, use extended timeout - server can take 3+ minutes to initialize
     if path == "/rpc" or path.startswith("/rpc/"):
-        _load_done.wait(timeout=60)
+        _load_done.wait(timeout=180)  # 3 minute timeout for RPC during startup
         if _full_app:
             return _full_app(environ, start_response)
+        # Even if not ready, log it and return proper JSON error
+        print(
+            f"[WSGI-RPC-NOT-READY] {path} - server still loading after 180s", flush=True
+        )
         start_response(
             "503 Service Unavailable", [("Content-Type", "application/json")]
         )
         return [
-            b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server starting, retry"},"id":null}'
+            b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server still initializing, please wait"},"id":null}'
         ]
 
     # Standard timeout for other endpoints
