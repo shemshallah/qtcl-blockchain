@@ -4463,7 +4463,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             })
             logger.info(f"[RPC-submitBlock] ✅ Settlement enqueued for h={height}")
         except _queue_mod2.Full:
-            logger.warning(f"[RPC-submitBlock] ⚠️  Settlement queue full — block accepted but settlement deferred")
+            logger.warning(f"[RPC-submitBlock] Settlement queue full—executing synchronous fallback settlement for h={height}")
+            try:
+                _settle_block_rewards(height, block_hash, miner_address, txs or [], _non_coinbase_txs)
+                logger.info(f"[RPC-submitBlock] ✅ Fallback settlement completed synchronously for h={height}")
+            except Exception as sync_err:
+                logger.error(f"[RPC-submitBlock] Fallback settlement failed: {sync_err}", exc_info=True)
         except Exception as eq_err:
             logger.warning(f"[RPC-submitBlock] ⚠️  Settlement enqueue failed: {eq_err}")
 
