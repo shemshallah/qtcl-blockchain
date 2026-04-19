@@ -194,21 +194,27 @@ def _dispatch_single(req: dict) -> Optional[dict]:
             'qtcl_getTransactions': 10.0,
             'qtcl_getPeers': 5.0,
             'qtcl_getMerminTest': 20.0,
+            'qtcl_submitBlock': 30.0,  # Block submission: critical path (validation+insert), settlement async
         }
         timeout_sec = timeout_map.get(method, 3.0)
-        
+
         # Thread-safe timeout via concurrent.futures (signal.alarm only works on main thread)
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        # CRITICAL: Do NOT use 'with' context manager — it calls executor.shutdown(wait=True)
+        # which blocks forever if timeout fires. Use manual shutdown(wait=False) instead.
+        import concurrent.futures as _cf
+        executor = _cf.ThreadPoolExecutor(max_workers=1)
+        try:
             future = executor.submit(_RPC_METHODS[method], params, rpc_id)
             result = future.result(timeout=timeout_sec)
             return result
-    except concurrent.futures.TimeoutError:
-        logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
-        return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
-    except TimeoutError as te:
-        logger.warning(f"[RPC] {method} TIMEOUT: {te}")
-        return _rpc_error(-32000, f"RPC timeout: {str(te)}", rpc_id)
+        except _cf.TimeoutError:
+            logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
+            return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
+        except TimeoutError as te:
+            logger.warning(f"[RPC] {method} TIMEOUT: {te}")
+            return _rpc_error(-32000, f"RPC timeout: {str(te)}", rpc_id)
+        finally:
+            executor.shutdown(wait=False)  # Don't block — timeout is real now
     except Exception as e:
         logger.exception(f"[RPC] {method} raised: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
@@ -720,6 +726,56 @@ threading.Thread(
 ).start()
 logger.info("[ORACLE] 🔄 Oracle init deferred to background thread — gunicorn will serve /health immediately")
 
+def _prewarm_hlwe_engine() -> None:
+    """Pre-initialize HypΓ crypto engine before first block submission.
+
+    On first block submission, _init_hlwe_engine() would initialize HypTessellation,
+    LDPC code, and SchnorrGamma — potentially 5-30s. This thread pre-warms it so
+    the first block submission completes in < 5s.
+    """
+    try:
+        logger.info("[HLWE] 🔄 Pre-warming HypΓ engine...")
+        _init_hlwe_engine()
+        logger.info("[HLWE] ✅ HypΓ engine ready for block submissions")
+    except Exception as e:
+        logger.warning(f"[HLWE] ⚠️  Prewarm failed (non-fatal): {e}")
+
+threading.Thread(
+    target=_prewarm_hlwe_engine,
+    daemon=True,
+    name="HLWEPrewarm",
+).start()
+
+def _ensure_wallet_addresses_table() -> None:
+    """Ensure wallet_addresses table exists at startup (run once, not per-request).
+
+    The _rpc_submitBlock handler previously called CREATE TABLE IF NOT EXISTS
+    on every block submission. This DDL is now run once at startup to keep
+    the critical path fast.
+    """
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS wallet_addresses (
+                    address VARCHAR(128) PRIMARY KEY,
+                    wallet_fingerprint VARCHAR(64),
+                    public_key TEXT,
+                    balance NUMERIC(30,0) DEFAULT 0,
+                    transaction_count INTEGER DEFAULT 0,
+                    address_type VARCHAR(20) DEFAULT 'standard',
+                    last_updated TIMESTAMP DEFAULT NOW()
+                )
+            """)
+        logger.info("[STARTUP] ✅ wallet_addresses table ready")
+    except Exception as e:
+        logger.warning(f"[STARTUP] ⚠️  wallet_addresses DDL: {e}")
+
+threading.Thread(
+    target=_ensure_wallet_addresses_table,
+    daemon=True,
+    name="WalletTableInit",
+).start()
+
 # ═════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & CONSTANTS
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -871,6 +927,184 @@ def _tx_query(queries: list, timeout: float = 9.0) -> dict:
 _tx_worker_daemon = threading.Thread(
     target=_tx_worker_thread, daemon=True, name="TxQueryWorker")
 _tx_worker_daemon.start()
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# BLOCK SETTLEMENT WORKER — async settlement after block is persisted
+# ═════════════════════════════════════════════════════════════════════════════════
+
+_BLOCK_SETTLE_Q: '_queue_mod2.Queue' = _queue_mod2.Queue(maxsize=32)
+
+def _block_settle_worker_thread():
+    """Background worker: handle wallet credits + chain state after block is persisted.
+
+    Critical path (_rpc_submitBlock) inserts the block and immediately returns.
+    This worker handles the rest: miner/treasury rewards, tx settlement, chain state.
+    """
+    _settle_log = logging.getLogger("SETTLE")
+    while True:
+        try:
+            job = _BLOCK_SETTLE_Q.get(timeout=1.0)
+            if job is None:
+                break
+
+            height = job.get('height')
+            block_hash = job.get('block_hash')
+            miner_address = job.get('miner_address')
+            txs = job.get('txs', [])
+            non_coinbase_txs = job.get('non_coinbase_txs', [])
+            w_state_fidelity = job.get('w_state_fidelity', 0.0)
+            difficulty_bits = job.get('difficulty_bits', 4)
+
+            try:
+                # ── Settle non-coinbase transactions (wallet updates) ──────────────
+                _settle_log.info(f"[SETTLE] Processing h={height} {len(non_coinbase_txs)} non-coinbase txs")
+
+                with get_db_cursor() as cur:
+                    # Ensure wallet_addresses exists (redundant but safe)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS wallet_addresses (
+                            address VARCHAR(128) PRIMARY KEY,
+                            wallet_fingerprint VARCHAR(64),
+                            public_key TEXT,
+                            balance NUMERIC(30,0) DEFAULT 0,
+                            transaction_count INTEGER DEFAULT 0,
+                            address_type VARCHAR(20) DEFAULT 'standard',
+                            last_updated TIMESTAMP DEFAULT NOW()
+                        )
+                    """)
+
+                    for tx in non_coinbase_txs:
+                        tx_sender = tx.get('from_addr', tx.get('from_address', ''))
+                        tx_receiver = tx.get('to_addr', tx.get('to_address', ''))
+                        tx_amount = int(round(float(tx.get('amount', 0)) * 100))
+                        tx_fee = int(round(float(tx.get('fee', 0)) * 100))
+
+                        if not tx_sender or not tx_receiver or tx_amount <= 0:
+                            continue
+
+                        total_deduction = tx_amount + tx_fee
+                        cur.execute("""
+                            INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
+                            VALUES (%s, -%s, 'standard', NOW())
+                            ON CONFLICT (address) DO UPDATE SET
+                                balance = wallet_addresses.balance - %s,
+                                transaction_count = wallet_addresses.transaction_count + 1,
+                                last_updated = NOW()
+                        """, (tx_sender, total_deduction, total_deduction))
+
+                        cur.execute("""
+                            INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
+                            VALUES (%s, %s, 'standard', NOW())
+                            ON CONFLICT (address) DO UPDATE SET
+                                balance = wallet_addresses.balance + %s,
+                                transaction_count = wallet_addresses.transaction_count + 1,
+                                last_updated = NOW()
+                        """, (tx_receiver, tx_amount, tx_amount))
+
+                    _settle_log.info(f"[SETTLE] ✅ TX settlement done: {len(non_coinbase_txs)} txs")
+
+                # ── Credit miner + treasury rewards ────────────────────────────────
+                _settle_log.info(f"[SETTLE] Crediting rewards for h={height}")
+
+                try:
+                    miner_reward = 720.0
+                    treasury_reward = 80.0
+                    if TessellationRewardSchedule:
+                        rewards = TessellationRewardSchedule.get_rewards_for_height(height)
+                        miner_reward = float(rewards.get('miner', 720))
+                        treasury_reward = float(rewards.get('treasury', 80))
+
+                    # Add transaction fees to treasury
+                    for tx in txs:
+                        f = tx.get('fee', tx.get('fee_base', 0))
+                        if isinstance(f, (float, str)):
+                            try:
+                                treasury_reward += float(f)
+                            except:
+                                pass
+
+                    with get_db_cursor() as cur:
+                        # Miner reward
+                        _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+                        cur.execute("""
+                            INSERT INTO wallet_addresses
+                                (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+                            VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
+                            ON CONFLICT (address) DO UPDATE SET
+                                balance = wallet_addresses.balance + EXCLUDED.balance,
+                                transaction_count = wallet_addresses.transaction_count + 1,
+                                last_updated = NOW()
+                        """, (miner_address, _miner_fp, _miner_fp, int(miner_reward * 100)))
+
+                        # Treasury reward
+                        if TessellationRewardSchedule and treasury_reward > 0:
+                            treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
+                            _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
+                            cur.execute("""
+                                INSERT INTO wallet_addresses
+                                    (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
+                                VALUES (%s, %s, %s, %s, 1, 'treasury')
+                                ON CONFLICT (address) DO UPDATE SET
+                                    balance = wallet_addresses.balance + EXCLUDED.balance,
+                                    transaction_count = wallet_addresses.transaction_count + 1
+                            """, (treasury_address, _treas_fp, _treas_fp, int(treasury_reward * 100)))
+
+                        _settle_log.info(f"[SETTLE] ✅ Rewards credited: miner={miner_reward:.2f}, treasury={treasury_reward:.2f} QTCL")
+
+                except Exception as reward_err:
+                    _settle_log.warning(f"[SETTLE] ⚠️  Reward credit failed: {reward_err}")
+
+                # ── Update chain state ───────────────────────────────────────────────
+                try:
+                    _lazy_ensure_chain_state()
+                    with get_db_cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
+                            VALUES (1, %s, %s, %s, NOW())
+                            ON CONFLICT (state_id) DO UPDATE SET
+                                chain_height = EXCLUDED.chain_height,
+                                head_block_hash = EXCLUDED.head_block_hash,
+                                latest_coherence = EXCLUDED.latest_coherence,
+                                updated_at = NOW()
+                        """, (height, block_hash, w_state_fidelity))
+                    _settle_log.debug(f"[SETTLE] ✅ Chain state updated: h={height}")
+                except Exception as cs_err:
+                    _settle_log.warning(f"[SETTLE] ⚠️  Chain state update: {cs_err}")
+
+                # ── Cache block ──────────────────────────────────────────────────
+                try:
+                    _cache_block({
+                        'height': height,
+                        'block_hash': block_hash,
+                        'timestamp': job.get('timestamp_s', 0),
+                        'difficulty': difficulty_bits,
+                        'miner': miner_address,
+                        'w_state_fidelity': w_state_fidelity,
+                    })
+                    _settle_log.debug(f"[SETTLE] ✅ Block cached: h={height}")
+                except Exception as cache_err:
+                    _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
+
+                # ── Difficulty retarget ──────────────────────────────────────────
+                try:
+                    dm = get_difficulty_manager()
+                    dm.on_block_accepted(job.get('timestamp_s', 0))
+                except Exception:
+                    pass
+
+                _settle_log.info(f"[SETTLE] ✅ Block h={height} settlement complete")
+
+            except Exception as settle_err:
+                _settle_log.error(f"[SETTLE] ❌ h={job.get('height')}: {settle_err}", exc_info=True)
+
+        except _queue_mod2.Empty:
+            continue
+        except Exception as e:
+            _settle_log.error(f"[SETTLE-WORKER] Fatal: {e}", exc_info=True)
+
+_block_settle_daemon = threading.Thread(
+    target=_block_settle_worker_thread, daemon=True, name="BlockSettle")
+_block_settle_daemon.start()
 logger.info("[TX-WORKER] Dedicated transaction query thread started (port 6543)")
 
 # ── Oracle identity — unique per deployed instance ────────────────────────────
@@ -4167,273 +4401,50 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # Even if PG fails, we attempt to continue with SQLite if we can.
             # But normally we want the authoritative DB to succeed.
             # return _rpc_error(-32603, f"DB persist failed: {str(dbe)}", rpc_id)
-        
+
         # ─────────────────────────────────────────────────────────────────────────
-        # TRANSACTION SETTLEMENT — Update wallet balances for all non-coinbase txs
-        # For each transaction: SENDER balance ↓, RECEIVER balance ↑
+        # CRITICAL PATH COMPLETE — Block is persisted to database
+        # All remaining work (wallet updates, rewards, caching) is now async
         # ─────────────────────────────────────────────────────────────────────────
-        _txs_settled = 0
-        if _block_rowcount > 0:
-            try:
-                with get_db_cursor() as cur:
-                    # Ensure wallet_addresses table exists
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS wallet_addresses (
-                            address VARCHAR(128) PRIMARY KEY,
-                            wallet_fingerprint VARCHAR(64),
-                            public_key TEXT,
-                            balance NUMERIC(30,0) DEFAULT 0,
-                            transaction_count INTEGER DEFAULT 0,
-                            address_type VARCHAR(20) DEFAULT 'standard',
-                            last_updated TIMESTAMP DEFAULT NOW()
-                        )
-                    """)
 
-                    # Process each non-coinbase transaction
-                    for tx in _non_coinbase_txs:
-                        tx_sender = tx.get('from_addr', tx.get('from_address', ''))
-                        tx_receiver = tx.get('to_addr', tx.get('to_address', ''))
-                        tx_amount = int(round(float(tx.get('amount', 0)) * 100))  # Convert to base units
-                        tx_fee = int(round(float(tx.get('fee', 0)) * 100))
-                        tx_id = tx.get('tx_id', tx.get('tx_hash', ''))
-
-                        if not tx_sender or not tx_receiver or tx_amount <= 0:
-                            continue
-
-                        # DEDUCT from sender (amount + fee)
-                        total_deduction = tx_amount + tx_fee
-                        cur.execute("""
-                            INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
-                            VALUES (%s, -%s, 'standard', NOW())
-                            ON CONFLICT (address) DO UPDATE SET
-                                balance = wallet_addresses.balance - %s,
-                                transaction_count = wallet_addresses.transaction_count + 1,
-                                last_updated = NOW()
-                        """, (tx_sender, total_deduction, total_deduction))
-
-                        # ADD to receiver (amount only, not fee)
-                        cur.execute("""
-                            INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
-                            VALUES (%s, %s, 'standard', NOW())
-                            ON CONFLICT (address) DO UPDATE SET
-                                balance = wallet_addresses.balance + %s,
-                                transaction_count = wallet_addresses.transaction_count + 1,
-                                last_updated = NOW()
-                        """, (tx_receiver, tx_amount, tx_amount))
-
-                        # Update transaction status to 'confirmed'
-                        cur.execute("""
-                            UPDATE transactions SET status = 'confirmed', height = %s, updated_at = NOW()
-                            WHERE tx_hash = %s OR tx_id = %s
-                        """, (height, tx_id, tx_id))
-
-                        _txs_settled += 1
-                        logger.info(
-                            f"[RPC-submitBlock] ✅ TX settled h={height}: "
-                            f"{tx_sender[:16]}…→{tx_receiver[:16]}… "
-                            f"amount={tx_amount/100:.2f} fee={tx_fee/100:.2f} QTCL"
-                        )
-
-                    if _txs_settled > 0:
-                        logger.info(f"[RPC-submitBlock] ✅ {_txs_settled} transactions settled with balance updates")
-            except Exception as _tx_settle_err:
-                logger.error(f"[RPC-submitBlock] ⚠️  Transaction settlement error (non-fatal): {_tx_settle_err}")
-                # Continue — block was persisted; settlement failure is not fatal
-
-        # ── Credit coinbase rewards (transaction 3 — isolated from block persist) ──
-        # Separate get_db_cursor so a wallet schema error cannot roll back the block.
-        # Deterministic from header: never scan txs (breaks when miner == treasury).
-        _rewards_credited = False
-        if _block_rowcount > 0 and TessellationRewardSchedule:
-            try:
-                rewards          = TessellationRewardSchedule.get_rewards_for_height(height)
-                miner_reward     = rewards.get('miner', 720)
-                
-                # Base treasury reward + all transaction donations (formerly fees)
-                base_treasury_reward = rewards.get('treasury', 80)
-                total_donations = 0
-                for tx in (txs or []):
-                    # Accept 'fee' (float QTCL) or 'fee_base' (int base units)
-                    f = tx.get('fee', tx.get('fee_base', 0))
-                    if isinstance(f, (float, str)):
-                        try: total_donations += int(round(float(f) * 100))
-                        except: pass
-                    else:
-                        total_donations += int(f)
-                
-                treasury_reward  = base_treasury_reward + total_donations
-                treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
-
-                # Canonical deterministic coinbase tx hashes for ledger
-                _cb_miner_hash = hashlib.sha3_256(
-                    json.dumps({"height": height, "to": miner_address,
-                                "amount": miner_reward, "block_hash": block_hash,
-                                "role": "miner"}, sort_keys=True, separators=(',', ':')).encode()
-                ).hexdigest()
-                _cb_treasury_hash = hashlib.sha3_256(
-                    json.dumps({"height": height, "to": treasury_address,
-                                "amount": treasury_reward, "block_hash": block_hash,
-                                "role": "treasury"}, sort_keys=True, separators=(',', ':')).encode()
-                ).hexdigest()
-
-                with get_db_cursor() as cur:
-                    # First, ensure wallet_addresses table exists (create if missing)
-                    try:
-                        cur.execute("""
-                            CREATE TABLE IF NOT EXISTS wallet_addresses (
-                                address VARCHAR(128) PRIMARY KEY,
-                                wallet_fingerprint VARCHAR(64),
-                                public_key TEXT,
-                                balance NUMERIC(30,0) DEFAULT 0,
-                                transaction_count INTEGER DEFAULT 0,
-                                address_type VARCHAR(20) DEFAULT 'standard',
-                                last_updated TIMESTAMP DEFAULT NOW()
-                            )
-                        """)
-                    except Exception as _table_err:
-                        logger.warning(f"[RPC-submitBlock] Could not ensure wallet_addresses table: {_table_err}")
-                    
-                    # ── Miner wallet balance ─────────────────────────────────────
-                    _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-                    cur.execute("""
-                        INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, public_key,
-                             balance, transaction_count, address_type, last_updated)
-                        VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
-                        ON CONFLICT (address) DO UPDATE SET
-                            balance           = wallet_addresses.balance + EXCLUDED.balance,
-                            transaction_count = wallet_addresses.transaction_count + 1,
-                            last_updated      = NOW()
-                    """, (miner_address, _miner_fp, _miner_fp, miner_reward))
-                    _miner_rowcount = cur.rowcount
-                    _rewards_credited = (_miner_rowcount > 0)
-                    logger.info(
-                        f"[RPC-submitBlock] ⛏  Miner credited: {miner_reward} base units "
-                        f"({miner_reward/100:.2f} QTCL) → {miner_address[:22]}… "
-                        f"(rows={_miner_rowcount})"
-                    )
-
-                    # ── Treasury wallet balance ──────────────────────────────────
-                    if treasury_address and treasury_reward > 0:
-                        _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
-                        cur.execute("""
-                            INSERT INTO wallet_addresses
-                                (address, wallet_fingerprint, public_key,
-                                 balance, transaction_count, address_type)
-                            VALUES (%s, %s, %s, %s, 1, 'treasury')
-                            ON CONFLICT (address) DO UPDATE SET
-                                balance           = wallet_addresses.balance + EXCLUDED.balance,
-                                transaction_count = wallet_addresses.transaction_count + 1
-                        """, (treasury_address, _treas_fp, _treas_fp, treasury_reward))
-                        logger.info(
-                            f"[RPC-submitBlock] 💰 Treasury credited: {treasury_reward} base units "
-                            f"({treasury_reward/100:.2f} QTCL) → {treasury_address[:22]}…"
-                        )
-
-                    # ── Canonical coinbase transaction rows ──────────────────────
-                    cur.execute("""
-                        INSERT INTO transactions
-                            (tx_hash, from_address, to_address,
-                             amount, tx_type, status, height, updated_at)
-                        VALUES (%s, %s, %s, %s, 'coinbase', 'confirmed', %s, NOW())
-                        ON CONFLICT (tx_hash) DO NOTHING
-                    """, (_cb_miner_hash, "0" * 64, miner_address,
-                          float(miner_reward), height))
-
-                    if treasury_address and treasury_reward > 0:
-                        cur.execute("""
-                            INSERT INTO transactions
-                                (tx_hash, from_address, to_address,
-                                 amount, tx_type, status, height, updated_at)
-                            VALUES (%s, %s, %s, %s, 'coinbase', 'confirmed', %s, NOW())
-                            ON CONFLICT (tx_hash) DO NOTHING
-                        """, (_cb_treasury_hash, "0" * 64, treasury_address,
-                              float(treasury_reward), height))
-
-            except Exception as credit_err:
-                logger.error(
-                    f"[RPC-submitBlock] ❌ Coinbase credit FAILED h={height}: {credit_err}",
-                    exc_info=True
-                )
-
-        # ── Difficulty retarget ──────────────────────────────────────────────
-        try:
-            dm = get_difficulty_manager()
-            dm.on_block_accepted(timestamp_s)
-        except Exception:
-            pass
-
-        # ── Cache block for fast retrieval ───────────────────────────────────
-        if _block_rowcount > 0:
-            _cache_block({
-                'height': height,
-                'block_hash': block_hash,
-                'parent_hash': parent_hash,
-                'merkle_root': merkle_root,
-                'timestamp': timestamp_s,
-                'timestamp_s': timestamp_s,
-                'difficulty': difficulty_bits,
-                'nonce': nonce,
-                'miner': miner_address,
-                'tx_count': len(txs) if txs else 0,
-                'w_state_fidelity': w_state_fidelity,
-                'coherence': w_state_fidelity,
-                'fidelity': w_state_fidelity,
-                'quantum_fidelity': w_state_fidelity,
-                'w_state_hash': w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                'hyp_witness': w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                'pq_curr': height,
-                'pq_last': max(0, height - 1),
-            })
-
-        # ── Update chain state ──────────────────────────────────────────────
-        try:
-            _lazy_ensure_chain_state()
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
-                    VALUES (1, %s, %s, %s, NOW())
-                    ON CONFLICT (state_id) DO UPDATE SET
-                        chain_height = EXCLUDED.chain_height,
-                        head_block_hash = EXCLUDED.head_block_hash,
-                        latest_coherence = EXCLUDED.latest_coherence,
-                        updated_at = NOW()
-                """, (height, block_hash, w_state_fidelity))
-        except Exception as cs_err:
-            logger.warning(f"[RPC-submitBlock] Chain state update failed (non-fatal): {cs_err}")
-
-        # ── In-memory blockchain index ────────────────────────────────────────
-        try:
-            from globals import get_blockchain
-            get_blockchain().index_block(height, txs or [])
-        except Exception:
-            pass
-
-        try: _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
-        except Exception: _resp_reward = 7.20
-        
-        # ── Final diagnostics and response ───────────────────────────────────
         if _block_rowcount == 0:
             # Block wasn't inserted - could be duplicate or DB issue
             logger.warning(f"[RPC-submitBlock] 🔁 DUPLICATE/REJECTED h={height} hash={block_hash[:16]}… (rowcount=0)")
-            _resp = _rpc_ok({
+            return _rpc_ok({
                 "status": "duplicate",
                 "height": height,
                 "block_hash": block_hash,
-                "diagnostic": {
-                    "block_rowcount": _block_rowcount,
-                    "rewards_credited": _rewards_credited,
-                    "note": "Block at this height already exists or DB insert failed"
-                }
+                "diagnostic": {"note": "Block at this height already exists or DB insert failed"}
             }, rpc_id)
-            logger.info(f"[RPC-submitBlock] 📤 RESPONSE: {_resp}")
-            return _resp
-        
-        # Block was successfully inserted
+
+        # Block was successfully inserted — enqueue settlement and return immediately
+        try:
+            _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
+        except Exception:
+            _resp_reward = 7.20
+
+        # Enqueue settlement work to background worker (non-blocking)
+        try:
+            _BLOCK_SETTLE_Q.put_nowait({
+                'height': height,
+                'block_hash': block_hash,
+                'miner_address': miner_address,
+                'txs': txs or [],
+                'non_coinbase_txs': _non_coinbase_txs,
+                'w_state_fidelity': w_state_fidelity,
+                'difficulty_bits': difficulty_bits,
+                'timestamp_s': timestamp_s,
+            })
+            logger.info(f"[RPC-submitBlock] ✅ Settlement enqueued for h={height}")
+        except _queue_mod2.Full:
+            logger.warning(f"[RPC-submitBlock] ⚠️  Settlement queue full — block accepted but settlement deferred")
+        except Exception as eq_err:
+            logger.warning(f"[RPC-submitBlock] ⚠️  Settlement enqueue failed: {eq_err}")
+
+        # Return accepted immediately (settlement happens in background)
         logger.info(
             f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… "
-            f"miner={miner_address[:16]}… reward={_resp_reward} QTCL "
-            f"(rows={_block_rowcount}, rewards_ok={_rewards_credited})"
+            f"miner={miner_address[:16]}… reward={_resp_reward} QTCL (critical path complete)"
         )
         _resp = _rpc_ok({
             "status": "accepted",
@@ -4443,8 +4454,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             "miner_reward_qtcl": _resp_reward,
             "diagnostic": {
                 "block_rowcount": _block_rowcount,
-                "rewards_credited": _rewards_credited,
-                "persistence_verified": True
+                "persistence_verified": True,
+                "settlement": "async"
             }
         }, rpc_id)
         logger.info(f"[RPC-submitBlock] 📤 RESPONSE: status=accepted reward={_resp_reward}")

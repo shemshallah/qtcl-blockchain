@@ -2205,51 +2205,10 @@ class OracleWStateManager:
             for r in sorted(readings, key=lambda r: r.oracle_id)
         ]
 
-        # ── Step 6b: Mermin — async fire-and-forget ───────────────────────────
-        # Nelder-Mead on 12 angles takes ~18s when blocking. Submit to dedicated
-        # single-thread executor; return _last_mermin (from previous run) immediately.
-        # Warm-start means angles drift <0.01 rad/cycle → converges in 1-2 iterations.
-        with self._state_lock:
-            _mermin_pending = self._mermin_future is not None and not self._mermin_future.done()
-
-        if not _mermin_pending:
-            _dm_snap  = dm_mean.copy()
-            _fid_snap = float(cons_fidelity)
-            _pni_snap = list(per_node_info)
-            with self._state_lock:
-                _warm = self._best_mermin_angles.copy() if self._best_mermin_angles is not None else None
-
-            def _async_mermin():
-                try:
-                    _r = 6 if _fid_snap >= 0.80 else (3 if _fid_snap >= 0.70 else 2)
-                    M, angles, iters = OracleWStateManager._optimize_mermin_angles(
-                        _dm_snap, n_restarts=_r, warm_start=_warm)
-                    res = self._build_mermin_result(_dm_snap, M, angles, iters, _fid_snap, _pni_snap)
-                    with self._state_lock:
-                        self._best_mermin_angles = angles.copy()
-                        self._last_mermin = res
-                        if self.current_density_matrix is not None:
-                            self.current_density_matrix.bell_test = res
-                except Exception as _exc:
-                    logger.debug(f"[ORACLE CLUSTER] Async Mermin failed: {_exc}")
-
-            with self._state_lock:
-                # Recreate executor if it was shut down (gunicorn worker recycle)
-                try:
-                    if self._mermin_executor._shutdown:
-                        self._mermin_executor = ThreadPoolExecutor(
-                            max_workers=1, thread_name_prefix="MerminAsync")
-                except Exception:
-                    pass
-                try:
-                    self._mermin_future = self._mermin_executor.submit(_async_mermin)
-                except RuntimeError:
-                    pass  # executor shut down — skip this Mermin computation
-
-        with self._state_lock:
-            mermin_result = self._last_mermin
-
-        # ── Step 7: Build snapshot ────────────────────────────────────────────
+        # ── Step 6b: Build snapshot FIRST (before async Mermin) ────────────────
+        # CRITICAL FIX: Snapshot must be built and stored BEFORE firing async Mermin.
+        # This ensures Mermin callback updates the snapshot that's actually being used,
+        # not a stale copy. Atomicity: build → store → fire async job.
         QIM = QuantumInformationMetrics
         bf_agg = {
             "pq_curr": pq_curr, "pq_last": pq_last,
@@ -2296,12 +2255,65 @@ class OracleWStateManager:
             entanglement_witness    = QIM.entanglement_witness(dm_mean),
             trace_purity            = QIM.trace_purity(dm_mean),
         )
+
+        # Include last Mermin result if available
+        with self._state_lock:
+            mermin_result = self._last_mermin
         if mermin_result:
             snapshot.bell_test = mermin_result
 
+        # Store snapshot to self.current_density_matrix (atomically)
         with self._state_lock:
             self.current_density_matrix = snapshot
             self.density_matrix_buffer.append(snapshot)
+
+        # ── Step 6c: Mermin — async fire-and-forget (after snapshot stored) ────
+        # Nelder-Mead on 12 angles takes ~18s when blocking. Submit to dedicated
+        # single-thread executor; return _last_mermin (from previous run) immediately.
+        # Warm-start means angles drift <0.01 rad/cycle → converges in 1-2 iterations.
+        # NOW fires AFTER snapshot is stored, so callback updates the stored snapshot.
+        with self._state_lock:
+            _mermin_pending = self._mermin_future is not None and not self._mermin_future.done()
+
+        if not _mermin_pending:
+            _dm_snap  = dm_mean.copy()
+            _fid_snap = float(cons_fidelity)
+            _pni_snap = list(per_node_info)
+            with self._state_lock:
+                _warm = self._best_mermin_angles.copy() if self._best_mermin_angles is not None else None
+
+            def _async_mermin_callback(res):
+                """Update snapshot with Mermin result (thread-safe)."""
+                with self._state_lock:
+                    if self.current_density_matrix is not None:
+                        self.current_density_matrix.bell_test = res
+
+            def _async_mermin():
+                try:
+                    _r = 6 if _fid_snap >= 0.80 else (3 if _fid_snap >= 0.70 else 2)
+                    M, angles, iters = OracleWStateManager._optimize_mermin_angles(
+                        _dm_snap, n_restarts=_r, warm_start=_warm)
+                    res = self._build_mermin_result(_dm_snap, M, angles, iters, _fid_snap, _pni_snap)
+                    with self._state_lock:
+                        self._best_mermin_angles = angles.copy()
+                        self._last_mermin = res
+                    # Update the snapshot with the callback
+                    _async_mermin_callback(res)
+                except Exception as _exc:
+                    logger.debug(f"[ORACLE CLUSTER] Async Mermin failed: {_exc}")
+
+            with self._state_lock:
+                # Recreate executor if it was shut down (gunicorn worker recycle)
+                try:
+                    if self._mermin_executor._shutdown:
+                        self._mermin_executor = ThreadPoolExecutor(
+                            max_workers=1, thread_name_prefix="MerminAsync")
+                except Exception:
+                    pass
+                try:
+                    self._mermin_future = self._mermin_executor.submit(_async_mermin)
+                except RuntimeError:
+                    pass  # executor shut down — skip this Mermin computation
 
         # ── Step 8: ENQUEUE FOR MULTIPLEXER (CRITICAL: DM + metrics for SSE streams) ──
         # This is the primary integration point. The server's multiplexer forks this
