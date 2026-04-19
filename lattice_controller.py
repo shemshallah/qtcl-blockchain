@@ -3234,11 +3234,11 @@ class BlockManager:
             self.chain_height   += 1
             self.blocks_sealed  += 1
 
-            # ── Broadcast sealed block to SSE clients ─────────────────────────────
+            # ── Broadcast sealed block to SSE service ──────────────────────────────
             try:
                 import sys
                 _srv = sys.modules.get('server')
-                if _srv and hasattr(_srv, '_blocks_sse_queue'):
+                if _srv and hasattr(_srv, '_push_to_sse_service'):
                     block_event = {
                         'height': block.block_height,
                         'block_hash': block.block_hash,
@@ -3253,8 +3253,8 @@ class BlockManager:
                         'miner_public_key_hex': block.miner_public_key_hex if block.miner_public_key_hex else None,
                         'signature_verified': block.signature_verified,
                     }
-                    _srv._blocks_sse_queue.put_nowait(block_event)
-                    logger.debug(f"[BLOCK-BRD] ✅ Broadcasted block #{block.block_height}")
+                    _srv._push_to_sse_service('/push/block', block_event)
+                    logger.debug(f"[BLOCK-BRD] ✅ Pushed block #{block.block_height} to SSE service")
             except Exception as _brd_err:
                 logger.debug(f"[BLOCK-BRD] skip: {_brd_err}")
             
