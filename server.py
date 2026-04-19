@@ -64,6 +64,53 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# ═══ PRE-WARMED RPC THREAD POOL — shared across all dispatch calls ═══════════
+# Single 8-thread pool eliminates per-call ThreadPoolExecutor create/destroy churn.
+# Fast (cache-read) methods run INLINE — never touch the pool.
+# Slow (DB/oracle) methods submit to pool with hard timeout.
+_RPC_THREAD_POOL = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix='rpc_worker')
+
+# Methods that run directly in the request thread — all are lock-free cache reads
+# taking < 1ms. Wrapping them in a thread pool adds 5–20ms overhead for zero gain.
+_RPC_INLINE_METHODS: frozenset = frozenset({
+    'qtcl_getBlockHeight',
+    'qtcl_getQuantumMetrics',
+    'qtcl_getLatestDMSnapshot',
+    'qtcl_getLatestDMSnapshots',
+    'qtcl_getMempoolStats',
+    'qtcl_getHealth',
+    'qtcl_getPeers',
+    'qtcl_getPeersByNatGroup',
+    'qtcl_getMyAddr',
+    'qtcl_getDHTTable',
+    'qtcl_getTreasuryAddress',
+    'qtcl_listMeasurementSubscribers',
+    'qtcl_getEvents',
+    'qtcl_peerHeartbeat',
+})
+
+# Slow methods (DB round-trips, crypto ops) — get pool + timeout protection
+_RPC_TIMEOUT_MAP: dict = {
+    'qtcl_getBlockRange':     10.0,
+    'qtcl_getTransactions':   10.0,
+    'qtcl_getBlock':          5.0,
+    'qtcl_getBalance':        4.0,
+    'qtcl_getTransaction':    4.0,
+    'qtcl_submitBlock':       30.0,
+    'qtcl_submitTransaction': 6.0,
+    'qtcl_submitOracleReg':   6.0,
+    'qtcl_getOracleRegistry': 5.0,
+    'qtcl_getOracleRecord':   4.0,
+    'qtcl_pushOracleDM':      4.0,
+    'qtcl_getPythPrice':      5.0,
+    'qtcl_registerPeer':      4.0,
+    'qtcl_receiveDHTTable':   3.0,
+    'qtcl_registerMeasurementSubscriber':   3.0,
+    'qtcl_unregisterMeasurementSubscriber': 3.0,
+    'qtcl_getDeviceChain':    4.0,
+    'qtcl_getMerminTest':     20.0,
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # SSE SERVICE CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -208,44 +255,46 @@ def _dispatch(body_bytes: bytes) -> Optional[Union[dict, list]]:
     return _dispatch_single(body)
 
 def _dispatch_single(req: dict) -> Optional[dict]:
-    """Dispatch single JSON-RPC 2.0 request with per-method timeout."""
+    """Dispatch single JSON-RPC 2.0 request.
+
+    Fast path: inline execution in current gthread (lock-free cache reads).
+    Slow path: submitted to _RPC_THREAD_POOL with per-method hard timeout.
+    No per-call ThreadPoolExecutor creation — eliminates thread churn under GIL.
+    """
     if not isinstance(req, dict):
         return _rpc_error(-32600, "Invalid Request: not an object", None)
-    
-    jsonrpc, method, params, rpc_id = req.get("jsonrpc"), req.get("method"), req.get("params", []), req.get("id")
-    
+
+    jsonrpc = req.get("jsonrpc")
+    method  = req.get("method")
+    params  = req.get("params", [])
+    rpc_id  = req.get("id")
+
     if jsonrpc != _JSONRPC_VERSION:
         return _rpc_error(-32600, f"Invalid jsonrpc: {jsonrpc}", rpc_id)
     if not isinstance(method, str):
         return _rpc_error(-32600, "Invalid Request: method not a string", rpc_id)
     if method not in _RPC_METHODS:
         return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
-    
-    try:
-        # Per-method timeout: 3s for most, longer for expensive quantum queries
-        timeout_map = {
-            'qtcl_getBlockRange': 10.0,
-            'qtcl_getQuantumMetrics': 25.0,  # Oracle cluster - generous to let AER complete
-            'qtcl_getTransactions': 10.0,
-            'qtcl_getPeers': 5.0,
-            'qtcl_getMerminTest': 20.0,
-            'qtcl_submitBlock': 30.0,  # Block submission: critical path (validation+insert), settlement async
-        }
-        timeout_sec = timeout_map.get(method, 3.0)
 
-        # Thread-safe timeout via concurrent.futures (signal.alarm only works on main thread)
-        # CRITICAL: Do NOT use 'with' context manager — it calls executor.shutdown(wait=True)
-        # which blocks forever if timeout fires. Use manual shutdown(wait=False) instead.
-        executor = _cf.ThreadPoolExecutor(max_workers=1)
+    handler = _RPC_METHODS[method]
+
+    # ── FAST PATH: inline, zero thread overhead ───────────────────────────────
+    if method in _RPC_INLINE_METHODS:
         try:
-            future = executor.submit(_RPC_METHODS[method], params, rpc_id)
-            result = future.result(timeout=timeout_sec)
-            return result
-        except _cf.TimeoutError:
-            logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
-            return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
-        finally:
-            executor.shutdown(wait=False)  # Don't block — timeout is real now
+            return handler(params, rpc_id)
+        except Exception as e:
+            logger.exception(f"[RPC] {method} inline error: {e}")
+            return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+    # ── SLOW PATH: pool submit with timeout ───────────────────────────────────
+    timeout_sec = _RPC_TIMEOUT_MAP.get(method, 5.0)
+    try:
+        future = _RPC_THREAD_POOL.submit(handler, params, rpc_id)
+        result = future.result(timeout=timeout_sec)
+        return result
+    except _cf.TimeoutError:
+        logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
+        return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] {method} raised: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
