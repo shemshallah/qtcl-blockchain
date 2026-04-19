@@ -3983,6 +3983,9 @@ def qtcl_pow_hash(
     _ph_miner  = miner_address.encode()[:40].ljust(40, b'\x00')
     _ph_seed   = w_entropy_seed[:32]
 
+    # Debug log
+    logger.debug(f"[qtcl_pow_hash] Computing: h={height} ts={timestamp_s} parent={parent_hash[:16]}… merkle={merkle_root[:16]}… diff={difficulty_bits} nonce={nonce} miner_bytes={_ph_miner.hex()[:20]}… w_entropy={w_entropy_seed.hex()[:32]}…")
+
     scratchpad = hashlib.shake_256(
         _POW_SCRATCHPAD_PFX + w_entropy_seed
     ).digest(_POW_SCRATCHPAD_BYTES)
@@ -4097,6 +4100,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         miner_address   = str(hdr.get("miner_address", ""))
         difficulty_bits = int(hdr.get("difficulty_bits", hdr.get("difficulty", 4)))
         w_entropy_hex   = str(hdr.get("w_entropy_hash", hdr.get("w_entropy_seed", "")))
+
+        # Log all parsed values for debugging
+        logger.info(f"[RPC-submitBlock] 📨 PARSED: h={height} hash={block_hash[:16]}… parent={parent_hash[:16]}… merkle={merkle_root[:16]}… ts={timestamp_s} nonce={nonce} miner='{miner_address}' diff={difficulty_bits} w_entropy={w_entropy_hex[:32] if w_entropy_hex else 'EMPTY'}…")
         w_state_fidelity = float(hdr.get("w_state_fidelity", 0.0) or 0.0)
         mermin_value    = float(hdr.get("mermin_value", 0.0) or 0.0)
         mermin_violated = bool(hdr.get("mermin_violated", False))
@@ -4131,6 +4137,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ── PoW verification ─────────────────────────────────────────────────
         try:
             w_seed = bytes.fromhex(w_entropy_hex) if w_entropy_hex else b'\x00' * 32
+            logger.info(f"[RPC-submitBlock] 🔍 PoW DEBUG: height={height} ts={timestamp_s} parent={parent_hash[:16]}… merkle={merkle_root[:16]}… diff={difficulty_bits} nonce={nonce} miner={miner_address[:16]}… w_entropy={w_entropy_hex[:32] if w_entropy_hex else 'NONE'}…")
             valid, reason = qtcl_pow_verify(
                 height=height,
                 parent_hash=parent_hash,
