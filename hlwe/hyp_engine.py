@@ -321,7 +321,8 @@ except ImportError as e:
 
 try:
     from hyp_schnorr import (
-        SchnorrGamma, HypSignature, SchnorrError
+        SchnorrGamma, HypSignature, SchnorrError,
+        signature_to_dict, WIRE_VERSION
     )
     _MODULES_AVAILABLE['hyp_schnorr'] = True
 except ImportError as e:
@@ -666,9 +667,21 @@ class HypGammaEngine:
                     message_hash, walk_indices, generators
                 )
 
-            # Format output — Schnorr class's sign_hash returns _SigResult with string attrs
+            # Format output — return full crypto components for verification
+            # Convert to dict format that signature_from_dict() can parse
             timestamp = datetime.now(timezone.utc).isoformat()
+
+            # Get the full signature dict with R, Z, c_full, c_exp
+            sig_dict = signature_to_dict(sig)
+
+            # Add version and timestamp for backward compat
             result = {
+                'version': WIRE_VERSION,
+                'R': sig_dict['R'],
+                'Z': sig_dict['Z'],
+                'c_full': sig.c_full,  # hex string of full challenge
+                'c_exp': sig.c_exp,    # exponent bits
+                # Backward compat: also include legacy fields
                 'signature': sig.signature,
                 'challenge': sig.challenge,
                 'auth_tag': sig.auth_tag,
