@@ -50,6 +50,7 @@ import hashlib
 import secrets
 import logging
 import threading
+import concurrent.futures as _cf
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable, Union, Deque
 from collections import deque, OrderedDict
 
@@ -201,7 +202,6 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         # Thread-safe timeout via concurrent.futures (signal.alarm only works on main thread)
         # CRITICAL: Do NOT use 'with' context manager — it calls executor.shutdown(wait=True)
         # which blocks forever if timeout fires. Use manual shutdown(wait=False) instead.
-        import concurrent.futures as _cf
         executor = _cf.ThreadPoolExecutor(max_workers=1)
         try:
             future = executor.submit(_RPC_METHODS[method], params, rpc_id)
@@ -2431,25 +2431,33 @@ def _get_canonical_node() -> Optional[dict]:
 
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
-    
-    DB-AUTHORITATIVE: reads from PostgreSQL blocks table via query_latest_block().
-    No fallbacks — DB is the single source of truth.
+
+    🔴 CRITICAL: DB-AUTHORITATIVE, ALWAYS FRESH, NO CACHING
+    This query MUST return the actual current block height.
+    Client depends on this for mining loop progression (h → h+1 → h+2...).
     """
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight called with params={params}, id={rpc_id}")
-        
         db_tip = query_latest_block()
+
         if db_tip is None:
-            # No blocks yet — return genesis state (height=0) which is the actual state
-            return _rpc_ok({"height": 0, "tip_hash": "0" * 64, "ts": time.time()}, rpc_id)
-        
-        height   = int(db_tip['height'])
-        tip_hash = str(db_tip.get('hash', ''))
-        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight success: height={height}")
-        return _rpc_ok({"height": height, "tip_hash": tip_hash, "ts": time.time()}, rpc_id)
+            height = 0
+            tip_hash = "0" * 64
+        else:
+            height = int(db_tip['height'])
+            tip_hash = str(db_tip.get('hash', '') or "0" * 64)
+
+        # 🔴 CRITICAL LOGGING: Verify DB state
+        logger.critical(f"[RPC-HEIGHT] 📊 CHAIN TIP: h={height} hash={tip_hash[:16]}… (DB-authoritative, always fresh)")
+
+        return _rpc_ok({
+            "height": height,
+            "tip_hash": tip_hash,
+            "ts": time.time(),
+            "source": "DB-authoritative"  # Signal to client this is ground truth
+        }, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
-        return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id)
 
 
 def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
@@ -3983,8 +3991,12 @@ def qtcl_pow_hash(
     _ph_miner  = miner_address.encode()[:40].ljust(40, b'\x00')
     _ph_seed   = w_entropy_seed[:32]
 
-    # Debug log
-    logger.debug(f"[qtcl_pow_hash] Computing: h={height} ts={timestamp_s} parent={parent_hash[:16]}… merkle={merkle_root[:16]}… diff={difficulty_bits} nonce={nonce} miner_bytes={_ph_miner.hex()[:20]}… w_entropy={w_entropy_seed.hex()[:32]}…")
+    # Debug log - DETAILED for troubleshooting
+    logger.info(f"[qtcl_pow_hash] h={height} ts={timestamp_s} diff={difficulty_bits} nonce={nonce}")
+    logger.info(f"[qtcl_pow_hash] parent={parent_hash}")
+    logger.info(f"[qtcl_pow_hash] merkle={merkle_root}")
+    logger.info(f"[qtcl_pow_hash] miner='{miner_address}' → bytes={_ph_miner.hex()}")
+    logger.info(f"[qtcl_pow_hash] entropy={w_entropy_seed.hex()}")
 
     scratchpad = hashlib.shake_256(
         _POW_SCRATCHPAD_PFX + w_entropy_seed
@@ -3998,10 +4010,12 @@ def qtcl_pow_hash(
                    _ph_parent, _ph_merkle,
                    difficulty_bits, nonce,
                    _ph_miner, _ph_seed)
+    logger.info(f"[qtcl_pow_hash] hdr={hdr.hex()}")
     h0 = hashlib.sha3_256()
     h0.update(_POW_PREFIX)
     h0.update(hdr)
     state = h0.digest()
+    logger.info(f"[qtcl_pow_hash] initial_state={state.hex()}")
 
     for rnd in range(_POW_MIX_ROUNDS):
         wi = struct.unpack_from('>I', state, 0)[0] % _POW_N_WINDOWS
@@ -4080,7 +4094,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _has_pubkey = bool(_data.get("miner_public_key_hex"))
                 _height = int(_hdr.get("height", 0))
                 _hash = str(_hdr.get("block_hash", "")[:16])
-                logger.info(f"[RPC-submitBlock] 📥 RECEIVED h={_height} hash={_hash}… | has_sig={_has_sig} has_pubkey={_has_pubkey} | data_keys={list(_data.keys())[:5]}")
+                _entropy_in_data = "w_entropy_hash" in _data or "w_entropy_seed" in _data
+                _entropy_in_hdr = "w_entropy_hash" in _hdr or "w_entropy_seed" in _hdr
+                logger.info(f"[RPC-submitBlock] 📥 RECEIVED h={_height} hash={_hash}… | has_sig={_has_sig} has_pubkey={_has_pubkey} has_entropy={_entropy_in_data or _entropy_in_hdr}")
+                logger.info(f"[RPC-submitBlock] 📋 DATA KEYS: {list(_data.keys())}")
+                logger.info(f"[RPC-submitBlock] 📋 HEADER KEYS: {list(_hdr.keys())}")
         
         if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
             return _rpc_error(-32602, "params[0] must be {header, transactions}", rpc_id)
@@ -4101,6 +4119,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         difficulty_bits = int(hdr.get("difficulty_bits", hdr.get("difficulty", 4)))
         w_entropy_hex   = str(hdr.get("w_entropy_hash", hdr.get("w_entropy_seed", "")))
 
+        # 🔍 DUMP submission for manual verification (DEBUG)
+        logger.critical(f"[BLOCK-SUBMISSION-DEBUG] h={height} hash={block_hash} parent={parent_hash} merkle={merkle_root} ts={timestamp_s} nonce={nonce} miner={miner_address} diff={difficulty_bits} entropy_hex={w_entropy_hex}")
+
         # Log all parsed values for debugging
         logger.info(f"[RPC-submitBlock] 📨 PARSED: h={height} hash={block_hash[:16]}… parent={parent_hash[:16]}… merkle={merkle_root[:16]}… ts={timestamp_s} nonce={nonce} miner='{miner_address}' diff={difficulty_bits} w_entropy={w_entropy_hex[:32] if w_entropy_hex else 'EMPTY'}…")
         w_state_fidelity = float(hdr.get("w_state_fidelity", 0.0) or 0.0)
@@ -4110,7 +4131,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ── Duplicate check ──────────────────────────────────────────────────
         existing = query_block_by_hash(block_hash)
         if existing:
-            return _rpc_ok({"status": "duplicate", "height": height, "block_hash": block_hash}, rpc_id)
+            # Return next expected height so client knows to mine h+1
+            return _rpc_ok({
+                "status": "duplicate",
+                "height": height,
+                "block_hash": block_hash,
+                "next_height": height + 1,  # Signal client to mine next block
+                "diagnostic": {"note": "Block at this height already exists"}
+            }, rpc_id)
 
         # ── Height check ─────────────────────────────────────────────────────
         latest = query_latest_block()
@@ -4137,7 +4165,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ── PoW verification ─────────────────────────────────────────────────
         try:
             w_seed = bytes.fromhex(w_entropy_hex) if w_entropy_hex else b'\x00' * 32
-            logger.info(f"[RPC-submitBlock] 🔍 PoW DEBUG: height={height} ts={timestamp_s} parent={parent_hash[:16]}… merkle={merkle_root[:16]}… diff={difficulty_bits} nonce={nonce} miner={miner_address[:16]}… w_entropy={w_entropy_hex[:32] if w_entropy_hex else 'NONE'}…")
+            logger.info(f"[RPC-submitBlock] 🔍 PoW DEBUG: height={height} ts={timestamp_s} parent={parent_hash[:16]}… merkle={merkle_root[:16]}… diff={difficulty_bits} nonce={nonce} miner={miner_address[:16]}…")
+            logger.info(f"[RPC-submitBlock] 🔐 ENTROPY: received_hex={w_entropy_hex} seed={w_seed.hex()}")
             valid, reason = qtcl_pow_verify(
                 height=height,
                 parent_hash=parent_hash,
@@ -4334,9 +4363,19 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
                 if _block_rowcount > 0:
-                    logger.warning(f"[RPC-submitBlock] ✅ BLOCK PERSISTED: rowcount={_block_rowcount}, height will advance to {height}")
+                    logger.warning(f"[RPC-submitBlock] ✅ BLOCK INSERTED: rowcount={_block_rowcount} at height={height}")
                 else:
-                    logger.warning(f"[RPC-submitBlock] ⚠️  Block insert rowcount=0 (duplicate height or conflict)")
+                    logger.warning(f"[RPC-submitBlock] ⚠️  Block insert rowcount=0 (duplicate height conflict)")
+
+                # 🔴 CRITICAL VERIFICATION: Confirm block is in DB before proceeding
+                # This prevents silent failures where INSERT succeeds but block never reaches DB
+                cur.execute("SELECT height, block_hash FROM blocks WHERE height=%s", (height,))
+                _verify_row = cur.fetchone()
+                if _verify_row:
+                    _verify_h, _verify_hash = _verify_row
+                    logger.critical(f"[RPC-submitBlock] ✅ VERIFICATION PASSED: h={_verify_h} is in DB as hash={_verify_hash[:16]}…")
+                else:
+                    logger.error(f"[RPC-submitBlock] ❌ VERIFICATION FAILED: h={height} NOT FOUND IN DB AFTER INSERT!")
 
                 # Persist user-supplied transactions
                 for tx in (txs or []):
@@ -4432,6 +4471,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             "block_hash": block_hash,
             "difficulty_bits": difficulty_bits,
             "miner_reward_qtcl": _resp_reward,
+            "next_height": height + 1,  # Signal client to mine next block
             "diagnostic": {
                 "block_rowcount": _block_rowcount,
                 "persistence_verified": True,
