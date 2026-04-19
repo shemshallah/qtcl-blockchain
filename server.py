@@ -957,19 +957,6 @@ def _block_settle_worker_thread():
                 _settle_log.info(f"[SETTLE] Processing h={height} {len(non_coinbase_txs)} non-coinbase txs")
 
                 with get_db_cursor() as cur:
-                    # Ensure wallet_addresses exists (redundant but safe)
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS wallet_addresses (
-                            address VARCHAR(128) PRIMARY KEY,
-                            wallet_fingerprint VARCHAR(64),
-                            public_key TEXT,
-                            balance NUMERIC(30,0) DEFAULT 0,
-                            transaction_count INTEGER DEFAULT 0,
-                            address_type VARCHAR(20) DEFAULT 'standard',
-                            last_updated TIMESTAMP DEFAULT NOW()
-                        )
-                    """)
-
                     for tx in non_coinbase_txs:
                         tx_sender = tx.get('from_addr', tx.get('from_address', ''))
                         tx_receiver = tx.get('to_addr', tx.get('to_address', ''))
