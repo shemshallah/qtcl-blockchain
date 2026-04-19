@@ -991,22 +991,38 @@ class HypGammaEngine:
     def _deserialize_psl_matrix(hex_str: str) -> PSLMatrix:
         """
         Deserialize hex string back to PSL(2,ℝ) matrix.
-        Inverse of _serialize_psl_matrix().
+        Inverse of to_hex() from PSLMatrix.
+
+        The hex_str is the hex encoding of the ASCII decimal representation
+        of the matrix entries. We decode hex → ASCII, then parse 4 decimal floats.
         """
-        # Parse hex string as 4 segments of 300 characters each
-        # Each segment is a 150-dps decimal float
-        if len(hex_str) < 1200:
-            raise ValueError(f"Invalid serialized matrix length: {len(hex_str)}")
+        # Decode hex to ASCII
+        try:
+            ascii_str = bytes.fromhex(hex_str).decode('ascii')
+        except (ValueError, UnicodeDecodeError):
+            raise ValueError(f"Invalid hex-encoded matrix: could not decode hex string")
+
+        # Parse 4 segments of ~242 characters each (depends on magnitude)
+        # Split by newlines or parse all at once (null-separated)
+        # Actually, the serialize_canonical() uses null separators
+        if '\x00' in ascii_str:
+            parts = ascii_str.split('\x00')
+            if len(parts) != 4:
+                raise ValueError(f"Expected 4 matrix entries separated by nulls, got {len(parts)}")
+        else:
+            # Fallback: try to split by whitespace or assume contiguous
+            # For now, assume they're all in one string and we need to parse carefully
+            # This is a simplified heuristic: look for sign changes
+            raise ValueError(f"Matrix entries not properly separated (expected null-terminated)")
 
         from mpmath import mpf
         entries = []
-        for i in range(4):
-            segment = hex_str[i*300:(i+1)*300]
+        for i, part in enumerate(parts):
             try:
-                val = mpf(segment)
+                val = mpf(part.strip())
                 entries.append(val)
             except:
-                raise ValueError(f"Could not parse matrix entry {i}")
+                raise ValueError(f"Could not parse matrix entry {i}: '{part[:100]}'")
 
         return PSLMatrix(entries[0], entries[1], entries[2], entries[3])
 
