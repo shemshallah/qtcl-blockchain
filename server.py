@@ -6206,7 +6206,7 @@ _snapshot_cache_lock = _threading_module.RLock()
 # Main server pushes blocks to SSE service via _push_to_sse_service()
 
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
-logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/snapshot (SSE stream only)")
+logger.info("[RPC-ORACLE] ✅ Oracle initialized (streaming via external SSE service)")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
 logger.info("[RPC-HYP] 🔒 HypΓ Post-Quantum Cryptography RPC methods registered (Schnorr-Γ + GeodesicLWE)")
 logger.info("[RPC-HYP]   • qtcl_hyp_generateKeypair — asymmetric key generation")
