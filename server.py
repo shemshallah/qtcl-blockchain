@@ -122,8 +122,8 @@ _RPC_TIMEOUT_MAP: dict = {
 # Separate async SSE service handles quantum streaming endpoints.
 # This server pushes data via HTTP POST to fan-out to all clients.
 SSE_SERVICE_URL = os.environ.get(
-    "SSE_SERVICE_URL", ""
-)  # e.g., http://localhost:8001 or https://qtcl-sse.koyeb.app
+    "SSE_SERVICE_URL", "http://localhost:8001"
+)  # Default to local SSE server
 
 
 def _push_to_sse_service(path: str, payload: dict) -> None:
