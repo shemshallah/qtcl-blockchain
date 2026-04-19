@@ -233,26 +233,6 @@ def _rpc_error(code: int, message: str, rpc_id: Any, data: Optional[dict] = None
         resp["error"]["data"] = data
     return resp
 
-def _dispatch(body_bytes: bytes) -> Optional[Union[dict, list]]:
-    """JSON-RPC 2.0 dispatcher (parse, call, return). Handles batches.
-    CRITICAL: Always returns properly formed JSON-RPC response(s), never HTTP error codes.
-    """
-    try:
-        body = json.loads(body_bytes.decode('utf-8'))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        # Parse error: return JSON-RPC error (HTTP 200 handled by rpc_endpoint)
-        return _rpc_error(-32700, f"Parse error: {str(e)}", None)
-
-    if isinstance(body, list):
-        if not body:
-            # Empty batch: return JSON-RPC error
-            return _rpc_error(-32600, "Invalid Request: empty batch", None)
-        # Batch: return list of responses (filtering out notifications)
-        responses = [r for req in body if (r := _dispatch_single(req)) is not None]
-        return responses if responses else None
-
-    # Single request: dispatch and return response (with error in body if needed)
-    return _dispatch_single(body)
 
 def _dispatch_single(req: dict) -> Optional[dict]:
     """Dispatch single JSON-RPC 2.0 request.
@@ -5791,37 +5771,75 @@ def _start_p2p_broadcast():
     _p2p_broadcast_thread.start()
     logger.info(f"[P2P] ✅ DHT broadcaster started (30s interval)")
 
-@app.route("/rpc", methods=["POST"])
+@app.route("/rpc", methods=["GET"])
 def rpc_endpoint():
-    """POST /rpc — JSON-RPC 2.0 endpoint for all P2P and blockchain operations.
-    CRITICAL: Always return HTTP 200 with proper JSON-RPC response (error in body, not status code).
+    """GET /rpc — JSON-RPC 2.0 endpoint (pull-based, query params).
+    Query params:
+      - method: RPC method name (required for calls, omit for discovery)
+      - params: JSON-encoded array of parameters (URL-decoded, default "[]")
+      - id: JSON-RPC request ID (optional, default 1)
+
+    When method is missing: return discovery (all registered method names).
+    CRITICAL: Always return HTTP 200 with proper JSON-RPC response.
     """
     try:
-        body = request.get_data()
-        if not body:
-            # Even on empty request, return HTTP 200 with JSON-RPC error
-            error_response = _rpc_error(-32600, "Empty request", None)
+        # Check if this is a discovery request (no method param)
+        method = request.args.get("method")
+        if not method:
+            # Discovery: return all registered method names
+            method_names = sorted(list(_RPC_METHODS.keys()))
+            discovery_response = {
+                "jsonrpc": _JSONRPC_VERSION,
+                "result": {
+                    "methods": method_names,
+                    "count": len(method_names),
+                    "endpoint": "/rpc",
+                    "ts": time.time(),
+                },
+                "id": None,
+            }
+            return Response(json.dumps(discovery_response), status=200, mimetype='application/json')
+
+        # Parse params (JSON-encoded, URL-decoded, default to empty list)
+        params_str = request.args.get("params", "[]")
+        try:
+            params = json.loads(params_str)
+            if not isinstance(params, list):
+                params = [params]  # Wrap single value in list
+        except json.JSONDecodeError as e:
+            # JSON parse error on params: return -32700
+            error_response = _rpc_error(-32700, f"Parse error in params: {str(e)}", None)
             return Response(json.dumps(error_response), status=200, mimetype='application/json')
 
-        # Log incoming method if possible
+        # Parse request ID (default 1)
+        rpc_id = request.args.get("id", "1")
         try:
-            peek = json.loads(body)
-            method = peek.get("method") if isinstance(peek, dict) else "batch"
-            logger.debug(f"[RPC] Method: {method}")
-        except: pass
+            rpc_id = int(rpc_id) if rpc_id.isdigit() else rpc_id
+        except:
+            rpc_id = 1
 
-        result = _dispatch(body)
+        # Synthesize JSON-RPC 2.0 request dict
+        req_dict = {
+            "jsonrpc": _JSONRPC_VERSION,
+            "method": method,
+            "params": params,
+            "id": rpc_id,
+        }
 
-        # Result is None only on empty batch — return 200 with nothing
+        logger.debug(f"[RPC] GET method: {method}")
+
+        # Dispatch using _dispatch_single directly (no batching)
+        result = _dispatch_single(req_dict)
+
+        # Result should never be None for GET (no notifications), but handle safely
         if result is None:
             return "", 204
 
         # CRITICAL: Always HTTP 200, never status codes >= 400
-        # JSON-RPC 2.0 errors go in the response body, not in HTTP status
         json_payload = json.dumps(result)
         return Response(json_payload, status=200, mimetype='application/json')
     except Exception as e:
-        logger.exception(f"[RPC] Endpoint error: {e}")
+        logger.exception(f"[RPC] GET endpoint error: {e}")
         # Even on unexpected error, return HTTP 200 with JSON-RPC error
         error_response = _rpc_error(-32603, str(e), None)
         return Response(json.dumps(error_response), status=200, mimetype='application/json')
