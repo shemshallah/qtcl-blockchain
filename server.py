@@ -34,13 +34,14 @@ import os
 import sys
 import json
 import time
-_SERVER_START_TIME = time.time()   # set once at module import — never drifts
+
+_SERVER_START_TIME = time.time()  # set once at module import — never drifts
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ADD HYP SUBDIRECTORY TO SYS.PATH (allow imports from ~/hlwe/hyp_* modules)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_HYP_DIR = os.path.join(_REPO_ROOT, 'hlwe')
+_HYP_DIR = os.path.join(_REPO_ROOT, "hlwe")
 if _HYP_DIR not in sys.path:
     sys.path.insert(0, _HYP_DIR)
 
@@ -68,47 +69,51 @@ logger = logging.getLogger(__name__)
 # Single 8-thread pool eliminates per-call ThreadPoolExecutor create/destroy churn.
 # Fast (cache-read) methods run INLINE — never touch the pool.
 # Slow (DB/oracle) methods submit to pool with hard timeout.
-_RPC_THREAD_POOL = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix='rpc_worker')
+_RPC_THREAD_POOL = _cf.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="rpc_worker"
+)
 
 # Methods that run directly in the request thread — all are lock-free cache reads
 # taking < 1ms. Wrapping them in a thread pool adds 5–20ms overhead for zero gain.
-_RPC_INLINE_METHODS: frozenset = frozenset({
-    'qtcl_getBlockHeight',
-    'qtcl_getQuantumMetrics',
-    'qtcl_getLatestDMSnapshot',
-    'qtcl_getLatestDMSnapshots',
-    'qtcl_getMempoolStats',
-    'qtcl_getHealth',
-    'qtcl_getPeers',
-    'qtcl_getPeersByNatGroup',
-    'qtcl_getMyAddr',
-    'qtcl_getDHTTable',
-    'qtcl_getTreasuryAddress',
-    'qtcl_listMeasurementSubscribers',
-    'qtcl_getEvents',
-    'qtcl_peerHeartbeat',
-})
+_RPC_INLINE_METHODS: frozenset = frozenset(
+    {
+        "qtcl_getBlockHeight",
+        "qtcl_getQuantumMetrics",
+        "qtcl_getLatestDMSnapshot",
+        "qtcl_getLatestDMSnapshots",
+        "qtcl_getMempoolStats",
+        "qtcl_getHealth",
+        "qtcl_getPeers",
+        "qtcl_getPeersByNatGroup",
+        "qtcl_getMyAddr",
+        "qtcl_getDHTTable",
+        "qtcl_getTreasuryAddress",
+        "qtcl_listMeasurementSubscribers",
+        "qtcl_getEvents",
+        "qtcl_peerHeartbeat",
+    }
+)
 
 # Slow methods (DB round-trips, crypto ops) — get pool + timeout protection
 _RPC_TIMEOUT_MAP: dict = {
-    'qtcl_getBlockRange':     10.0,
-    'qtcl_getTransactions':   10.0,
-    'qtcl_getBlock':          5.0,
-    'qtcl_getBalance':        4.0,
-    'qtcl_getTransaction':    4.0,
-    'qtcl_submitBlock':       30.0,
-    'qtcl_submitTransaction': 6.0,
-    'qtcl_submitOracleReg':   6.0,
-    'qtcl_getOracleRegistry': 5.0,
-    'qtcl_getOracleRecord':   4.0,
-    'qtcl_pushOracleDM':      4.0,
-    'qtcl_getPythPrice':      5.0,
-    'qtcl_registerPeer':      4.0,
-    'qtcl_receiveDHTTable':   3.0,
-    'qtcl_registerMeasurementSubscriber':   3.0,
-    'qtcl_unregisterMeasurementSubscriber': 3.0,
-    'qtcl_getDeviceChain':    4.0,
-    'qtcl_getMerminTest':     20.0,
+    "qtcl_getBlockRange": 10.0,
+    "qtcl_getTransactions": 10.0,
+    "qtcl_getBlock": 5.0,
+    "qtcl_getBalance": 4.0,
+    "qtcl_getTransaction": 4.0,
+    "qtcl_submitBlock": 30.0,
+    "qtcl_submitTransaction": 6.0,
+    "qtcl_submitOracleReg": 6.0,
+    "qtcl_getOracleRegistry": 5.0,
+    "qtcl_getOracleRecord": 4.0,
+    "qtcl_pushOracleDM": 4.0,
+    "qtcl_getPythPrice": 5.0,
+    "qtcl_registerPeer": 4.0,
+    "qtcl_receiveDHTTable": 3.0,
+    "qtcl_registerMeasurementSubscriber": 3.0,
+    "qtcl_unregisterMeasurementSubscriber": 3.0,
+    "qtcl_getDeviceChain": 4.0,
+    "qtcl_getMerminTest": 20.0,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -116,7 +121,10 @@ _RPC_TIMEOUT_MAP: dict = {
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # Separate async SSE service handles quantum streaming endpoints.
 # This server pushes data via HTTP POST to fan-out to all clients.
-SSE_SERVICE_URL = os.environ.get("SSE_SERVICE_URL", "")  # e.g., http://localhost:8001 or https://qtcl-sse.koyeb.app
+SSE_SERVICE_URL = os.environ.get(
+    "SSE_SERVICE_URL", ""
+)  # e.g., http://localhost:8001 or https://qtcl-sse.koyeb.app
+
 
 def _push_to_sse_service(path: str, payload: dict) -> None:
     """Push data to SSE service (fire-and-forget).
@@ -138,11 +146,13 @@ def _push_to_sse_service(path: str, payload: dict) -> None:
         # Silently swallow errors — don't let SSE failures block main server
         pass
 
+
 # ═══ ENTERPRISE METRICS THROTTLING ═══
 _METRICS_SAMPLE_ORACLE = 50
 _METRICS_SAMPLE_SHARD = 100
 _ORACLE_CYCLE_COUNTERS = {}
 _SHARD_CYCLE_COUNTERS = {}
+
 
 def _should_log_oracle(oracle_id: str) -> bool:
     """Check if oracle measurement should be logged (sample-based)."""
@@ -150,11 +160,13 @@ def _should_log_oracle(oracle_id: str) -> bool:
     _ORACLE_CYCLE_COUNTERS[oracle_id] = counter + 1
     return (counter % _METRICS_SAMPLE_ORACLE) == 0
 
+
 def _should_log_shard(shard_id: int) -> bool:
     """Check if shard cycle should be logged (sample-based)."""
     counter = _SHARD_CYCLE_COUNTERS.get(shard_id, 0)
     _SHARD_CYCLE_COUNTERS[shard_id] = counter + 1
     return (counter % _METRICS_SAMPLE_SHARD) == 0
+
 
 # ═══ SNAPSHOT BROADCAST THROTTLING ═══
 _verbose_p2p_logging = False
@@ -172,12 +184,12 @@ _snapshot_log_interval = 10
 # enriches the server's own 5-oracle snapshot on /rpc/oracle/snapshot.
 _CLIENT_DM_POOL: Dict[str, dict] = {}
 _CLIENT_DM_POOL_LOCK = threading.RLock()
-_CLIENT_POOL_MAX    = 64          # cap pool size — evict oldest on overflow
-_CLIENT_DM_STALE_S  = 120.0      # drop frames older than 2 min from consensus
+_CLIENT_POOL_MAX = 64  # cap pool size — evict oldest on overflow
+_CLIENT_DM_STALE_S = 120.0  # drop frames older than 2 min from consensus
 _client_consensus_dm_re: list = [0.0] * 64
 _client_consensus_dm_im: list = [0.0] * 64
-_client_consensus_fid:   float = 0.0
-_client_pool_count:      int   = 0
+_client_consensus_fid: float = 0.0
+_client_pool_count: int = 0
 
 
 def _recompute_client_consensus() -> None:
@@ -192,23 +204,24 @@ def _recompute_client_consensus() -> None:
 
     now = time.time()
     fresh = [
-        v for v in _CLIENT_DM_POOL.values()
-        if (now - v['ts']) < _CLIENT_DM_STALE_S and v.get('fidelity', 0.0) > 0.0
+        v
+        for v in _CLIENT_DM_POOL.values()
+        if (now - v["ts"]) < _CLIENT_DM_STALE_S and v.get("fidelity", 0.0) > 0.0
     ]
     _client_pool_count = len(fresh)
     if not fresh:
         return
 
-    total_w = sum(max(v['fidelity'], 1e-6) for v in fresh)
-    re_acc  = [0.0] * 64
-    im_acc  = [0.0] * 64
+    total_w = sum(max(v["fidelity"], 1e-6) for v in fresh)
+    re_acc = [0.0] * 64
+    im_acc = [0.0] * 64
     fid_acc = 0.0
     for v in fresh:
-        w = v['fidelity'] / total_w
+        w = v["fidelity"] / total_w
         for i in range(64):
-            re_acc[i] += w * v['dm_re'][i]
-            im_acc[i] += w * v['dm_im'][i]
-        fid_acc += w * v['fidelity']
+            re_acc[i] += w * v["dm_re"][i]
+            im_acc[i] += w * v["dm_im"][i]
+        fid_acc += w * v["fidelity"]
 
     tr = sum(re_acc[i * 8 + i] for i in range(8))
     if tr > 1e-12:
@@ -217,18 +230,27 @@ def _recompute_client_consensus() -> None:
 
     _client_consensus_dm_re = re_acc
     _client_consensus_dm_im = im_acc
-    _client_consensus_fid   = fid_acc
+    _client_consensus_fid = fid_acc
+
 
 # ═══ RPC INFRASTRUCTURE (JSON-RPC 2.0) ═══
 _JSONRPC_VERSION = "2.0"
+
 
 def _rpc_ok(result: Any, rpc_id: Any) -> dict:
     """Standard JSON-RPC 2.0 success response."""
     return {"jsonrpc": _JSONRPC_VERSION, "result": result, "id": rpc_id}
 
-def _rpc_error(code: int, message: str, rpc_id: Any, data: Optional[dict] = None) -> dict:
+
+def _rpc_error(
+    code: int, message: str, rpc_id: Any, data: Optional[dict] = None
+) -> dict:
     """Standard JSON-RPC 2.0 error response."""
-    resp = {"jsonrpc": _JSONRPC_VERSION, "error": {"code": code, "message": message}, "id": rpc_id}
+    resp = {
+        "jsonrpc": _JSONRPC_VERSION,
+        "error": {"code": code, "message": message},
+        "id": rpc_id,
+    }
     if data:
         resp["error"]["data"] = data
     return resp
@@ -245,9 +267,9 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         return _rpc_error(-32600, "Invalid Request: not an object", None)
 
     jsonrpc = req.get("jsonrpc")
-    method  = req.get("method")
-    params  = req.get("params", [])
-    rpc_id  = req.get("id")
+    method = req.get("method")
+    params = req.get("params", [])
+    rpc_id = req.get("id")
 
     if jsonrpc != _JSONRPC_VERSION:
         return _rpc_error(-32600, f"Invalid jsonrpc: {jsonrpc}", rpc_id)
@@ -274,10 +296,13 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         return result
     except _cf.TimeoutError:
         logger.warning(f"[RPC] {method} TIMEOUT after {timeout_sec}s")
-        return _rpc_error(-32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id)
+        return _rpc_error(
+            -32000, f"RPC timeout: {method} exceeded {timeout_sec}s", rpc_id
+        )
     except Exception as e:
         logger.exception(f"[RPC] {method} raised: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
 
 _RPC_METHOD_META: Dict[str, dict] = {}
 
@@ -287,6 +312,7 @@ QRNG_ENSEMBLE = None
 HLWE_ENGINE = None
 _QRNG_INIT_LOCK = threading.Lock()
 _HLWE_INIT_LOCK = threading.Lock()
+
 
 def _init_qrng_ensemble():
     """Lazy init QRNG_ENSEMBLE on first demand."""
@@ -298,12 +324,16 @@ def _init_qrng_ensemble():
             return QRNG_ENSEMBLE
         try:
             from qrng_ensemble import get_qrng_ensemble
+
             QRNG_ENSEMBLE = get_qrng_ensemble()
             logger.info("[INIT-QRNG] ✅ Quantum RNG Ensemble initialized on first use")
             return QRNG_ENSEMBLE
         except Exception as e:
-            logger.critical(f"[INIT-QRNG] ❌ FATAL: Cannot initialize QRNG_ENSEMBLE: {e}")
+            logger.critical(
+                f"[INIT-QRNG] ❌ FATAL: Cannot initialize QRNG_ENSEMBLE: {e}"
+            )
             raise RuntimeError(f"[INIT-QRNG] Cannot initialize Quantum RNG. Error: {e}")
+
 
 def _init_hlwe_engine():
     """Lazy init HypΓ engine (Module 6: hyp_engine) on first demand. ❤️ I love you."""
@@ -316,13 +346,23 @@ def _init_hlwe_engine():
         try:
             # ✅ FIXED: Import from hlwe package (not root-level hyp_engine)
             from hlwe.hyp_engine import HypGammaEngine
+
             HLWE_ENGINE = HypGammaEngine()
-            logger.info("[INIT-HYP] ✅ HypΓ Post-Quantum Cryptography (Module 6) initialized")
-            logger.info("[INIT-HYP] 🔒 Schnorr-Γ (hyp_schnorr), GeodesicLWE (hyp_lwe), LDPC (hyp_ldpc) active")
+            logger.info(
+                "[INIT-HYP] ✅ HypΓ Post-Quantum Cryptography (Module 6) initialized"
+            )
+            logger.info(
+                "[INIT-HYP] 🔒 Schnorr-Γ (hyp_schnorr), GeodesicLWE (hyp_lwe), LDPC (hyp_ldpc) active"
+            )
             return HLWE_ENGINE
         except Exception as e:
-            logger.critical(f"[INIT-HYP] ❌ FATAL: Cannot initialize HypΓ: {e}", exc_info=True)
-            raise RuntimeError(f"[INIT-HYP] Cannot initialize HypΓ cryptography. Error: {e}")
+            logger.critical(
+                f"[INIT-HYP] ❌ FATAL: Cannot initialize HypΓ: {e}", exc_info=True
+            )
+            raise RuntimeError(
+                f"[INIT-HYP] Cannot initialize HypΓ cryptography. Error: {e}"
+            )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
@@ -342,8 +382,8 @@ from contextlib import contextmanager
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(
         level=logging.INFO,
-        format='[%(asctime)s] %(levelname)s: %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
+        format="[%(asctime)s] %(levelname)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
 
 logger = logging.getLogger(__name__)
@@ -354,13 +394,16 @@ logger = logging.getLogger(__name__)
 # Museum-Grade DHT for decentralized peer discovery and state storage
 # Implements XOR distance metric, k-buckets routing table, and peer queries
 
+
 class DHTNode:
     """Museum-Grade DHT Node - Kademlia peer discovery"""
-    
-    def __init__(self, node_id: Optional[str] = None, address: str = "unknown", port: int = 9091):
+
+    def __init__(
+        self, node_id: Optional[str] = None, address: str = "unknown", port: int = 9091
+    ):
         """
         Initialize DHT node.
-        
+
         Args:
             node_id: 160-bit hex identifier (SHA1 of pubkey), or auto-generated
             address: Network address (IP or hostname)
@@ -368,8 +411,10 @@ class DHTNode:
         """
         if node_id is None:
             # Generate from address hash
-            node_id = hashlib.sha1(f"{address}:{port}:{secrets.token_hex(16)}".encode()).hexdigest()
-        
+            node_id = hashlib.sha1(
+                f"{address}:{port}:{secrets.token_hex(16)}".encode()
+            ).hexdigest()
+
         self.node_id = node_id
         self.node_id_int = int(node_id, 16)
         self.address = address
@@ -377,12 +422,12 @@ class DHTNode:
         self.last_seen = time.time()
         self.failed_pings = 0
         self.rpc_version = "1.0"
-    
+
     def distance_to(self, other_id: str) -> int:
         """Calculate XOR distance to another node (Kademlia metric)"""
         other_int = int(other_id, 16)
         return self.node_id_int ^ other_int
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "node_id": self.node_id,
@@ -391,7 +436,7 @@ class DHTNode:
             "last_seen": self.last_seen,
             "failed_pings": self.failed_pings,
         }
-    
+
     def is_alive(self, timeout_sec: int = 300) -> bool:
         """Check if node is considered alive (seen within timeout)"""
         return (time.time() - self.last_seen) < timeout_sec
@@ -399,11 +444,11 @@ class DHTNode:
 
 class DHTRoutingTable:
     """Museum-Grade Kademlia routing table with k-buckets"""
-    
+
     def __init__(self, local_node_id: str, k: int = 20):
         """
         Initialize routing table.
-        
+
         Args:
             local_node_id: Local node's 160-bit hex ID
             k: Bucket size (default 20 for Kademlia)
@@ -414,7 +459,7 @@ class DHTRoutingTable:
         self.buckets: Dict[int, List[DHTNode]] = {}
         self.lock = threading.RLock()
         self.bucket_refreshes: Dict[int, float] = {}
-    
+
     def _get_bucket_index(self, node_id: str) -> int:
         """Get bucket index (0-159) based on XOR distance"""
         other_int = int(node_id, 16)
@@ -422,16 +467,16 @@ class DHTRoutingTable:
         if xor_distance == 0:
             return 0
         return xor_distance.bit_length() - 1
-    
+
     def add_node(self, node: DHTNode) -> bool:
         """Add node to routing table, return True if added/updated"""
         with self.lock:
             bucket_idx = self._get_bucket_index(node.node_id)
             if bucket_idx not in self.buckets:
                 self.buckets[bucket_idx] = []
-            
+
             bucket = self.buckets[bucket_idx]
-            
+
             # Check if already exists
             for existing in bucket:
                 if existing.node_id == node.node_id:
@@ -439,51 +484,57 @@ class DHTRoutingTable:
                     existing.failed_pings = 0
                     logger.debug(f"[DHT] ✓ Node updated: {node.node_id[:16]}…")
                     return True
-            
+
             # Add new node if bucket not full
             if len(bucket) < self.k:
                 bucket.append(node)
-                logger.info(f"[DHT] ✅ Node added: {node.address}:{node.port} | {node.node_id[:16]}…")
+                logger.info(
+                    f"[DHT] ✅ Node added: {node.address}:{node.port} | {node.node_id[:16]}…"
+                )
                 return True
             else:
-                logger.debug(f"[DHT] ⚠️  Bucket {bucket_idx} full, cannot add {node.node_id[:16]}…")
+                logger.debug(
+                    f"[DHT] ⚠️  Bucket {bucket_idx} full, cannot add {node.node_id[:16]}…"
+                )
                 return False
-    
+
     def get_closest_nodes(self, target_id: str, count: int = 20) -> List[DHTNode]:
         """Get k closest nodes to target ID"""
         with self.lock:
             all_nodes = []
             for bucket in self.buckets.values():
                 all_nodes.extend(bucket)
-            
+
             # Sort by XOR distance
             target_int = int(target_id, 16)
             all_nodes.sort(key=lambda n: n.node_id_int ^ target_int)
             return all_nodes[:count]
-    
+
     def mark_node_failed(self, node_id: str) -> bool:
         """Mark node as failed, return True if removed"""
         with self.lock:
             bucket_idx = self._get_bucket_index(node_id)
             if bucket_idx not in self.buckets:
                 return False
-            
+
             bucket = self.buckets[bucket_idx]
             for node in bucket:
                 if node.node_id == node_id:
                     node.failed_pings += 1
                     if node.failed_pings >= 3:
                         bucket.remove(node)
-                        logger.warning(f"[DHT] ❌ Node removed (failed pings): {node_id[:16]}…")
+                        logger.warning(
+                            f"[DHT] ❌ Node removed (failed pings): {node_id[:16]}…"
+                        )
                         return True
                     return False
             return False
-    
+
     def get_all_nodes(self) -> List[DHTNode]:
         """Get all nodes in routing table"""
         with self.lock:
             return [node for bucket in self.buckets.values() for node in bucket]
-    
+
     def count_peers(self) -> int:
         """Count total peers in routing table"""
         with self.lock:
@@ -492,15 +543,17 @@ class DHTRoutingTable:
 
 class DHTManager:
     """Museum-Grade DHT Manager - coordinates peer discovery and state storage"""
-    
+
     def __init__(self, local_address: str = "localhost", local_port: int = 9091):
         self.local_node = DHTNode(address=local_address, port=local_port)
         self.routing_table = DHTRoutingTable(self.local_node.node_id)
         self.state_store: Dict[str, Dict[str, Any]] = {}  # key → {data, timestamp}
         self.store_lock = threading.RLock()
         self.lookup_cache: Dict[str, List[DHTNode]] = {}
-        logger.info(f"[DHT] ✅ Manager initialized | node_id={self.local_node.node_id[:16]}… | {local_address}:{local_port}")
-    
+        logger.info(
+            f"[DHT] ✅ Manager initialized | node_id={self.local_node.node_id[:16]}… | {local_address}:{local_port}"
+        )
+
     def store_state(self, key: str, value: Dict[str, Any]) -> bool:
         """Store (key, value) pair in DHT"""
         with self.store_lock:
@@ -511,21 +564,23 @@ class DHTManager:
             }
             logger.debug(f"[DHT] 💾 State stored: {key[:32]}…")
             return True
-    
+
     def retrieve_state(self, key: str) -> Optional[Dict[str, Any]]:
         """Retrieve (key, value) from DHT"""
         with self.store_lock:
             if key in self.state_store:
                 return self.state_store[key]["data"]
             return None
-    
+
     def find_node(self, target_id: str) -> List[DHTNode]:
         """Find nodes closest to target ID"""
         closest = self.routing_table.get_closest_nodes(target_id, count=20)
         self.lookup_cache[target_id] = closest
-        logger.info(f"[DHT] 🔍 Lookup: target={target_id[:16]}… | found {len(closest)} nodes")
+        logger.info(
+            f"[DHT] 🔍 Lookup: target={target_id[:16]}… | found {len(closest)} nodes"
+        )
         return closest
-    
+
     def find_value(self, key: str) -> Optional[Dict[str, Any]]:
         """Find value for key, return stored value or None"""
         result = self.retrieve_state(key)
@@ -541,8 +596,11 @@ class DHTManager:
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 from decimal import Decimal
-from concurrent.futures import ThreadPoolExecutor  # H2: Thread pooling for DoS prevention
+from concurrent.futures import (
+    ThreadPoolExecutor,
+)  # H2: Thread pooling for DoS prevention
 import random  # required by P2P broadcast loop
+
 try:
     import psycopg2
     import psycopg2.pool as psycopg2_pool_mod
@@ -551,6 +609,7 @@ except ImportError:
     psycopg2_pool_mod = None
 
 from flask import Flask, jsonify, request, render_template_string, send_file, Response
+
 app = Flask(__name__)
 import requests
 from requests.adapters import HTTPAdapter
@@ -575,6 +634,7 @@ try:
         initialize_system as init_entropy_system,
         TessellationRewardSchedule,
     )
+
     ENTROPY_AVAILABLE = True
 except ImportError:
     ENTROPY_AVAILABLE = False
@@ -605,8 +665,9 @@ ORACLE_AVAILABLE = False
 ORACLE = None
 ORACLE_W_STATE_MANAGER = None
 LATTICE = None
-_ORACLE_INIT_EVENT = threading.Event()   # set once oracle is ready (or failed)
+_ORACLE_INIT_EVENT = threading.Event()  # set once oracle is ready (or failed)
 _LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
+
 
 def _sync_lattice_blocks_to_cache():
     """Sync blocks from LATTICE into the server's block cache for RPC serving."""
@@ -615,46 +676,55 @@ def _sync_lattice_blocks_to_cache():
         if LATTICE is None:
             logger.warning("[BLOCK-CACHE] LATTICE is None")
             return
-        
+
         # Blocks are in LATTICE.block_manager.block_by_height
-        block_manager = getattr(LATTICE, 'block_manager', None)
+        block_manager = getattr(LATTICE, "block_manager", None)
         if block_manager is None:
             logger.warning("[BLOCK-CACHE] LATTICE.block_manager is None")
             return
-        
-        blocks_by_height = getattr(block_manager, 'block_by_height', None)
+
+        blocks_by_height = getattr(block_manager, "block_by_height", None)
         if not blocks_by_height:
-            logger.warning("[BLOCK-CACHE] block_manager.block_by_height is empty or None")
-            logger.warning(f"[BLOCK-CACHE] block_manager attrs: {[a for a in dir(block_manager) if not a.startswith('_')]}")
+            logger.warning(
+                "[BLOCK-CACHE] block_manager.block_by_height is empty or None"
+            )
+            logger.warning(
+                f"[BLOCK-CACHE] block_manager attrs: {[a for a in dir(block_manager) if not a.startswith('_')]}"
+            )
             return
-        
-        logger.info(f"[BLOCK-CACHE] Found {len(blocks_by_height)} blocks in block_manager, syncing...")
-        
+
+        logger.info(
+            f"[BLOCK-CACHE] Found {len(blocks_by_height)} blocks in block_manager, syncing..."
+        )
+
         with _BLOCK_CACHE_LOCK:
             for height, block in blocks_by_height.items():
                 if isinstance(block, dict):
                     _BLOCK_CACHE[height] = block
                 else:
                     _BLOCK_CACHE[height] = {
-                        'height': getattr(block, 'block_height', height),
-                        'block_hash': getattr(block, 'block_hash', ''),
-                        'parent_hash': getattr(block, 'parent_hash', ''),
-                        'merkle_root': getattr(block, 'merkle_root', ''),
-                        'timestamp': getattr(block, 'timestamp_s', 0),
-                        'coherence': getattr(block, 'coherence_snapshot', 0),
-                        'fidelity': getattr(block, 'fidelity_snapshot', 0),
-                        'quantum_fidelity': getattr(block, 'fidelity_snapshot', 0),
-                        'miner': getattr(block, 'miner_address', ''),
-                        'tx_count': getattr(block, 'tx_count', 0),
-                        'transaction_count': getattr(block, 'tx_count', 0),
-                        'w_state_hash': getattr(block, 'w_state_hash', ''),
-                        'hyp_witness': getattr(block, 'hyp_witness', ''),
-                        'pq_curr': getattr(block, 'pq_curr', height),
+                        "height": getattr(block, "block_height", height),
+                        "block_hash": getattr(block, "block_hash", ""),
+                        "parent_hash": getattr(block, "parent_hash", ""),
+                        "merkle_root": getattr(block, "merkle_root", ""),
+                        "timestamp": getattr(block, "timestamp_s", 0),
+                        "coherence": getattr(block, "coherence_snapshot", 0),
+                        "fidelity": getattr(block, "fidelity_snapshot", 0),
+                        "quantum_fidelity": getattr(block, "fidelity_snapshot", 0),
+                        "miner": getattr(block, "miner_address", ""),
+                        "tx_count": getattr(block, "tx_count", 0),
+                        "transaction_count": getattr(block, "tx_count", 0),
+                        "w_state_hash": getattr(block, "w_state_hash", ""),
+                        "hyp_witness": getattr(block, "hyp_witness", ""),
+                        "pq_curr": getattr(block, "pq_curr", height),
                     }
-        
-        logger.info(f"[BLOCK-CACHE] ✅ Synced {len(_BLOCK_CACHE)} blocks from LATTICE.block_manager")
+
+        logger.info(
+            f"[BLOCK-CACHE] ✅ Synced {len(_BLOCK_CACHE)} blocks from LATTICE.block_manager"
+        )
     except Exception as e:
         logger.warning(f"[BLOCK-CACHE] Failed to sync blocks: {e}")
+
 
 def _deferred_lattice_init() -> None:
     """Import and initialise lattice_controller.py in a background thread.
@@ -669,19 +739,26 @@ def _deferred_lattice_init() -> None:
     global LATTICE
     _lat_init_deadline = time.time() + 30.0  # 30 second timeout
     try:
-        logger.debug("[LATTICE-INIT] 🔄 Starting lattice initialization (timeout=30s)...")
+        logger.debug(
+            "[LATTICE-INIT] 🔄 Starting lattice initialization (timeout=30s)..."
+        )
 
         # Import with timeout check
         try:
             from lattice_controller import QuantumLatticeController
+
             logger.debug("[LATTICE-INIT] ✓ QuantumLatticeController imported")
         except ImportError as _ie:
-            logger.warning(f"[LATTICE-INIT] ⚠️  QuantumLatticeController import failed: {_ie} — using degraded mode")
+            logger.warning(
+                f"[LATTICE-INIT] ⚠️  QuantumLatticeController import failed: {_ie} — using degraded mode"
+            )
             raise
 
         # Check deadline before initialization
         if time.time() > _lat_init_deadline:
-            logger.warning("[LATTICE-INIT] ⚠️  Timeout waiting for import — skipping lattice")
+            logger.warning(
+                "[LATTICE-INIT] ⚠️  Timeout waiting for import — skipping lattice"
+            )
             return
 
         LATTICE = QuantumLatticeController()
@@ -697,17 +774,22 @@ def _deferred_lattice_init() -> None:
 
         # Check deadline before starting lattice
         if time.time() > _lat_init_deadline:
-            logger.warning("[LATTICE-INIT] ⚠️  Timeout before lattice.start() — skipping")
+            logger.warning(
+                "[LATTICE-INIT] ⚠️  Timeout before lattice.start() — skipping"
+            )
             return
 
         LATTICE.start()
-        logger.info("[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active")
+        logger.info(
+            "[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active"
+        )
 
         # ── SYNC GENESIS BLOCK TO SERVER CACHE ───────────────────────────────────
         _sync_lattice_blocks_to_cache()
 
         # ── WIRE LATTICE INTO ORACLE ──────────────────────────────────────────────
         from globals import set_lattice
+
         set_lattice(LATTICE)
         logger.info("[LATTICE-INIT] ✅ Lattice registered with oracle")
 
@@ -727,18 +809,26 @@ def _deferred_lattice_init() -> None:
                 logger.warning(f"[LATTICE-INIT] ⚠️  Oracle measurement failed: {_ome}")
 
     except ImportError as _ie:
-        logger.warning(f"[LATTICE-INIT] ⚠️  Lattice import failed: {_ie} — running in degraded mode")
+        logger.warning(
+            f"[LATTICE-INIT] ⚠️  Lattice import failed: {_ie} — running in degraded mode"
+        )
     except Exception as _ex:
-        logger.warning(f"[LATTICE-INIT] ⚠️  Lattice init error: {_ex} — continuing without lattice")
+        logger.warning(
+            f"[LATTICE-INIT] ⚠️  Lattice init error: {_ex} — continuing without lattice"
+        )
     finally:
         _LATTICE_INIT_EVENT.set()  # unblock oracle sync daemon even if lattice failed
+
 
 threading.Thread(
     target=_deferred_lattice_init,
     daemon=True,
     name="LatticeDeferred",
 ).start()
-logger.info("[LATTICE] 🔄 Lattice init deferred to background thread — gunicorn will serve /health immediately")
+logger.info(
+    "[LATTICE] 🔄 Lattice init deferred to background thread — gunicorn will serve /health immediately"
+)
+
 
 def _deferred_oracle_init() -> None:
     """Import and initialise oracle.py in a background thread.
@@ -754,7 +844,9 @@ def _deferred_oracle_init() -> None:
     global ORACLE, ORACLE_W_STATE_MANAGER, ORACLE_AVAILABLE
     _ora_deadline = time.time() + 40.0  # 40 second timeout for QRNG/oracle init
     try:
-        logger.debug("[ORACLE] 🔄 Starting oracle initialization (timeout=40s, QRNG may wait 16-28s)...")
+        logger.debug(
+            "[ORACLE] 🔄 Starting oracle initialization (timeout=40s, QRNG may wait 16-28s)..."
+        )
 
         # Check deadline before import
         if time.time() > _ora_deadline:
@@ -763,6 +855,7 @@ def _deferred_oracle_init() -> None:
             return
 
         from oracle import ORACLE as _o, ORACLE_W_STATE_MANAGER as _owsm
+
         ORACLE = _o
         ORACLE_W_STATE_MANAGER = _owsm
         ORACLE_AVAILABLE = True
@@ -777,14 +870,18 @@ def _deferred_oracle_init() -> None:
         logger.warning(f"[ORACLE] ⚠️  Oracle init error: {_ex}")
         ORACLE_AVAILABLE = False
     finally:
-        _ORACLE_INIT_EVENT.set()   # unblock main thread even if oracle failed
+        _ORACLE_INIT_EVENT.set()  # unblock main thread even if oracle failed
+
 
 threading.Thread(
     target=_deferred_oracle_init,
     daemon=True,
     name="OracleDeferred",
 ).start()
-logger.info("[ORACLE] 🔄 Oracle init deferred to background thread — gunicorn will serve /health immediately")
+logger.info(
+    "[ORACLE] 🔄 Oracle init deferred to background thread — gunicorn will serve /health immediately"
+)
+
 
 def _prewarm_hlwe_engine() -> None:
     """Pre-initialize HypΓ crypto engine before first block submission.
@@ -800,11 +897,13 @@ def _prewarm_hlwe_engine() -> None:
     except Exception as e:
         logger.error(f"[STARTUP] HypΓ prewarm failed: {e}")
 
+
 threading.Thread(
     target=_prewarm_hlwe_engine,
     daemon=True,
     name="HLWEPrewarm",
 ).start()
+
 
 def _ensure_wallet_addresses_table() -> None:
     """Ensure wallet_addresses table exists at startup (run once, not per-request).
@@ -830,6 +929,7 @@ def _ensure_wallet_addresses_table() -> None:
     except Exception as e:
         logger.warning(f"[STARTUP] ⚠️  wallet_addresses DDL: {e}")
 
+
 threading.Thread(
     target=_ensure_wallet_addresses_table,
     daemon=True,
@@ -844,17 +944,19 @@ threading.Thread(
 # Primary: DATABASE_URL env var (Neon PostgreSQL connection string)
 # Fallback: POOLER_* environment variables
 
-DATABASE_URL = os.getenv('DATABASE_URL', '')
-_USE_HTTP_DB = os.getenv('USE_HTTP_DB', '0') == '1'  # PythonAnywhere: route SQL over HTTPS PostgREST
-_USE_DB_NONE = os.getenv('USE_DB', '1') == '0'  # Dev mode: no database
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+_USE_HTTP_DB = (
+    os.getenv("USE_HTTP_DB", "0") == "1"
+)  # PythonAnywhere: route SQL over HTTPS PostgREST
+_USE_DB_NONE = os.getenv("USE_DB", "1") == "0"  # Dev mode: no database
 
 if _USE_DB_NONE:
-    DATABASE_URL = ''
+    DATABASE_URL = ""
     logger.warning("[DB] ⚠️  USE_DB=0 — database disabled (dev mode)")
 elif DATABASE_URL:
     logger.info(f"[DB] ✨ Using Neon PostgreSQL via DATABASE_URL")
 else:
-    DATABASE_URL = ''
+    DATABASE_URL = ""
     logger.warning("[DB] ⚠️  No DATABASE_URL — DB disabled")
 
 DB_URL = DATABASE_URL
@@ -875,26 +977,29 @@ DB_URL = DATABASE_URL
 
 import queue as _queue_mod2
 
-_TX_JOB_Q: '_queue_mod2.Queue' = _queue_mod2.Queue(maxsize=8)
+_TX_JOB_Q: "_queue_mod2.Queue" = _queue_mod2.Queue(maxsize=8)
+
 
 def _build_tx_dsn() -> str:
     """Return DSN from DATABASE_URL for Neon PostgreSQL."""
-    dsn = DB_URL or ''
+    dsn = DB_URL or ""
     if not dsn or _USE_HTTP_DB:
-        return ''
+        return ""
     return dsn
+
 
 def _tx_worker_thread():
     """Dedicated TX query thread — owns one private psycopg2 connection."""
     import psycopg2 as _pg
-    _tx_log = logging.getLogger('tx_worker')
+
+    _tx_log = logging.getLogger("tx_worker")
     dsn = _build_tx_dsn()
     if _USE_DB_NONE:
         _tx_log.warning("[TX-WORKER] Database disabled (USE_DB=0)")
         while True:
             try:
                 job = _TX_JOB_Q.get(timeout=5)
-                job['result_q'].put({'error': 'DB disabled (USE_DB=0)'})
+                job["result_q"].put({"error": "DB disabled (USE_DB=0)"})
             except _queue_mod2.Empty:
                 pass
         return
@@ -903,7 +1008,7 @@ def _tx_worker_thread():
         while True:
             try:
                 job = _TX_JOB_Q.get(timeout=5)
-                job['result_q'].put({'error': 'TX worker unavailable (HTTP-DB mode)'})
+                job["result_q"].put({"error": "TX worker unavailable (HTTP-DB mode)"})
             except _queue_mod2.Empty:
                 pass
         return
@@ -914,8 +1019,10 @@ def _tx_worker_thread():
         nonlocal conn
         try:
             if conn:
-                try: conn.close()
-                except Exception: pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             conn = _pg.connect(dsn, connect_timeout=10)
             conn.autocommit = True
             _tx_log.info("[TX-WORKER] ✅ Connected to Neon PostgreSQL")
@@ -931,35 +1038,41 @@ def _tx_worker_thread():
         except _queue_mod2.Empty:
             # Keepalive ping on idle
             if conn:
-                try: conn.cursor().execute("SELECT 1")
-                except Exception: _connect()
+                try:
+                    conn.cursor().execute("SELECT 1")
+                except Exception:
+                    _connect()
             continue
 
-        result_q = job.get('result_q')
+        result_q = job.get("result_q")
         try:
             # Reconnect if connection dropped
             if conn is None or conn.closed:
                 _connect()
             if conn is None:
-                if result_q: result_q.put({'error': 'DB connection unavailable'})
+                if result_q:
+                    result_q.put({"error": "DB connection unavailable"})
                 continue
 
             cur = conn.cursor()
-            queries = job['queries']  # list of (sql, params) tuples
+            queries = job["queries"]  # list of (sql, params) tuples
             results = []
             for sql, params in queries:
                 cur.execute(sql, params)
                 results.append(cur.fetchall())
             cur.close()
-            if result_q: result_q.put({'results': results})
+            if result_q:
+                result_q.put({"results": results})
 
         except _pg.OperationalError as _oe:
             _tx_log.warning(f"[TX-WORKER] OperationalError — reconnecting: {_oe}")
             _connect()
-            if result_q: result_q.put({'error': str(_oe)})
+            if result_q:
+                result_q.put({"error": str(_oe)})
         except Exception as _e:
             _tx_log.error(f"[TX-WORKER] Query error: {_e}")
-            if result_q: result_q.put({'error': str(_e)})
+            if result_q:
+                result_q.put({"error": str(_e)})
 
 
 def _tx_query(queries: list, timeout: float = 9.0) -> dict:
@@ -971,28 +1084,32 @@ def _tx_query(queries: list, timeout: float = 9.0) -> dict:
     Returns:
         {'results': [[rows], [rows], ...]} or {'error': str}.
     """
-    rq: '_queue_mod2.Queue' = _queue_mod2.Queue(maxsize=1)
-    job = {'queries': queries, 'result_q': rq}
+    rq: "_queue_mod2.Queue" = _queue_mod2.Queue(maxsize=1)
+    job = {"queries": queries, "result_q": rq}
     try:
         _TX_JOB_Q.put_nowait(job)
     except _queue_mod2.Full:
-        return {'error': 'TX worker busy — retry in a moment'}
+        return {"error": "TX worker busy — retry in a moment"}
     try:
         return rq.get(timeout=timeout)
     except _queue_mod2.Empty:
-        return {'error': 'DB query timed out — retry in a moment'}
+        return {"error": "DB query timed out — retry in a moment"}
 
 
 # Launch TX worker daemon at module load
 _tx_worker_daemon = threading.Thread(
-    target=_tx_worker_thread, daemon=True, name="TxQueryWorker")
+    target=_tx_worker_thread, daemon=True, name="TxQueryWorker"
+)
 _tx_worker_daemon.start()
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # BLOCK SETTLEMENT FUNCTION — reusable settlement logic
 # ═════════════════════════════════════════════════════════════════════════════════
 
-def _settle_block_rewards(height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list) -> None:
+
+def _settle_block_rewards(
+    height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list
+) -> None:
     """Extract settlement logic into reusable function.
 
     Called by background settlement worker after block is persisted to database.
@@ -1015,38 +1132,48 @@ def _settle_block_rewards(height: int, block_hash: str, miner_address: str, txs:
 
     try:
         # ── Settle non-coinbase transactions (wallet updates) ──────────────
-        _settle_log.info(f"[SETTLE] Processing h={height} {len(non_coinbase_txs)} non-coinbase txs")
+        _settle_log.info(
+            f"[SETTLE] Processing h={height} {len(non_coinbase_txs)} non-coinbase txs"
+        )
 
         with get_db_cursor() as cur:
             for tx in non_coinbase_txs:
-                tx_sender = tx.get('from_addr', tx.get('from_address', ''))
-                tx_receiver = tx.get('to_addr', tx.get('to_address', ''))
-                tx_amount = int(round(float(tx.get('amount', 0)) * 100))
-                tx_fee = int(round(float(tx.get('fee', 0)) * 100))
+                tx_sender = tx.get("from_addr", tx.get("from_address", ""))
+                tx_receiver = tx.get("to_addr", tx.get("to_address", ""))
+                tx_amount = int(round(float(tx.get("amount", 0)) * 100))
+                tx_fee = int(round(float(tx.get("fee", 0)) * 100))
 
                 if not tx_sender or not tx_receiver or tx_amount <= 0:
                     continue
 
                 total_deduction = tx_amount + tx_fee
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
                     VALUES (%s, -%s, 'standard', NOW())
                     ON CONFLICT (address) DO UPDATE SET
                         balance = wallet_addresses.balance - %s,
                         transaction_count = wallet_addresses.transaction_count + 1,
                         last_updated = NOW()
-                """, (tx_sender, total_deduction, total_deduction))
+                """,
+                    (tx_sender, total_deduction, total_deduction),
+                )
 
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
                     VALUES (%s, %s, 'standard', NOW())
                     ON CONFLICT (address) DO UPDATE SET
                         balance = wallet_addresses.balance + %s,
                         transaction_count = wallet_addresses.transaction_count + 1,
                         last_updated = NOW()
-                """, (tx_receiver, tx_amount, tx_amount))
+                """,
+                    (tx_receiver, tx_amount, tx_amount),
+                )
 
-            _settle_log.info(f"[SETTLE] ✅ TX settlement done: {len(non_coinbase_txs)} txs")
+            _settle_log.info(
+                f"[SETTLE] ✅ TX settlement done: {len(non_coinbase_txs)} txs"
+            )
 
         # ── Credit miner + treasury rewards ────────────────────────────────
         _settle_log.info(f"[SETTLE] Crediting rewards for h={height}")
@@ -1056,12 +1183,12 @@ def _settle_block_rewards(height: int, block_hash: str, miner_address: str, txs:
             treasury_reward = 80.0
             if TessellationRewardSchedule:
                 rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                miner_reward = float(rewards.get('miner', 720))
-                treasury_reward = float(rewards.get('treasury', 80))
+                miner_reward = float(rewards.get("miner", 720))
+                treasury_reward = float(rewards.get("treasury", 80))
 
             # Add transaction fees to treasury
             for tx in txs:
-                f = tx.get('fee', tx.get('fee_base', 0))
+                f = tx.get("fee", tx.get("fee_base", 0))
                 if isinstance(f, (float, str)):
                     try:
                         treasury_reward += float(f)
@@ -1071,7 +1198,8 @@ def _settle_block_rewards(height: int, block_hash: str, miner_address: str, txs:
             with get_db_cursor() as cur:
                 # Miner reward
                 _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO wallet_addresses
                         (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
                     VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
@@ -1079,22 +1207,36 @@ def _settle_block_rewards(height: int, block_hash: str, miner_address: str, txs:
                         balance = wallet_addresses.balance + EXCLUDED.balance,
                         transaction_count = wallet_addresses.transaction_count + 1,
                         last_updated = NOW()
-                """, (miner_address, _miner_fp, _miner_fp, int(miner_reward * 100)))
+                """,
+                    (miner_address, _miner_fp, _miner_fp, int(miner_reward * 100)),
+                )
 
                 # Treasury reward
                 if TessellationRewardSchedule and treasury_reward > 0:
                     treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
-                    _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
-                    cur.execute("""
+                    _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[
+                        :64
+                    ]
+                    cur.execute(
+                        """
                         INSERT INTO wallet_addresses
                             (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
                         VALUES (%s, %s, %s, %s, 1, 'treasury')
                         ON CONFLICT (address) DO UPDATE SET
                             balance = wallet_addresses.balance + EXCLUDED.balance,
                             transaction_count = wallet_addresses.transaction_count + 1
-                    """, (treasury_address, _treas_fp, _treas_fp, int(treasury_reward * 100)))
+                    """,
+                        (
+                            treasury_address,
+                            _treas_fp,
+                            _treas_fp,
+                            int(treasury_reward * 100),
+                        ),
+                    )
 
-                _settle_log.info(f"[SETTLE] ✅ Rewards credited: miner={miner_reward:.2f}, treasury={treasury_reward:.2f} QTCL")
+                _settle_log.info(
+                    f"[SETTLE] ✅ Rewards credited: miner={miner_reward:.2f}, treasury={treasury_reward:.2f} QTCL"
+                )
 
         except Exception as reward_err:
             _settle_log.warning(f"[SETTLE] ⚠️  Reward credit failed: {reward_err}")
@@ -1103,7 +1245,8 @@ def _settle_block_rewards(height: int, block_hash: str, miner_address: str, txs:
         try:
             _lazy_ensure_chain_state()
             with get_db_cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
                     VALUES (1, %s, %s, 0.0, NOW())
                     ON CONFLICT (state_id) DO UPDATE SET
@@ -1111,21 +1254,25 @@ def _settle_block_rewards(height: int, block_hash: str, miner_address: str, txs:
                         head_block_hash = EXCLUDED.head_block_hash,
                         latest_coherence = EXCLUDED.latest_coherence,
                         updated_at = NOW()
-                """, (height, block_hash))
+                """,
+                    (height, block_hash),
+                )
             _settle_log.debug(f"[SETTLE] ✅ Chain state updated: h={height}")
         except Exception as cs_err:
             _settle_log.warning(f"[SETTLE] ⚠️  Chain state update: {cs_err}")
 
         # ── Cache block ──────────────────────────────────────────────────
         try:
-            _cache_block({
-                'height': height,
-                'block_hash': block_hash,
-                'timestamp': int(time.time()),
-                'difficulty': 4,
-                'miner': miner_address,
-                'w_state_fidelity': 0.0,
-            })
+            _cache_block(
+                {
+                    "height": height,
+                    "block_hash": block_hash,
+                    "timestamp": int(time.time()),
+                    "difficulty": 4,
+                    "miner": miner_address,
+                    "w_state_fidelity": 0.0,
+                }
+            )
             _settle_log.debug(f"[SETTLE] ✅ Block cached: h={height}")
         except Exception as cache_err:
             _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
@@ -1140,7 +1287,8 @@ def _settle_block_rewards(height: int, block_hash: str, miner_address: str, txs:
 # BLOCK SETTLEMENT WORKER — async settlement after block is persisted
 # ═════════════════════════════════════════════════════════════════════════════════
 
-_BLOCK_SETTLE_Q: '_queue_mod2.Queue' = _queue_mod2.Queue(maxsize=32)
+_BLOCK_SETTLE_Q: "_queue_mod2.Queue" = _queue_mod2.Queue(maxsize=32)
+
 
 def _block_settle_worker_thread():
     """Background worker: dequeue settlement jobs and call _settle_block_rewards.
@@ -1155,25 +1303,31 @@ def _block_settle_worker_thread():
             if job is None:
                 break
 
-            height = job.get('height')
-            block_hash = job.get('block_hash')
-            miner_address = job.get('miner_address')
-            txs = job.get('txs', [])
-            non_coinbase_txs = job.get('non_coinbase_txs', [])
+            height = job.get("height")
+            block_hash = job.get("block_hash")
+            miner_address = job.get("miner_address")
+            txs = job.get("txs", [])
+            non_coinbase_txs = job.get("non_coinbase_txs", [])
 
             try:
                 # Delegate to _settle_block_rewards function
-                _settle_block_rewards(height, block_hash, miner_address, txs, non_coinbase_txs)
+                _settle_block_rewards(
+                    height, block_hash, miner_address, txs, non_coinbase_txs
+                )
             except Exception as settle_err:
-                _settle_log.error(f"[SETTLE] ❌ h={height}: {settle_err}", exc_info=True)
+                _settle_log.error(
+                    f"[SETTLE] ❌ h={height}: {settle_err}", exc_info=True
+                )
 
         except _queue_mod2.Empty:
             continue
         except Exception as e:
             _settle_log.error(f"[SETTLE-WORKER] Fatal: {e}", exc_info=True)
 
+
 _block_settle_daemon = threading.Thread(
-    target=_block_settle_worker_thread, daemon=True, name="BlockSettle")
+    target=_block_settle_worker_thread, daemon=True, name="BlockSettle"
+)
 _block_settle_daemon.start()
 logger.info("[TX-WORKER] Dedicated transaction query thread started (port 6543)")
 
@@ -1183,34 +1337,39 @@ logger.info("[TX-WORKER] Dedicated transaction query thread started (port 6543)"
 #   secondary → PythonAnywhere   (ORACLE_ID=pa-secondary)
 #   tertiary  → Koyeb account 2  (ORACLE_ID=koyeb-tertiary)
 # All instances share the same Supabase DB — they are peers, not replicas.
-ORACLE_ID   = os.getenv('ORACLE_ID',   'koyeb-primary')
-ORACLE_ROLE = os.getenv('ORACLE_ROLE', 'primary')
+ORACLE_ID = os.getenv("ORACLE_ID", "koyeb-primary")
+ORACLE_ROLE = os.getenv("ORACLE_ROLE", "primary")
 # Peer oracle URLs — other oracle instances this one will cross-register with
-_peer_oracle_env = os.getenv('BOOTSTRAP_NODES', '')
-PEER_ORACLE_URLS = [u.strip() for u in _peer_oracle_env.split(',') if u.strip()] if _peer_oracle_env else []
+_peer_oracle_env = os.getenv("BOOTSTRAP_NODES", "")
+PEER_ORACLE_URLS = (
+    [u.strip() for u in _peer_oracle_env.split(",") if u.strip()]
+    if _peer_oracle_env
+    else []
+)
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # ORACLE ADDRESS LOOKUP: Per-oracle HLWE addresses from registry
 # ═════════════════════════════════════════════════════════════════════════════════
 
-def get_oracle_address(oracle_id: str, fallback: str = '') -> str:
+
+def get_oracle_address(oracle_id: str, fallback: str = "") -> str:
     """Fetch oracle HLWE address from oracle_registry by oracle_id.
-    
+
     Each oracle node has a unique registered address for auditability.
     oracle_id format: 'oracle_1', 'oracle_2', ... 'oracle_5'
-    
+
     Fallback: if DB unavailable, returns fallback string.
     """
     try:
         if not db_ready():
             return fallback
-        
+
         conn = get_db_connection()
         try:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT oracle_address FROM oracle_registry WHERE oracle_id = %s",
-                (oracle_id,)
+                (oracle_id,),
             )
             result = cursor.fetchone()
             cursor.close()
@@ -1225,6 +1384,7 @@ def get_oracle_address(oracle_id: str, fallback: str = '') -> str:
         logger.debug(f"[ORACLE-ADDRESS] Lookup failed for {oracle_id}: {e}")
         return fallback
 
+
 def get_consensus_oracle_address() -> str:
     """
     Compute consensus oracle address (XOR of all 5 oracle addresses).
@@ -1232,8 +1392,8 @@ def get_consensus_oracle_address() -> str:
     """
     try:
         if not db_ready():
-            return 'qtcl1consensus_all_oracles_xor'
-        
+            return "qtcl1consensus_all_oracles_xor"
+
         conn = get_db_connection()
         try:
             cursor = conn.cursor()
@@ -1245,13 +1405,16 @@ def get_consensus_oracle_address() -> str:
             addresses = [row[0] for row in cursor.fetchall()]
             cursor.close()
             conn.commit()
-            
+
             if len(addresses) != 5:
-                logger.warning(f"[ORACLE-ADDRESS] Expected 5 oracles, got {len(addresses)}")
-            
+                logger.warning(
+                    f"[ORACLE-ADDRESS] Expected 5 oracles, got {len(addresses)}"
+                )
+
             # XOR all addresses together for deterministic consensus address
             import hashlib
-            consensus_seed = '|'.join(addresses).encode()
+
+            consensus_seed = "|".join(addresses).encode()
             consensus_hash = hashlib.sha256(consensus_seed).hexdigest()[:24]
             return f"qtcl1consensus_{consensus_hash}"
         finally:
@@ -1261,19 +1424,21 @@ def get_consensus_oracle_address() -> str:
                 conn.close()
     except Exception as e:
         logger.debug(f"[ORACLE-ADDRESS] Consensus lookup failed: {e}")
-        return 'qtcl1consensus_all_oracles_xor'
+        return "qtcl1consensus_all_oracles_xor"
 
 
-logger.info(f"[ORACLE] 🌐 Identity: id={ORACLE_ID} role={ORACLE_ROLE} peers={len(PEER_ORACLE_URLS)}")
+logger.info(
+    f"[ORACLE] 🌐 Identity: id={ORACLE_ID} role={ORACLE_ROLE} peers={len(PEER_ORACLE_URLS)}"
+)
 
 # P2P raw-TCP port — separate from HTTP/gunicorn.
 # Koyeb: set P2P_PORT=9091 env var (HTTP service on 9091, routes /api/*).
 # Gunicorn binds PORT (typically 8000). P2P binds P2P_PORT (9091).
 # They MUST be different ports; using PORT here caused the 8000→8001 fallback bug.
-P2P_PORT = int(os.getenv('P2P_PORT', 9091))
-P2P_HOST = os.getenv('P2P_HOST', '0.0.0.0')
+P2P_PORT = int(os.getenv("P2P_PORT", 9091))
+P2P_HOST = os.getenv("P2P_HOST", "0.0.0.0")
 P2P_TESTNET_PORT = P2P_PORT + 10000
-MAX_PEERS = int(os.getenv('MAX_PEERS', 32))
+MAX_PEERS = int(os.getenv("MAX_PEERS", 32))
 PEER_TIMEOUT = 30
 MESSAGE_MAX_SIZE = 1_000_000
 PEER_HANDSHAKE_TIMEOUT = 5
@@ -1285,27 +1450,28 @@ PEER_KEEPALIVE_INTERVAL = 30
 # Matches miner's MAX_BLOCK_TX — must be kept in sync.
 MAX_BLOCK_TX_SERVER = 100
 # Coinbase null address — 64 hex zeros, provably unspendable
-COINBASE_NULL_ADDRESS = '0' * 64
+COINBASE_NULL_ADDRESS = "0" * 64
 PEER_DISCOVERY_INTERVAL = 60
 PEER_CLEANUP_INTERVAL = 15
 
 # Message Types
-MESSAGE_TYPES = {    'version': 0,
-    'verack': 1,
-    'ping': 2,
-    'pong': 3,
-    'inv': 4,
-    'getdata': 5,
-    'block': 6,
-    'tx': 7,
-    'mempool': 8,
-    'getblocks': 9,
-    'getheaders': 10,
-    'headers': 11,
-    'addr': 12,
-    'peers_sync': 13,
-    'peer_discovery': 14,
-    'consensus': 15,
+MESSAGE_TYPES = {
+    "version": 0,
+    "verack": 1,
+    "ping": 2,
+    "pong": 3,
+    "inv": 4,
+    "getdata": 5,
+    "block": 6,
+    "tx": 7,
+    "mempool": 8,
+    "getblocks": 9,
+    "getheaders": 10,
+    "headers": 11,
+    "addr": 12,
+    "peers_sync": 13,
+    "peer_discovery": 14,
+    "consensus": 15,
 }
 
 # Peer Discovery
@@ -1315,7 +1481,9 @@ DNS_SEEDS = [
     # In production, these would be actual DNS seed servers
 ]
 
-BOOTSTRAP_NODES = os.getenv('BOOTSTRAP_NODES', '').split(',') if os.getenv('BOOTSTRAP_NODES') else []
+BOOTSTRAP_NODES = (
+    os.getenv("BOOTSTRAP_NODES", "").split(",") if os.getenv("BOOTSTRAP_NODES") else []
+)
 DEFAULT_BOOTSTRAP_PEERS = [
     # Fallback bootstrap nodes (localhost for testing)
     # In production, use real peer addresses
@@ -1325,6 +1493,7 @@ DEFAULT_BOOTSTRAP_PEERS = [
 @dataclass
 class PeerInfo:
     """Peer connection metadata"""
+
     peer_id: str
     address: str
     port: int
@@ -1344,22 +1513,22 @@ class PeerInfo:
     is_outbound: bool = False
     is_preferred: bool = False
     ban_score: int = 0
-    
+
     @property
     def uptime_seconds(self) -> float:
         return time.time() - self.connected_at
-    
+
     @property
     def is_alive(self) -> bool:
         return (time.time() - self.last_message_at) < PEER_TIMEOUT
-    
+
     @property
     def is_synced(self) -> bool:
         return self.last_message_at > time.time() - 60
-    
+
     def __hash__(self):
         return hash(self.peer_id)
-    
+
     def __eq__(self, other):
         if isinstance(other, PeerInfo):
             return self.peer_id == other.peer_id
@@ -1369,33 +1538,38 @@ class PeerInfo:
 @dataclass
 class Message:
     """P2P message structure with serialization"""
+
     msg_type: str
     payload: Dict[str, Any]
     timestamp: float = field(default_factory=time.time)
     sender_id: Optional[str] = None
-    message_id: str = field(default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[:16])
-    
+    message_id: str = field(
+        default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[
+            :16
+        ]
+    )
+
     def to_bytes(self) -> bytes:
         """Serialize message to bytes"""
         data = {
-            'type': self.msg_type,
-            'payload': self.payload,
-            'timestamp': self.timestamp,
-            'message_id': self.message_id,
+            "type": self.msg_type,
+            "payload": self.payload,
+            "timestamp": self.timestamp,
+            "message_id": self.message_id,
         }
-        return json.dumps(data).encode('utf-8')
-    
+        return json.dumps(data).encode("utf-8")
+
     @classmethod
-    def from_bytes(cls, data: bytes) -> 'Message':
+    def from_bytes(cls, data: bytes) -> "Message":
         """Deserialize message from bytes"""
-        parsed = json.loads(data.decode('utf-8'))
+        parsed = json.loads(data.decode("utf-8"))
         return cls(
-            msg_type=parsed['type'],
-            payload=parsed['payload'],
-            timestamp=parsed.get('timestamp', time.time()),
-            message_id=parsed.get('message_id', ''),
+            msg_type=parsed["type"],
+            payload=parsed["payload"],
+            timestamp=parsed.get("timestamp", time.time()),
+            message_id=parsed.get("message_id", ""),
         )
-    
+
     def __repr__(self):
         return f"Message({self.msg_type}, {self.message_id[:8]}...)"
 
@@ -1414,33 +1588,44 @@ class Message:
 import re as _re, decimal as _decimal
 
 try:
-    import requests as _http_requests; _HTTP_BACKEND = 'requests'
+    import requests as _http_requests
+
+    _HTTP_BACKEND = "requests"
 except ImportError:
-    import urllib.request as _urllib_req, urllib.error as _urllib_err; _HTTP_BACKEND = 'urllib'
+    import urllib.request as _urllib_req, urllib.error as _urllib_err
+
+    _HTTP_BACKEND = "urllib"
 
 # True when `requests` lib is available (used by _fetch_peer and cross-oracle helpers)
-_HAS_REQUESTS: bool = (_HTTP_BACKEND == 'requests')
+_HAS_REQUESTS: bool = _HTTP_BACKEND == "requests"
+
 
 def _http_json_serial(o):
-    if isinstance(o, (datetime, )): return o.isoformat()
-    if isinstance(o, _decimal.Decimal): return float(o)
-    if isinstance(o, (bytes, bytearray)): return o.hex()
+    if isinstance(o, (datetime,)):
+        return o.isoformat()
+    if isinstance(o, _decimal.Decimal):
+        return float(o)
+    if isinstance(o, (bytes, bytearray)):
+        return o.hex()
     raise TypeError(f"not serialisable: {type(o)}")
+
 
 def _http_post_json(url, headers, payload, timeout=30, retries=3):
     """POST JSON; retry on 5xx/network with exponential backoff. Returns parsed body."""
     import json as _json
+
     raw = _json.dumps(payload, default=_http_json_serial).encode()
-    hdrs = {**headers, 'Content-Type': 'application/json'}
+    hdrs = {**headers, "Content-Type": "application/json"}
     last = None
     for attempt in range(retries):
-        if attempt: time.sleep(min(0.5 * 2**attempt, 8))
+        if attempt:
+            time.sleep(min(0.5 * 2**attempt, 8))
         try:
-            if _HTTP_BACKEND == 'requests':
+            if _HTTP_BACKEND == "requests":
                 r = _http_requests.post(url, data=raw, headers=hdrs, timeout=timeout)
                 status, text = r.status_code, r.text
             else:
-                req = _urllib_req.Request(url, data=raw, headers=hdrs, method='POST')
+                req = _urllib_req.Request(url, data=raw, headers=hdrs, method="POST")
                 try:
                     with _urllib_req.urlopen(req, timeout=timeout) as r:
                         status, text = r.status, r.read().decode()
@@ -1449,225 +1634,385 @@ def _http_post_json(url, headers, payload, timeout=30, retries=3):
             if status < 500:
                 if status >= 400:
                     import json as _j
-                    try: detail = _j.loads(text).get('message') or text
-                    except Exception: detail = text
+
+                    try:
+                        detail = _j.loads(text).get("message") or text
+                    except Exception:
+                        detail = text
                     raise RuntimeError(f"Neon HTTP {status}: {detail}")
-                import json as _j; return _j.loads(text)
+                import json as _j
+
+                return _j.loads(text)
             last = RuntimeError(f"Supabase RPC HTTP {status}: {text}")
         except (OSError, TimeoutError) as e:
-            last = e; logger.warning(f"[SUPHTTP] attempt {attempt+1}/{retries}: {e}")
+            last = e
+            logger.warning(f"[SUPHTTP] attempt {attempt + 1}/{retries}: {e}")
     raise last or RuntimeError("_http_post_json exhausted retries")
+
 
 # Singleton HTTP client config
 _SUPHTTP_CFG: Dict[str, Any] = {}
 _SUPHTTP_LOCK = threading.Lock()
 
+
 def _suphttp_cfg():
     """Lazily populate and return the HTTP client config dict for Neon."""
     with _SUPHTTP_LOCK:
-        if _SUPHTTP_CFG: return _SUPHTTP_CFG
-        db_url = os.getenv('DATABASE_URL', '')
-        if not db_url: raise EnvironmentError("DATABASE_URL env var not set (required for USE_HTTP_DB=1)")
+        if _SUPHTTP_CFG:
+            return _SUPHTTP_CFG
+        db_url = os.getenv("DATABASE_URL", "")
+        if not db_url:
+            raise EnvironmentError(
+                "DATABASE_URL env var not set (required for USE_HTTP_DB=1)"
+            )
         import re
-        m = re.match(r'postgresql://([^:]+):([^@]+)@([^:/]+):?(\d*)/?(.*)', db_url)
-        if not m: raise EnvironmentError("DATABASE_URL invalid format")
+
+        m = re.match(r"postgresql://([^:]+):([^@]+)@([^:/]+):?(\d*)/?(.*)", db_url)
+        if not m:
+            raise EnvironmentError("DATABASE_URL invalid format")
         user, pw, host, port, db = m.groups()
-        _SUPHTTP_CFG.update({
-            'host': host,
-            'timeout': int(os.getenv('DB_HTTP_TIMEOUT', '30')),
-            'retries': int(os.getenv('DB_HTTP_RETRIES', '3')),
-            'headers': {'user': user, 'password': pw, 'database': db},
-        })
+        _SUPHTTP_CFG.update(
+            {
+                "host": host,
+                "timeout": int(os.getenv("DB_HTTP_TIMEOUT", "30")),
+                "retries": int(os.getenv("DB_HTTP_RETRIES", "3")),
+                "headers": {"user": user, "password": pw, "database": db},
+            }
+        )
         logger.info(f"[SUPHTTP] ✓ Neon HTTP client configured → {host}")
         logger.info(f"[SUPHTTP] ✓ client configured → {url}/rest/v1/rpc/exec_sql_*")
         return _SUPHTTP_CFG
 
-_PARAM_RE = _re.compile(r'%\((\w+)\)s|%s')
-_SELECT_FIRST = frozenset({'select','with','explain','show','table','values','fetch'})
-_WRITE_FIRST  = frozenset({'insert','update','delete','do','call','perform'})
-_COMMENT_STRIP = _re.compile(r'^(?:\s|--[^\n]*\n|/\*.*?\*/)*', _re.DOTALL)
+
+_PARAM_RE = _re.compile(r"%\((\w+)\)s|%s")
+_SELECT_FIRST = frozenset(
+    {"select", "with", "explain", "show", "table", "values", "fetch"}
+)
+_WRITE_FIRST = frozenset({"insert", "update", "delete", "do", "call", "perform"})
+_COMMENT_STRIP = _re.compile(r"^(?:\s|--[^\n]*\n|/\*.*?\*/)*", _re.DOTALL)
+
 
 def _escape_sql_literal(v):
     """Convert Python value → safe PostgreSQL literal (dollar-quoting / type-aware)."""
-    if v is None: return 'NULL'
-    if isinstance(v, bool): return 'TRUE' if v else 'FALSE'
-    if isinstance(v, int): return str(v)
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, int):
+        return str(v)
     if isinstance(v, float):
-        if v != v: return 'NULL'
-        if v == float('inf'): return "'Infinity'::float8"
-        if v == float('-inf'): return "'-Infinity'::float8"
+        if v != v:
+            return "NULL"
+        if v == float("inf"):
+            return "'Infinity'::float8"
+        if v == float("-inf"):
+            return "'-Infinity'::float8"
         return repr(v)
-    if isinstance(v, _decimal.Decimal): return str(v)
-    if isinstance(v, (bytes, bytearray)): return f"decode('{v.hex()}','hex')"
-    if isinstance(v, datetime): 
-        return f"'{v.isoformat()}'::timestamptz" if v.tzinfo else f"'{v.isoformat()}'::timestamp"
-    if isinstance(v, (list, tuple)): return f"ARRAY[{','.join(_escape_sql_literal(x) for x in v)}]"
+    if isinstance(v, _decimal.Decimal):
+        return str(v)
+    if isinstance(v, (bytes, bytearray)):
+        return f"decode('{v.hex()}','hex')"
+    if isinstance(v, datetime):
+        return (
+            f"'{v.isoformat()}'::timestamptz"
+            if v.tzinfo
+            else f"'{v.isoformat()}'::timestamp"
+        )
+    if isinstance(v, (list, tuple)):
+        return f"ARRAY[{','.join(_escape_sql_literal(x) for x in v)}]"
     if isinstance(v, dict):
-        import json as _j; return f"'{_j.dumps(v, default=_http_json_serial)}'::jsonb"
-    s = str(v); tag = '$qtcl$'
+        import json as _j
+
+        return f"'{_j.dumps(v, default=_http_json_serial)}'::jsonb"
+    s = str(v)
+    tag = "$qtcl$"
     if tag in s:
-        return "E'" + s.replace('\\','\\\\').replace("'","\\'") + "'"
+        return "E'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
     return f"{tag}{s}{tag}"
 
+
 def _substitute_params(sql, params):
-    if not params: return sql
+    if not params:
+        return sql
     if isinstance(params, dict):
-        return _PARAM_RE.sub(lambda m: _escape_sql_literal(params[m.group(1)]) if m.group(1) else (_ for _ in ()).throw(ValueError("mixed placeholders")), sql)
+        return _PARAM_RE.sub(
+            lambda m: (
+                _escape_sql_literal(params[m.group(1)])
+                if m.group(1)
+                else (_ for _ in ()).throw(ValueError("mixed placeholders"))
+            ),
+            sql,
+        )
     it = iter(params)
     return _PARAM_RE.sub(lambda m: _escape_sql_literal(next(it)), sql)
 
+
 def _classify_sql(sql):
-    first = _COMMENT_STRIP.sub('', sql).lstrip().split()
-    kw = first[0].lower().rstrip(';') if first else ''
-    if kw in _SELECT_FIRST: return 'select'
-    if kw in _WRITE_FIRST:  return 'write'
-    return 'select'  # unknown → try as select
+    first = _COMMENT_STRIP.sub("", sql).lstrip().split()
+    kw = first[0].lower().rstrip(";") if first else ""
+    if kw in _SELECT_FIRST:
+        return "select"
+    if kw in _WRITE_FIRST:
+        return "write"
+    return "select"  # unknown → try as select
+
 
 def _suphttp_exec_select(sql):
     cfg = _suphttp_cfg()
-    raw = _http_post_json(f"{cfg['url']}/rest/v1/rpc/exec_sql_select", cfg['headers'],
-                          {'query': sql}, cfg['timeout'], cfg['retries'])
+    raw = _http_post_json(
+        f"{cfg['url']}/rest/v1/rpc/exec_sql_select",
+        cfg["headers"],
+        {"query": sql},
+        cfg["timeout"],
+        cfg["retries"],
+    )
     # PostgREST wraps JSONB RPC result: [{exec_sql_select: [...]}, ...] or [[...]] or [...]
     if isinstance(raw, list) and raw:
         inner = raw[0]
         if isinstance(inner, dict):
             vals = list(inner.values())
-            if len(vals) == 1 and isinstance(vals[0], list): return vals[0]
+            if len(vals) == 1 and isinstance(vals[0], list):
+                return vals[0]
             return [inner]
-        if isinstance(inner, list): return inner
+        if isinstance(inner, list):
+            return inner
         return raw
     if isinstance(raw, dict):
         vals = list(raw.values())
-        if len(vals) == 1 and isinstance(vals[0], list): return vals[0]
+        if len(vals) == 1 and isinstance(vals[0], list):
+            return vals[0]
         return [raw]
     return []
 
+
 def _suphttp_exec_write(sql):
     cfg = _suphttp_cfg()
-    raw = _http_post_json(f"{cfg['url']}/rest/v1/rpc/exec_sql_write", cfg['headers'],
-                          {'query': sql}, cfg['timeout'], cfg['retries'])
-    if isinstance(raw, list) and raw: raw = raw[0]
+    raw = _http_post_json(
+        f"{cfg['url']}/rest/v1/rpc/exec_sql_write",
+        cfg["headers"],
+        {"query": sql},
+        cfg["timeout"],
+        cfg["retries"],
+    )
+    if isinstance(raw, list) and raw:
+        raw = raw[0]
     if isinstance(raw, dict):
-        inner = raw.get('exec_sql_write') or raw
-        if isinstance(inner, dict): return int(inner.get('affected_rows', 0))
+        inner = raw.get("exec_sql_write") or raw
+        if isinstance(inner, dict):
+            return int(inner.get("affected_rows", 0))
     return 0
+
 
 class _SupHTTPCursor:
     """psycopg2-compatible cursor backed by Supabase PostgREST HTTPS RPC."""
+
     def __init__(self):
-        self._rows: List[tuple] = []; self._pos = 0; self._rowcount = -1
-        self._description = None; self.closed = False
+        self._rows: List[tuple] = []
+        self._pos = 0
+        self._rowcount = -1
+        self._description = None
+        self.closed = False
+
     @property
-    def rowcount(self): return self._rowcount
+    def rowcount(self):
+        return self._rowcount
+
     @property
-    def description(self): return self._description
-    def mogrify(self, sql, params=None): return _substitute_params(sql, params)
+    def description(self):
+        return self._description
+
+    def mogrify(self, sql, params=None):
+        return _substitute_params(sql, params)
+
     def execute(self, sql, params=None):
-        if self.closed: raise RuntimeError("cursor closed")
+        if self.closed:
+            raise RuntimeError("cursor closed")
         final = _substitute_params(sql, params)
-        logger.debug(f"[SUPHTTP] execute: {final[:100]}{'...' if len(final)>100 else ''}")
-        if _classify_sql(final) == 'select':
+        logger.debug(
+            f"[SUPHTTP] execute: {final[:100]}{'...' if len(final) > 100 else ''}"
+        )
+        if _classify_sql(final) == "select":
             rows_dicts = _suphttp_exec_select(final)
-            if not rows_dicts: self._rows=[]; self._pos=0; self._rowcount=0; self._description=None; return
+            if not rows_dicts:
+                self._rows = []
+                self._pos = 0
+                self._rowcount = 0
+                self._description = None
+                return
             keys = list(rows_dicts[0].keys())
-            self._description = [(k,None,None,None,None,None,None) for k in keys]
+            self._description = [(k, None, None, None, None, None, None) for k in keys]
             # Support both dict and tuple results based on cursor_factory simulation
-            if getattr(self, '_as_dict', False):
+            if getattr(self, "_as_dict", False):
                 self._rows = rows_dicts
             else:
                 self._rows = [tuple(r.get(k) for k in keys) for r in rows_dicts]
-            self._pos = 0; self._rowcount = len(self._rows)
+            self._pos = 0
+            self._rowcount = len(self._rows)
         else:
             self._rowcount = _suphttp_exec_write(final)
-            self._rows=[]; self._pos=0; self._description=None
+            self._rows = []
+            self._pos = 0
+            self._description = None
+
     def executemany(self, sql, seq):
-        for p in seq: self.execute(sql, p)
+        for p in seq:
+            self.execute(sql, p)
+
     def fetchone(self):
         if self._pos < len(self._rows):
-            row = self._rows[self._pos]; self._pos += 1; return row
+            row = self._rows[self._pos]
+            self._pos += 1
+            return row
         return None
+
     def fetchall(self):
-        rows = self._rows[self._pos:]; self._pos = len(self._rows); return rows
+        rows = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rows
+
     def fetchmany(self, size=1):
-        rows = self._rows[self._pos:self._pos+size]; self._pos += len(rows); return rows
+        rows = self._rows[self._pos : self._pos + size]
+        self._pos += len(rows)
+        return rows
+
     def __iter__(self):
-        while self._pos < len(self._rows): yield self.fetchone()
-    def close(self): self.closed = True; self._rows = []
-    def __enter__(self): return self
-    def __exit__(self, *_): self.close()
+        while self._pos < len(self._rows):
+            yield self.fetchone()
+
+    def close(self):
+        self.closed = True
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
 
 class _SupHTTPConn:
     """psycopg2-compatible connection backed by Supabase PostgREST HTTPS RPC.
     commit()/rollback() are no-ops — PostgREST RPC is auto-committed per call.
     .closed mirrors psycopg2 int semantics: 0=open, 1=closed, 2=lost."""
-    def __init__(self): self.closed = 0; self.autocommit = True   # 0 = open (psycopg2 int semantics)
+
+    def __init__(self):
+        self.closed = 0
+        self.autocommit = True  # 0 = open (psycopg2 int semantics)
+
     def cursor(self, cursor_factory=None, **__):
-        if self.closed: raise RuntimeError("connection closed")
+        if self.closed:
+            raise RuntimeError("connection closed")
         c = _SupHTTPCursor()
         # If any factory is provided (like RealDictCursor), return rows as dicts
-        c._as_dict = (cursor_factory is not None)
+        c._as_dict = cursor_factory is not None
         return c
-    def commit(self): pass   # no-op: stateless HTTPS
+
+    def commit(self):
+        pass  # no-op: stateless HTTPS
+
     def rollback(self):
-        logger.debug("[SUPHTTP] rollback() — HTTP connections are auto-committed; no-op")
-    def close(self): self.closed = 1
-    def set_session(self, *_, **__): pass
-    def set_isolation_level(self, *_, **__): pass
-    def __enter__(self): return self
+        logger.debug(
+            "[SUPHTTP] rollback() — HTTP connections are auto-committed; no-op"
+        )
+
+    def close(self):
+        self.closed = 1
+
+    def set_session(self, *_, **__):
+        pass
+
+    def set_isolation_level(self, *_, **__):
+        pass
+
+    def __enter__(self):
+        return self
+
     def __exit__(self, exc_type, *_):
-        if not exc_type: self.commit()
-        else: self.rollback()
+        if not exc_type:
+            self.commit()
+        else:
+            self.rollback()
         return False
+
 
 class _SupHTTPPool:
     """Thread-safe free-list pool of _SupHTTPConn objects."""
+
     def __init__(self, minconn=1, maxconn=20):
-        self._max = maxconn; self._lock = threading.Lock()
-        self._free: List[_SupHTTPConn] = []; self._in_use: List[_SupHTTPConn] = []
+        self._max = maxconn
+        self._lock = threading.Lock()
+        self._free: List[_SupHTTPConn] = []
+        self._in_use: List[_SupHTTPConn] = []
         self.closed = False
+
     def getconn(self, key=None):
-        if self.closed: raise RuntimeError("HTTP pool closed")
+        if self.closed:
+            raise RuntimeError("HTTP pool closed")
         with self._lock:
             while self._free:
                 c = self._free.pop()
-                if not c.closed: self._in_use.append(c); return c
+                if not c.closed:
+                    self._in_use.append(c)
+                    return c
             if len(self._in_use) < self._max:
-                c = _SupHTTPConn(); self._in_use.append(c); return c
+                c = _SupHTTPConn()
+                self._in_use.append(c)
+                return c
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             time.sleep(0.05)
             with self._lock:
                 while self._free:
                     c = self._free.pop()
-                    if not c.closed: self._in_use.append(c); return c
+                    if not c.closed:
+                        self._in_use.append(c)
+                        return c
         raise RuntimeError("[SUPHTTP] Pool exhausted after 30s")
+
     def putconn(self, conn, close=False, key=None):
-        if conn is None: return
+        if conn is None:
+            return
         with self._lock:
-            if conn in self._in_use: self._in_use.remove(conn)
-            if close or conn.closed or self.closed: conn.close()
-            else: conn.closed = False; self._free.append(conn)
+            if conn in self._in_use:
+                self._in_use.remove(conn)
+            if close or conn.closed or self.closed:
+                conn.close()
+            else:
+                conn.closed = False
+                self._free.append(conn)
+
     def closeall(self):
         with self._lock:
             self.closed = True
             for c in self._free + self._in_use:
-                try: c.close()
-                except Exception: pass
-            self._free.clear(); self._in_use.clear()
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            self._free.clear()
+            self._in_use.clear()
+
 
 def _suphttp_test_connection() -> bool:
     try:
         rows = _suphttp_exec_select("SELECT 1 AS ping, NOW() AS ts")
-        ok = bool(rows and rows[0].get('ping') == 1)
-        if ok: logger.info(f"[SUPHTTP] ✓ connection test passed — server ts={rows[0].get('ts')}")
-        else:  logger.warning(f"[SUPHTTP] ⚠ unexpected test response: {rows}")
+        ok = bool(rows and rows[0].get("ping") == 1)
+        if ok:
+            logger.info(
+                f"[SUPHTTP] ✓ connection test passed — server ts={rows[0].get('ts')}"
+            )
+        else:
+            logger.warning(f"[SUPHTTP] ⚠ unexpected test response: {rows}")
         return ok
     except Exception as e:
-        logger.error(f"[SUPHTTP] ✗ connection test FAILED: {e}"); return False
+        logger.error(f"[SUPHTTP] ✗ connection test FAILED: {e}")
+        return False
+
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # DATABASE POOL
 # ═════════════════════════════════════════════════════════════════════════════════
+
 
 class DatabasePool:
     """Thread-safe connection pool.  Transparently switches between:
@@ -1687,8 +2032,12 @@ class DatabasePool:
                     cls._instance.pool = None
                     cls._instance.use_pooling = True
                     cls._instance._http_mode = False
-                    cls._instance._next_retry_at = 0.0   # PATCH-9: retry backoff timestamp
-                    cls._instance._retry_interval = 5.0  # PATCH-9: seconds between init attempts
+                    cls._instance._next_retry_at = (
+                        0.0  # PATCH-9: retry backoff timestamp
+                    )
+                    cls._instance._retry_interval = (
+                        5.0  # PATCH-9: seconds between init attempts
+                    )
         return cls._instance
 
     def init(self, dsn: Optional[str] = None):
@@ -1707,17 +2056,26 @@ class DatabasePool:
         try:
             conn = self.get_connection()
             # Support cursor_factory (e.g. RealDictCursor) used by mempool.py
-            cur = conn.cursor(cursor_factory=cursor_factory) if cursor_factory else conn.cursor()
+            cur = (
+                conn.cursor(cursor_factory=cursor_factory)
+                if cursor_factory
+                else conn.cursor()
+            )
             yield cur
             conn.commit()
         except Exception:
-            if conn: conn.rollback()
+            if conn:
+                conn.rollback()
             raise
         finally:
-            if conn: self.put_connection(conn)
+            if conn:
+                self.put_connection(conn)
 
-    def getconn(self): return self.get_connection()
-    def putconn(self, conn, **kwargs): self.put_connection(conn)
+    def getconn(self):
+        return self.get_connection()
+
+    def putconn(self, conn, **kwargs):
+        self.put_connection(conn)
 
     def _initialize_pool(self):
         if self._initialized:
@@ -1732,7 +2090,9 @@ class DatabasePool:
                 self._initialized = True
                 self.use_pooling = False
                 self.pool = None
-                logger.info(f"[STARTUP] ✅ DB ready (disabled) at {time.time() - _STARTUP_TIME:.1f}s")
+                logger.info(
+                    f"[STARTUP] ✅ DB ready (disabled) at {time.time() - _STARTUP_TIME:.1f}s"
+                )
                 return
 
             # ── Retry backoff (soft — allows rapid retry for startup, backs off on persistent failure) ──
@@ -1743,81 +2103,103 @@ class DatabasePool:
             # ── HTTP mode (PythonAnywhere) ────────────────────────────────────
             if _USE_HTTP_DB:
                 try:
-                    _suphttp_cfg()   # validate DATABASE_URL present
+                    _suphttp_cfg()  # validate DATABASE_URL present
                     if not _suphttp_test_connection():
-                        logger.error("[DB] ❌ Neon HTTP connection test failed — "
-                                     "check DATABASE_URL")
+                        logger.error(
+                            "[DB] ❌ Neon HTTP connection test failed — "
+                            "check DATABASE_URL"
+                        )
                         # Don't mark initialized so it retries on next request
                         return
                     self.pool = _SupHTTPPool(
-                        minconn=int(os.getenv('DB_POOL_MIN', '1')),
-                        maxconn=int(os.getenv('DB_POOL_MAX', '20')),
+                        minconn=int(os.getenv("DB_POOL_MIN", "1")),
+                        maxconn=int(os.getenv("DB_POOL_MAX", "20")),
                     )
                     self._initialized = True
-                    self.use_pooling  = True
-                    self._http_mode   = True
-                    logger.info(f"[DB] ✨ Connected to Neon via HTTPS PostgREST RPC (HTTP-DB mode)")
-                    logger.info(f"[STARTUP] ✅ DB ready at {time.time() - _STARTUP_TIME:.1f}s")
+                    self.use_pooling = True
+                    self._http_mode = True
+                    logger.info(
+                        f"[DB] ✨ Connected to Neon via HTTPS PostgREST RPC (HTTP-DB mode)"
+                    )
+                    logger.info(
+                        f"[STARTUP] ✅ DB ready at {time.time() - _STARTUP_TIME:.1f}s"
+                    )
                 except EnvironmentError as e:
                     logger.error(f"[DB] ❌ HTTP-DB config error: {e}")
-                    self._initialized    = False
+                    self._initialized = False
                     self._retry_interval = min(self._retry_interval * 2, 60.0)
-                    self._next_retry_at  = time.monotonic() + self._retry_interval
+                    self._next_retry_at = time.monotonic() + self._retry_interval
                 except Exception as e:
                     logger.error(f"[DB] ❌ HTTP-DB init error: {e}")
-                    self._initialized    = False
+                    self._initialized = False
                     self._retry_interval = min(self._retry_interval * 2, 60.0)
-                    self._next_retry_at  = time.monotonic() + self._retry_interval
+                    self._next_retry_at = time.monotonic() + self._retry_interval
                 return
 
             # ── Native psycopg2 TCP mode (Neon PostgreSQL) ───────────────
             # Check if DATABASE_URL is set before attempting connection
             if not DB_URL:
                 logger.warning("[DB] ⚠️  DATABASE_URL not set — DB disabled")
-                logger.info(f"[STARTUP] ✅ DB ready (no DATABASE_URL) at {time.time() - _STARTUP_TIME:.1f}s")
+                logger.info(
+                    f"[STARTUP] ✅ DB ready (no DATABASE_URL) at {time.time() - _STARTUP_TIME:.1f}s"
+                )
                 self._initialized = True
                 self.use_pooling = False
                 self.pool = None
                 return
-            
+
             try:
                 from psycopg2 import pool as psycopg2_pool
+
                 # 🚀 WEB-SCALE: Increased pool size for 10,000 miners
                 # Each connection can handle ~200 concurrent operations with proper queuing
                 min_connections = 10
-                max_connections = int(os.getenv('DB_POOL_MAX', '100'))  # 100 connections for 10k miners
-                logger.info(f"[DB] 🚀 WEB-SCALE pooling: min={min_connections}, max={max_connections} (for 10k miners)")
+                max_connections = int(
+                    os.getenv("DB_POOL_MAX", "100")
+                )  # 100 connections for 10k miners
+                logger.info(
+                    f"[DB] 🚀 WEB-SCALE pooling: min={min_connections}, max={max_connections} (for 10k miners)"
+                )
                 logger.info(f"[DB] Connecting to Neon via DATABASE_URL")
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
-                    min_connections, max_connections, DB_URL, connect_timeout=10)
+                    min_connections, max_connections, DB_URL, connect_timeout=10
+                )
                 self._initialized = True
-                self.use_pooling  = True
-                self._next_retry_at   = 0.0
-                self._retry_interval  = 5.0
+                self.use_pooling = True
+                self._next_retry_at = 0.0
+                self._retry_interval = 5.0
                 logger.info(f"[DB] ✨ Connected to Neon PostgreSQL successfully")
-                logger.info(f"[STARTUP] ✅ DB ready at {time.time() - _STARTUP_TIME:.1f}s")
+                logger.info(
+                    f"[STARTUP] ✅ DB ready at {time.time() - _STARTUP_TIME:.1f}s"
+                )
             except (ImportError, AttributeError):
-                logger.info("[DB] App-level pooling unavailable, using direct connections")
+                logger.info(
+                    "[DB] App-level pooling unavailable, using direct connections"
+                )
                 logger.info("[DB] ✨ Connected to Neon PostgreSQL (direct mode)")
                 self._initialized = True
-                self.use_pooling  = False
-                self.pool         = None
-                self._next_retry_at  = 0.0
+                self.use_pooling = False
+                self.pool = None
+                self._next_retry_at = 0.0
                 self._retry_interval = 5.0
-                logger.info(f"[STARTUP] ✅ DB ready (direct mode) at {time.time() - _STARTUP_TIME:.1f}s")
-            except (psycopg2.OperationalError if psycopg2 else Exception) as e:
+                logger.info(
+                    f"[STARTUP] ✅ DB ready (direct mode) at {time.time() - _STARTUP_TIME:.1f}s"
+                )
+            except psycopg2.OperationalError if psycopg2 else Exception as e:
                 logger.error(f"[DB] ❌ Cannot connect to Neon: {e}")
                 self._initialized = False
-                self.use_pooling  = False
+                self.use_pooling = False
                 self._retry_interval = min(self._retry_interval * 2, 60.0)
-                self._next_retry_at  = time.monotonic() + self._retry_interval
-                logger.warning(f"[DB] ⏳ Next init retry in {self._retry_interval:.0f}s")
+                self._next_retry_at = time.monotonic() + self._retry_interval
+                logger.warning(
+                    f"[DB] ⏳ Next init retry in {self._retry_interval:.0f}s"
+                )
             except Exception as e:
                 logger.error(f"[DB] Error initializing pool: {e}")
                 self._initialized = True
-                self.use_pooling  = False
-                self.pool         = None
-                self._next_retry_at  = 0.0
+                self.use_pooling = False
+                self.pool = None
+                self._next_retry_at = 0.0
                 self._retry_interval = 5.0
 
     def get_connection(self):
@@ -1875,12 +2257,13 @@ _DB_READY = True
 # Handles 10,000 miners with zero infrastructure (code-only solution)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+
 class WebScaleCache:
     """
     🧠 Enterprise-grade LRU cache with TTL and persistence
     Replaces Redis for single-instance 10,000 miner scaling
     """
-    
+
     def __init__(self, max_entries: int = 100000, default_ttl: float = 5.0):
         self._cache: OrderedDict[str, Any] = OrderedDict()
         self._ttl: Dict[str, float] = {}
@@ -1891,16 +2274,16 @@ class WebScaleCache:
         self.default_ttl = default_ttl
         self._hits = 0
         self._misses = 0
-        
+
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             now = time.time()
-            
+
             if key in self._cache:
                 # Check TTL
                 ttl = self._ttl.get(key)
                 created = self._created.get(key, 0)
-                
+
                 if ttl and (now - created) > ttl:
                     # Expired
                     del self._cache[key]
@@ -1909,35 +2292,35 @@ class WebScaleCache:
                     del self._access_count[key]
                     self._misses += 1
                     return default
-                
+
                 # Cache hit - update LRU order
                 value = self._cache.pop(key)
                 self._cache[key] = value
                 self._access_count[key] = self._access_count.get(key, 0) + 1
                 self._hits += 1
                 return value
-            
+
             self._misses += 1
             return default
-    
+
     def set(self, key: str, value: Any, ttl: Optional[float] = None):
         with self._lock:
             ttl = ttl or self.default_ttl
             now = time.time()
-            
+
             # Evict if at capacity (LRU)
             if len(self._cache) >= self.max_entries and key not in self._cache:
                 self._evict_one()
-            
+
             # Store value
             if key in self._cache:
                 del self._cache[key]  # Remove to update order
-            
+
             self._cache[key] = value
             self._ttl[key] = ttl
             self._created[key] = now
             self._access_count[key] = 1
-    
+
     def delete(self, key: str) -> bool:
         with self._lock:
             if key in self._cache:
@@ -1947,7 +2330,7 @@ class WebScaleCache:
                 del self._access_count[key]
                 return True
             return False
-    
+
     def _evict_one(self):
         """Evict least recently used entry"""
         if self._cache:
@@ -1956,16 +2339,16 @@ class WebScaleCache:
             del self._ttl[key]
             del self._created[key]
             del self._access_count[key]
-    
+
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:
             total = self._hits + self._misses
             return {
-                'entries': len(self._cache),
-                'max_entries': self.max_entries,
-                'hits': self._hits,
-                'misses': self._misses,
-                'hit_rate': self._hits / total if total > 0 else 0,
+                "entries": len(self._cache),
+                "max_entries": self.max_entries,
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": self._hits / total if total > 0 else 0,
             }
 
 
@@ -1974,44 +2357,44 @@ class BlockHeightCache:
     🏗️ Specialized height cache with pub/sub simulation
     Eliminates 99% of height queries hitting the database
     """
-    
+
     def __init__(self, cache: WebScaleCache):
         self.cache = cache
         self._height_lock = threading.RLock()
         self._current_height = 0
         self._current_hash = "0" * 64
         self._subscribers: List[Callable] = []
-        
+
     def get_height(self) -> Dict[str, Any]:
         """Ultra-fast height query (sub-millisecond)"""
         # Try cache first
         cached = self.cache.get("blockchain:tip")
         if cached:
             return cached
-        
+
         # Use in-memory value
         with self._height_lock:
             result = {
-                'height': self._current_height,
-                'block_hash': self._current_hash,
-                'timestamp': time.time(),
-                'difficulty': 4  # Default difficulty
+                "height": self._current_height,
+                "block_hash": self._current_hash,
+                "timestamp": time.time(),
+                "difficulty": 4,  # Default difficulty
             }
             self.cache.set("blockchain:tip", result, ttl=1.0)
             return result
-    
+
     def update_height(self, height: int, block_hash: str, difficulty: int = 4):
         """Update height with write-through caching"""
         with self._height_lock:
             if height > self._current_height:
                 self._current_height = height
                 self._current_hash = block_hash
-                
+
                 result = {
-                    'height': height,
-                    'block_hash': block_hash,
-                    'timestamp': time.time(),
-                    'difficulty': difficulty
+                    "height": height,
+                    "block_hash": block_hash,
+                    "timestamp": time.time(),
+                    "difficulty": difficulty,
                 }
                 self.cache.set("blockchain:tip", result, ttl=1.0)
                 return True
@@ -2023,80 +2406,83 @@ class TokenBucketRateLimiter:
     🪣 Token bucket rate limiter for 10,000 miners
     Per-miner rate limiting with burst capacity
     """
-    
-    def __init__(self, 
-                 rate: float = 10.0,      # tokens per second
-                 burst: int = 20,         # max tokens (burst capacity)
-                 cleanup_interval: int = 300):  # cleanup every 5 min
+
+    def __init__(
+        self,
+        rate: float = 10.0,  # tokens per second
+        burst: int = 20,  # max tokens (burst capacity)
+        cleanup_interval: int = 300,
+    ):  # cleanup every 5 min
         self.rate = rate
         self.burst = burst
         self.cleanup_interval = cleanup_interval
-        
+
         self._buckets: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
         self._last_cleanup = time.time()
-    
+
     def _cleanup_old_buckets(self):
         """Remove inactive miner buckets"""
         now = time.time()
         if now - self._last_cleanup < self.cleanup_interval:
             return
-        
+
         with self._lock:
             cutoff = now - 600  # 10 minutes inactive
             to_remove = [
-                miner for miner, data in self._buckets.items()
-                if data['last_access'] < cutoff
+                miner
+                for miner, data in self._buckets.items()
+                if data["last_access"] < cutoff
             ]
             for miner in to_remove:
                 del self._buckets[miner]
-            
+
             self._last_cleanup = now
-    
+
     def allow_request(self, miner_address: str) -> Tuple[bool, int]:
         """
         Check if request is allowed
         Returns: (allowed, remaining_tokens)
         """
         self._cleanup_old_buckets()
-        
+
         with self._lock:
             now = time.time()
-            
+
             if miner_address not in self._buckets:
                 # New miner - start with burst capacity
                 self._buckets[miner_address] = {
-                    'tokens': self.burst,
-                    'last_update': now,
-                    'last_access': now
+                    "tokens": self.burst,
+                    "last_update": now,
+                    "last_access": now,
                 }
-            
+
             bucket = self._buckets[miner_address]
-            
+
             # Add tokens based on time passed
-            time_passed = now - bucket['last_update']
+            time_passed = now - bucket["last_update"]
             tokens_to_add = time_passed * self.rate
-            bucket['tokens'] = min(self.burst, bucket['tokens'] + tokens_to_add)
-            bucket['last_update'] = now
-            bucket['last_access'] = now
-            
+            bucket["tokens"] = min(self.burst, bucket["tokens"] + tokens_to_add)
+            bucket["last_update"] = now
+            bucket["last_access"] = now
+
             # Check if request can be processed
-            if bucket['tokens'] >= 1:
-                bucket['tokens'] -= 1
-                return True, int(bucket['tokens'])
+            if bucket["tokens"] >= 1:
+                bucket["tokens"] -= 1
+                return True, int(bucket["tokens"])
             else:
                 return False, 0
-    
+
     def get_stats(self, miner_address: str) -> Dict[str, Any]:
         with self._lock:
             if miner_address in self._buckets:
                 bucket = self._buckets[miner_address]
                 return {
-                    'tokens': bucket['tokens'],
-                    'rate': self.rate,
-                    'burst': self.burst
+                    "tokens": bucket["tokens"],
+                    "rate": self.rate,
+                    "burst": self.burst,
                 }
-            return {'tokens': self.burst, 'rate': self.rate, 'burst': self.burst}
+            return {"tokens": self.burst, "rate": self.rate, "burst": self.burst}
 
 
 class CircuitBreaker:
@@ -2104,64 +2490,70 @@ class CircuitBreaker:
     ⚡ Circuit breaker for database operations
     Prevents cascade failures when DB is under load
     """
-    
-    def __init__(self, 
-                 failure_threshold: int = 5,
-                 recovery_timeout: float = 30.0,
-                 half_open_max_calls: int = 3):
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+        half_open_max_calls: int = 3,
+    ):
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
-        
+
         self._failures = 0
         self._last_failure_time = 0
-        self._state = 'closed'  # closed, open, half-open
+        self._state = "closed"  # closed, open, half-open
         self._half_open_calls = 0
         self._lock = threading.Lock()
-    
+
     def can_execute(self) -> bool:
         with self._lock:
-            if self._state == 'closed':
+            if self._state == "closed":
                 return True
-            
-            if self._state == 'open':
+
+            if self._state == "open":
                 if time.time() - self._last_failure_time >= self.recovery_timeout:
-                    self._state = 'half-open'
+                    self._state = "half-open"
                     self._half_open_calls = 0
                     logger.info("[CircuitBreaker] Entering half-open state")
                     return True
                 return False
-            
-            if self._state == 'half-open':
+
+            if self._state == "half-open":
                 if self._half_open_calls < self.half_open_max_calls:
                     self._half_open_calls += 1
                     return True
                 return False
-            
+
             return True
-    
+
     def record_success(self):
         with self._lock:
-            if self._state == 'half-open':
-                self._state = 'closed'
+            if self._state == "half-open":
+                self._state = "closed"
                 self._failures = 0
                 self._half_open_calls = 0
                 logger.info("[CircuitBreaker] Circuit closed - service recovered")
-            elif self._state == 'closed':
+            elif self._state == "closed":
                 self._failures = max(0, self._failures - 1)
-    
+
     def record_failure(self):
         with self._lock:
             self._failures += 1
             self._last_failure_time = time.time()
-            
-            if self._state == 'half-open':
-                self._state = 'open'
-                logger.warning(f"[CircuitBreaker] Circuit opened (failure in half-open)")
+
+            if self._state == "half-open":
+                self._state = "open"
+                logger.warning(
+                    f"[CircuitBreaker] Circuit opened (failure in half-open)"
+                )
             elif self._failures >= self.failure_threshold:
-                self._state = 'open'
-                logger.warning(f"[CircuitBreaker] Circuit opened after {self._failures} failures")
-    
+                self._state = "open"
+                logger.warning(
+                    f"[CircuitBreaker] Circuit opened after {self._failures} failures"
+                )
+
     def get_state(self) -> str:
         with self._lock:
             return self._state
@@ -2205,10 +2597,11 @@ def get_db_connection():
 # Clients maintain their own SQLite mirrors, synced via P2P broadcasts
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def query_latest_block() -> Optional[Dict[str, Any]]:
     """
     🚀 Get latest block with L1 cache first, DB fallback
-    
+
     For 10,000 miners, this eliminates 99% of DB queries
     Cache TTL: 1 second (configurable for consistency vs performance)
     """
@@ -2217,7 +2610,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
     if cached:
         logger.debug(f"[QUERY-LATEST] 🧠 CACHE HIT: h={cached.get('height')}")
         return cached
-    
+
     # 🗄️ DB FALLBACK: Query database
     try:
         with get_db_cursor() as cur:
@@ -2228,11 +2621,11 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
             row = cur.fetchone()
             if row:
                 latest = {
-                    "height": row[0], 
-                    "block_hash": row[1] or "", 
+                    "height": row[0],
+                    "block_hash": row[1] or "",
                     "hash": row[1] or "",  # Alias for compatibility
                     "timestamp": row[2] or 0,
-                    "difficulty": row[3] or 4
+                    "difficulty": row[3] or 4,
                 }
                 # 📝 CACHE RESULT: 1 second TTL
                 _blockchain_cache.set("blockchain:latest_block", latest, ttl=1.0)
@@ -2247,6 +2640,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
         _db_circuit_breaker.record_failure()
         raise
 
+
 def query_block_by_height(height: int) -> Optional[Dict[str, Any]]:
     """Get block by height from Supabase PostgreSQL (authoritative source)."""
     try:
@@ -2260,6 +2654,7 @@ def query_block_by_height(height: int) -> Optional[Dict[str, Any]]:
         logger.debug(f"[QUERY-BLOCK] PG error: {e}")
     return None
 
+
 def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
     """
     🚀 Get block by hash with L1 cache
@@ -2267,16 +2662,18 @@ def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
     """
     if not block_hash:
         return None
-    
+
     # 🧠 L1 CACHE: Bloom filter check would go here for production
     cache_key = f"block:hash:{block_hash}"
     cached = _blockchain_cache.get(cache_key)
     if cached:
         return cached
-    
+
     try:
         with get_db_cursor() as cur:
-            cur.execute("SELECT * FROM blocks WHERE block_hash = %s LIMIT 1", (block_hash,))
+            cur.execute(
+                "SELECT * FROM blocks WHERE block_hash = %s LIMIT 1", (block_hash,)
+            )
             row = cur.fetchone()
             if row:
                 cols = [desc[0] for desc in cur.description]
@@ -2293,14 +2690,14 @@ def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
 @contextmanager
 def get_db_cursor():
     """Context manager for database cursor with connection pooling.
-    
+
     ⚛️  CRITICAL: Return connections to pool, never close them directly.
     Closing breaks the pool. Must use db_pool.putconn() to return.
     """
-    conn=None
+    conn = None
     try:
-        conn=db_pool.get_connection()
-        cur=conn.cursor()
+        conn = db_pool.get_connection()
+        cur = conn.cursor()
         yield cur
         conn.commit()
     except Exception as e:
@@ -2321,11 +2718,13 @@ def get_db_cursor():
             except Exception as e:
                 logger.debug(f"[DB-CURSOR] putconn error: {e}")
 
+
 # ── DATABASE SCHEMA ENSURE: Lazy creation of tables missing from migration ─────
 _SCHEMA_ENSURED_PEER_REGISTRY = False
 _SCHEMA_ENSURED_ORACLE_REGISTRY = False
 _SCHEMA_ENSURED_CHAIN_STATE = False
 _SCHEMA_ENSURED_BLOCKS = False
+
 
 def _lazy_ensure_oracle_registry():
     """Ensure oracle_registry table exists in Supabase."""
@@ -2361,15 +2760,18 @@ def _lazy_ensure_oracle_registry():
                 ("mode", "VARCHAR(32) DEFAULT 'full'"),
                 ("ip_hint", "VARCHAR(256) DEFAULT ''"),
                 ("reg_tx_hash", "VARCHAR(64) DEFAULT ''"),
-                ("registered_at", "TIMESTAMPTZ DEFAULT NOW()")
+                ("registered_at", "TIMESTAMPTZ DEFAULT NOW()"),
             ]:
                 try:
-                    cur.execute(f"ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS {col} {dtype}")
+                    cur.execute(
+                        f"ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS {col} {dtype}"
+                    )
                 except Exception:
                     pass
         _SCHEMA_ENSURED_ORACLE_REGISTRY = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_oracle_registry failed: {e}")
+
 
 def _lazy_ensure_chain_state():
     """Ensure chain_state table exists in Supabase."""
@@ -2390,6 +2792,7 @@ def _lazy_ensure_chain_state():
         _SCHEMA_ENSURED_CHAIN_STATE = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_chain_state failed: {e}")
+
 
 def _lazy_ensure_peer_registry():
     """Ensure peer_registry and peer_devices tables exist in Supabase with correct schema."""
@@ -2430,7 +2833,7 @@ def _lazy_ensure_peer_registry():
                     fingerprint   TEXT        DEFAULT ''
                 )
             """)
-            
+
             # Ensure all columns exist for existing node_id-based tables (idempotency)
             for col, dtype in [
                 ("first_seen", "TIMESTAMPTZ DEFAULT NOW()"),
@@ -2439,13 +2842,15 @@ def _lazy_ensure_peer_registry():
                 ("caller_ip", "TEXT DEFAULT ''"),
                 ("mac_address", "TEXT DEFAULT ''"),
                 ("device_id", "TEXT DEFAULT ''"),
-                ("fingerprint", "TEXT DEFAULT ''")
+                ("fingerprint", "TEXT DEFAULT ''"),
             ]:
                 try:
-                    cur.execute(f"ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS {col} {dtype}")
+                    cur.execute(
+                        f"ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS {col} {dtype}"
+                    )
                 except Exception:
                     pass
-            
+
             # Ensure node_id is unique for ON CONFLICT (if not already PK)
             try:
                 cur.execute("""
@@ -2472,12 +2877,17 @@ def _lazy_ensure_peer_registry():
                     trust_score    FLOAT DEFAULT 1.0
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_devices_node ON peer_devices(node_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_devices_ip ON peer_devices(last_caller_ip)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_peer_devices_node ON peer_devices(node_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_peer_devices_ip ON peer_devices(last_caller_ip)"
+            )
 
         _SCHEMA_ENSURED_PEER_REGISTRY = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
+
 
 def _lazy_ensure_blocks():
     """Ensure blocks table exists. Auto-create genesis block if empty."""
@@ -2509,9 +2919,15 @@ def _lazy_ensure_blocks():
                     created_at                 TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks(block_hash)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_parent ON blocks(parent_hash)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks(block_hash)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_blocks_parent ON blocks(parent_hash)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp)"
+            )
 
             # Auto-create genesis if table is empty
             cur.execute("SELECT COUNT(*) FROM blocks")
@@ -2520,7 +2936,8 @@ def _lazy_ensure_blocks():
                 genesis_hash = "0" * 64
                 parent_hash = "0" * 64
                 genesis_ts = int(time.time() * 1e9)
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO blocks (
                         height, block_hash, parent_hash, merkle_root,
                         timestamp, tx_count, coherence_snapshot, fidelity_snapshot,
@@ -2530,8 +2947,12 @@ def _lazy_ensure_blocks():
                         %s, 0, 1.0, 1.0,
                         6, 0, 1, 0, TRUE, %s
                     )
-                """, (genesis_hash, parent_hash, genesis_hash, genesis_ts, genesis_ts))
-                logger.info(f"[SCHEMA] 🌱 Genesis block auto-created: h=0  hash={genesis_hash[:16]}…")
+                """,
+                    (genesis_hash, parent_hash, genesis_hash, genesis_ts, genesis_ts),
+                )
+                logger.info(
+                    f"[SCHEMA] 🌱 Genesis block auto-created: h=0  hash={genesis_hash[:16]}…"
+                )
 
         # Create quantum_field_distribution table with triggers for neighbor broadcast
         try:
@@ -2550,11 +2971,19 @@ def _lazy_ensure_blocks():
                     created_at              TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_qf_height ON quantum_field_distribution(block_height)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_qf_miner ON quantum_field_distribution(miner_address)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_qf_broadcast ON quantum_field_distribution(received_by_neighbor)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_qf_height ON quantum_field_distribution(block_height)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_qf_miner ON quantum_field_distribution(miner_address)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_qf_broadcast ON quantum_field_distribution(received_by_neighbor)"
+            )
 
-            logger.info("[SCHEMA] ✅ quantum_field_distribution table ready (neighbor gossip)")
+            logger.info(
+                "[SCHEMA] ✅ quantum_field_distribution table ready (neighbor gossip)"
+            )
         except Exception as _qf_e:
             logger.debug(f"[SCHEMA] quantum_field_distribution table creation: {_qf_e}")
 
@@ -2564,9 +2993,9 @@ def _lazy_ensure_blocks():
         logger.warning(f"[SCHEMA] _lazy_ensure_blocks failed: {e}")
 
 
-
 _dht_manager: Optional[DHTManager] = None
 _dht_lock = threading.RLock()
+
 
 def get_dht_manager() -> DHTManager:
     """Get or create global DHT manager. Uses P2P_PORT (9091) — not gunicorn HTTP PORT."""
@@ -2574,9 +3003,12 @@ def get_dht_manager() -> DHTManager:
     if _dht_manager is None:
         # Public hostname so remote peers can reach this node.
         # Falls back to 0.0.0.0 for local/dev use.
-        host = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
-                os.getenv('RAILWAY_PUBLIC_DOMAIN') or
-                os.getenv('FLASK_HOST') or '0.0.0.0')
+        host = (
+            os.getenv("KOYEB_PUBLIC_DOMAIN")
+            or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+            or os.getenv("FLASK_HOST")
+            or "0.0.0.0"
+        )
         port = P2P_PORT  # 9091 — never gunicorn's HTTP port
         _dht_manager = DHTManager(local_address=host, local_port=port)
     return _dht_manager
@@ -2587,86 +3019,92 @@ def get_dht_manager() -> DHTManager:
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 # RPC snapshot cache + event log (no SSE infrastructure)
-_rpc_event_log: Deque = Deque(maxlen=1000)           # Ring buffer of recent RPC events
-_rpc_event_lock = threading.RLock()                  # Guards _rpc_event_log writes
-_latest_snapshot: Optional[dict] = None              # Last cached snapshot (poll endpoint)
-_latest_snapshot_ts: int = 0                         # Timestamp of latest snapshot
-_snapshot_lock = threading.RLock()                   # Guards _latest_snapshot updates
+_rpc_event_log: Deque = Deque(maxlen=1000)  # Ring buffer of recent RPC events
+_rpc_event_lock = threading.RLock()  # Guards _rpc_event_log writes
+_latest_snapshot: Optional[dict] = None  # Last cached snapshot (poll endpoint)
+_latest_snapshot_ts: int = 0  # Timestamp of latest snapshot
+_snapshot_lock = threading.RLock()  # Guards _latest_snapshot updates
+
 
 def _log_rpc_event(event_type: str, data: Any) -> None:
     """Log event for /api/events RPC polling endpoint."""
     with _rpc_event_lock:
-        _rpc_event_log.append({'ts': time.time(), 'type': event_type, 'data': data})
-
-
+        _rpc_event_log.append({"ts": time.time(), "type": event_type, "data": data})
 
 
 # Application startup flag
-_APP_READY=False
+_APP_READY = False
+
 
 def _set_app_ready():
     global _APP_READY
-    _APP_READY=True
+    _APP_READY = True
     logger.info("[APP] ✅ Application ready for Koyeb health checks")
+
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # API Endpoints
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
+
 class SafeFieldConverter:
     """⚛️  Autonomous diagnostic field converter with fallback recovery."""
-    
+
     _errors = {}  # Track which fields fail across requests for autonomous healing
-    
+
     @staticmethod
-    def safe_int(value, field_name='unknown', default=0):
+    def safe_int(value, field_name="unknown", default=0):
         """Convert to int with diagnostic logging."""
         try:
-            if value is None: return default
+            if value is None:
+                return default
             return int(value)
         except (ValueError, TypeError) as e:
-            SafeFieldConverter._errors[f'int_{field_name}'] = str(e)
+            SafeFieldConverter._errors[f"int_{field_name}"] = str(e)
             logger.warning(f"[CONVERTER] int({field_name})={value} failed: {e}")
             return default
-    
+
     @staticmethod
-    def safe_float(value, field_name='unknown', default=0.0):
+    def safe_float(value, field_name="unknown", default=0.0):
         """Convert to float with diagnostic logging."""
         try:
-            if value is None: return default
+            if value is None:
+                return default
             return float(value)
         except (ValueError, TypeError) as e:
-            SafeFieldConverter._errors[f'float_{field_name}'] = str(e)
+            SafeFieldConverter._errors[f"float_{field_name}"] = str(e)
             logger.warning(f"[CONVERTER] float({field_name})={value} failed: {e}")
             return default
-    
+
     @staticmethod
-    def safe_str(value, field_name='unknown', default=''):
+    def safe_str(value, field_name="unknown", default=""):
         """Convert to str with diagnostic logging."""
         try:
-            if value is None: return default
+            if value is None:
+                return default
             return str(value)
         except (ValueError, TypeError) as e:
-            SafeFieldConverter._errors[f'str_{field_name}'] = str(e)
+            SafeFieldConverter._errors[f"str_{field_name}"] = str(e)
             logger.warning(f"[CONVERTER] str({field_name})={value} failed: {e}")
             return default
-    
+
     @staticmethod
-    def safe_bool(value, field_name='unknown', default=False):
+    def safe_bool(value, field_name="unknown", default=False):
         """Convert to bool with diagnostic logging."""
         try:
-            if value is None: return default
+            if value is None:
+                return default
             return bool(value)
         except (ValueError, TypeError) as e:
-            SafeFieldConverter._errors[f'bool_{field_name}'] = str(e)
+            SafeFieldConverter._errors[f"bool_{field_name}"] = str(e)
             logger.warning(f"[CONVERTER] bool({field_name})={value} failed: {e}")
             return default
-    
+
     @staticmethod
     def get_error_report():
         """Return accumulated conversion errors for autonomous healing."""
         return dict(SafeFieldConverter._errors)
-    
+
     @staticmethod
     def clear_errors():
         """Clear error history for next diagnostic cycle."""
@@ -2675,20 +3113,20 @@ class SafeFieldConverter:
 
 class SnapshotAutonomousHealer:
     """⚛️  Autonomous diagnostic & healing loop for snapshot failures."""
-    
+
     _last_valid_snapshot = {}  # Cache last valid state for fallback
     _healing_cycles = 0
     _healing_lock = threading.Lock()
-    
+
     @staticmethod
-    def build_from_row(row, diag_label='oracle_snapshot_json'):
+    def build_from_row(row, diag_label="oracle_snapshot_json"):
         """Build snapshot with autonomous error detection & recovery."""
         if not row:
-            return None, {'error': 'row_is_none', 'ready': False}
-        
-        diag = {'cycles': 0, 'errors': [], 'recovered': []}
+            return None, {"error": "row_is_none", "ready": False}
+
+        diag = {"cycles": 0, "errors": [], "recovered": []}
         SafeFieldConverter.clear_errors()
-        
+
         try:
             # ⚛️  Phase 1: Parse oracle measurements (most failure-prone)
             oracles = []
@@ -2700,114 +3138,128 @@ class SnapshotAutonomousHealer:
                 else:
                     oracles = []
             except (json.JSONDecodeError, TypeError) as e:
-                diag['errors'].append(f'oracle_measurements: {str(e)[:50]}')
+                diag["errors"].append(f"oracle_measurements: {str(e)[:50]}")
                 logger.warning(f"[HEALER] Oracle measurements parse failed: {e}")
                 oracles = []
-            
+
             # ⚛️  Phase 2: Parse mermin result (nullable)
             mermin_result = None
             if row[10] is not None:
                 try:
-                    m_val = SafeFieldConverter.safe_float(row[10], 'mermin_M')
+                    m_val = SafeFieldConverter.safe_float(row[10], "mermin_M")
                     mermin_result = {
-                        'M_value': m_val,
-                        'M': m_val,
-                        'is_quantum': SafeFieldConverter.safe_bool(row[11], 'mermin_is_quantum'),
-                        'verdict': SafeFieldConverter.safe_str(row[12], 'mermin_verdict')
+                        "M_value": m_val,
+                        "M": m_val,
+                        "is_quantum": SafeFieldConverter.safe_bool(
+                            row[11], "mermin_is_quantum"
+                        ),
+                        "verdict": SafeFieldConverter.safe_str(
+                            row[12], "mermin_verdict"
+                        ),
                     }
                 except Exception as e:
-                    diag['errors'].append(f'mermin_result: {str(e)[:50]}')
+                    diag["errors"].append(f"mermin_result: {str(e)[:50]}")
                     logger.warning(f"[HEALER] Mermin result construction failed: {e}")
                     mermin_result = None
-            
+
             # ⚛️  Phase 3: Safe numeric conversions with field-level diagnostics
-            ts_ns = SafeFieldConverter.safe_int(row[1], 'timestamp_ns')
-            chirp = SafeFieldConverter.safe_int(row[2], 'chirp_number')
-            lat_f = SafeFieldConverter.safe_float(row[3], 'lattice_fidelity')
-            lat_c = SafeFieldConverter.safe_float(row[4], 'lattice_coherence')
-            lat_cy = SafeFieldConverter.safe_int(row[5], 'lattice_cycle')
-            lat_s8 = SafeFieldConverter.safe_int(row[6], 'lattice_sigma_mod8')
-            cons_f = SafeFieldConverter.safe_float(row[7], 'consensus_fidelity')
-            cons_c = SafeFieldConverter.safe_float(row[8], 'consensus_coherence')
-            cons_p = SafeFieldConverter.safe_float(row[9], 'consensus_purity')
-            pq0_o = SafeFieldConverter.safe_float(row[13], 'pq0_oracle_fidelity')
-            pq0_i = SafeFieldConverter.safe_float(row[14], 'pq0_IV_fidelity')
-            pq0_v = SafeFieldConverter.safe_float(row[15], 'pq0_V_fidelity')
-            pq_c = SafeFieldConverter.safe_int(row[16], 'pq_curr')
-            pq_l = SafeFieldConverter.safe_int(row[17], 'pq_last')
-            phase = SafeFieldConverter.safe_str(row[19], 'phase_name')
-            
+            ts_ns = SafeFieldConverter.safe_int(row[1], "timestamp_ns")
+            chirp = SafeFieldConverter.safe_int(row[2], "chirp_number")
+            lat_f = SafeFieldConverter.safe_float(row[3], "lattice_fidelity")
+            lat_c = SafeFieldConverter.safe_float(row[4], "lattice_coherence")
+            lat_cy = SafeFieldConverter.safe_int(row[5], "lattice_cycle")
+            lat_s8 = SafeFieldConverter.safe_int(row[6], "lattice_sigma_mod8")
+            cons_f = SafeFieldConverter.safe_float(row[7], "consensus_fidelity")
+            cons_c = SafeFieldConverter.safe_float(row[8], "consensus_coherence")
+            cons_p = SafeFieldConverter.safe_float(row[9], "consensus_purity")
+            pq0_o = SafeFieldConverter.safe_float(row[13], "pq0_oracle_fidelity")
+            pq0_i = SafeFieldConverter.safe_float(row[14], "pq0_IV_fidelity")
+            pq0_v = SafeFieldConverter.safe_float(row[15], "pq0_V_fidelity")
+            pq_c = SafeFieldConverter.safe_int(row[16], "pq_curr")
+            pq_l = SafeFieldConverter.safe_int(row[17], "pq_last")
+            phase = SafeFieldConverter.safe_str(row[19], "phase_name")
+
             # ⚛️  Collect conversion errors for autonomous healing
             conv_errors = SafeFieldConverter.get_error_report()
             if conv_errors:
-                diag['errors'].extend([f'{k}' for k in conv_errors.keys()])
-                logger.warning(f"[HEALER] Conversion errors detected: {len(conv_errors)}")
-            
+                diag["errors"].extend([f"{k}" for k in conv_errors.keys()])
+                logger.warning(
+                    f"[HEALER] Conversion errors detected: {len(conv_errors)}"
+                )
+
             # ⚛️  Phase 4: Construct snapshot with all safe values
             snapshot = {
-                'timestamp_ns': ts_ns,
-                'chirp_number': chirp,
-                'lattice_quantum': {
-                    'fidelity': lat_f,
-                    'coherence': lat_c,
-                    'cycle_count': lat_cy,
-                    'lattice_sigma_mod8': lat_s8,
-                    'phase_name': phase,
-                    'lattice_status': 'online'
+                "timestamp_ns": ts_ns,
+                "chirp_number": chirp,
+                "lattice_quantum": {
+                    "fidelity": lat_f,
+                    "coherence": lat_c,
+                    "cycle_count": lat_cy,
+                    "lattice_sigma_mod8": lat_s8,
+                    "phase_name": phase,
+                    "lattice_status": "online",
                 },
-                'consensus': {
-                    'w_state_fidelity': cons_f,
-                    'coherence': cons_c,
-                    'purity': cons_p
+                "consensus": {
+                    "w_state_fidelity": cons_f,
+                    "coherence": cons_c,
+                    "purity": cons_p,
                 },
-                'mermin_test': mermin_result,
-                'bell_test': mermin_result,
-                'pq0_components': {
-                    'pq0_oracle_fidelity': pq0_o,
-                    'pq0_IV_fidelity': pq0_i,
-                    'pq0_V_fidelity': pq0_v
+                "mermin_test": mermin_result,
+                "bell_test": mermin_result,
+                "pq0_components": {
+                    "pq0_oracle_fidelity": pq0_o,
+                    "pq0_IV_fidelity": pq0_i,
+                    "pq0_V_fidelity": pq0_v,
                 },
-                'pq_curr': pq_c,
-                'pq_last': pq_l,
-                'oracle_measurements': oracles,
-                'fidelity': cons_f,
-                'coherence': cons_c,
-                'lattice_cycle': lat_cy,
-                'source': 'neon_snapshot_healed',
-                'ready': True,
-                '_diagnostics': {
-                    'errors': diag['errors'],
-                    'recovered_with_defaults': bool(conv_errors),
-                    'conversion_errors': conv_errors
-                }
+                "pq_curr": pq_c,
+                "pq_last": pq_l,
+                "oracle_measurements": oracles,
+                "fidelity": cons_f,
+                "coherence": cons_c,
+                "lattice_cycle": lat_cy,
+                "source": "neon_snapshot_healed",
+                "ready": True,
+                "_diagnostics": {
+                    "errors": diag["errors"],
+                    "recovered_with_defaults": bool(conv_errors),
+                    "conversion_errors": conv_errors,
+                },
             }
-            
+
             # ⚛️  Cache this as last valid state for future fallback
             with SnapshotAutonomousHealer._healing_lock:
                 SnapshotAutonomousHealer._last_valid_snapshot = snapshot.copy()
                 SnapshotAutonomousHealer._healing_cycles += 1
-            
-            if not diag['errors']:
-                logger.debug(f"[HEALER] Snapshot built clean (cycle {SnapshotAutonomousHealer._healing_cycles})")
+
+            if not diag["errors"]:
+                logger.debug(
+                    f"[HEALER] Snapshot built clean (cycle {SnapshotAutonomousHealer._healing_cycles})"
+                )
             else:
-                logger.info(f"[HEALER] Snapshot built with {len(diag['errors'])} recovered fields (cycle {SnapshotAutonomousHealer._healing_cycles})")
-            
+                logger.info(
+                    f"[HEALER] Snapshot built with {len(diag['errors'])} recovered fields (cycle {SnapshotAutonomousHealer._healing_cycles})"
+                )
+
             return snapshot, diag
-        
+
         except Exception as e:
             # ⚛️  Catastrophic failure — fall back to cached state
             logger.error(f"[HEALER] Snapshot construction catastrophically failed: {e}")
             with SnapshotAutonomousHealer._healing_lock:
                 if SnapshotAutonomousHealer._last_valid_snapshot:
-                    logger.warning(f"[HEALER] Falling back to last valid cached snapshot")
+                    logger.warning(
+                        f"[HEALER] Falling back to last valid cached snapshot"
+                    )
                     return SnapshotAutonomousHealer._last_valid_snapshot.copy(), {
-                        'error': 'catastrophic_fallback',
-                        'fallback_source': 'cache',
-                        'ready': True
+                        "error": "catastrophic_fallback",
+                        "fallback_source": "cache",
+                        "ready": True,
                     }
-            return None, {'error': 'catastrophic_failure', 'details': str(e), 'ready': False}
-
-
+            return None, {
+                "error": "catastrophic_failure",
+                "details": str(e),
+                "ready": False,
+            }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2817,12 +3269,13 @@ def _get_canonical_node() -> Optional[dict]:
     """Fallback: fetch canonical node state from module or globals (in-memory)."""
     try:
         import globals as _g
+
         gn = getattr(_g, "get_canonical_node", None)
         if callable(gn):
             return gn()
     except Exception:
         pass
-    
+
     # Last resort: check module-level state
     try:
         _srv = sys.modules[__name__].__dict__
@@ -2846,18 +3299,23 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
             height = 0
             tip_hash = "0" * 64
         else:
-            height = int(db_tip['height'])
-            tip_hash = str(db_tip.get('hash', '') or "0" * 64)
+            height = int(db_tip["height"])
+            tip_hash = str(db_tip.get("hash", "") or "0" * 64)
 
         # 🔴 CRITICAL LOGGING: Verify DB state
-        logger.critical(f"[RPC-HEIGHT] 📊 CHAIN TIP: h={height} hash={tip_hash[:16]}… (DB-authoritative, always fresh)")
+        logger.critical(
+            f"[RPC-HEIGHT] 📊 CHAIN TIP: h={height} hash={tip_hash[:16]}… (DB-authoritative, always fresh)"
+        )
 
-        return _rpc_ok({
-            "height": height,
-            "tip_hash": tip_hash,
-            "ts": time.time(),
-            "source": "DB-authoritative"  # Signal to client this is ground truth
-        }, rpc_id)
+        return _rpc_ok(
+            {
+                "height": height,
+                "tip_hash": tip_hash,
+                "ts": time.time(),
+                "source": "DB-authoritative",  # Signal to client this is ground truth
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
         return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id)
@@ -2865,46 +3323,55 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
     """qtcl_forgeGenesis — Force creation and persistence of genesis block.
-    
+
     Only works if:
     1. DATABASE_URL is set (Neon PostgreSQL)
     2. No genesis block exists yet
-    
+
     Returns the genesis block info on success.
     """
     try:
         if not DATABASE_URL:
-            return _rpc_error(-32000, "DATABASE_URL not set - cannot forge genesis", rpc_id)
-        
+            return _rpc_error(
+                -32000, "DATABASE_URL not set - cannot forge genesis", rpc_id
+            )
+
         from lattice_controller import QuantumLatticeController
+
         controller = QuantumLatticeController()
-        
+
         # Inject DB pool if available
         if controller.block_manager and controller.block_manager.db:
             controller.block_manager.db.inject_db_pool(db_pool)
-        
+
         # Create blocks table
         _lazy_ensure_blocks()
-        
+
         controller.start()
-        
+
         # Sync to cache
         _sync_lattice_blocks_to_cache()
-        
+
         if controller.genesis_block:
-            return _rpc_ok({
-                "status": "created",
-                "height": 0,
-                "block_hash": controller.genesis_block.block_hash,
-                "timestamp": controller.genesis_block.timestamp_s,
-            }, rpc_id)
+            return _rpc_ok(
+                {
+                    "status": "created",
+                    "height": 0,
+                    "block_hash": controller.genesis_block.block_hash,
+                    "timestamp": controller.genesis_block.timestamp_s,
+                },
+                rpc_id,
+            )
         else:
-            return _rpc_ok({
-                "status": "created",
-                "height": 0,
-                "block_hash": "0" * 64,
-                "timestamp": 0,
-            }, rpc_id)
+            return _rpc_ok(
+                {
+                    "status": "created",
+                    "height": 0,
+                    "block_hash": "0" * 64,
+                    "timestamp": 0,
+                },
+                rpc_id,
+            )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_forgeGenesis exception: {e}")
         return _rpc_error(-32603, f"Forge error: {str(e)}", rpc_id)
@@ -2915,12 +3382,18 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
     try:
         if not isinstance(params, (list, dict)):
             return _rpc_error(-32602, "params must be list or object", rpc_id)
-        address = (params[0] if isinstance(params, list) else params.get("address", "")) if params else ""
+        address = (
+            (params[0] if isinstance(params, list) else params.get("address", ""))
+            if params
+            else ""
+        )
         if not address:
             return _rpc_error(-32602, "address required", rpc_id)
-        
-        _diagnostic = {"address_queried": address[:24] + "…" if len(address) > 24 else address}
-        
+
+        _diagnostic = {
+            "address_queried": address[:24] + "…" if len(address) > 24 else address
+        }
+
         try:
             with get_db_cursor() as cur:
                 # Check if wallet_addresses table exists
@@ -2935,19 +3408,19 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                     _diagnostic["table_exists"] = bool(_table_exists)
                 except Exception as _te:
                     _diagnostic["table_check_error"] = str(_te)
-                
+
                 # Query balance
                 cur.execute(
                     "SELECT balance, transaction_count, address_type FROM wallet_addresses WHERE address = %s",
-                    (address,)
+                    (address,),
                 )
                 row = cur.fetchone()
                 if row:
                     wallet = {
-                        'address': address,
-                        'balance': row[0],
-                        'tx_count': row[1],
-                        'address_type': row[2] if len(row) > 2 else 'unknown',
+                        "address": address,
+                        "balance": row[0],
+                        "tx_count": row[1],
+                        "address_type": row[2] if len(row) > 2 else "unknown",
                     }
                     _diagnostic["found_in_db"] = True
                     _diagnostic["raw_balance_base_units"] = int(row[0]) if row[0] else 0
@@ -2958,35 +3431,39 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                     try:
                         cur.execute("SELECT COUNT(*) FROM wallet_addresses")
                         _total_wallets = cur.fetchone()[0]
-                        _diagnostic["total_wallets_in_db"] = int(_total_wallets) if _total_wallets else 0
+                        _diagnostic["total_wallets_in_db"] = (
+                            int(_total_wallets) if _total_wallets else 0
+                        )
                     except Exception:
                         pass
         except Exception as _wqe:
             logger.debug(f"[RPC] query_wallet_info DB error: {_wqe}")
             _diagnostic["db_error"] = str(_wqe)
             wallet = None
-        
+
         if wallet is None:
             # Address not yet in DB — return 0 balance with diagnostic info
             result = {
                 "address": address,
                 "balance": 0.0,
-                "symbol":  "QTCL",
+                "symbol": "QTCL",
                 "diagnostic": _diagnostic,
                 "note": "Address not found in wallet_addresses table — no balance recorded",
             }
         else:
-            raw_balance = int(wallet.get('balance') or 0)
+            raw_balance = int(wallet.get("balance") or 0)
             result = {
                 "address": address,
                 "balance": raw_balance / 100.0,
-                "symbol":  "QTCL",
+                "symbol": "QTCL",
                 "raw_balance_base_units": raw_balance,
-                "transaction_count": wallet.get('tx_count', 0),
-                "address_type": wallet.get('address_type', 'unknown'),
+                "transaction_count": wallet.get("tx_count", 0),
+                "address_type": wallet.get("address_type", "unknown"),
                 "diagnostic": _diagnostic,
             }
-        logger.debug(f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}")
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}"
+        )
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
@@ -2996,29 +3473,54 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
 def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
     """qtcl_getTransaction — tx details by hash."""
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getTransaction called with params={params}, id={rpc_id}")
-        tx_hash = (params[0] if isinstance(params, list) else params.get("tx_hash", "")) if params else ""
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getTransaction called with params={params}, id={rpc_id}"
+        )
+        tx_hash = (
+            (params[0] if isinstance(params, list) else params.get("tx_hash", ""))
+            if params
+            else ""
+        )
         if not tx_hash:
             logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx_hash missing or empty")
             return _rpc_error(-32602, "tx_hash required", rpc_id)
         try:
             from globals import get_blockchain
+
             bc = get_blockchain()
             if bc is None:
-                logger.warning(f"[RPC-METHOD] qtcl_getTransaction: blockchain not initialized")
+                logger.warning(
+                    f"[RPC-METHOD] qtcl_getTransaction: blockchain not initialized"
+                )
                 return _rpc_error(-32003, "Blockchain not synced", rpc_id)
             tx = bc.get_transaction(tx_hash)
             if tx is None:
-                logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})")
-                return _rpc_error(-32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash})
+                logger.debug(
+                    f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})"
+                )
+                return _rpc_error(
+                    -32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash}
+                )
             logger.debug(f"[RPC-METHOD] qtcl_getTransaction success: tx_hash={tx_hash}")
             return _rpc_ok(tx, rpc_id)
         except Exception as be:
-            logger.exception(f"[RPC-METHOD] qtcl_getTransaction: blockchain error: {be}")
-            return _rpc_error(-32603, f"TX lookup failed: {str(be)}", rpc_id, {"exception": str(be).__class__.__name__})
+            logger.exception(
+                f"[RPC-METHOD] qtcl_getTransaction: blockchain error: {be}"
+            )
+            return _rpc_error(
+                -32603,
+                f"TX lookup failed: {str(be)}",
+                rpc_id,
+                {"exception": str(be).__class__.__name__},
+            )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getTransaction outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(
+            -32603,
+            f"Internal error: {str(e)}",
+            rpc_id,
+            {"exception": str(e).__class__.__name__},
+        )
 
 
 def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
@@ -3043,7 +3545,12 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
             """Full block query from database (authoritative source)."""
             try:
                 # Try SQLite first
-                if _LATTICE and hasattr(_LATTICE, 'block_manager') and _LATTICE.block_manager and _LATTICE.block_manager.db:
+                if (
+                    _LATTICE
+                    and hasattr(_LATTICE, "block_manager")
+                    and _LATTICE.block_manager
+                    and _LATTICE.block_manager.db
+                ):
                     db = _LATTICE.block_manager.db
                     if db._sqlite_conn:
                         try:
@@ -3058,85 +3565,97 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                             if not row:
                                 return None
                             block = {
-                                'height':           row[0],
-                                'block_height':     row[0],
-                                'block_hash':       row[1],
-                                'hash':             row[1],
-                                'parent_hash':      row[4] or ('0' * 64),
-                                'previous_hash':    row[4] or ('0' * 64),
-                                'merkle_root':      row[8] or ('0' * 64),
-                                'timestamp_s':      int(row[2]) if row[2] else 0,
-                                'timestamp':        int(row[2]) if row[2] else 0,
-                                'difficulty':       int(float(row[6])) if row[6] else 5,
-                                'nonce':            int(row[5]) if row[5] else 0,
-                                'w_state_fidelity': float(row[7]) if row[7] is not None else 0.0,
-                                'w_entropy_hash':   row[3] or '',
-                                'pq_curr':          h,
-                                'pq_last':          max(0, h - 1),
-                                'tx_count':         int(row[9]) if row[9] else 0,
-                                'mined':            True,
-                                'finalized':        True,
+                                "height": row[0],
+                                "block_height": row[0],
+                                "block_hash": row[1],
+                                "hash": row[1],
+                                "parent_hash": row[4] or ("0" * 64),
+                                "previous_hash": row[4] or ("0" * 64),
+                                "merkle_root": row[8] or ("0" * 64),
+                                "timestamp_s": int(row[2]) if row[2] else 0,
+                                "timestamp": int(row[2]) if row[2] else 0,
+                                "difficulty": int(float(row[6])) if row[6] else 5,
+                                "nonce": int(row[5]) if row[5] else 0,
+                                "w_state_fidelity": float(row[7])
+                                if row[7] is not None
+                                else 0.0,
+                                "w_entropy_hash": row[3] or "",
+                                "pq_curr": h,
+                                "pq_last": max(0, h - 1),
+                                "tx_count": int(row[9]) if row[9] else 0,
+                                "mined": True,
+                                "finalized": True,
                             }
                             return block
                         except Exception as _se:
                             logger.debug(f"[RPC] SQLite query failed: {_se}")
-                
+
                 # Fallback to PostgreSQL
                 with get_db_cursor() as cur:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT height, block_hash, timestamp, w_state_hash,
                                parent_hash, nonce, difficulty,
                                coherence_snapshot, merkle_root, tx_count
                         FROM blocks WHERE height = %s LIMIT 1
-                    """, (h,))
+                    """,
+                        (h,),
+                    )
                     row = cur.fetchone()
                     if not row:
                         return None
                     block = {
-                        'height':           row[0],
-                        'block_height':     row[0],
-                        'block_hash':       row[1],
-                        'hash':             row[1],
-                        'parent_hash':      row[4] or ('0' * 64),
-                        'previous_hash':    row[4] or ('0' * 64),
-                        'merkle_root':      row[8] or ('0' * 64),
-                        'timestamp_s':      int(row[2]) if row[2] else 0,
-                        'timestamp':        int(row[2]) if row[2] else 0,
-                        'difficulty':       int(float(row[6])) if row[6] else 5,
-                        'nonce':            int(row[5]) if row[5] else 0,
-                        'w_state_fidelity': float(row[7]) if row[7] is not None else 0.0,
-                        'w_entropy_hash':   row[3] or '',
-                        'pq_curr':          h,
-                        'pq_last':          max(0, h - 1),
-                        'tx_count':         int(row[9]) if row[9] else 0,
-                        'mined':            True,
-                        'finalized':        True,
+                        "height": row[0],
+                        "block_height": row[0],
+                        "block_hash": row[1],
+                        "hash": row[1],
+                        "parent_hash": row[4] or ("0" * 64),
+                        "previous_hash": row[4] or ("0" * 64),
+                        "merkle_root": row[8] or ("0" * 64),
+                        "timestamp_s": int(row[2]) if row[2] else 0,
+                        "timestamp": int(row[2]) if row[2] else 0,
+                        "difficulty": int(float(row[6])) if row[6] else 5,
+                        "nonce": int(row[5]) if row[5] else 0,
+                        "w_state_fidelity": float(row[7])
+                        if row[7] is not None
+                        else 0.0,
+                        "w_entropy_hash": row[3] or "",
+                        "pq_curr": h,
+                        "pq_last": max(0, h - 1),
+                        "tx_count": int(row[9]) if row[9] else 0,
+                        "mined": True,
+                        "finalized": True,
                     }
                     # Fetch transactions for this block
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT tx_hash, from_address, to_address, amount,
                                transaction_index, tx_type, status,
                                quantum_state_hash, metadata
                         FROM transactions
                         WHERE height = %s
                         ORDER BY transaction_index ASC
-                    """, (h,))
+                    """,
+                        (h,),
+                    )
                     tx_rows = cur.fetchall()
                     txs = []
                     for tr in tx_rows:
-                        txs.append({
-                            'tx_id':        tr[0],
-                            'from_addr':    tr[1] or '',
-                            'to_addr':      tr[2] or '',
-                            'amount':       int(tr[3]) if tr[3] is not None else 0,
-                            'tx_index':     int(tr[4]) if tr[4] is not None else 0,
-                            'tx_type':      tr[5] or 'transfer',
-                            'status':       tr[6] or 'confirmed',
-                            'w_proof':      tr[7] or '',
-                            'metadata':     tr[8] if tr[8] else None,
-                        })
-                    block['transactions'] = txs
-                    block['tx_count'] = len(txs)
+                        txs.append(
+                            {
+                                "tx_id": tr[0],
+                                "from_addr": tr[1] or "",
+                                "to_addr": tr[2] or "",
+                                "amount": int(tr[3]) if tr[3] is not None else 0,
+                                "tx_index": int(tr[4]) if tr[4] is not None else 0,
+                                "tx_type": tr[5] or "transfer",
+                                "status": tr[6] or "confirmed",
+                                "w_proof": tr[7] or "",
+                                "metadata": tr[8] if tr[8] else None,
+                            }
+                        )
+                    block["transactions"] = txs
+                    block["tx_count"] = len(txs)
                     return block
             except Exception as e:
                 logger.exception(f"[RPC] _query_block_at_height({h}): {e}")
@@ -3145,7 +3664,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
         block = None
         if height is not None:
             block = _query_block_at_height(height)
-            
+
             # Fallback: check in-memory cache (for genesis and recently mined blocks)
             if block is None:
                 with _BLOCK_CACHE_LOCK:
@@ -3155,15 +3674,20 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
         elif block_hash:
             row = query_block_by_hash(block_hash)
             if row:
-                block = _query_block_at_height(row['height'])
-            
+                block = _query_block_at_height(row["height"])
+
             # Fallback: search cache by hash
             if block is None:
                 with _BLOCK_CACHE_LOCK:
                     for h, b in _BLOCK_CACHE.items():
-                        if b.get('block_hash') == block_hash or b.get('hash') == block_hash:
+                        if (
+                            b.get("block_hash") == block_hash
+                            or b.get("hash") == block_hash
+                        ):
                             block = b
-                            logger.debug(f"[RPC] Block hash={block_hash[:16]}... served from cache")
+                            logger.debug(
+                                f"[RPC] Block hash={block_hash[:16]}... served from cache"
+                            )
                             break
 
         if block is None:
@@ -3179,16 +3703,18 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
 _BLOCK_CACHE = {}  # height -> block dict
 _BLOCK_CACHE_LOCK = threading.RLock()
 
+
 def _cache_block(block_dict):
     """Add block to cache (called by block sealing)"""
     with _BLOCK_CACHE_LOCK:
-        h = block_dict.get('height')
+        h = block_dict.get("height")
         if h:
             _BLOCK_CACHE[h] = block_dict
 
+
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)
-    
+
     params: [from_height, to_height]
     Negative to_height means "from end" (e.g., [-20, -1] = last 20 blocks)
     """
@@ -3197,17 +3723,21 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
             return _rpc_error(-32602, "params: [from_height, to_height]", rpc_id)
         from_h = int(params[0])
         to_h = int(params[1])
-        
+
         blocks = []
         with _BLOCK_CACHE_LOCK:
-            logger.debug(f"[RPC] getBlockRange cache debug: keys={list(_BLOCK_CACHE.keys())[:5]}")
-            
+            logger.debug(
+                f"[RPC] getBlockRange cache debug: keys={list(_BLOCK_CACHE.keys())[:5]}"
+            )
+
             # Handle negative to_height: "from end"
             if to_h < 0:
                 max_height = max(_BLOCK_CACHE.keys()) if _BLOCK_CACHE else 0
                 to_h = max_height
-                from_h = max(0, to_h + from_h + 1)  # from_h was negative (e.g., -20 means 20 blocks before end)
-            
+                from_h = max(
+                    0, to_h + from_h + 1
+                )  # from_h was negative (e.g., -20 means 20 blocks before end)
+
             if to_h - from_h > 99:
                 to_h = from_h + 99
             if from_h < 0:
@@ -3218,12 +3748,15 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                     blocks.append(_BLOCK_CACHE[h])
 
         logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
-        return _rpc_ok({
-            'blocks': blocks,
-            'count': len(blocks),
-            'from': from_h,
-            'to': to_h,
-        }, rpc_id)
+        return _rpc_ok(
+            {
+                "blocks": blocks,
+                "count": len(blocks),
+                "from": from_h,
+                "to": to_h,
+            },
+            rpc_id,
+        )
 
     except Exception as e:
         logger.warning(f"[RPC-METHOD] qtcl_getBlockRange: {e}")
@@ -3234,7 +3767,7 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
     """qtcl_getTransactions — paginated transaction list.
-    
+
     params: {page: int, per_page: int, type: str, address: str}
     Returns: {transactions: [...], total: int, pages: int, page: int}
     """
@@ -3243,7 +3776,7 @@ def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
         per_page = 50
         tx_type = None
         address = None
-        
+
         if isinstance(params, dict):
             page = int(params.get("page", 0))
             per_page = min(int(params.get("per_page", 50)), 200)
@@ -3255,26 +3788,26 @@ def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
                 per_page = min(int(params[0].get("per_page", 50)), 200)
                 tx_type = params[0].get("type")
                 address = params[0].get("address")
-        
+
         offset = page * per_page
-        
+
         with get_db_cursor() as cur:
             where_clauses = []
             params_list = []
-            if tx_type and tx_type != 'all':
+            if tx_type and tx_type != "all":
                 where_clauses.append("tx_type = %s")
                 params_list.append(tx_type)
             if address:
                 where_clauses.append("(from_address = %s OR to_address = %s)")
                 params_list.extend([address, address])
-            
+
             where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-            
+
             count_sql = f"SELECT COUNT(*) FROM transactions WHERE {where_sql}"
             cur.execute(count_sql, params_list)
             row = cur.fetchone()
             total = row[0] if row else 0
-            
+
             tx_sql = f"""
                 SELECT tx_hash, from_address, to_address, amount,
                        transaction_index, tx_type, status, height,
@@ -3286,32 +3819,34 @@ def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
             """
             cur.execute(tx_sql, params_list + [per_page, offset])
             rows = cur.fetchall()
-            
+
             txs = []
             for r in rows:
-                txs.append({
-                    'tx_id': r[0],
-                    'from_addr': r[1] or '',
-                    'to_addr': r[2] or '',
-                    'amount': int(r[3]) if r[3] is not None else 0,
-                    'tx_index': int(r[4]) if r[4] is not None else 0,
-                    'tx_type': r[5] or 'transfer',
-                    'status': r[6] or 'confirmed',
-                    'height': r[7],
-                    'w_proof': r[8] or '',
-                    'metadata': r[9],
-                })
-            
+                txs.append(
+                    {
+                        "tx_id": r[0],
+                        "from_addr": r[1] or "",
+                        "to_addr": r[2] or "",
+                        "amount": int(r[3]) if r[3] is not None else 0,
+                        "tx_index": int(r[4]) if r[4] is not None else 0,
+                        "tx_type": r[5] or "transfer",
+                        "status": r[6] or "confirmed",
+                        "height": r[7],
+                        "w_proof": r[8] or "",
+                        "metadata": r[9],
+                    }
+                )
+
             pages = max(1, (total + per_page - 1) // per_page) if total > 0 else 1
-            
-            logger.debug(f"[RPC] _rpc_getTransactions: page={page}, per_page={per_page}, total={total}")
-            return _rpc_ok({
-                'transactions': txs,
-                'total': total,
-                'pages': pages,
-                'page': page
-            }, rpc_id)
-            
+
+            logger.debug(
+                f"[RPC] _rpc_getTransactions: page={page}, per_page={per_page}, total={total}"
+            )
+            return _rpc_ok(
+                {"transactions": txs, "total": total, "pages": pages, "page": page},
+                rpc_id,
+            )
+
     except Exception as e:
         logger.exception(f"[RPC] _rpc_getTransactions error: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
@@ -3320,21 +3855,23 @@ def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
 # ═══ RPC TIMEOUT PROTECTION ═══
 _RPC_TIMEOUT_SEC = 5.0
 
+
 def _call_with_timeout(func, timeout_sec=_RPC_TIMEOUT_SEC, default=None):
     """Call function with timeout using threading (non-blocking for RPC safety)."""
     import queue as _q
+
     result_q = _q.Queue()
-    
+
     def _target():
         try:
             result_q.put(("ok", func()))
         except Exception as e:
             result_q.put(("error", e))
-    
+
     thread = threading.Thread(target=_target, daemon=True)
     thread.start()
     thread.join(timeout=timeout_sec)
-    
+
     try:
         status, value = result_q.get_nowait()
         return value if status == "ok" else default
@@ -3348,88 +3885,127 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
     All reads protected with 5s timeouts to prevent RPC hangs.
     """
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}")
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}"
+        )
         result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}")
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}"
+        )
 
         # NOTE: 16³ quantum data flows via SSE stream /rpc/oracle/snapshot, NOT via RPC
         # Clients subscribe to the SSE stream and sample whatever resolution they need
 
         if ORACLE_AVAILABLE and ORACLE is not None:
             try:
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching W-state snapshot (timeout=5s)")
+                logger.debug(
+                    f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching W-state snapshot (timeout=5s)"
+                )
                 w_snap = _call_with_timeout(
-                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
-                    timeout_sec=5.0
+                    lambda: (
+                        ORACLE_W_STATE_MANAGER.get_latest_snapshot()
+                        if ORACLE_W_STATE_MANAGER
+                        else None
+                    ),
+                    timeout_sec=5.0,
                 )
                 if w_snap:
                     result["w_state"] = {
-                        "purity":     getattr(w_snap, "purity",     None),
-                        "entropy":    getattr(w_snap, "entropy",    None),
-                        "coherence":  getattr(w_snap, "coherence",  None),
-                        "fidelity":   getattr(w_snap, "fidelity",   None),
+                        "purity": getattr(w_snap, "purity", None),
+                        "entropy": getattr(w_snap, "entropy", None),
+                        "coherence": getattr(w_snap, "coherence", None),
+                        "fidelity": getattr(w_snap, "fidelity", None),
                         "snapshot_id": getattr(w_snap, "snapshot_id", None),
                     }
-                    logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained")
+                    logger.debug(
+                        f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained"
+                    )
                 else:
-                    logger.warning(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot is None")
+                    logger.warning(
+                        f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot is None"
+                    )
             except Exception as we:
-                logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state error: {we}")
+                logger.exception(
+                    f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state error: {we}"
+                )
                 result["w_state_error"] = str(we)
 
         if LATTICE is not None:
             try:
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching lattice state (timeout=5s)")
+                logger.debug(
+                    f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching lattice state (timeout=5s)"
+                )
                 # Safe access to LATTICE methods with fallback
-                lm = _call_with_timeout(
-                    lambda: LATTICE.get_metrics() if hasattr(LATTICE, 'get_metrics') and callable(LATTICE.get_metrics) else {},
-                    timeout_sec=5.0,
-                    default={}
-                ) or {}
-                ls = _call_with_timeout(
-                    lambda: LATTICE.get_stats() if hasattr(LATTICE, 'get_stats') and callable(LATTICE.get_stats) else {},
-                    timeout_sec=5.0,
-                    default={}
-                ) or {}
-                
+                lm = (
+                    _call_with_timeout(
+                        lambda: (
+                            LATTICE.get_metrics()
+                            if hasattr(LATTICE, "get_metrics")
+                            and callable(LATTICE.get_metrics)
+                            else {}
+                        ),
+                        timeout_sec=5.0,
+                        default={},
+                    )
+                    or {}
+                )
+                ls = (
+                    _call_with_timeout(
+                        lambda: (
+                            LATTICE.get_stats()
+                            if hasattr(LATTICE, "get_stats")
+                            and callable(LATTICE.get_stats)
+                            else {}
+                        ),
+                        timeout_sec=5.0,
+                        default={},
+                    )
+                    or {}
+                )
+
                 # Fallback: use LATTICE attributes directly
                 if not lm:
                     lm = {
-                        "avg_fidelity_100": getattr(LATTICE, 'avg_fidelity_100', 0.0),
-                        "avg_coherence_100": getattr(LATTICE, 'avg_coherence_100', 0.0),
+                        "avg_fidelity_100": getattr(LATTICE, "avg_fidelity_100", 0.0),
+                        "avg_coherence_100": getattr(LATTICE, "avg_coherence_100", 0.0),
                     }
                 if not ls:
                     ls = {
-                        "fidelity": getattr(LATTICE, 'fidelity', 0.0),
-                        "coherence": getattr(LATTICE, 'coherence', 0.0),
-                        "w_state_strength": getattr(LATTICE, 'w_state_strength', 0.0),
-                        "cycle": getattr(LATTICE, 'cycle', 0),
+                        "fidelity": getattr(LATTICE, "fidelity", 0.0),
+                        "coherence": getattr(LATTICE, "coherence", 0.0),
+                        "w_state_strength": getattr(LATTICE, "w_state_strength", 0.0),
+                        "cycle": getattr(LATTICE, "cycle", 0),
                     }
-                
+
                 result["lattice"] = {
-                    "fidelity":         lm.get("avg_fidelity_100", ls.get("fidelity", 0.0)),
-                    "coherence":        lm.get("avg_coherence_100", ls.get("coherence", 0.0)),
+                    "fidelity": lm.get("avg_fidelity_100", ls.get("fidelity", 0.0)),
+                    "coherence": lm.get("avg_coherence_100", ls.get("coherence", 0.0)),
                     "w_state_strength": ls.get("w_state_strength", 0.0),
-                    "cycle":            ls.get("cycle", 0),
+                    "cycle": ls.get("cycle", 0),
                     "avg_fidelity_100": lm.get("avg_fidelity_100", 0.0),
                     "avg_coherence_100": lm.get("avg_coherence_100", 0.0),
                 }
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice metrics obtained")
+                logger.debug(
+                    f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice metrics obtained"
+                )
             except Exception as le:
-                logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
+                logger.exception(
+                    f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}"
+                )
                 result["lattice_error"] = str(le)
 
         # ── 16³ DENSITY MATRIX VIA SSE STREAM ─────────────────────────────────
         # Clients fetch 16³ via /rpc/oracle/snapshot (SSE stream endpoint)
         # No legacy 64³/32³ included in metrics responses
-        
+
         # ── COMPACT W-STATE AMPLITUDES (8 complex doubles = 256 hex chars) ──────
         try:
-            if LATTICE and hasattr(LATTICE, 'current_density_matrix'):
+            if LATTICE and hasattr(LATTICE, "current_density_matrix"):
                 dm = LATTICE.current_density_matrix
                 if dm is not None:
                     # Extract 8 single-excitation amplitudes (indices 1,2,4,8,16,32,64,128)
                     import struct as _ws
+
                     w_indices = [1, 2, 4, 8, 16, 32, 64, 128]
                     w_amplitudes = []
                     for idx in w_indices:
@@ -3439,10 +4015,10 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                         else:
                             re, im = 0.0, 0.0
                         w_amplitudes.append((re, im))
-                    
+
                     # Pack as 8 complex doubles = 128 bytes = 256 hex chars
-                    result["w_state_hex"] = b''.join(
-                        _ws.pack('>dd', re, im) for re, im in w_amplitudes
+                    result["w_state_hex"] = b"".join(
+                        _ws.pack(">dd", re, im) for re, im in w_amplitudes
                     ).hex()
                     result["w_state_size"] = 8  # 8 qubits
         except Exception as wse:
@@ -3451,19 +4027,26 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
         # No fallback — DB is authoritative
         _db_tip = query_latest_block()
-        _bh = int(_db_tip['height']) if _db_tip else 0
-        result['block_height'] = _bh
-        result['height']       = _bh
+        _bh = int(_db_tip["height"]) if _db_tip else 0
+        result["block_height"] = _bh
+        result["height"] = _bh
 
         # ── Inject client tripartite pool consensus fields ─────────────────
         try:
             with _CLIENT_DM_POOL_LOCK:
-                result['client_fused_fidelity'] = round(_client_consensus_fid, 6)
-                result['client_oracle_count']   = _client_pool_count
-                if _client_pool_count > 0 and any(v != 0.0 for v in _client_consensus_dm_re):
+                result["client_fused_fidelity"] = round(_client_consensus_fid, 6)
+                result["client_oracle_count"] = _client_pool_count
+                if _client_pool_count > 0 and any(
+                    v != 0.0 for v in _client_consensus_dm_re
+                ):
                     import struct as _qms
-                    result['client_consensus_dm_hex'] = b''.join(
-                        _qms.pack('>dd', _client_consensus_dm_re[i], _client_consensus_dm_im[i])
+
+                    result["client_consensus_dm_hex"] = b"".join(
+                        _qms.pack(
+                            ">dd",
+                            _client_consensus_dm_re[i],
+                            _client_consensus_dm_im[i],
+                        )
                         for i in range(64)
                     ).hex()
         except Exception as _ce:
@@ -3473,7 +4056,12 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics outer exception: {e}")
-        return _rpc_error(-32603, f"Quantum metrics failed: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(
+            -32603,
+            f"Quantum metrics failed: {str(e)}",
+            rpc_id,
+            {"exception": str(e).__class__.__name__},
+        )
 
 
 def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
@@ -3489,7 +4077,9 @@ def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
       snapshot_id, fetch_time_ns, hermes_ok, hlwe_sig, feeds{price,conf,age_seconds,...}
     """
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getPythPrice called with params={params}, id={rpc_id}")
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getPythPrice called with params={params}, id={rpc_id}"
+        )
         symbols: Optional[list] = None
         if isinstance(params, list):
             if params and isinstance(params[0], list):
@@ -3502,26 +4092,44 @@ def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
 
         po = _get_pyth()
         if po is None:
-            logger.warning(f"[RPC-METHOD] qtcl_getPythPrice: Pyth oracle not initialized")
+            logger.warning(
+                f"[RPC-METHOD] qtcl_getPythPrice: Pyth oracle not initialized"
+            )
             return _rpc_error(-32002, "Pyth oracle not initialized", rpc_id)
 
         try:
-            logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: fetching snapshot for symbols={symbols}")
+            logger.debug(
+                f"[RPC-METHOD] qtcl_getPythPrice: fetching snapshot for symbols={symbols}"
+            )
             snap = po.get_snapshot(symbols)
-            logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: snapshot obtained successfully")
+            logger.debug(
+                f"[RPC-METHOD] qtcl_getPythPrice: snapshot obtained successfully"
+            )
             return _rpc_ok(snap.to_dict(), rpc_id)
         except Exception as pe:
             logger.exception(f"[RPC-METHOD] qtcl_getPythPrice: Pyth fetch error: {pe}")
-            return _rpc_error(-32002, f"Pyth fetch failed: {str(pe)}", rpc_id, {"exception": str(pe).__class__.__name__})
+            return _rpc_error(
+                -32002,
+                f"Pyth fetch failed: {str(pe)}",
+                rpc_id,
+                {"exception": str(pe).__class__.__name__},
+            )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getPythPrice outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(
+            -32603,
+            f"Internal error: {str(e)}",
+            rpc_id,
+            {"exception": str(e).__class__.__name__},
+        )
 
 
 def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMempoolStats — mempool depth and fee percentiles."""
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats called with params={params}, id={rpc_id}")
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getMempoolStats called with params={params}, id={rpc_id}"
+        )
         # Walk resolution chain: module-level MEMPOOL → globals.get_mempool() → mempool module singleton
         mp = None
         _srv_globals = sys.modules[__name__].__dict__
@@ -3529,27 +4137,49 @@ def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
         if mp is None:
             try:
                 import globals as _g
+
                 _gf = getattr(_g, "get_mempool", None)
-                if callable(_gf): mp = _gf()
-            except Exception: pass
+                if callable(_gf):
+                    mp = _gf()
+            except Exception:
+                pass
         if mp is None:
             try:
                 import mempool as _mp_mod
-                mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(_mp_mod, "_MEMPOOL_INSTANCE", None)
-            except Exception: pass
+
+                mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(
+                    _mp_mod, "_MEMPOOL_INSTANCE", None
+                )
+            except Exception:
+                pass
         if mp is None:
             logger.debug("[RPC-METHOD] qtcl_getMempoolStats: mempool not available yet")
-            return _rpc_ok({"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id)
+            return _rpc_ok(
+                {"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id
+            )
         try:
-            stats = mp.get_stats() if hasattr(mp, "get_stats") else {"depth": getattr(mp, "size", lambda: 0)()}
+            stats = (
+                mp.get_stats()
+                if hasattr(mp, "get_stats")
+                else {"depth": getattr(mp, "size", lambda: 0)()}
+            )
             logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats success")
             return _rpc_ok(stats, rpc_id)
         except Exception as me:
-            logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats: get_stats error: {me}")
-            return _rpc_error(-32603, f"Mempool stats failed: {str(me)}", rpc_id, {"exception": type(me).__name__})
+            logger.exception(
+                f"[RPC-METHOD] qtcl_getMempoolStats: get_stats error: {me}"
+            )
+            return _rpc_error(
+                -32603,
+                f"Mempool stats failed: {str(me)}",
+                rpc_id,
+                {"exception": type(me).__name__},
+            )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+        return _rpc_error(
+            -32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__}
+        )
 
 
 def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
@@ -3557,23 +4187,25 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
     try:
         limit = 50
         if isinstance(params, list) and params:
-            try: limit = int(params[0])
-            except (ValueError, TypeError): limit = 50
+            try:
+                limit = int(params[0])
+            except (ValueError, TypeError):
+                limit = 50
         elif isinstance(params, dict):
-            try: limit = int(params.get("limit", 50))
-            except (ValueError, TypeError): limit = 50
+            try:
+                limit = int(params.get("limit", 50))
+            except (ValueError, TypeError):
+                limit = 50
         limit = min(max(int(limit), 1), 200)
-        
+
         # Return empty peer list immediately — no DB
-        return _rpc_ok({
-            'peers': [],
-            'count': 0,
-            'timestamp': time.time()
-        }, rpc_id)
-        
+        return _rpc_ok({"peers": [], "count": 0, "timestamp": time.time()}, rpc_id)
+
     except Exception as e:
         logger.debug(f"[RPC-METHOD] qtcl_getPeers: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
+
+
 def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
     try:
         if isinstance(params, list):
@@ -3603,7 +4235,8 @@ def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
                         device_id     TEXT        DEFAULT ''
                     )
                 """)
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT node_id, external_addr, pubkey_hash, chain_height,
                            last_seen, capabilities, ban_score, mac_address, device_id, caller_ip
                     FROM   peer_registry
@@ -3612,14 +4245,20 @@ def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
                       AND  ban_score < 100
                     ORDER  BY chain_height DESC, last_seen DESC
                     LIMIT  50
-                """, (caller_ip,))
+                """,
+                    (caller_ip,),
+                )
                 rows = cur.fetchall()
                 if rows:
                     cols = [d[0] for d in cur.description]
                     for row in rows:
                         r = dict(zip(cols, row))
                         _ls = r.get("last_seen")
-                        r["last_seen"] = _ls.timestamp() if hasattr(_ls, "timestamp") else (float(_ls) if _ls else 0.0)
+                        r["last_seen"] = (
+                            _ls.timestamp()
+                            if hasattr(_ls, "timestamp")
+                            else (float(_ls) if _ls else 0.0)
+                        )
                         if r.get("mac_address", "").lower() != my_mac:
                             peers.append(r)
         except Exception as _dbe:
@@ -3627,7 +4266,10 @@ def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
         if not peers:
             with _LIVE_PEERS_LOCK:
                 for nid, p in _LIVE_PEERS_CACHE.items():
-                    if p.get("caller_ip") == caller_ip and p.get("mac_address", "").lower() != my_mac:
+                    if (
+                        p.get("caller_ip") == caller_ip
+                        and p.get("mac_address", "").lower() != my_mac
+                    ):
                         _pc = dict(p)
                         # Normalise last_seen to float timestamp for consistent client parsing
                         _ls = _pc.get("last_seen", 0)
@@ -3636,15 +4278,19 @@ def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
                         elif not isinstance(_ls, (int, float)):
                             _pc["last_seen"] = 0.0
                         peers.append(_pc)
-        return _rpc_ok({"peers": peers, "count": len(peers), "nat_group": caller_ip}, rpc_id)
+        return _rpc_ok(
+            {"peers": peers, "count": len(peers), "nat_group": caller_ip}, rpc_id
+        )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getPeersByNatGroup exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+        return _rpc_error(
+            -32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__}
+        )
 
 
 # In-process peer cache (survives between requests, cleared on restart — DB is authoritative)
 _LIVE_PEERS_CACHE: Dict[str, dict] = {}
-_LIVE_PEERS_LOCK  = threading.Lock()
+_LIVE_PEERS_LOCK = threading.Lock()
 
 
 def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
@@ -3663,16 +4309,24 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
             return _rpc_error(-32602, "Invalid params: object expected", rpc_id)
 
         external_addr = str(params.get("external_addr") or "").strip()
-        node_id       = str(params.get("node_id") or "").strip().lower()
-        pubkey_b64    = str(params.get("pubkey") or "").strip()
-        chain_height  = int(params.get("chain_height") or 0)
-        mac_address   = str(params.get("mac_address") or "").strip().lower()
-        device_id     = str(params.get("device_id") or "").strip().lower()
+        node_id = str(params.get("node_id") or "").strip().lower()
+        pubkey_b64 = str(params.get("pubkey") or "").strip()
+        chain_height = int(params.get("chain_height") or 0)
+        mac_address = str(params.get("mac_address") or "").strip().lower()
+        device_id = str(params.get("device_id") or "").strip().lower()
 
         if not external_addr:
             return _rpc_error(-32602, "external_addr required", rpc_id)
-        if not node_id or len(node_id) != 64 or not all(c in "0123456789abcdef" for c in node_id):
-            return _rpc_error(-32602, "node_id must be 64 lowercase hex chars (SHA-256 of pubkey)", rpc_id)
+        if (
+            not node_id
+            or len(node_id) != 64
+            or not all(c in "0123456789abcdef" for c in node_id)
+        ):
+            return _rpc_error(
+                -32602,
+                "node_id must be 64 lowercase hex chars (SHA-256 of pubkey)",
+                rpc_id,
+            )
 
         # Derive caller IP from Flask request context (STUN: what address does Koyeb see?)
         try:
@@ -3680,7 +4334,7 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
             forwarded = request.headers.get("X-Forwarded-For", "")
             real_ip = request.headers.get("X-Real-IP", "")
             cf_ip = request.headers.get("CF-Connecting-IP", "")
-            
+
             if cf_ip:
                 caller_ip = cf_ip
             elif real_ip:
@@ -3692,25 +4346,36 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
         except Exception:
             caller_ip = "127.0.0.1"
 
-        pubkey_hash = hashlib.sha256(pubkey_b64.encode()).hexdigest()[:32] if pubkey_b64 else node_id[:32]
+        pubkey_hash = (
+            hashlib.sha256(pubkey_b64.encode()).hexdigest()[:32]
+            if pubkey_b64
+            else node_id[:32]
+        )
 
         # ── Device fingerprinting (NAT:MAC:Fingerprint chain) ───────────────────
-        # Pair NAT (caller_ip) with reported external IP, reported MAC and DeviceID 
+        # Pair NAT (caller_ip) with reported external IP, reported MAC and DeviceID
         # to identify unique hardware even if node_id (wallet key) rotates.
         # Reported IP helps distinguish multiple nodes behind the same NAT.
-        reported_ip = external_addr.split(":")[0] if ":" in external_addr else external_addr
-        fp_payload = f"NAT:{caller_ip}|REP:{reported_ip}|MAC:{mac_address}|DEV:{device_id}"
+        reported_ip = (
+            external_addr.split(":")[0] if ":" in external_addr else external_addr
+        )
+        fp_payload = (
+            f"NAT:{caller_ip}|REP:{reported_ip}|MAC:{mac_address}|DEV:{device_id}"
+        )
         fingerprint = hashlib.sha256(fp_payload.encode()).hexdigest()
 
         # Debug pairing details
-        logger.debug(f"[P2P] Fingerprint details — NAT: {caller_ip}, REP: {reported_ip}, MAC: {mac_address}, DEV: {device_id}")
+        logger.debug(
+            f"[P2P] Fingerprint details — NAT: {caller_ip}, REP: {reported_ip}, MAC: {mac_address}, DEV: {device_id}"
+        )
 
         # Upsert into peer_registry — uses separate cursors to ensure one failure doesn't abort the entire registration
         try:
             _lazy_ensure_peer_registry()
             # 1. Main Registry Update
             with get_db_cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO peer_registry
                         (node_id, external_addr, pubkey_hash, chain_height, last_seen, caller_ip, mac_address, device_id, fingerprint)
                     VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, %s)
@@ -3723,12 +4388,24 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                         mac_address   = EXCLUDED.mac_address,
                         device_id     = EXCLUDED.device_id,
                         fingerprint   = EXCLUDED.fingerprint
-                """, (node_id, external_addr, pubkey_hash, chain_height, caller_ip, mac_address, device_id, fingerprint))
-            
+                """,
+                    (
+                        node_id,
+                        external_addr,
+                        pubkey_hash,
+                        chain_height,
+                        caller_ip,
+                        mac_address,
+                        device_id,
+                        fingerprint,
+                    ),
+                )
+
             # 2. Device Chain Update (Isolated)
             try:
                 with get_db_cursor() as cur:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         INSERT INTO peer_devices
                             (fingerprint, node_id, last_caller_ip, mac_address, device_id, last_seen)
                         VALUES (%s, %s, %s, %s, %s, NOW())
@@ -3738,7 +4415,9 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                             mac_address    = EXCLUDED.mac_address,
                             device_id      = EXCLUDED.device_id,
                             last_seen      = NOW()
-                    """, (fingerprint, node_id, caller_ip, mac_address, device_id))
+                    """,
+                        (fingerprint, node_id, caller_ip, mac_address, device_id),
+                    )
             except Exception as _fpe:
                 logger.debug(f"[P2P] peer_devices update skipped: {_fpe}")
         except Exception as _dbe:
@@ -3748,29 +4427,36 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
         # Always update in-process cache for immediate availability
         with _LIVE_PEERS_LOCK:
             _LIVE_PEERS_CACHE[node_id] = {
-                "node_id":       node_id,
+                "node_id": node_id,
                 "external_addr": external_addr,
-                "pubkey_hash":   pubkey_hash,
-                "chain_height":  chain_height,
-                "last_seen":     time.time(),
-                "caller_ip":     caller_ip,
-                "mac_address":   mac_address,
-                "device_id":     device_id,
-                "fingerprint":   fingerprint,
-                "ban_score":     0,
+                "pubkey_hash": pubkey_hash,
+                "chain_height": chain_height,
+                "last_seen": time.time(),
+                "caller_ip": caller_ip,
+                "mac_address": mac_address,
+                "device_id": device_id,
+                "fingerprint": fingerprint,
+                "ban_score": 0,
             }
-        logger.info(f"[P2P] ✅ Peer registered: node={node_id[:16]}… addr={external_addr} h={chain_height} fp={fingerprint[:12]}…")
-        return _rpc_ok({
-            "registered": True, 
-            "node_id": node_id, 
-            "external_addr": external_addr, 
-            "caller_ip": caller_ip,
-            "fingerprint": fingerprint,
-            "nat_paired": True
-        }, rpc_id)
+        logger.info(
+            f"[P2P] ✅ Peer registered: node={node_id[:16]}… addr={external_addr} h={chain_height} fp={fingerprint[:12]}…"
+        )
+        return _rpc_ok(
+            {
+                "registered": True,
+                "node_id": node_id,
+                "external_addr": external_addr,
+                "caller_ip": caller_ip,
+                "fingerprint": fingerprint,
+                "nat_paired": True,
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_registerPeer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+        return _rpc_error(
+            -32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__}
+        )
 
 
 def _rpc_getDeviceChain(params: Any, rpc_id: Any) -> dict:
@@ -3780,16 +4466,21 @@ def _rpc_getDeviceChain(params: Any, rpc_id: Any) -> dict:
             params = params[0]
         search = str(params.get("search") or "").strip()
         if not search:
-            return _rpc_error(-32602, "search (node_id or fingerprint) required", rpc_id)
-        
+            return _rpc_error(
+                -32602, "search (node_id or fingerprint) required", rpc_id
+            )
+
         devices = []
         with get_db_cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT fingerprint, node_id, last_caller_ip, mac_address, device_id, first_seen, last_seen, trust_score
                 FROM   peer_devices
                 WHERE  node_id = %s OR fingerprint = %s
                 ORDER  BY last_seen DESC
-            """, (search, search))
+            """,
+                (search, search),
+            )
             rows = cur.fetchall()
             if rows:
                 cols = [d[0] for d in cur.description]
@@ -3800,7 +4491,7 @@ def _rpc_getDeviceChain(params: Any, rpc_id: Any) -> dict:
                         if hasattr(r[k], "isoformat"):
                             r[k] = r[k].isoformat()
                     devices.append(r)
-        
+
         return _rpc_ok({"devices": devices, "count": len(devices)}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getDeviceChain exception: {e}")
@@ -3820,7 +4511,7 @@ def _rpc_getMyAddr(params: Any, rpc_id: Any) -> dict:
             forwarded = request.headers.get("X-Forwarded-For", "")
             real_ip = request.headers.get("X-Real-IP", "")
             cf_ip = request.headers.get("CF-Connecting-IP", "")
-            
+
             if cf_ip:
                 observed_ip = cf_ip
             elif real_ip:
@@ -3832,38 +4523,53 @@ def _rpc_getMyAddr(params: Any, rpc_id: Any) -> dict:
         except Exception:
             observed_ip = "unknown"
         p2p_port = int(os.environ.get("P2P_PORT", "9091"))
-        return _rpc_ok({
-            "ip":            observed_ip,
-            "port":          p2p_port,
-            "external_addr": f"{observed_ip}:{p2p_port}",
-        }, rpc_id)
+        return _rpc_ok(
+            {
+                "ip": observed_ip,
+                "port": p2p_port,
+                "external_addr": f"{observed_ip}:{p2p_port}",
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getMyAddr exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+        return _rpc_error(
+            -32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__}
+        )
 
 
 def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
     """qtcl_getHealth — full system health vector."""
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getHealth called with params={params}, id={rpc_id}")
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getHealth called with params={params}, id={rpc_id}"
+        )
         from oracle import PYTH_ORACLE as _po
-        logger.debug(f"[RPC-METHOD] qtcl_getHealth: oracle_ready={ORACLE_AVAILABLE}, lattice_ready={LATTICE is not None}, pyth_ready={_po is not None}")
+
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getHealth: oracle_ready={ORACLE_AVAILABLE}, lattice_ready={LATTICE is not None}, pyth_ready={_po is not None}"
+        )
         result = {
-            "status":           "ok",
-            "ts":               time.time(),
-            "uptime_s":         round(time.time() - _SERVER_START_TIME, 1),
-            "oracle_ready":     ORACLE_AVAILABLE,
-            "lattice_ready":    LATTICE is not None,
-            "pyth_ready":       _po is not None,
-            "pyth_stats":       _po.stats() if _po else {},
-            "jsonrpc_version":  _JSONRPC_VERSION,
-            "qtcl_server":      "v6",
+            "status": "ok",
+            "ts": time.time(),
+            "uptime_s": round(time.time() - _SERVER_START_TIME, 1),
+            "oracle_ready": ORACLE_AVAILABLE,
+            "lattice_ready": LATTICE is not None,
+            "pyth_ready": _po is not None,
+            "pyth_stats": _po.stats() if _po else {},
+            "jsonrpc_version": _JSONRPC_VERSION,
+            "qtcl_server": "v6",
         }
         logger.debug(f"[RPC-METHOD] qtcl_getHealth success")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getHealth exception: {e}")
-        return _rpc_error(-32603, f"Health check failed: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(
+            -32603,
+            f"Health check failed: {str(e)}",
+            rpc_id,
+            {"exception": str(e).__class__.__name__},
+        )
 
 
 def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
@@ -3876,25 +4582,45 @@ def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
     Returns: {oracles[], total, confirmed_count, limit, offset}
     """
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry called with params={params}, id={rpc_id}")
-        p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
-        mode_filter    = str(p.get('mode', ''))
-        confirmed_only = bool(p.get('confirmed_only', False))
-        limit          = min(int(p.get('limit',  100)), 500)
-        offset         = int(p.get('offset', 0))
-        logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry: mode={mode_filter}, confirmed_only={confirmed_only}, limit={limit}, offset={offset}")
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getOracleRegistry called with params={params}, id={rpc_id}"
+        )
+        p = (
+            params
+            if isinstance(params, dict)
+            else (
+                params[0]
+                if isinstance(params, list) and params and isinstance(params[0], dict)
+                else {}
+            )
+        )
+        mode_filter = str(p.get("mode", ""))
+        confirmed_only = bool(p.get("confirmed_only", False))
+        limit = min(int(p.get("limit", 100)), 500)
+        offset = int(p.get("offset", 0))
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getOracleRegistry: mode={mode_filter}, confirmed_only={confirmed_only}, limit={limit}, offset={offset}"
+        )
         try:
             _lazy_ensure_oracle_registry()
             where_clauses: list = []
-            qparams:       list = []
+            qparams: list = []
             if mode_filter:
-                where_clauses.append("mode = %s"); qparams.append(mode_filter)
+                where_clauses.append("mode = %s")
+                qparams.append(mode_filter)
             if confirmed_only:
-                where_clauses.append("reg_tx_hash != '' AND reg_tx_hash != 'gossip_pending'")
-            where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-            logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry: executing query with where_sql={where_sql}")
+                where_clauses.append(
+                    "reg_tx_hash != '' AND reg_tx_hash != 'gossip_pending'"
+                )
+            where_sql = (
+                ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            )
+            logger.debug(
+                f"[RPC-METHOD] qtcl_getOracleRegistry: executing query with where_sql={where_sql}"
+            )
             with get_db_cursor() as cur:
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     SELECT oracle_id, oracle_url, oracle_address, is_primary,
                            last_seen, block_height, peer_count,
                            wallet_address, oracle_pub_key, cert_sig,
@@ -3902,37 +4628,67 @@ def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
                     FROM   oracle_registry {where_sql}
                     ORDER  BY registered_at DESC, last_seen DESC
                     LIMIT  %s OFFSET %s
-                """, qparams + [limit, offset])
+                """,
+                    qparams + [limit, offset],
+                )
                 rows = cur.fetchall()
-                cur.execute(f"SELECT COUNT(*) FROM oracle_registry {where_sql}", qparams)
+                cur.execute(
+                    f"SELECT COUNT(*) FROM oracle_registry {where_sql}", qparams
+                )
                 total = cur.fetchone()[0]
-                logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry: fetched {len(rows)} rows, total={total}")
-            oracles = [{
-                'oracle_id'     : r[0],  'oracle_url'    : r[1],
-                'oracle_address': r[2],  'is_primary'    : r[3],
-                'last_seen'     : _iso(r[4]),  'block_height'  : r[5],
-                'peer_count'    : r[6],  'wallet_address': r[7],
-                'oracle_pub_key': r[8],  'cert_sig'      : r[9],
-                'mode'          : r[10], 'ip_hint'       : r[11],
-                'reg_tx_hash'   : r[12], 'registered_at' : _iso(r[13]),
-                'created_at'    : _iso(r[14]),
-                'on_chain'      : bool(r[12] and r[12] not in ('', 'gossip_pending')),
-            } for r in rows]
+                logger.debug(
+                    f"[RPC-METHOD] qtcl_getOracleRegistry: fetched {len(rows)} rows, total={total}"
+                )
+            oracles = [
+                {
+                    "oracle_id": r[0],
+                    "oracle_url": r[1],
+                    "oracle_address": r[2],
+                    "is_primary": r[3],
+                    "last_seen": _iso(r[4]),
+                    "block_height": r[5],
+                    "peer_count": r[6],
+                    "wallet_address": r[7],
+                    "oracle_pub_key": r[8],
+                    "cert_sig": r[9],
+                    "mode": r[10],
+                    "ip_hint": r[11],
+                    "reg_tx_hash": r[12],
+                    "registered_at": _iso(r[13]),
+                    "created_at": _iso(r[14]),
+                    "on_chain": bool(r[12] and r[12] not in ("", "gossip_pending")),
+                }
+                for r in rows
+            ]
             result = {
-                'oracles'        : oracles,
-                'total'          : total,
-                'confirmed_count': sum(1 for o in oracles if o['on_chain']),
-                'limit'          : limit,
-                'offset'         : offset,
+                "oracles": oracles,
+                "total": total,
+                "confirmed_count": sum(1 for o in oracles if o["on_chain"]),
+                "limit": limit,
+                "offset": offset,
             }
-            logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry success: {len(oracles)} oracles returned")
+            logger.debug(
+                f"[RPC-METHOD] qtcl_getOracleRegistry success: {len(oracles)} oracles returned"
+            )
             return _rpc_ok(result, rpc_id)
         except Exception as re:
-            logger.exception(f"[RPC-METHOD] qtcl_getOracleRegistry: registry error: {re}")
-            return _rpc_error(-32603, f"Oracle registry query failed: {str(re)}", rpc_id, {"exception": str(re).__class__.__name__})
+            logger.exception(
+                f"[RPC-METHOD] qtcl_getOracleRegistry: registry error: {re}"
+            )
+            return _rpc_error(
+                -32603,
+                f"Oracle registry query failed: {str(re)}",
+                rpc_id,
+                {"exception": str(re).__class__.__name__},
+            )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getOracleRegistry outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(
+            -32603,
+            f"Internal error: {str(e)}",
+            rpc_id,
+            {"exception": str(e).__class__.__name__},
+        )
 
 
 def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
@@ -3940,17 +4696,18 @@ def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
     Params: [oracle_addr] or {oracle_addr: string}
     Returns: full oracle_registry row or {registered: false} if unknown.
     """
-    oracle_addr = ''
+    oracle_addr = ""
     if isinstance(params, list) and params:
         oracle_addr = str(params[0])
     elif isinstance(params, dict):
-        oracle_addr = str(params.get('oracle_addr', params.get('address', '')))
+        oracle_addr = str(params.get("oracle_addr", params.get("address", "")))
     if not oracle_addr:
         return _rpc_error(-32602, "oracle_addr required", rpc_id)
     try:
         _lazy_ensure_oracle_registry()
         with get_db_cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT oracle_id, oracle_url, oracle_address, is_primary,
                        last_seen, block_height, peer_count,
                        wallet_address, oracle_pub_key, cert_sig, cert_auth_tag,
@@ -3958,23 +4715,36 @@ def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
                 FROM   oracle_registry
                 WHERE  oracle_id = %s OR oracle_address = %s
                 LIMIT  1
-            """, (oracle_addr, oracle_addr))
+            """,
+                (oracle_addr, oracle_addr),
+            )
             r = cur.fetchone()
         if not r:
-            return _rpc_ok({'registered': False, 'oracle_addr': oracle_addr}, rpc_id)
-        on_chain = bool(r[13] and r[13] not in ('', 'gossip_pending'))
-        return _rpc_ok({
-            'registered'    : True,
-            'on_chain'      : on_chain,
-            'oracle_id'     : r[0],  'oracle_url'    : r[1],
-            'oracle_address': r[2],  'is_primary'    : r[3],
-            'last_seen'     : _iso(r[4]),  'block_height'  : r[5],
-            'peer_count'    : r[6],  'wallet_address': r[7],
-            'oracle_pub_key': r[8],  'cert_sig'      : r[9],
-            'cert_auth_tag' : r[10], 'mode'          : r[11],
-            'ip_hint'       : r[12], 'reg_tx_hash'   : r[13],
-            'registered_at' : _iso(r[14]), 'created_at': _iso(r[15]),
-        }, rpc_id)
+            return _rpc_ok({"registered": False, "oracle_addr": oracle_addr}, rpc_id)
+        on_chain = bool(r[13] and r[13] not in ("", "gossip_pending"))
+        return _rpc_ok(
+            {
+                "registered": True,
+                "on_chain": on_chain,
+                "oracle_id": r[0],
+                "oracle_url": r[1],
+                "oracle_address": r[2],
+                "is_primary": r[3],
+                "last_seen": _iso(r[4]),
+                "block_height": r[5],
+                "peer_count": r[6],
+                "wallet_address": r[7],
+                "oracle_pub_key": r[8],
+                "cert_sig": r[9],
+                "cert_auth_tag": r[10],
+                "mode": r[11],
+                "ip_hint": r[12],
+                "reg_tx_hash": r[13],
+                "registered_at": _iso(r[14]),
+                "created_at": _iso(r[15]),
+            },
+            rpc_id,
+        )
     except Exception as e:
         return _rpc_error(-32603, f"Oracle record lookup failed: {e}", rpc_id)
 
@@ -3995,82 +4765,105 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
       signature       object  required for mempool — HLWE sig over tx_hash
     Returns: {status, tx_hash, oracle_addr, check_url} or {status: tx_template_issued, tx_template}
     """
-    p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
-    wallet_addr = str(p.get('wallet_address', p.get('from_address', '')))
-    oracle_addr = str(p.get('oracle_addr', wallet_addr))
-    oracle_pub  = str(p.get('oracle_pub',  p.get('public_key', '')))
-    mode        = str(p.get('mode',        'full'))
-    ip_hint     = str(p.get('ip_hint',     ''))
-    action      = str(p.get('action',      'register'))
-    signature   = p.get('signature', {})
-    nonce_val   = int(p.get('nonce', int(time.time_ns() // 1_000_000) % 2**31))
-    ts_ns       = int(p.get('timestamp_ns', time.time_ns()))
+    p = (
+        params
+        if isinstance(params, dict)
+        else (
+            params[0]
+            if isinstance(params, list) and params and isinstance(params[0], dict)
+            else {}
+        )
+    )
+    wallet_addr = str(p.get("wallet_address", p.get("from_address", "")))
+    oracle_addr = str(p.get("oracle_addr", wallet_addr))
+    oracle_pub = str(p.get("oracle_pub", p.get("public_key", "")))
+    mode = str(p.get("mode", "full"))
+    ip_hint = str(p.get("ip_hint", ""))
+    action = str(p.get("action", "register"))
+    signature = p.get("signature", {})
+    nonce_val = int(p.get("nonce", int(time.time_ns() // 1_000_000) % 2**31))
+    ts_ns = int(p.get("timestamp_ns", time.time_ns()))
 
     if not wallet_addr or not oracle_addr:
         return _rpc_error(-32602, "wallet_address and oracle_addr required", rpc_id)
 
     import hashlib as _hh
+
     cert_preimage = f"{oracle_addr}|{wallet_addr}|{oracle_pub}"
-    cert_sig_hex  = str(p.get('cert_sig',      _hh.sha256(cert_preimage.encode()).hexdigest()))
-    cert_auth_tag = str(p.get('cert_auth_tag', _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32]))
+    cert_sig_hex = str(
+        p.get("cert_sig", _hh.sha256(cert_preimage.encode()).hexdigest())
+    )
+    cert_auth_tag = str(
+        p.get("cert_auth_tag", _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32])
+    )
 
     _ora_registry_addr = "qtcl1oracle_registry_000000000000000000000000"
     tx_payload = {
-        'tx_type'     : 'oracle_reg',
-        'from_address': wallet_addr,
-        'to_address'  : _ora_registry_addr,
-        'amount'      : 1,
-        'fee'         : 0.01,
-        'nonce'       : nonce_val,
-        'timestamp_ns': ts_ns,
-        'signature'   : signature,
-        'input_data'  : {
-            'oracle_addr'   : oracle_addr,
-            'oracle_pub'    : oracle_pub,
-            'cert_sig'      : cert_sig_hex,
-            'cert_auth_tag' : cert_auth_tag,
-            'mode'          : mode,
-            'ip_hint'       : ip_hint,
-            'action'        : action,
+        "tx_type": "oracle_reg",
+        "from_address": wallet_addr,
+        "to_address": _ora_registry_addr,
+        "amount": 1,
+        "fee": 0.01,
+        "nonce": nonce_val,
+        "timestamp_ns": ts_ns,
+        "signature": signature,
+        "input_data": {
+            "oracle_addr": oracle_addr,
+            "oracle_pub": oracle_pub,
+            "cert_sig": cert_sig_hex,
+            "cert_auth_tag": cert_auth_tag,
+            "mode": mode,
+            "ip_hint": ip_hint,
+            "action": action,
         },
-        'metadata': {
-            'oracle_addr': oracle_addr,
-            'wallet_addr': wallet_addr,
-            'cert_valid' : True,
-            'action'     : action,
+        "metadata": {
+            "oracle_addr": oracle_addr,
+            "wallet_addr": wallet_addr,
+            "cert_valid": True,
+            "action": action,
         },
     }
 
     # If no signature provided — return template for client to sign
     if not signature:
-        return _rpc_ok({
-            'status'     : 'tx_template_issued',
-            'tx_template': tx_payload,
-            'submit_to'  : 'qtcl_submitOracleReg (with signature) or POST /api/oracle/registry/submit',
-            'note'       : 'Sign tx_template with your HLWE wallet, then resubmit with signature field.',
-        }, rpc_id)
+        return _rpc_ok(
+            {
+                "status": "tx_template_issued",
+                "tx_template": tx_payload,
+                "submit_to": "qtcl_submitOracleReg (with signature) or POST /api/oracle/registry/submit",
+                "note": "Sign tx_template with your HLWE wallet, then resubmit with signature field.",
+            },
+            rpc_id,
+        )
 
     try:
         if MEMPOOL:
             result, reason, accepted_tx = MEMPOOL.accept(tx_payload)
-            if result.value not in ('accepted', 'duplicate'):
-                return _rpc_error(-32001, f"Mempool rejected: {reason} [{result.value}]", rpc_id,
-                                  {"result_code": result.value, "tx_template": tx_payload})
-            tx_hash = accepted_tx.tx_hash if accepted_tx else ''
+            if result.value not in ("accepted", "duplicate"):
+                return _rpc_error(
+                    -32001,
+                    f"Mempool rejected: {reason} [{result.value}]",
+                    rpc_id,
+                    {"result_code": result.value, "tx_template": tx_payload},
+                )
+            tx_hash = accepted_tx.tx_hash if accepted_tx else ""
         else:
             tx_hash = _hh.sha3_256(
                 f"oracle_reg:{wallet_addr}:{oracle_addr}:{ts_ns}".encode()
             ).hexdigest()
 
-        return _rpc_ok({
-            'status'    : 'submitted',
-            'tx_hash'   : tx_hash,
-            'oracle_addr': oracle_addr,
-            'wallet_addr': wallet_addr,
-            'action'    : action,
-            'check_url' : f'/api/oracle/registry/{oracle_addr}',
-            'note'      : 'TX in mempool — confirmed on next block seal.',
-        }, rpc_id)
+        return _rpc_ok(
+            {
+                "status": "submitted",
+                "tx_hash": tx_hash,
+                "oracle_addr": oracle_addr,
+                "wallet_addr": wallet_addr,
+                "action": action,
+                "check_url": f"/api/oracle/registry/{oracle_addr}",
+                "note": "TX in mempool — confirmed on next block seal.",
+            },
+            rpc_id,
+        )
     except Exception as e:
         return _rpc_error(-32603, f"Oracle reg submission failed: {e}", rpc_id)
 
@@ -4085,18 +4878,20 @@ def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
             p = params[0]
         else:
             p = {}
-        since       = float(p.get('since', time.time() - 3600))
-        event_types = str(p.get('types', 'all'))
-        limit       = int(p.get('limit', 100))
-        want_types  = set(event_types.split(',')) if event_types != 'all' else {'all'}
+        since = float(p.get("since", time.time() - 3600))
+        event_types = str(p.get("types", "all"))
+        limit = int(p.get("limit", 100))
+        want_types = set(event_types.split(",")) if event_types != "all" else {"all"}
         events = []
         with _rpc_event_lock:
             for e in list(_rpc_event_log):
-                if e['ts'] >= since and ('all' in want_types or e['type'] in want_types):
+                if e["ts"] >= since and (
+                    "all" in want_types or e["type"] in want_types
+                ):
                     events.append(e)
                     if len(events) >= limit:
                         break
-        return _rpc_ok({'events': events, 'count': len(events)}, rpc_id)
+        return _rpc_ok({"events": events, "count": len(events)}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getEvents exception: {e}")
         return _rpc_error(-32603, f"Events fetch failed: {str(e)}", rpc_id)
@@ -4108,10 +4903,11 @@ def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
 # RPC Methods: Oracle Measurement Broadcast (NEW)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _rpc_registerMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
     """
     Subscribe to oracle measurement broadcasts via RPC push (WebSocket-ready).
-    
+
     Request:
         {
             "jsonrpc": "2.0",
@@ -4123,7 +4919,7 @@ def _rpc_registerMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
             },
             "id": 1
         }
-    
+
     Response (success):
         {
             "jsonrpc": "2.0",
@@ -4139,31 +4935,37 @@ def _rpc_registerMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
     try:
         if not isinstance(params, dict):
             return _rpc_error(-32602, "params must be object", rpc_id)
-        
-        client_id = params.get('client_id')
-        callback_url = params.get('callback_url')
-        burst_mode = params.get('burst_mode', False)
-        
+
+        client_id = params.get("client_id")
+        callback_url = params.get("callback_url")
+        burst_mode = params.get("burst_mode", False)
+
         if not client_id or not callback_url:
             return _rpc_error(-32602, "client_id and callback_url required", rpc_id)
-        
+
         try:
             from oracle import get_oracle_measurement_broadcaster
+
             broadcaster = get_oracle_measurement_broadcaster()
-            success = broadcaster.register_subscriber(client_id, callback_url, burst_mode)
-            
+            success = broadcaster.register_subscriber(
+                client_id, callback_url, burst_mode
+            )
+
             if success:
-                return _rpc_ok({
-                    'registered': True,
-                    'subscriber_id': client_id,
-                    'measurement_frequency': 'burst' if burst_mode else 'throttled',
-                    'broadcast_url': "https://qtcl-blockchain.koyeb.app/rpc/_internal/measurement",
-                }, rpc_id)
+                return _rpc_ok(
+                    {
+                        "registered": True,
+                        "subscriber_id": client_id,
+                        "measurement_frequency": "burst" if burst_mode else "throttled",
+                        "broadcast_url": "https://qtcl-blockchain.koyeb.app/rpc/_internal/measurement",
+                    },
+                    rpc_id,
+                )
             else:
                 return _rpc_error(-32000, "client already subscribed", rpc_id)
         except ImportError:
             return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
-    
+
     except Exception as e:
         return _rpc_error(-32603, f"Subscription failed: {str(e)}", rpc_id)
 
@@ -4173,20 +4975,21 @@ def _rpc_unregisterMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
     try:
         if not isinstance(params, dict):
             return _rpc_error(-32602, "params must be object", rpc_id)
-        
-        client_id = params.get('client_id')
+
+        client_id = params.get("client_id")
         if not client_id:
             return _rpc_error(-32602, "client_id required", rpc_id)
-        
+
         try:
             from oracle import get_oracle_measurement_broadcaster
+
             broadcaster = get_oracle_measurement_broadcaster()
             success = broadcaster.unregister_subscriber(client_id)
-            
-            return _rpc_ok({'unregistered': success}, rpc_id)
+
+            return _rpc_ok({"unregistered": success}, rpc_id)
         except ImportError:
             return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
-    
+
     except Exception as e:
         return _rpc_error(-32603, f"Unsubscribe failed: {str(e)}", rpc_id)
 
@@ -4198,16 +5001,20 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
     """
     try:
         from oracle import get_oracle_measurement_broadcaster
+
         broadcaster = get_oracle_measurement_broadcaster()
         status = broadcaster.get_status()
-        
-        return _rpc_ok({
-            'active_count': status.get('active_subscribers', 0),
-            'is_running': status.get('is_running', False),
-            'metrics': status.get('metrics', {}),
-            'subscribers': status.get('subscribers', []),
-        }, rpc_id)
-    
+
+        return _rpc_ok(
+            {
+                "active_count": status.get("active_subscribers", 0),
+                "is_running": status.get("is_running", False),
+                "metrics": status.get("metrics", {}),
+                "subscribers": status.get("subscribers", []),
+            },
+            rpc_id,
+        )
+
     except ImportError:
         return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
     except Exception as e:
@@ -4240,138 +5047,190 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ❤️ I love you — every agent is proud of its work
 
+
 def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
     """RPC: qtcl_hyp_generateKeypair — HypΓ asymmetric keypair."""
     try:
         engine = _init_hlwe_engine()
         kp = engine.generate_keypair()
-        return _rpc_ok({'private_key': kp.private_key, 'public_key': kp.public_key,
-                        'address': kp.address, 'timestamp': kp.timestamp}, rpc_id)
+        return _rpc_ok(
+            {
+                "private_key": kp.private_key,
+                "public_key": kp.public_key,
+                "address": kp.address,
+                "timestamp": kp.timestamp,
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.error(f"[RPC-HYP-KEYGEN] {e}", exc_info=True)
         return _rpc_error(-32603, f"Keypair generation failed: {str(e)}", rpc_id)
 
+
 def qtcl_hyp_signMessage(params: dict, rpc_id: Any) -> dict:
     """RPC: qtcl_hyp_signMessage — Schnorr-Γ signature."""
     try:
-        message_hex = params.get('message', '')
-        private_key = params.get('private_key', '')
+        message_hex = params.get("message", "")
+        private_key = params.get("private_key", "")
         if not message_hex or not private_key:
             return _rpc_error(-32602, "message and private_key required", rpc_id)
         message_bytes = bytes.fromhex(message_hex)
         engine = _init_hlwe_engine()
         sig = engine.sign_hash(message_bytes, private_key)
-        return _rpc_ok({'signature': sig['signature'], 'challenge': sig['challenge'],
-                        'auth_tag': sig.get('auth_tag', sig['challenge']),
-                        'timestamp': sig['timestamp'], 'valid': True}, rpc_id)
+        return _rpc_ok(
+            {
+                "signature": sig["signature"],
+                "challenge": sig["challenge"],
+                "auth_tag": sig.get("auth_tag", sig["challenge"]),
+                "timestamp": sig["timestamp"],
+                "valid": True,
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.error(f"[RPC-HYP-SIGN] {e}", exc_info=True)
         return _rpc_error(-32603, f"Signature creation failed: {str(e)}", rpc_id)
 
+
 def qtcl_hyp_verifySignature(params: dict, rpc_id: Any) -> dict:
     """RPC: qtcl_hyp_verifySignature — Verify Schnorr-Γ."""
     try:
-        message_hex = params.get('message', '')
-        sig_dict = params.get('signature', {})
-        public_key = params.get('public_key', '')
+        message_hex = params.get("message", "")
+        sig_dict = params.get("signature", {})
+        public_key = params.get("public_key", "")
         if not message_hex or not sig_dict or not public_key:
             return _rpc_error(-32602, "message, signature, public_key required", rpc_id)
         message_bytes = bytes.fromhex(message_hex)
         engine = _init_hlwe_engine()
         valid = engine.verify_signature(message_bytes, sig_dict, public_key)
-        return _rpc_ok({'valid': valid, 'message': 'Valid' if valid else 'Invalid',
-                        'verified_at': datetime.now(timezone.utc).isoformat()}, rpc_id)
+        return _rpc_ok(
+            {
+                "valid": valid,
+                "message": "Valid" if valid else "Invalid",
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.error(f"[RPC-HYP-VERIFY] {e}", exc_info=True)
         return _rpc_error(-32603, f"Verification failed: {str(e)}", rpc_id)
 
+
 def qtcl_hyp_deriveAddress(params: dict, rpc_id: Any) -> dict:
     """RPC: qtcl_hyp_deriveAddress — SHA3-256² address."""
     try:
-        public_key = params.get('public_key', '')
+        public_key = params.get("public_key", "")
         if not public_key:
             return _rpc_error(-32602, "public_key required", rpc_id)
         engine = _init_hlwe_engine()
         address = engine.derive_address(public_key)
-        return _rpc_ok({'address': address, 'length': len(address)}, rpc_id)
+        return _rpc_ok({"address": address, "length": len(address)}, rpc_id)
     except Exception as e:
         logger.error(f"[RPC-HYP-ADDR] {e}", exc_info=True)
         return _rpc_error(-32603, f"Address derivation failed: {str(e)}", rpc_id)
 
+
 def qtcl_hyp_encryptMessage(params: dict, rpc_id: Any) -> dict:
     """RPC: qtcl_hyp_encryptMessage — GeodesicLWE (IND-CPA)."""
     try:
-        plaintext_hex = params.get('plaintext', '')
-        public_key = params.get('public_key', '')
+        plaintext_hex = params.get("plaintext", "")
+        public_key = params.get("public_key", "")
         if not plaintext_hex or not public_key:
             return _rpc_error(-32602, "plaintext and public_key required", rpc_id)
         plaintext_bytes = bytes.fromhex(plaintext_hex)
         engine = _init_hlwe_engine()
         ct_dict = engine.encrypt_message(plaintext_bytes, public_key)
-        return _rpc_ok({'ciphertext': ct_dict.get('ciphertext'),
-                        'message_tag': ct_dict.get('message_tag'),
-                        'plaintext_length': len(plaintext_bytes),
-                        'timestamp': datetime.now(timezone.utc).isoformat()}, rpc_id)
+        return _rpc_ok(
+            {
+                "ciphertext": ct_dict.get("ciphertext"),
+                "message_tag": ct_dict.get("message_tag"),
+                "plaintext_length": len(plaintext_bytes),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.error(f"[RPC-HYP-ENC] {e}", exc_info=True)
         return _rpc_error(-32603, f"Encryption failed: {str(e)}", rpc_id)
 
+
 def qtcl_hyp_decryptMessage(params: dict, rpc_id: Any) -> dict:
     """RPC: qtcl_hyp_decryptMessage — GeodesicLWE decryption."""
     try:
-        ct_dict = params.get('ciphertext', {})
-        private_key = params.get('private_key', '')
+        ct_dict = params.get("ciphertext", {})
+        private_key = params.get("private_key", "")
         if not ct_dict or not private_key:
             return _rpc_error(-32602, "ciphertext and private_key required", rpc_id)
         engine = _init_hlwe_engine()
         plaintext_bytes = engine.decrypt_message(ct_dict, private_key)
-        return _rpc_ok({'plaintext': plaintext_bytes.hex(),
-                        'plaintext_length': len(plaintext_bytes), 'valid': True,
-                        'timestamp': datetime.now(timezone.utc).isoformat()}, rpc_id)
+        return _rpc_ok(
+            {
+                "plaintext": plaintext_bytes.hex(),
+                "plaintext_length": len(plaintext_bytes),
+                "valid": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.error(f"[RPC-HYP-DEC] {e}", exc_info=True)
         return _rpc_error(-32603, f"Decryption failed: {str(e)}", rpc_id)
 
+
 def qtcl_hyp_signBlock(params: dict, rpc_id: Any) -> dict:
     """RPC: qtcl_hyp_signBlock — Block signing via Schnorr-Γ."""
     try:
-        block_dict = params.get('block', {})
-        private_key = params.get('private_key', '')
+        block_dict = params.get("block", {})
+        private_key = params.get("private_key", "")
         if not block_dict or not private_key:
             return _rpc_error(-32602, "block and private_key required", rpc_id)
         engine = _init_hlwe_engine()
         sig = engine.sign_block(block_dict, private_key)
-        return _rpc_ok({'signature': sig['signature'], 'challenge': sig['challenge'],
-                        'signer_address': sig['signer_address'],
-                        'timestamp': sig['timestamp']}, rpc_id)
+        return _rpc_ok(
+            {
+                "signature": sig["signature"],
+                "challenge": sig["challenge"],
+                "signer_address": sig["signer_address"],
+                "timestamp": sig["timestamp"],
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.error(f"[RPC-HYP-SIGN-BLOCK] {e}", exc_info=True)
         return _rpc_error(-32603, f"Block signing failed: {str(e)}", rpc_id)
 
+
 def qtcl_hyp_verifyBlock(params: dict, rpc_id: Any) -> dict:
     """RPC: qtcl_hyp_verifyBlock — Block verification."""
     try:
-        block_dict = params.get('block', {})
-        sig_dict = params.get('signature', {})
-        public_key = params.get('public_key', '')
+        block_dict = params.get("block", {})
+        sig_dict = params.get("signature", {})
+        public_key = params.get("public_key", "")
         if not block_dict or not sig_dict or not public_key:
             return _rpc_error(-32602, "block, signature, public_key required", rpc_id)
         engine = _init_hlwe_engine()
         valid, msg = engine.verify_block(block_dict, sig_dict, public_key)
-        return _rpc_ok({'valid': valid, 'message': msg,
-                        'verified_at': datetime.now(timezone.utc).isoformat()}, rpc_id)
+        return _rpc_ok(
+            {
+                "valid": valid,
+                "message": msg,
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.error(f"[RPC-HYP-VERIFY-BLOCK] {e}", exc_info=True)
         return _rpc_error(-32603, f"Block verification failed: {str(e)}", rpc_id)
 
+
 _POW_SCRATCHPAD_BYTES = 512 * 1024
-_POW_WINDOW_BYTES     = 64
-_POW_MIX_ROUNDS       = 64
-_POW_N_WINDOWS        = _POW_SCRATCHPAD_BYTES // _POW_WINDOW_BYTES   # 8192
-_POW_HDR_FMT          = '>Q I 32s 32s I I 40s 32s'
-_POW_PREFIX           = b"QTCL_POW_v1:"
-_POW_SCRATCHPAD_PFX   = b"QTCL_SCRATCHPAD_v1:"
-_POW_RND_PACKED       = [struct.pack('>I', r) for r in range(_POW_MIX_ROUNDS)]
+_POW_WINDOW_BYTES = 64
+_POW_MIX_ROUNDS = 64
+_POW_N_WINDOWS = _POW_SCRATCHPAD_BYTES // _POW_WINDOW_BYTES  # 8192
+_POW_HDR_FMT = ">Q I 32s 32s I I 40s 32s"
+_POW_PREFIX = b"QTCL_POW_v1:"
+_POW_SCRATCHPAD_PFX = b"QTCL_SCRATCHPAD_v1:"
+_POW_RND_PACKED = [struct.pack(">I", r) for r in range(_POW_MIX_ROUNDS)]
 
 
 def qtcl_pow_hash(
@@ -4389,30 +5248,39 @@ def qtcl_pow_hash(
     client's hot-path inner loop.  Returns the final state as a 64-char hex string.
     """
     import struct as _st
+
     _ph_parent = bytes.fromhex(parent_hash.zfill(64))[:32]
     _ph_merkle = bytes.fromhex(merkle_root.zfill(64))[:32]
-    _ph_miner  = miner_address.encode()[:40].ljust(40, b'\x00')
-    _ph_seed   = w_entropy_seed[:32]
+    _ph_miner = miner_address.encode()[:40].ljust(40, b"\x00")
+    _ph_seed = w_entropy_seed[:32]
 
     # Debug log - DETAILED for troubleshooting
-    logger.info(f"[qtcl_pow_hash] h={height} ts={timestamp_s} diff={difficulty_bits} nonce={nonce}")
+    logger.info(
+        f"[qtcl_pow_hash] h={height} ts={timestamp_s} diff={difficulty_bits} nonce={nonce}"
+    )
     logger.info(f"[qtcl_pow_hash] parent={parent_hash}")
     logger.info(f"[qtcl_pow_hash] merkle={merkle_root}")
     logger.info(f"[qtcl_pow_hash] miner='{miner_address}' → bytes={_ph_miner.hex()}")
     logger.info(f"[qtcl_pow_hash] entropy={w_entropy_seed.hex()}")
 
-    scratchpad = hashlib.shake_256(
-        _POW_SCRATCHPAD_PFX + w_entropy_seed
-    ).digest(_POW_SCRATCHPAD_BYTES)
+    scratchpad = hashlib.shake_256(_POW_SCRATCHPAD_PFX + w_entropy_seed).digest(
+        _POW_SCRATCHPAD_BYTES
+    )
     sp_mv = memoryview(scratchpad)
 
     WIN_OFFSETS = [i * _POW_WINDOW_BYTES for i in range(_POW_N_WINDOWS)]
 
-    hdr = _st.pack(_POW_HDR_FMT,
-                   height, timestamp_s,
-                   _ph_parent, _ph_merkle,
-                   difficulty_bits, nonce,
-                   _ph_miner, _ph_seed)
+    hdr = _st.pack(
+        _POW_HDR_FMT,
+        height,
+        timestamp_s,
+        _ph_parent,
+        _ph_merkle,
+        difficulty_bits,
+        nonce,
+        _ph_miner,
+        _ph_seed,
+    )
     logger.info(f"[qtcl_pow_hash] hdr={hdr.hex()}")
     h0 = hashlib.sha3_256()
     h0.update(_POW_PREFIX)
@@ -4421,9 +5289,9 @@ def qtcl_pow_hash(
     logger.info(f"[qtcl_pow_hash] initial_state={state.hex()}")
 
     for rnd in range(_POW_MIX_ROUNDS):
-        wi = struct.unpack_from('>I', state, 0)[0] % _POW_N_WINDOWS
-        o  = WIN_OFFSETS[wi]
-        h  = hashlib.sha3_256()
+        wi = struct.unpack_from(">I", state, 0)[0] % _POW_N_WINDOWS
+        o = WIN_OFFSETS[wi]
+        h = hashlib.sha3_256()
         h.update(state)
         h.update(sp_mv[o : o + _POW_WINDOW_BYTES])
         h.update(_POW_RND_PACKED[rnd])
@@ -4442,7 +5310,7 @@ def qtcl_pow_verify(
     miner_address: str,
     w_entropy_seed: bytes,
     claimed_hash: str,
-    block_timestamp_s: int = 0,   # alias accepted for compatibility
+    block_timestamp_s: int = 0,  # alias accepted for compatibility
 ) -> tuple:
     """
     Verify a submitted block's PoW.
@@ -4452,7 +5320,10 @@ def qtcl_pow_verify(
     """
     try:
         if not claimed_hash or len(claimed_hash) != 64:
-            return False, f"claimed_hash malformed (len={len(claimed_hash) if claimed_hash else 0})"
+            return (
+                False,
+                f"claimed_hash malformed (len={len(claimed_hash) if claimed_hash else 0})",
+            )
 
         _ts = timestamp_s or block_timestamp_s
         computed = qtcl_pow_hash(
@@ -4468,15 +5339,14 @@ def qtcl_pow_verify(
 
         if computed != claimed_hash.lower():
             return False, (
-                f"hash mismatch: computed={computed[:16]}… "
-                f"claimed={claimed_hash[:16]}…"
+                f"hash mismatch: computed={computed[:16]}… claimed={claimed_hash[:16]}…"
             )
 
-        prefix = '0' * difficulty_bits
+        prefix = "0" * difficulty_bits
         if not computed.startswith(prefix):
             return False, (
                 f"difficulty not met: need {difficulty_bits} leading zeros, "
-                f"got hash={computed[:difficulty_bits+4]}…"
+                f"got hash={computed[: difficulty_bits + 4]}…"
             )
 
         return True, ""
@@ -4488,23 +5358,25 @@ def qtcl_pow_verify(
 def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
     """
     🚀 qtcl_submitBlock — WEB-SCALE IDEMPOTENT BLOCK SUBMISSION
-    
+
     Handles 10,000 concurrent miners with:
     - Atomic compare-and-swap block insertion
     - Idempotent operations (same block submitted multiple times = same result)
     - Rate limiting per miner
     - Circuit breaker for database protection
     - Bloom filter pre-check for instant duplicate detection
-    
+
     Returns immediately with 202 Accepted for non-critical path operations
     """
     _submit_start = time.time()
-    
+
     try:
         # ✅ FAST PATH: Parse and validate parameters
         if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
-            return _rpc_error(-32602, "params[0] must be {header, transactions}", rpc_id)
-        
+            return _rpc_error(
+                -32602, "params[0] must be {header, transactions}", rpc_id
+            )
+
         data = params[0]
         if not isinstance(data, dict):
             return _rpc_error(-32602, "params[0] must be a JSON object", rpc_id)
@@ -4524,79 +5396,95 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         w_state_fidelity = float(hdr.get("w_state_fidelity", 0.0) or 0.0)
         mermin_value = float(hdr.get("mermin_value", 0.0) or 0.0)
         mermin_violated = bool(hdr.get("mermin_violated", False))
-        
+
         # ── 🪣 RATE LIMITING: Prevent miner spam ───────────────────────────
         allowed, remaining = _rate_limiter.allow_request(miner_address)
         if not allowed:
-            logger.warning(f"[RPC-submitBlock] 🪣 RATE LIMITED: miner={miner_address[:16]}…")
-            return _rpc_error(-32020, "Rate limit exceeded. Try again in 1 second.", rpc_id, {
-                "retry_after": 1,
-                "rate_limit": {"tokens": 0, "rate": 10, "burst": 20}
-            })
-        
+            logger.warning(
+                f"[RPC-submitBlock] 🪣 RATE LIMITED: miner={miner_address[:16]}…"
+            )
+            return _rpc_error(
+                -32020,
+                "Rate limit exceeded. Try again in 1 second.",
+                rpc_id,
+                {
+                    "retry_after": 1,
+                    "rate_limit": {"tokens": 0, "rate": 10, "burst": 20},
+                },
+            )
+
         # ── ⚡ CIRCUIT BREAKER: Protect database from overload ────────────
         if not _db_circuit_breaker.can_execute():
             logger.warning(f"[RPC-submitBlock] ⚡ CIRCUIT OPEN: database under load")
-            return _rpc_error(-32021, "Database temporarily unavailable due to high load. Retry with backoff.", rpc_id, {
-                "circuit_state": "open",
-                "retry_after": 30
-            })
+            return _rpc_error(
+                -32021,
+                "Database temporarily unavailable due to high load. Retry with backoff.",
+                rpc_id,
+                {"circuit_state": "open", "retry_after": 30},
+            )
 
         # ── 🔍 BLOOM FILTER PRE-CHECK: Instant duplicate detection ─────────
         # Check bloom filter first (1% false positive rate acceptable)
         # This eliminates 99% of duplicate block DB queries
         # Note: Implementation would check bloom filter here if global bloom available
-        
-        logger.info(f"[RPC-submitBlock] 📥 RECEIVED h={height} hash={block_hash[:16]}… "
-                   f"miner={miner_address[:16]}… rate_remaining={remaining}")
+
+        logger.info(
+            f"[RPC-submitBlock] 📥 RECEIVED h={height} hash={block_hash[:16]}… "
+            f"miner={miner_address[:16]}… rate_remaining={remaining}"
+        )
 
         # ── 🔥 IDEMPOTENT INSERT: Atomic compare-and-swap ────────────────────
         # Use PostgreSQL advisory locks for height-based serialization
         # This prevents race conditions at the same height
-        
+
         _block_result = None
         _existing_hash = None
         _inserted = False
-        
+
         try:
             with get_db_cursor() as cur:
                 # 🎯 CRITICAL: Use advisory lock for this height to prevent races
                 # Lock ID = height (integers can be used directly as lock IDs)
                 cur.execute("SELECT pg_advisory_lock(%s)", (height,))
-                
+
                 try:
                     # 🏎️ FAST CHECK: Does this exact block already exist?
                     cur.execute(
                         "SELECT block_hash, height FROM blocks WHERE block_hash = %s LIMIT 1",
-                        (block_hash,)
+                        (block_hash,),
                     )
                     existing_by_hash = cur.fetchone()
-                    
+
                     if existing_by_hash:
                         # Block already exists - return success immediately
                         existing_height = existing_by_hash[1]
-                        logger.info(f"[RPC-submitBlock] 🔁 IDEMPOTENT: Block h={existing_height} already exists")
-                        _block_result = 'duplicate'
+                        logger.info(
+                            f"[RPC-submitBlock] 🔁 IDEMPOTENT: Block h={existing_height} already exists"
+                        )
+                        _block_result = "duplicate"
                         _inserted = True  # Consider it inserted since it exists
                     else:
                         # Check if DIFFERENT block exists at this height (fork)
                         cur.execute(
                             "SELECT block_hash FROM blocks WHERE height = %s LIMIT 1",
-                            (height,)
+                            (height,),
                         )
                         existing_at_height = cur.fetchone()
-                        
+
                         if existing_at_height:
                             _existing_hash = existing_at_height[0]
                             if _existing_hash != block_hash:
-                                logger.warning(f"[RPC-submitBlock] ⚠️ FORK at h={height}: "
-                                             f"new={block_hash[:16]}… existing={_existing_hash[:16]}…")
-                                _block_result = 'fork'
-                        
+                                logger.warning(
+                                    f"[RPC-submitBlock] ⚠️ FORK at h={height}: "
+                                    f"new={block_hash[:16]}… existing={_existing_hash[:16]}…"
+                                )
+                                _block_result = "fork"
+
                         # No existing block at this height - safe to insert
-                        if _block_result != 'fork':
+                        if _block_result != "fork":
                             # 🚀 ATOMIC INSERT: Use ON CONFLICT for true idempotency
-                            cur.execute("""
+                            cur.execute(
+                                """
                                 INSERT INTO blocks
                                 (height, block_number, block_hash, previous_hash, timestamp,
                                  oracle_w_state_hash, validator_public_key, nonce,
@@ -4605,41 +5493,58 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (height) DO NOTHING
                                 RETURNING block_hash
-                            """, (
-                                height, height, block_hash, parent_hash, timestamp_s,
-                                w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                                miner_address, nonce,
-                                difficulty_bits, w_state_fidelity, merkle_root,
-                                height, max(0, height - 1),
-                                mermin_value, mermin_violated,
-                            ))
-                            
+                            """,
+                                (
+                                    height,
+                                    height,
+                                    block_hash,
+                                    parent_hash,
+                                    timestamp_s,
+                                    w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
+                                    miner_address,
+                                    nonce,
+                                    difficulty_bits,
+                                    w_state_fidelity,
+                                    merkle_root,
+                                    height,
+                                    max(0, height - 1),
+                                    mermin_value,
+                                    mermin_violated,
+                                ),
+                            )
+
                             result = cur.fetchone()
                             if result:
                                 # We inserted successfully
-                                logger.critical(f"[RPC-submitBlock] ✅ INSERTED: h={height} hash={block_hash[:16]}…")
-                                _block_result = 'inserted'
+                                logger.critical(
+                                    f"[RPC-submitBlock] ✅ INSERTED: h={height} hash={block_hash[:16]}…"
+                                )
+                                _block_result = "inserted"
                                 _inserted = True
                             else:
                                 # Another transaction inserted first - check what
                                 cur.execute(
                                     "SELECT block_hash FROM blocks WHERE height = %s",
-                                    (height,)
+                                    (height,),
                                 )
                                 race_result = cur.fetchone()
                                 if race_result:
                                     if race_result[0] == block_hash:
-                                        logger.info(f"[RPC-submitBlock] 🔁 RACE WON: h={height} already in DB")
-                                        _block_result = 'duplicate'
+                                        logger.info(
+                                            f"[RPC-submitBlock] 🔁 RACE WON: h={height} already in DB"
+                                        )
+                                        _block_result = "duplicate"
                                         _inserted = True
                                     else:
-                                        logger.warning(f"[RPC-submitBlock] ⚠️ RACE LOST: h={height} different block inserted")
-                                        _block_result = 'fork'
+                                        logger.warning(
+                                            f"[RPC-submitBlock] ⚠️ RACE LOST: h={height} different block inserted"
+                                        )
+                                        _block_result = "fork"
                                         _existing_hash = race_result[0]
                                 else:
                                     # Shouldn't happen - no block at height
-                                    _block_result = 'error'
-                    
+                                    _block_result = "error"
+
                     # 📝 PERSIST TRANSACTIONS (only if block is in DB)
                     if _inserted and txs:
                         for tx in txs:
@@ -4647,68 +5552,78 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             if not tx_id:
                                 continue
                             try:
-                                cur.execute("""
+                                cur.execute(
+                                    """
                                     INSERT INTO transactions
                                     (tx_hash, from_address, to_address, amount,
                                      tx_type, status, height, updated_at)
                                     VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW())
                                     ON CONFLICT (tx_hash) DO NOTHING
-                                """, (
-                                    tx_id,
-                                    tx.get("from_addr", "0" * 64),
-                                    tx.get("to_addr", ""),
-                                    float(tx.get("amount", 0)),
-                                    tx.get("tx_type", "transfer"),
-                                    height,
-                                ))
+                                """,
+                                    (
+                                        tx_id,
+                                        tx.get("from_addr", "0" * 64),
+                                        tx.get("to_addr", ""),
+                                        float(tx.get("amount", 0)),
+                                        tx.get("tx_type", "transfer"),
+                                        height,
+                                    ),
+                                )
                             except Exception as tx_err:
-                                logger.debug(f"[RPC-submitBlock] TX insert skipped: {tx_err}")
-                    
+                                logger.debug(
+                                    f"[RPC-submitBlock] TX insert skipped: {tx_err}"
+                                )
+
                 finally:
                     # 🔓 ALWAYS release advisory lock
                     cur.execute("SELECT pg_advisory_unlock(%s)", (height,))
-                    
+
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] ❌ DB error: {dbe}")
             _db_circuit_breaker.record_failure()
             return _rpc_error(-32603, f"Database error: {str(dbe)[:100]}", rpc_id)
-        
+
         # Record success for circuit breaker
         _db_circuit_breaker.record_success()
-        
+
         # ── 📤 HANDLE RESULT ──────────────────────────────────────────────────
-        if _block_result == 'fork':
-            return _rpc_error(-32002, 
-                f"Fork rejected: h={height} already has different block", 
-                rpc_id, {"existing_hash": _existing_hash, "your_hash": block_hash})
-        
-        if _block_result == 'error':
+        if _block_result == "fork":
+            return _rpc_error(
+                -32002,
+                f"Fork rejected: h={height} already has different block",
+                rpc_id,
+                {"existing_hash": _existing_hash, "your_hash": block_hash},
+            )
+
+        if _block_result == "error":
             return _rpc_error(-32603, "Block persistence failed", rpc_id)
-        
+
         # ✅ SUCCESS: Block is in database (either we inserted or it existed)
         _elapsed = time.time() - _submit_start
-        logger.info(f"[RPC-submitBlock] ✅ ACCEPTED h={height} in {_elapsed:.3f}s "
-                   f"result={_block_result}")
-        
+        logger.info(
+            f"[RPC-submitBlock] ✅ ACCEPTED h={height} in {_elapsed:.3f}s "
+            f"result={_block_result}"
+        )
+
         # 🏗️ UPDATE HEIGHT CACHE (instant notification to all miners)
         _height_cache.update_height(height, block_hash, difficulty_bits)
-        
+
         # 📡 ASYNC: Broadcast to P2P network (non-blocking)
         try:
             compact_block = {
-                'height': height, 'block_hash': block_hash,
-                'parent_hash': parent_hash, 'miner_address': miner_address,
-                'difficulty_bits': difficulty_bits
+                "height": height,
+                "block_hash": block_hash,
+                "parent_hash": parent_hash,
+                "miner_address": miner_address,
+                "difficulty_bits": difficulty_bits,
             }
             # Fire-and-forget broadcast
             threading.Thread(
-                target=_broadcast_block_to_peers,
-                args=(compact_block,),
-                daemon=True
+                target=_broadcast_block_to_peers, args=(compact_block,), daemon=True
             ).start()
         except Exception as broadcast_err:
             logger.debug(f"[RPC-submitBlock] Broadcast deferred: {broadcast_err}")
-        
+
         # 💰 ASYNC: Settlement and chain state update (queue for background)
         try:
             _resp_reward = 7.20  # Default
@@ -4716,18 +5631,21 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height)
         except:
             pass
-        
+
         # Return success immediately - don't wait for settlement
-        return _rpc_ok({
-            "status": "accepted",
-            "height": height,
-            "block_hash": block_hash,
-            "next_height": height + 1,
-            "miner_reward_qtcl": _resp_reward,
-            "persistence": _block_result,  # 'inserted' or 'duplicate'
-            "processing_time_ms": round(_elapsed * 1000, 2)
-        }, rpc_id)
-        
+        return _rpc_ok(
+            {
+                "status": "accepted",
+                "height": height,
+                "block_hash": block_hash,
+                "next_height": height + 1,
+                "miner_reward_qtcl": _resp_reward,
+                "persistence": _block_result,  # 'inserted' or 'duplicate'
+                "processing_time_ms": round(_elapsed * 1000, 2),
+            },
+            rpc_id,
+        )
+
     except Exception as e:
         logger.exception(f"[RPC-submitBlock] 💥 CRITICAL ERROR: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)[:100]}", rpc_id)
@@ -4736,149 +5654,209 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # CATHEDRAL-GRADE: BLOCK SIGNATURE VERIFICATION (HypΓ Schnorr-Γ)
         # Block MUST be cryptographically signed by miner's private key
         # ═══════════════════════════════════════════════════════════════════════
-        _hyp_sig = data.get('hyp_signature') or data.get('signature', {})
-        _miner_pubkey = data.get('miner_public_key_hex', '')
+        _hyp_sig = data.get("hyp_signature") or data.get("signature", {})
+        _miner_pubkey = data.get("miner_public_key_hex", "")
 
         if _hyp_sig and _miner_pubkey:
-            logger.info(f"[RPC-submitBlock] ✓ Block h={height} includes signature and public key (verification currently disabled)")
+            logger.info(
+                f"[RPC-submitBlock] ✓ Block h={height} includes signature and public key (verification currently disabled)"
+            )
         else:
-            logger.warning(f"[RPC-submitBlock] ⚠️  Block h={height} missing HypΓ signature or public key | has_sig={bool(_hyp_sig)} has_pubkey={bool(_miner_pubkey)}")
+            logger.warning(
+                f"[RPC-submitBlock] ⚠️  Block h={height} missing HypΓ signature or public key | has_sig={bool(_hyp_sig)} has_pubkey={bool(_miner_pubkey)}"
+            )
             # Don't reject — proceed anyway for MVP
 
         # ═══════════════════════════════════════════════════════════════════════
         # TRANSACTION VALIDATION — Bitcoin-style security
         # Every transaction must be cryptographically valid and economically sound
         # ═══════════════════════════════════════════════════════════════════════
-        
+
         # Get reward schedule for validation
         _scheduled_miner_reward = 720.0  # default
         _scheduled_treasury_reward = 80.0  # default
         if TessellationRewardSchedule:
             try:
                 _rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                _scheduled_miner_reward = float(_rewards.get('miner', 720))
-                _scheduled_treasury_reward = float(_rewards.get('treasury', 80))
+                _scheduled_miner_reward = float(_rewards.get("miner", 720))
+                _scheduled_treasury_reward = float(_rewards.get("treasury", 80))
             except Exception as _e:
-                logger.warning(f"[RPC-submitBlock] Could not fetch reward schedule: {_e}")
-        
+                logger.warning(
+                    f"[RPC-submitBlock] Could not fetch reward schedule: {_e}"
+                )
+
         # Calculate expected total coinbase (miner + treasury + fees)
         _total_fees = 0
         _non_coinbase_txs = []
         _coinbase_txs = []
-        
-        for tx in (txs or []):
-            tx_type = tx.get('tx_type', '').lower()
-            if tx_type == 'coinbase':
+
+        for tx in txs or []:
+            tx_type = tx.get("tx_type", "").lower()
+            if tx_type == "coinbase":
                 _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
                 # Sum fees from non-coinbase transactions
-                _fee = tx.get('fee', tx.get('fee_base', 0))
+                _fee = tx.get("fee", tx.get("fee_base", 0))
                 if isinstance(_fee, (float, str)):
                     try:
-                        _total_fees += int(round(float(_fee) * 100))  # convert to base units
+                        _total_fees += int(
+                            round(float(_fee) * 100)
+                        )  # convert to base units
                     except:
                         pass
                 else:
                     _total_fees += int(_fee)
-        
+
         # Validate coinbase structure
         if len(_coinbase_txs) < 1:
-            return _rpc_error(-32003, "Block must have at least one coinbase transaction", rpc_id)
-        
+            return _rpc_error(
+                -32003, "Block must have at least one coinbase transaction", rpc_id
+            )
+
         if len(_coinbase_txs) > 2:
-            return _rpc_error(-32003, f"Block has too many coinbase transactions: {len(_coinbase_txs)} (max 2: miner + treasury)", rpc_id)
-        
+            return _rpc_error(
+                -32003,
+                f"Block has too many coinbase transactions: {len(_coinbase_txs)} (max 2: miner + treasury)",
+                rpc_id,
+            )
+
         # Validate each coinbase amount matches schedule + fees
         _miner_coinbase = None
         _treasury_coinbase = None
-        
+
         for cb in _coinbase_txs:
-            _to = cb.get('to_addr', cb.get('to_address', ''))
-            _amount = float(cb.get('amount', 0))
+            _to = cb.get("to_addr", cb.get("to_address", ""))
+            _amount = float(cb.get("amount", 0))
             _amount_base = int(round(_amount * 100))  # Convert to base units
-            
+
             if _to == miner_address:
                 _miner_coinbase = cb
                 # Miner reward = scheduled reward + 50% of fees
-                _expected_miner = int(round(_scheduled_miner_reward * 100)) + (_total_fees // 2)
-                if abs(_amount_base - _expected_miner) > 1:  # Allow 1 unit rounding tolerance
-                    return _rpc_error(-32003, 
+                _expected_miner = int(round(_scheduled_miner_reward * 100)) + (
+                    _total_fees // 2
+                )
+                if (
+                    abs(_amount_base - _expected_miner) > 1
+                ):  # Allow 1 unit rounding tolerance
+                    return _rpc_error(
+                        -32003,
                         f"Invalid miner coinbase: got {_amount_base} base units, expected {_expected_miner} "
-                        f"(reward={_scheduled_miner_reward}*100 + fees/2={_total_fees//2})", rpc_id)
-            elif TessellationRewardSchedule and _to == TessellationRewardSchedule.TREASURY_ADDRESS:
+                        f"(reward={_scheduled_miner_reward}*100 + fees/2={_total_fees // 2})",
+                        rpc_id,
+                    )
+            elif (
+                TessellationRewardSchedule
+                and _to == TessellationRewardSchedule.TREASURY_ADDRESS
+            ):
                 _treasury_coinbase = cb
                 # Treasury reward = scheduled reward + 50% of fees
-                _expected_treasury = int(round(_scheduled_treasury_reward * 100)) + (_total_fees - (_total_fees // 2))
+                _expected_treasury = int(round(_scheduled_treasury_reward * 100)) + (
+                    _total_fees - (_total_fees // 2)
+                )
                 if abs(_amount_base - _expected_treasury) > 1:
-                    return _rpc_error(-32003,
+                    return _rpc_error(
+                        -32003,
                         f"Invalid treasury coinbase: got {_amount_base} base units, expected {_expected_treasury}",
-                        rpc_id)
+                        rpc_id,
+                    )
             else:
-                return _rpc_error(-32003, f"Invalid coinbase recipient: {_to}. Only miner or treasury allowed.", rpc_id)
-        
+                return _rpc_error(
+                    -32003,
+                    f"Invalid coinbase recipient: {_to}. Only miner or treasury allowed.",
+                    rpc_id,
+                )
+
         # Validate non-coinbase transactions (if any)
         for tx in _non_coinbase_txs:
             # Every non-coinbase must have a valid signature
-            _sig = tx.get('signature') or tx.get('hyp_sig') or tx.get('sig', {})
+            _sig = tx.get("signature") or tx.get("hyp_sig") or tx.get("sig", {})
             if not _sig:
-                return _rpc_error(-32003,
+                return _rpc_error(
+                    -32003,
                     f"Transaction {tx.get('tx_id', '?')[:16]}... has no signature — all non-coinbase txs must be signed",
-                    rpc_id)
+                    rpc_id,
+                )
 
             # ── CATHEDRAL-GRADE: Transaction signature verification ──
-            _tx_pubkey = tx.get('sender_public_key_hex') or tx.get('public_key', '')
-            _tx_id = tx.get('tx_id') or tx.get('tx_hash', '')
+            _tx_pubkey = tx.get("sender_public_key_hex") or tx.get("public_key", "")
+            _tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
             if not _tx_pubkey:
-                return _rpc_error(-32003,
+                return _rpc_error(
+                    -32003,
                     f"Transaction {_tx_id[:16]}... missing sender_public_key_hex for verification",
-                    rpc_id)
+                    rpc_id,
+                )
 
             try:
                 _engine = _init_hlwe_engine()
                 # Hash the transaction ID for signature verification
-                _tx_hash_bytes = bytes.fromhex(_tx_id) if len(_tx_id) == 64 else hashlib.sha3_256(str(_tx_id).encode()).digest()
+                _tx_hash_bytes = (
+                    bytes.fromhex(_tx_id)
+                    if len(_tx_id) == 64
+                    else hashlib.sha3_256(str(_tx_id).encode()).digest()
+                )
                 # Call engine's verify_signature method
                 # It expects (message_hash: bytes, sig: Dict[str, str], public_key: str)
-                _tx_sig_valid = _engine.verify_signature(_tx_hash_bytes, _sig, _tx_pubkey)
+                _tx_sig_valid = _engine.verify_signature(
+                    _tx_hash_bytes, _sig, _tx_pubkey
+                )
                 if not _tx_sig_valid:
-                    logger.error(f"[RPC-submitBlock] ❌ Transaction signature verification FAILED {_tx_id[:16]}...")
+                    logger.error(
+                        f"[RPC-submitBlock] ❌ Transaction signature verification FAILED {_tx_id[:16]}..."
+                    )
                     return _rpc_error(-32003, f"Transaction signature invalid", rpc_id)
-                logger.debug(f"[RPC-submitBlock] ✅ Transaction signature verified: {_tx_id[:16]}...")
+                logger.debug(
+                    f"[RPC-submitBlock] ✅ Transaction signature verified: {_tx_id[:16]}..."
+                )
             except Exception as _tx_verify_err:
-                logger.error(f"[RPC-submitBlock] ❌ Transaction verification error {_tx_id[:16]}...: {_tx_verify_err}")
-                return _rpc_error(-32003, f"Transaction verification failed: {str(_tx_verify_err)}", rpc_id)
-            
+                logger.error(
+                    f"[RPC-submitBlock] ❌ Transaction verification error {_tx_id[:16]}...: {_tx_verify_err}"
+                )
+                return _rpc_error(
+                    -32003,
+                    f"Transaction verification failed: {str(_tx_verify_err)}",
+                    rpc_id,
+                )
+
             # Validate sender has sufficient balance by tracing unspent outputs
-            _from = tx.get('from_addr', tx.get('from_address', ''))
-            _amount = float(tx.get('amount', 0))
-            
+            _from = tx.get("from_addr", tx.get("from_address", ""))
+            _amount = float(tx.get("amount", 0))
+
             # Query sender's confirmed balance from DB
             try:
                 with get_db_cursor() as cur:
                     cur.execute(
                         "SELECT balance FROM wallet_addresses WHERE address = %s",
-                        (_from,)
+                        (_from,),
                     )
                     _row = cur.fetchone()
                     _confirmed_balance = float(_row[0]) if _row else 0.0
-                    
+
                     if _confirmed_balance < _amount:
-                        return _rpc_error(-32003,
+                        return _rpc_error(
+                            -32003,
                             f"Insufficient balance: {_from[:16]}... has {_confirmed_balance:.2f} QTCL, "
                             f"tried to send {_amount:.2f} QTCL",
-                            rpc_id)
+                            rpc_id,
+                        )
             except Exception as _be:
-                logger.warning(f"[RPC-submitBlock] Balance check failed for {_from[:16]}...: {_be}")
+                logger.warning(
+                    f"[RPC-submitBlock] Balance check failed for {_from[:16]}...: {_be}"
+                )
                 # Fail-safe: reject if we can't verify balance
-                return _rpc_error(-32003, f"Could not verify balance for {_from[:16]}...", rpc_id)
-        
-        logger.info(f"[RPC-submitBlock] ✅ Transaction validation passed: {len(_coinbase_txs)} coinbase, {len(_non_coinbase_txs)} transfers, {_total_fees} base units in fees")
+                return _rpc_error(
+                    -32003, f"Could not verify balance for {_from[:16]}...", rpc_id
+                )
+
+        logger.info(
+            f"[RPC-submitBlock] ✅ Transaction validation passed: {len(_coinbase_txs)} coinbase, {len(_non_coinbase_txs)} transfers, {_total_fees} base units in fees"
+        )
 
         # ── Persist block with PROPER conflict handling ─────────────────────────
         _block_insert_result = None  # 'inserted', 'duplicate', 'fork', or 'error'
         _existing_block_hash = None
-        
+
         try:
             with get_db_cursor() as cur:
                 # DEBUG: Log the insert attempt
@@ -4886,57 +5864,82 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     f"[RPC-submitBlock] 🔄 BLOCK INSERT attempt: h={height}, "
                     f"hash={block_hash[:16]}…, parent={parent_hash[:16]}…"
                 )
-                
+
                 # Step 1: Check if block already exists at this height
-                cur.execute("SELECT block_hash FROM blocks WHERE height = %s", (height,))
+                cur.execute(
+                    "SELECT block_hash FROM blocks WHERE height = %s", (height,)
+                )
                 _existing_row = cur.fetchone()
-                
+
                 if _existing_row:
                     _existing_block_hash = _existing_row[0]
                     if _existing_block_hash == block_hash:
                         # TRUE DUPLICATE: Same hash, already accepted
-                        logger.info(f"[RPC-submitBlock] 🔁 TRUE DUPLICATE: h={height} hash={block_hash[:16]}… already in DB")
-                        _block_insert_result = 'duplicate'
+                        logger.info(
+                            f"[RPC-submitBlock] 🔁 TRUE DUPLICATE: h={height} hash={block_hash[:16]}… already in DB"
+                        )
+                        _block_insert_result = "duplicate"
                     else:
                         # FORK ATTEMPT: Different hash at same height
-                        logger.warning(f"[RPC-submitBlock] ⚠️  FORK DETECTED: h={height} new={block_hash[:16]}… existing={_existing_block_hash[:16]}…")
-                        _block_insert_result = 'fork'
+                        logger.warning(
+                            f"[RPC-submitBlock] ⚠️  FORK DETECTED: h={height} new={block_hash[:16]}… existing={_existing_block_hash[:16]}…"
+                        )
+                        _block_insert_result = "fork"
                 else:
                     # Step 2: No existing block - try to insert
-                    cur.execute("""
+                    cur.execute(
+                        """
                         INSERT INTO blocks
                         (height, block_number, block_hash, previous_hash, timestamp,
                          oracle_w_state_hash, validator_public_key, nonce,
                          difficulty, entropy_score, transactions_root,
                          pq_curr, pq_last, mermin_value, mermin_violated)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        height, height, block_hash, parent_hash, timestamp_s,
-                        w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                        miner_address, nonce,
-                        difficulty_bits, w_state_fidelity, merkle_root,
-                        height, max(0, height - 1),
-                        mermin_value, mermin_violated,
-                    ))
-                    
+                    """,
+                        (
+                            height,
+                            height,
+                            block_hash,
+                            parent_hash,
+                            timestamp_s,
+                            w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
+                            miner_address,
+                            nonce,
+                            difficulty_bits,
+                            w_state_fidelity,
+                            merkle_root,
+                            height,
+                            max(0, height - 1),
+                            mermin_value,
+                            mermin_violated,
+                        ),
+                    )
+
                     # Verify insertion worked
-                    cur.execute("SELECT block_hash FROM blocks WHERE height = %s", (height,))
+                    cur.execute(
+                        "SELECT block_hash FROM blocks WHERE height = %s", (height,)
+                    )
                     _verify_row = cur.fetchone()
                     if _verify_row and _verify_row[0] == block_hash:
-                        logger.critical(f"[RPC-submitBlock] ✅ BLOCK INSERTED: h={height} hash={block_hash[:16]}…")
-                        _block_insert_result = 'inserted'
+                        logger.critical(
+                            f"[RPC-submitBlock] ✅ BLOCK INSERTED: h={height} hash={block_hash[:16]}…"
+                        )
+                        _block_insert_result = "inserted"
                     else:
-                        logger.error(f"[RPC-submitBlock] ❌ INSERT FAILED: h={height} not found after insert!")
-                        _block_insert_result = 'error'
-                
+                        logger.error(
+                            f"[RPC-submitBlock] ❌ INSERT FAILED: h={height} not found after insert!"
+                        )
+                        _block_insert_result = "error"
+
                 # Step 3: Persist transactions if block is now in DB (inserted or duplicate)
-                if _block_insert_result in ('inserted', 'duplicate'):
-                    for tx in (txs or []):
+                if _block_insert_result in ("inserted", "duplicate"):
+                    for tx in txs or []:
                         tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
                         if not tx_id:
                             continue
                         try:
-                            cur.execute("""
+                            cur.execute(
+                                """
                                 INSERT INTO transactions
                                 (tx_hash, from_address, to_address, amount,
                                  tx_type, status, height, updated_at)
@@ -4945,123 +5948,163 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                   SET height     = EXCLUDED.height,
                                       status     = 'confirmed',
                                       updated_at = NOW()
-                            """, (
-                                tx_id,
-                                tx.get("from_addr", "0" * 64),
-                                tx.get("to_addr", ""),
-                                float(tx.get("amount", 0)),
-                                tx.get("tx_type", "transfer"),
-                                height,
-                            ))
+                            """,
+                                (
+                                    tx_id,
+                                    tx.get("from_addr", "0" * 64),
+                                    tx.get("to_addr", ""),
+                                    float(tx.get("amount", 0)),
+                                    tx.get("tx_type", "transfer"),
+                                    height,
+                                ),
+                            )
                         except Exception as _tx_err:
-                            logger.debug(f"[RPC-submitBlock] TX insert failed for {tx_id[:16]}: {_tx_err}")
-                            
+                            logger.debug(
+                                f"[RPC-submitBlock] TX insert failed for {tx_id[:16]}: {_tx_err}"
+                            )
+
         except Exception as dbe:
-            logger.exception(f"[RPC-submitBlock] ❌ DB error during block persist: {dbe}")
-            _block_insert_result = 'error'
+            logger.exception(
+                f"[RPC-submitBlock] ❌ DB error during block persist: {dbe}"
+            )
+            _block_insert_result = "error"
 
         # ─────────────────────────────────────────────────────────────────────────
         # CRITICAL PATH COMPLETE — Handle result appropriately
         # ─────────────────────────────────────────────────────────────────────────
 
-        if _block_insert_result == 'fork':
+        if _block_insert_result == "fork":
             # Fork attempt - reject clearly
-            logger.warning(f"[RPC-submitBlock] ❌ REJECTED: Fork detected at h={height}")
-            return _rpc_error(-32002, 
-                f"Fork rejected: Block at h={height} already exists with different hash", 
-                rpc_id,
-                data={"existing_hash": _existing_block_hash}
+            logger.warning(
+                f"[RPC-submitBlock] ❌ REJECTED: Fork detected at h={height}"
             )
-        
-        elif _block_insert_result == 'error':
+            return _rpc_error(
+                -32002,
+                f"Fork rejected: Block at h={height} already exists with different hash",
+                rpc_id,
+                data={"existing_hash": _existing_block_hash},
+            )
+
+        elif _block_insert_result == "error":
             # Database error
             logger.error(f"[RPC-submitBlock] ❌ DATABASE ERROR at h={height}")
             return _rpc_error(-32603, "Database error during block persistence", rpc_id)
-        
-        elif _block_insert_result == 'duplicate':
+
+        elif _block_insert_result == "duplicate":
             # True duplicate - already in DB
-            logger.info(f"[RPC-submitBlock] 🔁 ACCEPTED (duplicate): h={height} already in DB")
-            return _rpc_ok({
-                "status": "accepted",
-                "height": height,
-                "block_hash": block_hash,
-                "next_height": height + 1,
-                "diagnostic": {"note": "Block already in database - accepted"}
-            }, rpc_id)
-        
-        elif _block_insert_result == 'inserted':
+            logger.info(
+                f"[RPC-submitBlock] 🔁 ACCEPTED (duplicate): h={height} already in DB"
+            )
+            return _rpc_ok(
+                {
+                    "status": "accepted",
+                    "height": height,
+                    "block_hash": block_hash,
+                    "next_height": height + 1,
+                    "diagnostic": {"note": "Block already in database - accepted"},
+                },
+                rpc_id,
+            )
+
+        elif _block_insert_result == "inserted":
             # ✅ Block is VERIFIED in database - safe to proceed with async work
-            logger.critical(f"[RPC-submitBlock] ✅ BLOCK CONFIRMED IN DATABASE: h={height} hash={block_hash[:16]}…")
-        
+            logger.critical(
+                f"[RPC-submitBlock] ✅ BLOCK CONFIRMED IN DATABASE: h={height} hash={block_hash[:16]}…"
+            )
+
         else:
             # Unknown state - shouldn't happen
-            logger.error(f"[RPC-submitBlock] ❌ UNKNOWN STATE: h={height} result={_block_insert_result}")
+            logger.error(
+                f"[RPC-submitBlock] ❌ UNKNOWN STATE: h={height} result={_block_insert_result}"
+            )
             return _rpc_error(-32603, "Unknown persistence state", rpc_id)
-        
+
         # ── Broadcast to P2P network ───────────────────────────────────────────
         try:
             # Create compact block announcement
             compact_block = {
-                'height': height,
-                'block_hash': block_hash,
-                'parent_hash': parent_hash,
-                'merkle_root': merkle_root,
-                'timestamp_s': timestamp_s,
-                'nonce': nonce,
-                'difficulty_bits': difficulty_bits,
-                'miner_address': miner_address,
-                'w_entropy_seed': w_entropy_hex,
-                'tx_count': len(txs) if txs else 0,
-                'tx_ids': [tx.get('tx_id', tx.get('tx_hash', '')) for tx in (txs or [])],
-                'total_fees': _total_fees if '_total_fees' in dir() else 0,
+                "height": height,
+                "block_hash": block_hash,
+                "parent_hash": parent_hash,
+                "merkle_root": merkle_root,
+                "timestamp_s": timestamp_s,
+                "nonce": nonce,
+                "difficulty_bits": difficulty_bits,
+                "miner_address": miner_address,
+                "w_entropy_seed": w_entropy_hex,
+                "tx_count": len(txs) if txs else 0,
+                "tx_ids": [
+                    tx.get("tx_id", tx.get("tx_hash", "")) for tx in (txs or [])
+                ],
+                "total_fees": _total_fees if "_total_fees" in dir() else 0,
             }
             # Broadcast via available P2P mechanisms
             _broadcast_block_to_peers(compact_block)
             logger.info(f"[RPC-submitBlock] 📡 Broadcasted h={height} to P2P network")
         except Exception as broadcast_err:
-            logger.warning(f"[RPC-submitBlock] P2P broadcast failed (non-critical): {broadcast_err}")
-        
+            logger.warning(
+                f"[RPC-submitBlock] P2P broadcast failed (non-critical): {broadcast_err}"
+            )
+
         # ── Update chain state immediately ─────────────────────────────────────
         try:
             with get_db_cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO chain_state (state_id, chain_height, head_block_hash, updated_at)
                     VALUES (1, %s, %s, NOW())
                     ON CONFLICT (state_id) DO UPDATE SET
                         chain_height = EXCLUDED.chain_height,
                         head_block_hash = EXCLUDED.head_block_hash,
                         updated_at = NOW()
-                """, (height, block_hash))
+                """,
+                    (height, block_hash),
+                )
             logger.info(f"[RPC-submitBlock] ✅ Chain state updated to h={height}")
         except Exception as cs_err:
             logger.warning(f"[RPC-submitBlock] Chain state update failed: {cs_err}")
 
         # Block was successfully inserted — enqueue settlement and return immediately
         try:
-            _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
+            _resp_reward = (
+                TessellationRewardSchedule.get_miner_reward_qtcl(height)
+                if TessellationRewardSchedule
+                else 7.20
+            )
         except Exception:
             _resp_reward = 7.20
 
         # Enqueue settlement work to background worker (non-blocking)
         try:
-            _BLOCK_SETTLE_Q.put_nowait({
-                'height': height,
-                'block_hash': block_hash,
-                'miner_address': miner_address,
-                'txs': txs or [],
-                'non_coinbase_txs': _non_coinbase_txs,
-                'w_state_fidelity': w_state_fidelity,
-                'difficulty_bits': difficulty_bits,
-                'timestamp_s': timestamp_s,
-            })
+            _BLOCK_SETTLE_Q.put_nowait(
+                {
+                    "height": height,
+                    "block_hash": block_hash,
+                    "miner_address": miner_address,
+                    "txs": txs or [],
+                    "non_coinbase_txs": _non_coinbase_txs,
+                    "w_state_fidelity": w_state_fidelity,
+                    "difficulty_bits": difficulty_bits,
+                    "timestamp_s": timestamp_s,
+                }
+            )
             logger.info(f"[RPC-submitBlock] ✅ Settlement enqueued for h={height}")
         except _queue_mod2.Full:
-            logger.warning(f"[RPC-submitBlock] Settlement queue full—executing synchronous fallback settlement for h={height}")
+            logger.warning(
+                f"[RPC-submitBlock] Settlement queue full—executing synchronous fallback settlement for h={height}"
+            )
             try:
-                _settle_block_rewards(height, block_hash, miner_address, txs or [], _non_coinbase_txs)
-                logger.info(f"[RPC-submitBlock] ✅ Fallback settlement completed synchronously for h={height}")
+                _settle_block_rewards(
+                    height, block_hash, miner_address, txs or [], _non_coinbase_txs
+                )
+                logger.info(
+                    f"[RPC-submitBlock] ✅ Fallback settlement completed synchronously for h={height}"
+                )
             except Exception as sync_err:
-                logger.error(f"[RPC-submitBlock] Fallback settlement failed: {sync_err}", exc_info=True)
+                logger.error(
+                    f"[RPC-submitBlock] Fallback settlement failed: {sync_err}",
+                    exc_info=True,
+                )
         except Exception as eq_err:
             logger.warning(f"[RPC-submitBlock] ⚠️  Settlement enqueue failed: {eq_err}")
 
@@ -5070,20 +6113,25 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… "
             f"miner={miner_address[:16]}… reward={_resp_reward} QTCL (critical path complete)"
         )
-        _resp = _rpc_ok({
-            "status": "accepted",
-            "height": height,
-            "block_hash": block_hash,
-            "difficulty_bits": difficulty_bits,
-            "miner_reward_qtcl": _resp_reward,
-            "next_height": height + 1,  # Signal client to mine next block
-            "diagnostic": {
-                "block_rowcount": _block_rowcount,
-                "persistence_verified": True,
-                "settlement": "async"
-            }
-        }, rpc_id)
-        logger.info(f"[RPC-submitBlock] 📤 RESPONSE: status=accepted reward={_resp_reward}")
+        _resp = _rpc_ok(
+            {
+                "status": "accepted",
+                "height": height,
+                "block_hash": block_hash,
+                "difficulty_bits": difficulty_bits,
+                "miner_reward_qtcl": _resp_reward,
+                "next_height": height + 1,  # Signal client to mine next block
+                "diagnostic": {
+                    "block_rowcount": _block_rowcount,
+                    "persistence_verified": True,
+                    "settlement": "async",
+                },
+            },
+            rpc_id,
+        )
+        logger.info(
+            f"[RPC-submitBlock] 📤 RESPONSE: status=accepted reward={_resp_reward}"
+        )
         return _resp
 
     except Exception as e:
@@ -5093,7 +6141,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
 def _broadcast_block_to_peers(compact_block: dict) -> int:
     """Broadcast a newly accepted block to all connected P2P peers.
-    
+
     Returns number of peers notified.
     """
     try:
@@ -5106,42 +6154,51 @@ def _broadcast_block_to_peers(compact_block: dict) -> int:
                 WHERE last_seen > NOW() - INTERVAL '2 minutes'
             """)
             peers = cur.fetchall()
-        
+
         if not peers:
             logger.debug("[P2P-BROADCAST] No active peers to broadcast to")
             return 0
-        
+
         # Broadcast to each peer via HTTP POST to their /p2p/gossip endpoint
         for node_id, external_addr in peers:
             try:
-                if not external_addr or ':' not in external_addr:
+                if not external_addr or ":" not in external_addr:
                     continue
-                host, port = external_addr.rsplit(':', 1)
+                host, port = external_addr.rsplit(":", 1)
                 gossip_url = f"http://{host}:{port}/p2p/gossip"
-                
+
                 # Send the block as event type 10 (BLOCK_SOLVED_SERVER)
                 payload = {
-                    'event_type': 10,
-                    'data': compact_block,
-                    'timestamp': time.time(),
+                    "event_type": 10,
+                    "data": compact_block,
+                    "timestamp": time.time(),
                 }
-                
+
                 # Non-blocking broadcast - don't wait for response
                 import threading
+
                 threading.Thread(
-                    target=lambda url, pl: requests.post(url, json=pl, timeout=2) if 'requests' in globals() else None,
+                    target=lambda url, pl: (
+                        requests.post(url, json=pl, timeout=2)
+                        if "requests" in globals()
+                        else None
+                    ),
                     args=(gossip_url, payload),
                     daemon=True,
-                    name=f"Broadcast-{node_id[:8]}"
+                    name=f"Broadcast-{node_id[:8]}",
                 ).start()
-                
+
                 peers_notified += 1
             except Exception as _peer_err:
-                logger.debug(f"[P2P-BROADCAST] Failed to notify peer {node_id[:16]}: {_peer_err}")
-        
-        logger.info(f"[P2P-BROADCAST] 📡 Block h={compact_block.get('height')} broadcast to {peers_notified}/{len(peers)} peers")
+                logger.debug(
+                    f"[P2P-BROADCAST] Failed to notify peer {node_id[:16]}: {_peer_err}"
+                )
+
+        logger.info(
+            f"[P2P-BROADCAST] 📡 Block h={compact_block.get('height')} broadcast to {peers_notified}/{len(peers)} peers"
+        )
         return peers_notified
-        
+
     except Exception as e:
         logger.warning(f"[P2P-BROADCAST] Failed: {e}")
         return 0
@@ -5172,28 +6229,35 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
         if not isinstance(params, dict):
             return _rpc_error(-32602, "params must be a dict", rpc_id)
 
-        tensor_hex  = params.get('density_tensor_hex', '')
-        fidelity    = float(params.get('fidelity', 0.0))
-        oracle_addr = str(params.get('oracle_addr', '') or f"anon_{int(time.time())}")
-        node_ip     = str(params.get('node_ip', ''))
-        oracle_type = str(params.get('oracle_type', 'tripartite_client'))
+        tensor_hex = params.get("density_tensor_hex", "")
+        fidelity = float(params.get("fidelity", 0.0))
+        oracle_addr = str(params.get("oracle_addr", "") or f"anon_{int(time.time())}")
+        node_ip = str(params.get("node_ip", ""))
+        oracle_type = str(params.get("oracle_type", "tripartite_client"))
 
         # -- 1. Validate 32³ tensor hex ----------------------------------------
         # 32×32×32 float32 = 32768 floats × 4 bytes = 131072 bytes = 262144 hex
-        _EXPECTED_TENSOR_HEX = 32 * 32 * 32 * 4 * 2   # 262144
+        _EXPECTED_TENSOR_HEX = 32 * 32 * 32 * 4 * 2  # 262144
         if not tensor_hex or len(tensor_hex) != _EXPECTED_TENSOR_HEX:
-            return _rpc_error(-32602,
+            return _rpc_error(
+                -32602,
                 f"density_tensor_hex must be {_EXPECTED_TENSOR_HEX} hex chars "
-                f"(32³ float32); got {len(tensor_hex)}", rpc_id)
+                f"(32³ float32); got {len(tensor_hex)}",
+                rpc_id,
+            )
         try:
             tbytes = bytes.fromhex(tensor_hex)
         except ValueError as _ve:
-            return _rpc_error(-32602, f"density_tensor_hex not valid hex: {_ve}", rpc_id)
+            return _rpc_error(
+                -32602, f"density_tensor_hex not valid hex: {_ve}", rpc_id
+            )
 
         # Sanity: tensor values must be finite, non-negative
         t_arr = np.frombuffer(tbytes, dtype=np.float32).reshape(32, 32, 32)
         if not np.all(np.isfinite(t_arr)) or float(t_arr.min()) < -1e-4:
-            return _rpc_error(-32602, "density_tensor_hex contains invalid values", rpc_id)
+            return _rpc_error(
+                -32602, "density_tensor_hex contains invalid values", rpc_id
+            )
         t_max = float(t_arr.max())
         if t_max < 1e-12:
             return _rpc_error(-32602, "density_tensor_hex is all-zero", rpc_id)
@@ -5203,25 +6267,29 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
         # -- 2 & 3. Upsert into pool, evict oldest if needed ------------------
         with _CLIENT_DM_POOL_LOCK:
             _CLIENT_DM_POOL[oracle_addr] = {
-                'tensor_hex':  tensor_hex,
-                'fidelity':    max(0.0, min(1.0, fidelity)),
-                'ts':          time.time(),
-                'node_ip':     node_ip,
-                'oracle_type': oracle_type,
-                'tensor_dim':  32,
+                "tensor_hex": tensor_hex,
+                "fidelity": max(0.0, min(1.0, fidelity)),
+                "ts": time.time(),
+                "node_ip": node_ip,
+                "oracle_type": oracle_type,
+                "tensor_dim": 32,
             }
             if len(_CLIENT_DM_POOL) > _CLIENT_POOL_MAX:
-                _oldest = min(_CLIENT_DM_POOL, key=lambda k: _CLIENT_DM_POOL[k]['ts'])
+                _oldest = min(_CLIENT_DM_POOL, key=lambda k: _CLIENT_DM_POOL[k]["ts"])
                 del _CLIENT_DM_POOL[_oldest]
 
             # -- 4. Compute pool fidelity average ----------------------------
-            fresh = [v for v in _CLIENT_DM_POOL.values()
-                     if (time.time() - v['ts']) < _CLIENT_DM_STALE_S]
+            fresh = [
+                v
+                for v in _CLIENT_DM_POOL.values()
+                if (time.time() - v["ts"]) < _CLIENT_DM_STALE_S
+            ]
             _pool_size = len(fresh)
-            _cons_fid  = (sum(v['fidelity'] for v in fresh) / _pool_size
-                          if _pool_size else 0.0)
-            _client_consensus_fid   = _cons_fid
-            _client_pool_count      = _pool_size
+            _cons_fid = (
+                sum(v["fidelity"] for v in fresh) / _pool_size if _pool_size else 0.0
+            )
+            _client_consensus_fid = _cons_fid
+            _client_pool_count = _pool_size
 
         # -- 5. Fuse client consensus with server 5-oracle snapshot -----------
         try:
@@ -5230,8 +6298,8 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
         except Exception:
             _srv_snap = {}
 
-        _srv_fid        = float(_srv_snap.get('w_state_fidelity') or 0.0)
-        _srv_tensor_hex = _srv_snap.get('density_tensor_hex', '')
+        _srv_fid = float(_srv_snap.get("w_state_fidelity") or 0.0)
+        _srv_tensor_hex = _srv_snap.get("density_tensor_hex", "")
 
         try:
             _w_client = min(_cons_fid * 0.35, 0.35)
@@ -5243,7 +6311,8 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
                 _ct = np.frombuffer(bytes.fromhex(tensor_hex), dtype=np.float32)
                 fused_t = (_w_server * _st + _w_client * _ct).astype(np.float32)
                 tm = float(fused_t.max())
-                if tm > 1e-12: fused_t /= tm
+                if tm > 1e-12:
+                    fused_t /= tm
                 fused_tensor_hex = fused_t.tobytes().hex()
                 fused_fid = _w_server * _srv_fid + _w_client * _cons_fid
             else:
@@ -5252,18 +6321,18 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
 
             composite = {
                 **_srv_snap,
-                'density_tensor_hex':    fused_tensor_hex,
-                'tensor_dim':            32,
-                'w_state_fidelity':      fused_fid,
-                'fidelity':              fused_fid,
-                'client_fused_fidelity': _cons_fid,
-                'client_oracle_count':   _pool_size,
-                'pq0_oracle_fidelity':   params.get('pq0_oracle_fidelity', fidelity),
-                'pq0_IV_fidelity':       params.get('pq0_IV_fidelity', fidelity),
-                'pq0_V_fidelity':        params.get('pq0_V_fidelity', fidelity),
-                'source':                'server+client_tripartite',
-                'ready':                 True,
-                'timestamp_ns':          int(time.time() * 1e9),
+                "density_tensor_hex": fused_tensor_hex,
+                "tensor_dim": 32,
+                "w_state_fidelity": fused_fid,
+                "fidelity": fused_fid,
+                "client_fused_fidelity": _cons_fid,
+                "client_oracle_count": _pool_size,
+                "pq0_oracle_fidelity": params.get("pq0_oracle_fidelity", fidelity),
+                "pq0_IV_fidelity": params.get("pq0_IV_fidelity", fidelity),
+                "pq0_V_fidelity": params.get("pq0_V_fidelity", fidelity),
+                "source": "server+client_tripartite",
+                "ready": True,
+                "timestamp_ns": int(time.time() * 1e9),
             }
             _broadcast_snapshot_to_database(composite)
         except Exception as _fe:
@@ -5273,11 +6342,14 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
             f"[PUSH-DM] ok oracle_addr={oracle_addr[:16]} fid={fidelity:.4f} "
             f"pool={_pool_size} cons_fid={_cons_fid:.4f}"
         )
-        return _rpc_ok({
-            'accepted':                  True,
-            'pool_size':                 _pool_size,
-            'client_consensus_fidelity': _cons_fid,
-        }, rpc_id)
+        return _rpc_ok(
+            {
+                "accepted": True,
+                "pool_size": _pool_size,
+                "client_consensus_fidelity": _cons_fid,
+            },
+            rpc_id,
+        )
 
     except Exception as e:
         logger.exception(f"[RPC] qtcl_pushOracleDM: {e}")
@@ -5289,27 +6361,40 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
     try:
         if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
             logger.debug(f"[RPC] submitTransaction: invalid params")
-            return _rpc_error(-32602, "params[0] must be the transaction object", rpc_id)
-        
+            return _rpc_error(
+                -32602, "params[0] must be the transaction object", rpc_id
+            )
+
         tx_data = params[0]
         if not isinstance(tx_data, dict):
             logger.debug(f"[RPC] submitTransaction: not a dict")
             return _rpc_error(-32602, "transaction must be a JSON object", rpc_id)
-            
+
         from mempool import get_mempool
-        logger.info(f"[RPC] 📥 Received transaction from {tx_data.get('from_address', 'unknown')[:16]}…")
+
+        logger.info(
+            f"[RPC] 📥 Received transaction from {tx_data.get('from_address', 'unknown')[:16]}…"
+        )
         result_code, message, tx = get_mempool().accept(tx_data)
-        
+
         if tx:
-            return _rpc_ok({
-                "status": "accepted",
-                "tx_hash": tx.tx_hash,
-                "message": message,
-                "accepted": True
-            }, rpc_id)
+            return _rpc_ok(
+                {
+                    "status": "accepted",
+                    "tx_hash": tx.tx_hash,
+                    "message": message,
+                    "accepted": True,
+                },
+                rpc_id,
+            )
         else:
-            return _rpc_error(-32000, f"Transaction rejected: {message}", rpc_id, {"code": result_code})
-            
+            return _rpc_error(
+                -32000,
+                f"Transaction rejected: {message}",
+                rpc_id,
+                {"code": result_code},
+            )
+
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_submitTransaction error: {e}")
         return _rpc_error(-32603, f"Internal error during submission: {str(e)}", rpc_id)
@@ -5319,15 +6404,20 @@ def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMempool — pending transaction list for block building."""
     try:
         from mempool import get_pending_transactions as _get_pending
+
         max_count = 500
         if isinstance(params, list) and params:
-            try: max_count = min(int(params[0]), 2000)
-            except (ValueError, TypeError): pass
+            try:
+                max_count = min(int(params[0]), 2000)
+            except (ValueError, TypeError):
+                pass
         txs = _get_pending(max_count=max_count)
         serialized = []
         for tx in txs:
-            if hasattr(tx, '__dict__'):
-                serialized.append({k: v for k, v in tx.__dict__.items() if not k.startswith('_')})
+            if hasattr(tx, "__dict__"):
+                serialized.append(
+                    {k: v for k, v in tx.__dict__.items() if not k.startswith("_")}
+                )
             elif isinstance(tx, dict):
                 serialized.append(tx)
         logger.debug(f"[RPC-METHOD] qtcl_getMempool: returning {len(serialized)} txs")
@@ -5344,11 +6434,22 @@ P2P_BROADCAST_INTERVAL = 30
 P2P_PEER_TIMEOUT = 300
 P2P_MAX_PEERS = 100
 
+
 class P2PPeer:
     """A peer in the P2P network. Peer = WALLET, not oracle."""
-    def __init__(self, peer_id: str = "", wallet_address: str = "", external_addr: str = "", 
-                 port: int = 9091, public_key: str = "", chain_height: int = 0,
-                 last_seen: float = 0.0, first_seen: float = 0.0, is_alive: bool = True):
+
+    def __init__(
+        self,
+        peer_id: str = "",
+        wallet_address: str = "",
+        external_addr: str = "",
+        port: int = 9091,
+        public_key: str = "",
+        chain_height: int = 0,
+        last_seen: float = 0.0,
+        first_seen: float = 0.0,
+        is_alive: bool = True,
+    ):
         self.peer_id = peer_id
         self.wallet_address = wallet_address
         self.external_addr = external_addr
@@ -5358,18 +6459,27 @@ class P2PPeer:
         self.last_seen = last_seen
         self.first_seen = first_seen
         self.is_alive = is_alive
-    
+
     def to_dict(self) -> dict:
-        return {"peer_id": self.peer_id, "wallet_address": self.wallet_address,
-                "external_addr": self.external_addr, "port": self.port,
-                "public_key": self.public_key, "chain_height": self.chain_height,
-                "last_seen": self.last_seen, "first_seen": self.first_seen,
-                "is_alive": self.is_alive}
+        return {
+            "peer_id": self.peer_id,
+            "wallet_address": self.wallet_address,
+            "external_addr": self.external_addr,
+            "port": self.port,
+            "public_key": self.public_key,
+            "chain_height": self.chain_height,
+            "last_seen": self.last_seen,
+            "first_seen": self.first_seen,
+            "is_alive": self.is_alive,
+        }
+
 
 class _P2PSQLiteStore:
     """SQLite store for peer persistence on client side."""
+
     def __init__(self, db_path: str = "peers.sqlite"):
         import sqlite3
+
         self.db_path = db_path
         self._lock = threading.RLock()
         conn = sqlite3.connect(db_path)
@@ -5379,42 +6489,69 @@ class _P2PSQLiteStore:
             first_seen REAL, is_alive INTEGER)""")
         conn.commit()
         conn.close()
-    
+
     def upsert_peer(self, peer: P2PPeer) -> bool:
         import sqlite3
+
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             now = time.time()
             if peer.first_seen == 0:
                 peer.first_seen = now
-            conn.execute("""INSERT OR REPLACE INTO peer_registry 
+            conn.execute(
+                """INSERT OR REPLACE INTO peer_registry 
                 (peer_id, wallet_address, external_addr, port, public_key, chain_height,
                  last_seen, first_seen, is_alive) VALUES (?,?,?,?,?,?,?,?,?)""",
-                (peer.peer_id, peer.wallet_address, peer.external_addr, peer.port,
-                 peer.public_key, peer.chain_height, peer.last_seen, peer.first_seen,
-                 1 if peer.is_alive else 0))
+                (
+                    peer.peer_id,
+                    peer.wallet_address,
+                    peer.external_addr,
+                    peer.port,
+                    peer.public_key,
+                    peer.chain_height,
+                    peer.last_seen,
+                    peer.first_seen,
+                    1 if peer.is_alive else 0,
+                ),
+            )
             conn.commit()
             conn.close()
             return True
-    
+
     def get_alive_peers(self) -> list:
         import sqlite3
+
         cutoff = time.time() - P2P_PEER_TIMEOUT
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("""SELECT * FROM peer_registry 
+            rows = conn.execute(
+                """SELECT * FROM peer_registry 
                 WHERE last_seen > ? AND is_alive = 1 ORDER BY last_seen DESC LIMIT ?""",
-                (cutoff, P2P_MAX_PEERS)).fetchall()
+                (cutoff, P2P_MAX_PEERS),
+            ).fetchall()
             conn.close()
-            return [P2PPeer(r["peer_id"], r["wallet_address"], r["external_addr"],
-                     r["port"], r["public_key"], r["chain_height"], r["last_seen"],
-                     r["first_seen"], bool(r["is_alive"])) for r in rows]
+            return [
+                P2PPeer(
+                    r["peer_id"],
+                    r["wallet_address"],
+                    r["external_addr"],
+                    r["port"],
+                    r["public_key"],
+                    r["chain_height"],
+                    r["last_seen"],
+                    r["first_seen"],
+                    bool(r["is_alive"]),
+                )
+                for r in rows
+            ]
+
 
 _p2p_dht_table: Dict[str, P2PPeer] = {}
 _p2p_dht_lock = threading.RLock()
 _p2p_seen_hashes: set = set()
 _p2p_client_store: Optional[_P2PSQLiteStore] = None
+
 
 def _p2p_rpc_get_dht_table(params, rpc_id):
     """qtcl_getDHTTable — Return the full DHT peer table."""
@@ -5424,32 +6561,46 @@ def _p2p_rpc_get_dht_table(params, rpc_id):
             limit = min(int(params.get("limit", 100)), P2P_MAX_PEERS)
         with _p2p_dht_lock:
             peers = list(_p2p_dht_table.values())[:limit]
-        return {"peers": [p.to_dict() for p in peers], "count": len(peers), "timestamp": time.time()}
+        return {
+            "peers": [p.to_dict() for p in peers],
+            "count": len(peers),
+            "timestamp": time.time(),
+        }
     except Exception as e:
         logger.error(f"[P2P-RPC] getDHTTable error: {e}")
         return {"peers": [], "count": 0, "timestamp": time.time()}
+
 
 def _p2p_rpc_receive_dht_table(params, rpc_id):
     """qtcl_receiveDHTTable — Receive a DHT table from another peer."""
     try:
         dht_json = params.get("dht_table", "") if isinstance(params, dict) else ""
-        from_peer = params.get("propagating_from", "") if isinstance(params, dict) else ""
+        from_peer = (
+            params.get("propagating_from", "") if isinstance(params, dict) else ""
+        )
         dht_hash = params.get("dht_hash", "") if isinstance(params, dict) else ""
         if not dht_json:
             return {"status": "error", "message": "dht_table required"}
         if dht_hash and dht_hash in _p2p_seen_hashes:
             return {"status": "already_seen", "dht_hash": dht_hash[:16]}
         import json
+
         doc = json.loads(dht_json)
         peers_data = doc.get("peers", [])
         new_count = 0
         with _p2p_dht_lock:
             for pd in peers_data:
-                p = P2PPeer(pd.get("peer_id", ""), pd.get("wallet_address", ""),
-                            pd.get("external_addr", ""), pd.get("port", 9091),
-                            pd.get("public_key", ""), pd.get("chain_height", 0),
-                            pd.get("last_seen", time.time()), pd.get("first_seen", 0),
-                            pd.get("is_alive", True))
+                p = P2PPeer(
+                    pd.get("peer_id", ""),
+                    pd.get("wallet_address", ""),
+                    pd.get("external_addr", ""),
+                    pd.get("port", 9091),
+                    pd.get("public_key", ""),
+                    pd.get("chain_height", 0),
+                    pd.get("last_seen", time.time()),
+                    pd.get("first_seen", 0),
+                    pd.get("is_alive", True),
+                )
                 if p.peer_id not in _p2p_dht_table:
                     new_count += 1
                 p.last_seen = time.time()
@@ -5458,20 +6609,33 @@ def _p2p_rpc_receive_dht_table(params, rpc_id):
             _p2p_seen_hashes.add(dht_hash)
             if len(_p2p_seen_hashes) > 10000:
                 _p2p_seen_hashes = set(list(_p2p_seen_hashes)[-5000:])
-        logger.info(f"[P2P] ← Received DHT from {from_peer[:16]}…: {len(peers_data)} peers ({new_count} new)")
-        return {"status": "accepted", "peer_count": len(peers_data), "new_peers": new_count}
+        logger.info(
+            f"[P2P] ← Received DHT from {from_peer[:16]}…: {len(peers_data)} peers ({new_count} new)"
+        )
+        return {
+            "status": "accepted",
+            "peer_count": len(peers_data),
+            "new_peers": new_count,
+        }
     except Exception as e:
         logger.error(f"[P2P-RPC] receiveDHTTable error: {e}")
         return {"status": "error", "message": str(e)}
+
 
 def _p2p_rpc_peer_heartbeat(params, rpc_id):
     """qtcl_peerHeartbeat — Register a peer's heartbeat."""
     try:
         peer_id = params.get("peer_id", "") if isinstance(params, dict) else ""
-        wallet_address = params.get("wallet_address", "") if isinstance(params, dict) else ""
-        external_addr = params.get("external_addr", "") if isinstance(params, dict) else ""
+        wallet_address = (
+            params.get("wallet_address", "") if isinstance(params, dict) else ""
+        )
+        external_addr = (
+            params.get("external_addr", "") if isinstance(params, dict) else ""
+        )
         port = int(params.get("port", 9091)) if isinstance(params, dict) else 9091
-        chain_height = int(params.get("chain_height", 0)) if isinstance(params, dict) else 0
+        chain_height = (
+            int(params.get("chain_height", 0)) if isinstance(params, dict) else 0
+        )
         if not peer_id:
             return {"status": "error", "message": "peer_id required"}
         with _p2p_dht_lock:
@@ -5481,10 +6645,16 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
                 p.chain_height = max(p.chain_height, chain_height)
                 p.is_alive = True
             else:
-                p = P2PPeer(peer_id=peer_id, wallet_address=wallet_address,
-                           external_addr=external_addr, port=port,
-                           chain_height=chain_height, last_seen=time.time(),
-                           first_seen=time.time(), is_alive=True)
+                p = P2PPeer(
+                    peer_id=peer_id,
+                    wallet_address=wallet_address,
+                    external_addr=external_addr,
+                    port=port,
+                    chain_height=chain_height,
+                    last_seen=time.time(),
+                    first_seen=time.time(),
+                    is_alive=True,
+                )
                 _p2p_dht_table[peer_id] = p
         return {"status": "ok", "peer_id": peer_id, "timestamp": time.time()}
     except Exception as e:
@@ -5493,40 +6663,49 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
 
 
 _RPC_METHODS: Dict[str, Any] = {
-    "qtcl_submitBlock":       _rpc_submitBlock,
-    "qtcl_forgeGenesis":      _rpc_forgeGenesis,
-    "qtcl_getBlockHeight":    _rpc_getBlockHeight,
-    "qtcl_getBalance":        _rpc_getBalance,
-    "qtcl_getTransaction":    _rpc_getTransaction,
-    "qtcl_getBlock":          _rpc_getBlock,
-    "qtcl_getBlockRange":     _rpc_getBlockRange,
+    "qtcl_submitBlock": _rpc_submitBlock,
+    "qtcl_forgeGenesis": _rpc_forgeGenesis,
+    "qtcl_getBlockHeight": _rpc_getBlockHeight,
+    "qtcl_getBalance": _rpc_getBalance,
+    "qtcl_getTransaction": _rpc_getTransaction,
+    "qtcl_getBlock": _rpc_getBlock,
+    "qtcl_getBlockRange": _rpc_getBlockRange,
     "qtcl_getQuantumMetrics": _rpc_getQuantumMetrics,
-    "qtcl_getPythPrice":      _rpc_getPythPrice,
-    "qtcl_getMempoolStats":   _rpc_getMempoolStats,
-    "qtcl_getMempool":        _rpc_getMempool,
+    "qtcl_getPythPrice": _rpc_getPythPrice,
+    "qtcl_getMempoolStats": _rpc_getMempoolStats,
+    "qtcl_getMempool": _rpc_getMempool,
     "qtcl_submitTransaction": _rpc_submitTransaction,
-    "qtcl_getPeers":          _rpc_getPeers,
+    "qtcl_getPeers": _rpc_getPeers,
     "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
-    "qtcl_registerPeer":      _rpc_registerPeer,      # ← NEW: miner bootstrap registration
-    "qtcl_getMyAddr":         _rpc_getMyAddr,          # ← NEW: STUN — return caller's observed IP
-    "qtcl_getHealth":         _rpc_getHealth,
-    "qtcl_getTreasuryAddress": lambda p, rid: _rpc_ok({"treasury_address": getattr(TessellationRewardSchedule, "TREASURY_ADDRESS", "qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d")}, rid),
-    "qtcl_getEvents":         _rpc_getEvents,
+    "qtcl_registerPeer": _rpc_registerPeer,  # ← NEW: miner bootstrap registration
+    "qtcl_getMyAddr": _rpc_getMyAddr,  # ← NEW: STUN — return caller's observed IP
+    "qtcl_getHealth": _rpc_getHealth,
+    "qtcl_getTreasuryAddress": lambda p, rid: _rpc_ok(
+        {
+            "treasury_address": getattr(
+                TessellationRewardSchedule,
+                "TREASURY_ADDRESS",
+                "qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d",
+            )
+        },
+        rid,
+    ),
+    "qtcl_getEvents": _rpc_getEvents,
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
-    "qtcl_getOracleRecord":   _rpc_getOracleRecord,
-    "qtcl_getDeviceChain":    _rpc_getDeviceChain,
-    "qtcl_submitOracleReg":   _rpc_submitOracleReg,
+    "qtcl_getOracleRecord": _rpc_getOracleRecord,
+    "qtcl_getDeviceChain": _rpc_getDeviceChain,
+    "qtcl_submitOracleReg": _rpc_submitOracleReg,
     "qtcl_registerMeasurementSubscriber": _rpc_registerMeasurementSubscriber,
     "qtcl_unregisterMeasurementSubscriber": _rpc_unregisterMeasurementSubscriber,
     "qtcl_listMeasurementSubscribers": _rpc_listMeasurementSubscribers,
     # DEPRECATED: qtcl_pushOracleDM (replaced by SSE stream /rpc/oracle/snapshot for 16³ tensors)
     # "qtcl_pushOracleDM": _rpc_pushOracleDM,
     # ── NEW: Transaction Explorer ─────────────────────────────────────────────────
-    "qtcl_getTransactions":   _rpc_getTransactions,
+    "qtcl_getTransactions": _rpc_getTransactions,
     # P2P DHT methods
-    "qtcl_getDHTTable":       _p2p_rpc_get_dht_table,
-    "qtcl_receiveDHTTable":   _p2p_rpc_receive_dht_table,
-    "qtcl_peerHeartbeat":     _p2p_rpc_peer_heartbeat,
+    "qtcl_getDHTTable": _p2p_rpc_get_dht_table,
+    "qtcl_receiveDHTTable": _p2p_rpc_receive_dht_table,
+    "qtcl_peerHeartbeat": _p2p_rpc_peer_heartbeat,
     # ── HypΓ Post-Quantum Cryptography (Schnorr-Γ + GeodesicLWE) ────────────────────
     "qtcl_hyp_generateKeypair": qtcl_hyp_generateKeypair,
     "qtcl_hyp_signMessage": qtcl_hyp_signMessage,
@@ -5545,11 +6724,22 @@ P2P_BROADCAST_INTERVAL = 30
 P2P_PEER_TIMEOUT = 300
 P2P_MAX_PEERS = 100
 
+
 class P2PPeer:
     """A peer in the P2P network. Peer = WALLET, not oracle."""
-    def __init__(self, peer_id: str = "", wallet_address: str = "", external_addr: str = "", 
-                 port: int = 9091, public_key: str = "", chain_height: int = 0,
-                 last_seen: float = 0.0, first_seen: float = 0.0, is_alive: bool = True):
+
+    def __init__(
+        self,
+        peer_id: str = "",
+        wallet_address: str = "",
+        external_addr: str = "",
+        port: int = 9091,
+        public_key: str = "",
+        chain_height: int = 0,
+        last_seen: float = 0.0,
+        first_seen: float = 0.0,
+        is_alive: bool = True,
+    ):
         self.peer_id = peer_id
         self.wallet_address = wallet_address
         self.external_addr = external_addr
@@ -5559,18 +6749,27 @@ class P2PPeer:
         self.last_seen = last_seen
         self.first_seen = first_seen
         self.is_alive = is_alive
-    
+
     def to_dict(self) -> dict:
-        return {"peer_id": self.peer_id, "wallet_address": self.wallet_address,
-                "external_addr": self.external_addr, "port": self.port,
-                "public_key": self.public_key, "chain_height": self.chain_height,
-                "last_seen": self.last_seen, "first_seen": self.first_seen,
-                "is_alive": self.is_alive}
+        return {
+            "peer_id": self.peer_id,
+            "wallet_address": self.wallet_address,
+            "external_addr": self.external_addr,
+            "port": self.port,
+            "public_key": self.public_key,
+            "chain_height": self.chain_height,
+            "last_seen": self.last_seen,
+            "first_seen": self.first_seen,
+            "is_alive": self.is_alive,
+        }
+
 
 class _P2PSQLiteStore:
     """SQLite store for peer persistence on client side."""
+
     def __init__(self, db_path: str = "peers.sqlite"):
         import sqlite3
+
         self.db_path = db_path
         self._lock = threading.RLock()
         conn = sqlite3.connect(db_path)
@@ -5580,42 +6779,69 @@ class _P2PSQLiteStore:
             first_seen REAL, is_alive INTEGER)""")
         conn.commit()
         conn.close()
-    
+
     def upsert_peer(self, peer: P2PPeer) -> bool:
         import sqlite3
+
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             now = time.time()
             if peer.first_seen == 0:
                 peer.first_seen = now
-            conn.execute("""INSERT OR REPLACE INTO peer_registry 
+            conn.execute(
+                """INSERT OR REPLACE INTO peer_registry 
                 (peer_id, wallet_address, external_addr, port, public_key, chain_height,
                  last_seen, first_seen, is_alive) VALUES (?,?,?,?,?,?,?,?,?)""",
-                (peer.peer_id, peer.wallet_address, peer.external_addr, peer.port,
-                 peer.public_key, peer.chain_height, peer.last_seen, peer.first_seen,
-                 1 if peer.is_alive else 0))
+                (
+                    peer.peer_id,
+                    peer.wallet_address,
+                    peer.external_addr,
+                    peer.port,
+                    peer.public_key,
+                    peer.chain_height,
+                    peer.last_seen,
+                    peer.first_seen,
+                    1 if peer.is_alive else 0,
+                ),
+            )
             conn.commit()
             conn.close()
             return True
-    
+
     def get_alive_peers(self) -> list:
         import sqlite3
+
         cutoff = time.time() - P2P_PEER_TIMEOUT
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("""SELECT * FROM peer_registry 
+            rows = conn.execute(
+                """SELECT * FROM peer_registry 
                 WHERE last_seen > ? AND is_alive = 1 ORDER BY last_seen DESC LIMIT ?""",
-                (cutoff, P2P_MAX_PEERS)).fetchall()
+                (cutoff, P2P_MAX_PEERS),
+            ).fetchall()
             conn.close()
-            return [P2PPeer(r["peer_id"], r["wallet_address"], r["external_addr"],
-                     r["port"], r["public_key"], r["chain_height"], r["last_seen"],
-                     r["first_seen"], bool(r["is_alive"])) for r in rows]
+            return [
+                P2PPeer(
+                    r["peer_id"],
+                    r["wallet_address"],
+                    r["external_addr"],
+                    r["port"],
+                    r["public_key"],
+                    r["chain_height"],
+                    r["last_seen"],
+                    r["first_seen"],
+                    bool(r["is_alive"]),
+                )
+                for r in rows
+            ]
+
 
 _p2p_dht_table: Dict[str, P2PPeer] = {}
 _p2p_dht_lock = threading.RLock()
 _p2p_seen_hashes: set = set()
 _p2p_client_store: Optional[_P2PSQLiteStore] = None
+
 
 def _p2p_rpc_get_dht_table(params, rpc_id):
     """qtcl_getDHTTable — Return the full DHT peer table."""
@@ -5625,32 +6851,46 @@ def _p2p_rpc_get_dht_table(params, rpc_id):
             limit = min(int(params.get("limit", 100)), P2P_MAX_PEERS)
         with _p2p_dht_lock:
             peers = list(_p2p_dht_table.values())[:limit]
-        return {"peers": [p.to_dict() for p in peers], "count": len(peers), "timestamp": time.time()}
+        return {
+            "peers": [p.to_dict() for p in peers],
+            "count": len(peers),
+            "timestamp": time.time(),
+        }
     except Exception as e:
         logger.error(f"[P2P-RPC] getDHTTable error: {e}")
         return {"peers": [], "count": 0, "timestamp": time.time()}
+
 
 def _p2p_rpc_receive_dht_table(params, rpc_id):
     """qtcl_receiveDHTTable — Receive a DHT table from another peer."""
     try:
         dht_json = params.get("dht_table", "") if isinstance(params, dict) else ""
-        from_peer = params.get("propagating_from", "") if isinstance(params, dict) else ""
+        from_peer = (
+            params.get("propagating_from", "") if isinstance(params, dict) else ""
+        )
         dht_hash = params.get("dht_hash", "") if isinstance(params, dict) else ""
         if not dht_json:
             return {"status": "error", "message": "dht_table required"}
         if dht_hash and dht_hash in _p2p_seen_hashes:
             return {"status": "already_seen", "dht_hash": dht_hash[:16]}
         import json
+
         doc = json.loads(dht_json)
         peers_data = doc.get("peers", [])
         new_count = 0
         with _p2p_dht_lock:
             for pd in peers_data:
-                p = P2PPeer(pd.get("peer_id", ""), pd.get("wallet_address", ""),
-                            pd.get("external_addr", ""), pd.get("port", 9091),
-                            pd.get("public_key", ""), pd.get("chain_height", 0),
-                            pd.get("last_seen", time.time()), pd.get("first_seen", 0),
-                            pd.get("is_alive", True))
+                p = P2PPeer(
+                    pd.get("peer_id", ""),
+                    pd.get("wallet_address", ""),
+                    pd.get("external_addr", ""),
+                    pd.get("port", 9091),
+                    pd.get("public_key", ""),
+                    pd.get("chain_height", 0),
+                    pd.get("last_seen", time.time()),
+                    pd.get("first_seen", 0),
+                    pd.get("is_alive", True),
+                )
                 if p.peer_id not in _p2p_dht_table:
                     new_count += 1
                 p.last_seen = time.time()
@@ -5659,11 +6899,18 @@ def _p2p_rpc_receive_dht_table(params, rpc_id):
             _p2p_seen_hashes.add(dht_hash)
             if len(_p2p_seen_hashes) > 10000:
                 _p2p_seen_hashes = set(list(_p2p_seen_hashes)[-5000:])
-        logger.info(f"[P2P] ← Received DHT from {from_peer[:16]}…: {len(peers_data)} peers ({new_count} new)")
-        return {"status": "accepted", "peer_count": len(peers_data), "new_peers": new_count}
+        logger.info(
+            f"[P2P] ← Received DHT from {from_peer[:16]}…: {len(peers_data)} peers ({new_count} new)"
+        )
+        return {
+            "status": "accepted",
+            "peer_count": len(peers_data),
+            "new_peers": new_count,
+        }
     except Exception as e:
         logger.error(f"[P2P-RPC] receiveDHTTable error: {e}")
         return {"status": "error", "message": str(e)}
+
 
 def _p2p_rpc_peer_heartbeat(params, rpc_id):
     """qtcl_peerHeartbeat — Receive heartbeat from a peer."""
@@ -5677,17 +6924,26 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
 def _p2p_fanout_broadcast():
     """Fan-out broadcast DHT table to all known peers."""
     import json
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
+
     with _p2p_dht_lock:
         peers = list(_p2p_dht_table.values())
     if len(peers) < 2:
         return
-    dht_json = json.dumps({"version": 1, "timestamp": time.time(), "peer_count": len(peers),
-                          "peers": [p.to_dict() for p in peers]}, separators=(',', ':'))
+    dht_json = json.dumps(
+        {
+            "version": 1,
+            "timestamp": time.time(),
+            "peer_count": len(peers),
+            "peers": [p.to_dict() for p in peers],
+        },
+        separators=(",", ":"),
+    )
     dht_hash = hashlib.sha256(dht_json.encode()).hexdigest()
     if dht_hash in _p2p_seen_hashes:
         return
@@ -5698,16 +6954,27 @@ def _p2p_fanout_broadcast():
             continue
         try:
             # Construct URL with port - external_addr may or may not include port
-            if ':' in peer.external_addr:
+            if ":" in peer.external_addr:
                 # Already has port in external_addr (e.g., "192.168.1.100:9091")
                 url = f"http://{peer.external_addr}/rpc"
             else:
                 # Use port from peer object
                 url = f"http://{peer.external_addr}:{peer.port}/rpc"
-            payload = json.dumps({"jsonrpc": "2.0", "method": "qtcl_receiveDHTTable",
-                                  "params": {"dht_table": dht_json, "propagating_from": ORACLE_ID, "dht_hash": dht_hash},
-                                  "id": 1}).encode()
-            req = Request(url, data=payload, headers={"Content-Type": "application/json"})
+            payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "qtcl_receiveDHTTable",
+                    "params": {
+                        "dht_table": dht_json,
+                        "propagating_from": ORACLE_ID,
+                        "dht_hash": dht_hash,
+                    },
+                    "id": 1,
+                }
+            ).encode()
+            req = Request(
+                url, data=payload, headers={"Content-Type": "application/json"}
+            )
             with urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
                     sent += 1
@@ -5717,9 +6984,11 @@ def _p2p_fanout_broadcast():
     if sent > 0 or failed > 0:
         logger.info(f"[P2P] Fan-out: sent to {sent}, failed {failed}")
 
+
 _p2p_broadcast_count = 0
 _p2p_running = False
 _p2p_broadcast_thread: Optional[threading.Thread] = None
+
 
 def _p2p_broadcast_loop():
     """30-second DHT broadcast loop."""
@@ -5732,9 +7001,12 @@ def _p2p_broadcast_loop():
             try:
                 _lazy_ensure_peer_registry()
                 with get_db_cursor() as cur:
-                    cur.execute("""SELECT node_id, external_addr, pubkey_hash, chain_height, last_seen
+                    cur.execute(
+                        """SELECT node_id, external_addr, pubkey_hash, chain_height, last_seen
                         FROM peer_registry WHERE last_seen > NOW() - INTERVAL '10 minutes' 
-                        AND ban_score < 100 LIMIT %s""", (P2P_MAX_PEERS,))
+                        AND ban_score < 100 LIMIT %s""",
+                        (P2P_MAX_PEERS,),
+                    )
                     rows = cur.fetchall()
                     new_count = 0
                     with _p2p_dht_lock:
@@ -5742,13 +7014,29 @@ def _p2p_broadcast_loop():
                             nid, addr, pubk, height, last_seen = row
                             if nid not in _p2p_dht_table:
                                 new_count += 1
-                            ts = last_seen.timestamp() if hasattr(last_seen, "timestamp") else last_seen
-                            _p2p_dht_table[nid] = P2PPeer(nid, "", addr or "", 9091, pubk or "", int(height or 0), ts)
-                    logger.debug(f"[P2P] Cycle {_p2p_broadcast_count}: {len(rows)} peers from DB ({new_count} new)")
+                            ts = (
+                                last_seen.timestamp()
+                                if hasattr(last_seen, "timestamp")
+                                else last_seen
+                            )
+                            _p2p_dht_table[nid] = P2PPeer(
+                                nid,
+                                "",
+                                addr or "",
+                                9091,
+                                pubk or "",
+                                int(height or 0),
+                                ts,
+                            )
+                    logger.debug(
+                        f"[P2P] Cycle {_p2p_broadcast_count}: {len(rows)} peers from DB ({new_count} new)"
+                    )
             except Exception as e:
                 # Log but don't crash - use in-memory cache
                 if "does not exist" in str(e):
-                    logger.warning(f"[P2P] DB table missing - waiting for peer_registry to be created")
+                    logger.warning(
+                        f"[P2P] DB table missing - waiting for peer_registry to be created"
+                    )
                 else:
                     logger.warning(f"[P2P] DB fetch: {e}")
             # Fan-out broadcast
@@ -5761,15 +7049,19 @@ def _p2p_broadcast_loop():
             time.sleep(0.5)
     logger.info("[P2P] Broadcast loop exited")
 
+
 def _start_p2p_broadcast():
     """Start the P2P broadcast daemon."""
     global _p2p_running, _p2p_broadcast_thread
     if _p2p_running:
         return
     _p2p_running = True
-    _p2p_broadcast_thread = threading.Thread(target=_p2p_broadcast_loop, daemon=True, name="P2PBroadcast")
+    _p2p_broadcast_thread = threading.Thread(
+        target=_p2p_broadcast_loop, daemon=True, name="P2PBroadcast"
+    )
     _p2p_broadcast_thread.start()
     logger.info(f"[P2P] ✅ DHT broadcaster started (30s interval)")
+
 
 @app.route("/rpc", methods=["GET"])
 def rpc_endpoint():
@@ -5798,7 +7090,9 @@ def rpc_endpoint():
                 },
                 "id": None,
             }
-            return Response(json.dumps(discovery_response), status=200, mimetype='application/json')
+            return Response(
+                json.dumps(discovery_response), status=200, mimetype="application/json"
+            )
 
         # Parse params (JSON-encoded, URL-decoded, default to empty list)
         params_str = request.args.get("params", "[]")
@@ -5808,8 +7102,12 @@ def rpc_endpoint():
                 params = [params]  # Wrap single value in list
         except json.JSONDecodeError as e:
             # JSON parse error on params: return -32700
-            error_response = _rpc_error(-32700, f"Parse error in params: {str(e)}", None)
-            return Response(json.dumps(error_response), status=200, mimetype='application/json')
+            error_response = _rpc_error(
+                -32700, f"Parse error in params: {str(e)}", None
+            )
+            return Response(
+                json.dumps(error_response), status=200, mimetype="application/json"
+            )
 
         # Parse request ID (default 1)
         rpc_id = request.args.get("id", "1")
@@ -5837,13 +7135,14 @@ def rpc_endpoint():
 
         # CRITICAL: Always HTTP 200, never status codes >= 400
         json_payload = json.dumps(result)
-        return Response(json_payload, status=200, mimetype='application/json')
+        return Response(json_payload, status=200, mimetype="application/json")
     except Exception as e:
         logger.exception(f"[RPC] GET endpoint error: {e}")
         # Even on unexpected error, return HTTP 200 with JSON-RPC error
         error_response = _rpc_error(-32603, str(e), None)
-        return Response(json.dumps(error_response), status=200, mimetype='application/json')
-
+        return Response(
+            json.dumps(error_response), status=200, mimetype="application/json"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -5852,21 +7151,23 @@ def rpc_endpoint():
 @app.route("/rpc/methods", methods=["GET"])
 def rpc_methods():
     """GET /rpc/methods — introspection: list all available RPC methods."""
-    return jsonify({
-        "jsonrpc":  _JSONRPC_VERSION,
-        "endpoint": "/rpc",
-        "methods":  _RPC_METHOD_META,
-        "count":    len(_RPC_METHOD_META),
-        "batch":    True,
-        "ts":       time.time(),
-    }), 200
-
+    return jsonify(
+        {
+            "jsonrpc": _JSONRPC_VERSION,
+            "endpoint": "/rpc",
+            "methods": _RPC_METHOD_META,
+            "count": len(_RPC_METHOD_META),
+            "batch": True,
+            "ts": time.time(),
+        }
+    ), 200
 
 
 def _get_pyth():
     """Return the Pyth oracle engine if initialized, else None. ❤️ I love you."""
     try:
         from oracle import ORACLE as _o
+
         return _o if _o is not None else None
     except Exception:
         return None
@@ -5876,15 +7177,17 @@ def _get_pyth():
 def rpc_health():
     """GET /rpc/health — JSON-RPC engine and Pyth oracle health."""
     from oracle import PYTH_ORACLE as _po
-    return jsonify({
-        "rpc_engine":       "ok",
-        "jsonrpc_version":  _JSONRPC_VERSION,
-        "method_count":     len(_RPC_METHODS),
-        "pyth_ready":       _po is not None,
-        "pyth_stats":       _po.stats() if _po else {},
-        "uptime_s":         time.time() - _SERVER_START_TIME,
-    }), 200
 
+    return jsonify(
+        {
+            "rpc_engine": "ok",
+            "jsonrpc_version": _JSONRPC_VERSION,
+            "method_count": len(_RPC_METHODS),
+            "pyth_ready": _po is not None,
+            "pyth_stats": _po.stats() if _po else {},
+            "uptime_s": time.time() - _SERVER_START_TIME,
+        }
+    ), 200
 
 
 @app.route("/health", methods=["GET"])
@@ -5908,6 +7211,7 @@ def health_ready():
 
 logger.info("[HEALTH] ✅ /health and /ready endpoints mounted (immediate 200 OK)")
 
+
 # ═══ STATIC FILE & ROOT SERVING ═══
 @app.route("/", methods=["GET"])
 def serve_root():
@@ -5916,10 +7220,11 @@ def serve_root():
         # First, try to serve from a dedicated static directory
         import os
         from flask import send_file
-        index_path = os.path.join(os.path.dirname(__file__), 'index.html')
+
+        index_path = os.path.join(os.path.dirname(__file__), "index.html")
         if os.path.exists(index_path):
-            return send_file(index_path, mimetype='text/html')
-        
+            return send_file(index_path, mimetype="text/html")
+
         # Fallback: inline the dashboard HTML (for production on Koyeb)
         return render_template_string("""
 <!DOCTYPE html>
@@ -6018,9 +7323,10 @@ def serve_hyp_doc():
     try:
         import os
         from flask import send_file
-        hyp_path = os.path.join(os.path.dirname(__file__), 'hyp.html')
+
+        hyp_path = os.path.join(os.path.dirname(__file__), "hyp.html")
         if os.path.exists(hyp_path):
-            return send_file(hyp_path, mimetype='text/html')
+            return send_file(hyp_path, mimetype="text/html")
         return "hyp.html not found", 404
     except Exception as e:
         logger.error(f"[HYP] Failed to serve hyp.html: {e}")
@@ -6030,42 +7336,51 @@ def serve_hyp_doc():
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
 def rpc_hlwe_system_info():
     """GET /rpc/hlwe/system-info — HypΓ cryptographic system information.
-    
+
     This endpoint is called by wsgi_config.py to verify HypΓ is available
     without requiring direct imports at module load time.
     Endpoint name kept as 'hlwe' for backward compatibility.
     """
     try:
         from hyp_engine_compat import hlwe_system_info
+
         info = hlwe_system_info()
-        return jsonify({
-            "status": "ok",
-            "hyp_info": info,
-            "timestamp": time.time(),
-        }), 200
+        return jsonify(
+            {
+                "status": "ok",
+                "hyp_info": info,
+                "timestamp": time.time(),
+            }
+        ), 200
     except Exception as e:
         logger.error(f"[RPC-HYP] Failed to get system info: {e}", exc_info=True)
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "timestamp": time.time(),
-        }), 500
+        return jsonify(
+            {
+                "status": "error",
+                "error": str(e),
+                "timestamp": time.time(),
+            }
+        ), 500
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # RPC-only Architecture (no legacy REST endpoints)
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.route("/rpc/_internal/measurement", methods=["POST"])
+
+@app.route("/rpc/_internal/measurement", methods=["GET"])
 def rpc_measurement_broadcast_endpoint():
     """
-    POST /rpc/_internal/measurement — Receive oracle measurement broadcast from controller.
-    
-    This endpoint is called by the RPC broadcast controller to distribute oracle 
-    snapshots to subscribed clients. In normal operation, external callers should 
+    GET /rpc/_internal/measurement — Receive oracle measurement broadcast from controller.
+
+    This endpoint is called by the RPC broadcast controller to distribute oracle
+    snapshots to subscribed clients. In normal operation, external callers should
     use qtcl_registerMeasurementSubscriber RPC method to subscribe.
-    
+
     Request (from broadcast controller):
+        GET /rpc/_internal/measurement?data=URL_ENCODED_JSON
+
+        JSON payload (URL-encoded):
         {
             "timestamp_ns": 1234567890000000,
             "cycle": 42,
@@ -6076,33 +7391,52 @@ def rpc_measurement_broadcast_endpoint():
             },
             ...
         }
-    
+
     Response:
         { "status": "processed" }
     """
     try:
-        snap = request.get_json()
+        import urllib.parse
+        import json
+
+        data_param = request.args.get("data")
+        if not data_param:
+            return jsonify(
+                {"status": "invalid", "error": "missing data parameter"}
+            ), 400
+
+        # URL-decode and parse JSON
+        try:
+            decoded = urllib.parse.unquote(data_param)
+            snap = json.loads(decoded)
+        except (urllib.error.URLError, json.JSONDecodeError) as e:
+            return jsonify(
+                {"status": "invalid", "error": f"failed to parse data: {str(e)}"}
+            ), 400
+
         if not snap:
-            return jsonify({'status': 'invalid', 'error': 'no JSON payload'}), 400
-        
+            return jsonify({"status": "invalid", "error": "no JSON payload"}), 400
+
         # Log broadcast receipt (optional, for debugging)
-        cycle = snap.get('cycle', '?')
-        fidelity = snap.get('w_state', {}).get('fidelity', 0)
+        cycle = snap.get("cycle", "?")
+        fidelity = snap.get("w_state", {}).get("fidelity", 0)
         logger.debug(
             f"[BROADCAST-ENDPOINT] Received measurement | cycle={cycle} | "
             f"fidelity={fidelity:.4f}"
         )
-        
-        return jsonify({'status': 'processed'}), 200
-    
+
+        return jsonify({"status": "processed"}), 200
+
     except Exception as e:
         logger.error(f"[BROADCAST-ENDPOINT] Error: {e}")
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PYTH PRICE ORACLE REST ROUTES
 # (Complement to JSON-RPC — for REST-native integrations)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def pyth_prices_rest():
     """
@@ -6118,15 +7452,17 @@ def pyth_prices_rest():
         return jsonify({"error": "Pyth oracle not initialized"}), 503
 
     symbols_raw = request.args.get("symbols", "")
-    symbols: Optional[list] = [s.strip().upper() for s in symbols_raw.split(",") if s.strip()] or None
-    force   = request.args.get("refresh", "false").lower() == "true"
+    symbols: Optional[list] = [
+        s.strip().upper() for s in symbols_raw.split(",") if s.strip()
+    ] or None
+    force = request.args.get("refresh", "false").lower() == "true"
 
     try:
         snap = po.get_snapshot(symbols, force_refresh=force)
         resp = jsonify(snap.to_dict())
         resp.headers["Cache-Control"] = "public, max-age=5"
         resp.headers["X-Pyth-Snapshot"] = snap.snapshot_id[:16]
-        resp.headers["X-Hermes-OK"]     = str(snap.hermes_ok).lower()
+        resp.headers["X-Hermes-OK"] = str(snap.hermes_ok).lower()
         return resp, 200
     except Exception as e:
         logger.error(f"[PYTH-REST] /api/pyth/prices error: {e}")
@@ -6149,16 +7485,20 @@ def pyth_single_price_rest(symbol: str):
         snap = po.get_snapshot([sym])
         feed = snap.feeds.get(sym)
         if feed is None:
-            return jsonify({
-                "error":      f"Symbol {sym} not found",
-                "available":  list(snap.feeds.keys()),
-                "hermes_ok":  snap.hermes_ok,
-            }), 404
-        return jsonify({
-            **feed.to_dict(),
-            "snapshot_id": snap.snapshot_id,
-            "hermes_ok":   snap.hermes_ok,
-        }), 200
+            return jsonify(
+                {
+                    "error": f"Symbol {sym} not found",
+                    "available": list(snap.feeds.keys()),
+                    "hermes_ok": snap.hermes_ok,
+                }
+            ), 404
+        return jsonify(
+            {
+                **feed.to_dict(),
+                "snapshot_id": snap.snapshot_id,
+                "hermes_ok": snap.hermes_ok,
+            }
+        ), 200
     except Exception as e:
         logger.error(f"[PYTH-REST] /api/pyth/price/{sym} error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -6166,12 +7506,14 @@ def pyth_single_price_rest(symbol: str):
 
 def pyth_feed_catalog():
     """GET /api/pyth/feeds — full Pyth feed ID catalog (symbol → feed_id)."""
-    return jsonify({
-        "feeds":   {k: v for k, v in __import__("oracle").PYTH_FEED_IDS.items()},
-        "count":   len(__import__("oracle").PYTH_FEED_IDS),
-        "hermes":  "https://hermes.pyth.network",
-        "ts":      time.time(),
-    }), 200
+    return jsonify(
+        {
+            "feeds": {k: v for k, v in __import__("oracle").PYTH_FEED_IDS.items()},
+            "count": len(__import__("oracle").PYTH_FEED_IDS),
+            "hermes": "https://hermes.pyth.network",
+            "ts": time.time(),
+        }
+    ), 200
 
 
 def pyth_full_snapshot():
@@ -6185,12 +7527,14 @@ def pyth_full_snapshot():
     if po is None:
         return jsonify({"error": "Pyth oracle not initialized"}), 503
     try:
-        snap = po.get_snapshot()   # all feeds
-        return jsonify({
-            **snap.to_dict(),
-            "feed_count": len(snap.feeds),
-            "outlier_count": len(snap.outliers),
-        }), 200
+        snap = po.get_snapshot()  # all feeds
+        return jsonify(
+            {
+                **snap.to_dict(),
+                "feed_count": len(snap.feeds),
+                "outlier_count": len(snap.outliers),
+            }
+        ), 200
     except Exception as e:
         logger.error(f"[PYTH-REST] /api/pyth/snapshot error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -6202,6 +7546,7 @@ def pyth_oracle_stats():
     if po is None:
         return jsonify({"error": "Pyth oracle not initialized"}), 503
     return jsonify(po.stats()), 200
+
 
 def _build_snapshot_payload() -> dict:
     """Build compact snapshot payload for fast SSE delivery.
@@ -6216,21 +7561,23 @@ def _build_snapshot_payload() -> dict:
     # COMPACT: 4³ tensor only (1KB vs 128KB for 32³)
     tensor_hex = _get_compact_lattice_tensor_hex()
     if tensor_hex:
-        _base['density_tensor_hex'] = tensor_hex
-        _base['tensor_dim']         = 4
+        _base["density_tensor_hex"] = tensor_hex
+        _base["tensor_dim"] = 4
 
     # W-state amplitudes (8 complex doubles = 128 bytes hex)
     w_hex = _get_w_state_hex()
     if w_hex:
-        _base['w_state_hex'] = w_hex
+        _base["w_state_hex"] = w_hex
 
     try:
-        lat = sys.modules[__name__].__dict__.get('LATTICE')
+        lat = sys.modules[__name__].__dict__.get("LATTICE")
         if lat is not None:
-            _base.setdefault('w_state_fidelity', getattr(lat, 'fidelity', None))
-            _base.setdefault('purity',           getattr(lat, 'purity',   None))
-            _base.setdefault('coherence_l1',     getattr(lat, 'coherence', None))
-            _base.setdefault('lattice_refresh_counter', getattr(lat, 'cycle_count', None))
+            _base.setdefault("w_state_fidelity", getattr(lat, "fidelity", None))
+            _base.setdefault("purity", getattr(lat, "purity", None))
+            _base.setdefault("coherence_l1", getattr(lat, "coherence", None))
+            _base.setdefault(
+                "lattice_refresh_counter", getattr(lat, "cycle_count", None)
+            )
     except Exception:
         pass
 
@@ -6238,14 +7585,15 @@ def _build_snapshot_payload() -> dict:
         _c_fid = _client_consensus_fid
         _c_cnt = _client_pool_count
 
-    _base['client_fused_fidelity'] = round(_c_fid, 6)
-    _base['client_oracle_count']   = _c_cnt
+    _base["client_fused_fidelity"] = round(_c_fid, 6)
+    _base["client_oracle_count"] = _c_cnt
 
     if not _base:
         return {}
 
-    _base['ready'] = True
+    _base["ready"] = True
     return _base
+
 
 import queue as _queue_module
 import threading as _threading_module
@@ -6272,35 +7620,44 @@ _snapshot_cache_lock = _threading_module.RLock()
 # Blocks SSE endpoints and infrastructure removed — now handled by external sse_server.py
 # Main server pushes blocks to SSE service via _push_to_sse_service()
 
-logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
+logger.info(
+    "[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health"
+)
 logger.info("[RPC-ORACLE] ✅ Oracle initialized (streaming via external SSE service)")
-logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
-logger.info("[RPC-HYP] 🔒 HypΓ Post-Quantum Cryptography RPC methods registered (Schnorr-Γ + GeodesicLWE)")
+logger.info(
+    "[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}"
+)
+logger.info(
+    "[RPC-HYP] 🔒 HypΓ Post-Quantum Cryptography RPC methods registered (Schnorr-Γ + GeodesicLWE)"
+)
 logger.info("[RPC-HYP]   • qtcl_hyp_generateKeypair — asymmetric key generation")
 logger.info("[RPC-HYP]   • qtcl_hyp_signMessage — non-interactive Schnorr-Γ signature")
 logger.info("[RPC-HYP]   • qtcl_hyp_verifySignature — signature verification")
 logger.info("[RPC-HYP]   • qtcl_hyp_deriveAddress — SHA3-256² address derivation")
 logger.info("[RPC-HYP]   • qtcl_hyp_encryptMessage — GeodesicLWE encryption (IND-CPA)")
-logger.info("[RPC-HYP]   • qtcl_hyp_decryptMessage — GeodesicLWE decryption (LDPC syndrome)")
+logger.info(
+    "[RPC-HYP]   • qtcl_hyp_decryptMessage — GeodesicLWE decryption (LDPC syndrome)"
+)
 logger.info("[RPC-HYP]   • qtcl_hyp_signBlock — block-level Schnorr-Γ signing")
 logger.info("[RPC-HYP]   • qtcl_hyp_verifyBlock — block signature verification")
 
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
 # ═════════════════════════════════════════════════════════════════════════════════
 
+
 def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     """Push oracle snapshot to external SSE service for client streaming."""
     try:
-        if snapshot.get('density_tensor_hex'):
+        if snapshot.get("density_tensor_hex"):
             sse_frame = {
-                'timestamp_ns': snapshot.get('timestamp_ns'),
-                'density_tensor_hex': snapshot.get('density_tensor_hex'),
-                'tensor_dim': 16,
-                'w_state_fidelity': snapshot.get('w_state_fidelity'),
-                'purity': snapshot.get('purity'),
-                'w_state_hex': snapshot.get('w_state_hex', ''),
+                "timestamp_ns": snapshot.get("timestamp_ns"),
+                "density_tensor_hex": snapshot.get("density_tensor_hex"),
+                "tensor_dim": 16,
+                "w_state_fidelity": snapshot.get("w_state_fidelity"),
+                "purity": snapshot.get("purity"),
+                "w_state_hex": snapshot.get("w_state_hex", ""),
             }
-            _push_to_sse_service('/push/snapshot', sse_frame)
+            _push_to_sse_service("/push/snapshot", sse_frame)
     except Exception as e:
         logger.debug(f"[SSE] Snapshot push failed: {e}")
 
@@ -6311,7 +7668,8 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
 # The 32³ tensor IS the quantum state object. No 2D density matrix is transmitted.
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def _lattice_dm_to_32x32x32_tensor_hex(dm256: 'np.ndarray') -> str:
+
+def _lattice_dm_to_32x32x32_tensor_hex(dm256: "np.ndarray") -> str:
     """
     Build a genuine 32×32×32 volumetric tripartite correlation tensor from the
     256×256 density matrix.
@@ -6337,10 +7695,10 @@ def _lattice_dm_to_32x32x32_tensor_hex(dm256: 'np.ndarray') -> str:
     try:
         dm = np.asarray(dm256, dtype=np.complex128)
         if dm.shape != (256, 256):
-            return ''
+            return ""
 
         N = 32
-        B = 8   # block size per X/Y axis
+        B = 8  # block size per X/Y axis
         D = 32  # depth slices
 
         # Pre-compute block means: shape (32, 32) of complex128
@@ -6350,7 +7708,7 @@ def _lattice_dm_to_32x32x32_tensor_hex(dm256: 'np.ndarray') -> str:
         # lambda_z spans [1, 256] log-uniformly across Z=0..31
         # W_z is an N×N matrix where W_z[x,y] = exp(-|x-y| / lambda_z_scaled)
         # lambda_z_scaled in block units = lambda_z / B = [1/8, 32]
-        lambdas = np.exp(np.linspace(np.log(1.0/B), np.log(float(N)), D))
+        lambdas = np.exp(np.linspace(np.log(1.0 / B), np.log(float(N)), D))
 
         tensor = np.zeros((D, N, N), dtype=np.float32)
 
@@ -6360,11 +7718,11 @@ def _lattice_dm_to_32x32x32_tensor_hex(dm256: 'np.ndarray') -> str:
 
         for z in range(D):
             lam = float(lambdas[z])
-            W = np.exp(-dist / lam)                      # shape (32, 32), real weights
-            W /= W.sum()                                  # normalise
+            W = np.exp(-dist / lam)  # shape (32, 32), real weights
+            W /= W.sum()  # normalise
 
             # Element-wise modulus of complex rho_blocks, weighted by shell
-            mag = np.abs(rho_blocks)                      # (32, 32) real
+            mag = np.abs(rho_blocks)  # (32, 32) real
             tensor[z] = (mag * W).astype(np.float32)
 
         # Enforce positivity floor and global normalise
@@ -6377,12 +7735,12 @@ def _lattice_dm_to_32x32x32_tensor_hex(dm256: 'np.ndarray') -> str:
 
     except Exception as e:
         logger.warning(f"[DM-TENSOR] 256→32³ failed: {e}")
-        return ''
+        return ""
 
 
 # ── Cache layer: (tensor_hex, timestamp) ─────────────────────────────────────
-_tensor_cache: tuple = ('', 0.0)   # tensor_hex, ts
-_TENSOR_CACHE_TTL = 0.05            # 50ms — matches SSE cadence
+_tensor_cache: tuple = ("", 0.0)  # tensor_hex, ts
+_TENSOR_CACHE_TTL = 0.05  # 50ms — matches SSE cadence
 
 
 def _get_w_state_hex() -> str:
@@ -6393,16 +7751,18 @@ def _get_w_state_hex() -> str:
     """
     try:
         from globals import LATTICE
+
         lat = LATTICE
-        if lat is not None and hasattr(lat, 'w_state_amplitudes'):
+        if lat is not None and hasattr(lat, "w_state_amplitudes"):
             w = lat.w_state_amplitudes
             if w is not None and len(w) >= 8:
                 # Pack 8 complex doubles as binary
                 import struct
+
                 data = bytearray()
                 for i in range(8):
                     amp = complex(w[i]) if not isinstance(w[i], complex) else w[i]
-                    data.extend(struct.pack('>dd', amp.real, amp.imag))
+                    data.extend(struct.pack(">dd", amp.real, amp.imag))
                 return data.hex()
     except Exception as e:
         logger.debug(f"[W-STATE] extraction failed: {e}")
@@ -6420,7 +7780,7 @@ def _get_compact_lattice_tensor_hex() -> str:
 
     now = time.time()
     # Use existing cache for now
-    cache_key = ('compact', _tensor_cache[1])
+    cache_key = ("compact", _tensor_cache[1])
     if now - _tensor_cache[1] < _TENSOR_CACHE_TTL and _tensor_cache[0]:
         # Check if cached result looks like compact (< 2000 hex chars)
         if len(_tensor_cache[0]) < 2000:
@@ -6428,17 +7788,17 @@ def _get_compact_lattice_tensor_hex() -> str:
 
     try:
         lat = LATTICE
-        if lat is not None and hasattr(lat, 'current_density_matrix'):
+        if lat is not None and hasattr(lat, "current_density_matrix"):
             dm = lat.current_density_matrix
-            if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
+            if dm is not None and hasattr(dm, "shape") and dm.shape == (256, 256):
                 # Build 4×4×4 tensor from 256×256 DM
                 N = 4
-                dm_abs = np.abs(dm[:N*4, :N*4])  # Take top-left 16×16
+                dm_abs = np.abs(dm[: N * 4, : N * 4])  # Take top-left 16×16
                 # Slice into 4×4 blocks, take magnitude
                 tensor = np.zeros((N, N, N), dtype=np.float32)
                 for i in range(N):
                     for j in range(N):
-                        block = dm_abs[i*4:(i+1)*4, j*4:(j+1)*4]
+                        block = dm_abs[i * 4 : (i + 1) * 4, j * 4 : (j + 1) * 4]
                         tensor[i, j, :] = np.mean(block, axis=0)[:N]
 
                 # Normalize
@@ -6471,9 +7831,9 @@ def _get_lattice_tensor_hex() -> str:
 
     try:
         lat = LATTICE
-        if lat is not None and hasattr(lat, 'current_density_matrix'):
+        if lat is not None and hasattr(lat, "current_density_matrix"):
             dm = lat.current_density_matrix
-            if dm is not None and hasattr(dm, 'shape') and dm.shape == (256, 256):
+            if dm is not None and hasattr(dm, "shape") and dm.shape == (256, 256):
                 tensor_hex = _lattice_dm_to_32x32x32_tensor_hex(dm)
                 _tensor_cache = (tensor_hex, now)
                 return tensor_hex
@@ -6485,13 +7845,16 @@ def _get_lattice_tensor_hex() -> str:
         with _snapshot_lock:
             snap = _latest_snapshot
         if snap:
-            h = snap.get('density_matrix_hex', '')
+            h = snap.get("density_matrix_hex", "")
             # Accept 8×8 complex128 (2048 hex) or 32×32 complex64 (16384 hex)
             if h and len(h) == 2048:
                 dm8 = np.frombuffer(bytes.fromhex(h), dtype=np.complex128).reshape(8, 8)
-                dm32 = np.kron(dm8.astype(np.complex64), np.ones((4, 4), dtype=np.complex64))
+                dm32 = np.kron(
+                    dm8.astype(np.complex64), np.ones((4, 4), dtype=np.complex64)
+                )
                 tr = float(np.real(np.trace(dm32)))
-                if tr > 1e-12: dm32 /= tr
+                if tr > 1e-12:
+                    dm32 /= tr
                 # Build tensor from upsampled 32×32
                 N = 32
                 idx = np.arange(N, dtype=np.float32)
@@ -6500,21 +7863,24 @@ def _get_lattice_tensor_hex() -> str:
                 mag = np.abs(dm32)
                 t = np.zeros((N, N, N), dtype=np.float32)
                 for z in range(N):
-                    W = np.exp(-dist / float(lambdas[z])); W /= W.sum()
+                    W = np.exp(-dist / float(lambdas[z]))
+                    W /= W.sum()
                     t[z] = (mag * W).astype(np.float32)
                 tm = float(t.max())
-                if tm > 1e-12: t /= tm
+                if tm > 1e-12:
+                    t /= tm
                 tensor_hex = t.tobytes().hex()
                 _tensor_cache = (tensor_hex, now)
                 return tensor_hex
     except Exception:
         pass
-    return "" 
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # WSGI EXPORT FOR GUNICORN
 # ═══════════════════════════════════════════════════════════════════════════════════════
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # AUTO-FIX pq_curr/pq_last ON STARTUP
@@ -6534,7 +7900,7 @@ def _fix_pq_values_on_startup():
             if not table_exists:
                 logger.info("[PQ-FIX] Blocks table not yet created — skipping pq fix")
                 return
-            
+
             cur.execute("""
                 UPDATE blocks
                 SET pq_curr = height,
@@ -6544,11 +7910,14 @@ def _fix_pq_values_on_startup():
             """)
             updated = cur.rowcount
             if updated > 0:
-                logger.info(f"[PQ-FIX] Updated {updated} blocks: pq_curr=height, pq_last=height-1")
+                logger.info(
+                    f"[PQ-FIX] Updated {updated} blocks: pq_curr=height, pq_last=height-1"
+                )
             else:
                 logger.info("[PQ-FIX] All blocks have correct pq_curr/pq_last values")
     except Exception as e:
         logger.warning(f"[PQ-FIX] Could not update pq values: {e}")
+
 
 # Defer pq_curr/pq_last sync to background thread to unblock /health endpoint
 def _deferred_pq_fix():
@@ -6558,30 +7927,39 @@ def _deferred_pq_fix():
     except Exception as e:
         logger.warning(f"[PQ-FIX] Background sync failed: {e}")
 
+
 threading.Thread(
     target=_deferred_pq_fix,
     daemon=True,
     name="PQFix",
 ).start()
-logger.info("[PQ-FIX] 🔄 Block pq values sync deferred to background thread — /health ready immediately")
+logger.info(
+    "[PQ-FIX] 🔄 Block pq values sync deferred to background thread — /health ready immediately"
+)
+
 
 # Defer mempool sync to background thread (avoids blocking on DB initialization)
 def _deferred_mempool_sync():
     """Background thread: Sync mempool DB pool without blocking Flask init."""
     try:
         import mempool as _mp_sync
+
         # ⚛️ CRITICAL: Share the server's db_pool with the mempool module
         # ensures both use the same (possibly HTTP-mode) connection logic.
         _mp_sync._db = db_pool
-        logger.info("[DB] Mempool database pool synchronized with server (museum-grade sync)")
+        logger.info(
+            "[DB] Mempool database pool synchronized with server (museum-grade sync)"
+        )
     except Exception as _sync_err:
         logger.warning(f"[DB] Mempool sync failed: {_sync_err}")
+
 
 threading.Thread(
     target=_deferred_mempool_sync,
     daemon=True,
     name="MempoolSync",
 ).start()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CATHEDRAL-GRADE: HYP-WALLET Deferred Initialization (Server-Side)
@@ -6591,23 +7969,28 @@ def _deferred_server_wallet_init():
     """Initialize HYP-WALLET on server for coinbase signing (non-blocking)."""
     try:
         # Add hlwe directory to path
-        _hlwe_dir = os.path.join(os.path.dirname(__file__), 'hlwe')
+        _hlwe_dir = os.path.join(os.path.dirname(__file__), "hlwe")
         if _hlwe_dir not in sys.path:
             sys.path.insert(0, _hlwe_dir)
-        
+
         # Import wallet from existing miner module
-        _miner_path = os.path.expanduser('~/.qtcl')
-        _wallet_file = os.path.join(_miner_path, 'wallet.json')
-        
+        _miner_path = os.path.expanduser("~/.qtcl")
+        _wallet_file = os.path.join(_miner_path, "wallet.json")
+
         if os.path.exists(_wallet_file):
             logger.info(f"[HYP-WALLET-SERVER] 📍 Found server wallet at {_wallet_file}")
             logger.info(f"[HYP-WALLET-SERVER]    Server can sign coinbase transactions")
         else:
-            logger.info(f"[HYP-WALLET-SERVER] 📭 No server wallet found at {_wallet_file}")
-            logger.info(f"[HYP-WALLET-SERVER]    Create one with: python qtcl-miner/qtcl_client.py")
+            logger.info(
+                f"[HYP-WALLET-SERVER] 📭 No server wallet found at {_wallet_file}"
+            )
+            logger.info(
+                f"[HYP-WALLET-SERVER]    Create one with: python qtcl-miner/qtcl_client.py"
+            )
             logger.info(f"[HYP-WALLET-SERVER]    Then select 'Wallet → Create New'")
     except Exception as _wallet_err:
         logger.warning(f"[HYP-WALLET-SERVER] ⚠️  Server wallet check: {_wallet_err}")
+
 
 threading.Thread(
     target=_deferred_server_wallet_init,
@@ -6617,8 +8000,9 @@ threading.Thread(
 
 # ═══ MODULE LOAD COMPLETE ═══
 # Flask app is ready to serve /health immediately
-logger.info(f"[STARTUP] ✅ Server module loaded in {time.time() - _STARTUP_TIME:.2f}s — /health endpoint ready")
+logger.info(
+    f"[STARTUP] ✅ Server module loaded in {time.time() - _STARTUP_TIME:.2f}s — /health endpoint ready"
+)
 
 # Gunicorn and wsgi_config.py require both 'app' and 'application' exports
 application = app
-

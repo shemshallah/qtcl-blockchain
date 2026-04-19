@@ -45,6 +45,7 @@ _metrics_lock = threading.RLock()
 _next_client_id = 0
 _client_id_lock = threading.Lock()
 
+
 def _allocate_client_id():
     global _next_client_id
     with _client_id_lock:
@@ -55,6 +56,7 @@ def _allocate_client_id():
 # ═══════════════════════════════════════════════════════════════════════════════
 # SSE ENDPOINTS — Stream to connected clients
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
@@ -86,7 +88,9 @@ def rpc_oracle_snapshot():
             logger.info(f"[SSE] /rpc/oracle/snapshot client {client_id} disconnected")
         finally:
             with _snapshot_lock:
-                _snapshot_clients[:] = [(cid, q) for cid, q in _snapshot_clients if cid != client_id]
+                _snapshot_clients[:] = [
+                    (cid, q) for cid, q in _snapshot_clients if cid != client_id
+                ]
 
     return Response(
         snapshot_generator(),
@@ -95,7 +99,7 @@ def rpc_oracle_snapshot():
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
-        }
+        },
     )
 
 
@@ -126,7 +130,9 @@ def rpc_events_blocks():
             logger.info(f"[SSE] /rpc/events/blocks client {client_id} disconnected")
         finally:
             with _blocks_lock:
-                _blocks_clients[:] = [(cid, q) for cid, q in _blocks_clients if cid != client_id]
+                _blocks_clients[:] = [
+                    (cid, q) for cid, q in _blocks_clients if cid != client_id
+                ]
 
     return Response(
         blocks_generator(),
@@ -135,15 +141,62 @@ def rpc_events_blocks():
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
-        }
+        },
     )
 
 
-@app.route("/rpc/metrics/push", methods=["GET", "POST", "OPTIONS"])
+@app.route("/rpc/blocks/stream", methods=["GET"])
+def rpc_blocks_stream():
+    """SSE stream: Real-time block information (height, hash, timestamp).
+
+    Streams block data in format: {"height": N, "hash": "...", "timestamp": ...}
+    """
+    client_id = _allocate_client_id()
+    client_queue = queue.Queue(maxsize=50)
+
+    with _blocks_lock:
+        _blocks_clients.append((client_id, client_queue))
+
+    logger.info(f"[SSE] /rpc/blocks/stream client {client_id} connected")
+
+    def blocks_stream_generator():
+        try:
+            while True:
+                try:
+                    block = client_queue.get(timeout=1.0)
+                    if block:
+                        # Format block data with height, hash, timestamp
+                        formatted = {
+                            "height": block.get("height", 0),
+                            "hash": block.get("hash", ""),
+                            "timestamp": block.get("timestamp", 0),
+                        }
+                        yield f"data: {json.dumps(formatted)}\n\n"
+                except queue.Empty:
+                    yield ": heartbeat\n\n"
+        except GeneratorExit:
+            logger.info(f"[SSE] /rpc/blocks/stream client {client_id} disconnected")
+        finally:
+            with _blocks_lock:
+                _blocks_clients[:] = [
+                    (cid, q) for cid, q in _blocks_clients if cid != client_id
+                ]
+
+    return Response(
+        blocks_stream_generator(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.route("/rpc/metrics/push", methods=["GET"])
 def rpc_metrics_push():
     """SSE stream: Metrics push (placeholder — currently streams heartbeats only)."""
-    if request.method == "OPTIONS":
-        return "", 204
 
     client_id = _allocate_client_id()
     client_queue = queue.Queue(maxsize=50)
@@ -166,7 +219,9 @@ def rpc_metrics_push():
             logger.info(f"[SSE] /rpc/metrics/push client {client_id} disconnected")
         finally:
             with _metrics_lock:
-                _metrics_clients[:] = [(cid, q) for cid, q in _metrics_clients if cid != client_id]
+                _metrics_clients[:] = [
+                    (cid, q) for cid, q in _metrics_clients if cid != client_id
+                ]
 
     return Response(
         metrics_generator(),
@@ -175,13 +230,14 @@ def rpc_metrics_push():
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
-        }
+        },
     )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INTERNAL PUSH ENDPOINTS — Main server pushes data, SSE service fan-outs
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 @app.route("/push/snapshot", methods=["POST"])
 def push_snapshot():
@@ -203,7 +259,9 @@ def push_snapshot():
                     except:
                         pass
 
-        logger.debug(f"[SSE] /push/snapshot fan-out to {len(_snapshot_clients)} clients")
+        logger.debug(
+            f"[SSE] /push/snapshot fan-out to {len(_snapshot_clients)} clients"
+        )
         return {"status": "ok", "clients": len(_snapshot_clients)}, 200
     except Exception as e:
         logger.error(f"[SSE] /push/snapshot error: {e}")
@@ -264,6 +322,7 @@ def push_metric():
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 @app.route("/health", methods=["GET"])
 def health():
