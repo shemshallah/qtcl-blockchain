@@ -667,20 +667,17 @@ class HypGammaEngine:
                     message_hash, walk_indices, generators
                 )
 
-            # Format output — return full crypto components for verification
-            # Convert to dict format that signature_from_dict() can parse
+            # sig is now an object with attributes: signature, challenge, auth_tag, timestamp,
+            # R (dict), Z (dict), c_full (hex string), c_exp (int), version
+            # Build verification dict with these components
             timestamp = datetime.now(timezone.utc).isoformat()
 
-            # Get the full signature dict with R, Z, c_full, c_exp
-            sig_dict = signature_to_dict(sig)
-
-            # Add version and timestamp for backward compat
             result = {
-                'version': WIRE_VERSION,
-                'R': sig_dict['R'],
-                'Z': sig_dict['Z'],
-                'c_full': sig.c_full,  # hex string of full challenge
-                'c_exp': sig.c_exp,    # exponent bits
+                'version': sig.version,
+                'R': sig.R,           # already a dict from sign_hash
+                'Z': sig.Z,           # already a dict from sign_hash
+                'c_full': sig.c_full,
+                'c_exp': sig.c_exp,
                 # Backward compat: also include legacy fields
                 'signature': sig.signature,
                 'challenge': sig.challenge,

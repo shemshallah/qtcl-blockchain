@@ -1748,18 +1748,21 @@ class SchnorrGamma:
         Sign a pre-hashed message (32-byte hash).
         public_key may be a PSLMatrix OR the generators dict from hyp_engine —
         we always derive the canonical PSLMatrix from the private_walk to be safe.
-        Returns an object with .signature and .challenge string attributes.
+        Returns an object with .signature and .challenge string attributes, plus
+        cryptographic components (R, Z, c_full, c_exp) for verification.
         """
         # Derive the PSLMatrix public key from the private walk so we never
         # pass a wrong type regardless of what hyp_engine sends as third arg.
         _kp = keygen_from_walk(private_walk)
         _result_dict = sign_hash(message_hash, private_walk, _kp.public_key)
+
+        # Wrap all fields from _result_dict in an object with attribute access
         class _SigResult:
-            signature = _result_dict.get('signature', '')
-            challenge  = _result_dict.get('challenge', '')
-            auth_tag   = _result_dict.get('auth_tag', '')
-            timestamp  = _result_dict.get('timestamp', '')
-        return _SigResult()
+            def __init__(self, d):
+                for k, v in d.items():
+                    setattr(self, k, v)
+
+        return _SigResult(_result_dict)
     
     def verify(self, sig: SchnorrSignature, message: bytes, public_key: PSLMatrix) -> VerifyResult:
         """Verify a Schnorr-Γ signature."""
@@ -1839,6 +1842,7 @@ def sign_hash(message_hash: bytes, private_walk: List[int], public_key: PSLMatri
     from datetime import datetime, timezone
     timestamp = datetime.now(timezone.utc).isoformat()
     return {
+        'version': sig_dict['version'],
         'signature': sig_dict['R'] if isinstance(sig_dict.get('R'), str) else json.dumps(sig_dict['R']),
         'challenge': challenge_hex,
         'timestamp': timestamp,
