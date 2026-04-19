@@ -730,12 +730,12 @@ def _prewarm_hlwe_engine() -> None:
     LDPC code, and SchnorrGamma — potentially 5-30s. This thread pre-warms it so
     the first block submission completes in < 5s.
     """
+    logger.info("[STARTUP] Pre-warming HypΓ engine...")
     try:
-        logger.info("[HLWE] 🔄 Pre-warming HypΓ engine...")
         _init_hlwe_engine()
-        logger.info("[HLWE] ✅ HypΓ engine ready for block submissions")
+        logger.info("[STARTUP] ✅ HypΓ engine ready")
     except Exception as e:
-        logger.warning(f"[HLWE] ⚠️  Prewarm failed (non-fatal): {e}")
+        logger.error(f"[STARTUP] HypΓ prewarm failed: {e}")
 
 threading.Thread(
     target=_prewarm_hlwe_engine,

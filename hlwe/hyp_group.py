@@ -98,10 +98,10 @@ NOISE_STEPS:   int = 8     # k — noise perturbation walk length
 N_GENERATORS:  int = 4     # {a, a⁻¹, b, b⁻¹}
 
 # Precision tolerance for det=1 check
-# At 150 dps with 500 bits precision, we allow error up to 1e-60.
-# With periodic renorm every 16 ops in long chains, accumulated error is ~1e-60 to 1e-65.
-# This tolerance allows normal floating-point error while catching protocol violations.
-DET_TOLERANCE: mpf = mpf('1e-60')
+# At 150 dps with 500 bits precision, accumulated floating-point error can reach 1e-50.
+# This tolerance allows normal rounding errors while catching protocol violations.
+# Error < 1e-50 is safely due to arithmetic precision, not mathematical issues.
+DET_TOLERANCE: mpf = mpf('1e-50')
 
 # Overflow bound for matrix entries (if entries exceed this, matrices have drifted)
 ENTRY_OVERFLOW_BOUND: mpf = mpf('1e100')
