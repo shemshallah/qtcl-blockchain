@@ -7063,6 +7063,25 @@ def _start_p2p_broadcast():
     logger.info(f"[P2P] ✅ DHT broadcaster started (30s interval)")
 
 
+# Handle POST/OTHER methods to /rpc for debugging
+@app.route("/rpc", methods=["POST", "PUT", "DELETE", "PATCH"])
+def rpc_endpoint_post_debug():
+    """Log and reject POST/OTHER requests to /rpc (GET-only endpoint)."""
+    logger.warning(
+        f"[RPC-REJECTED] {request.method} /rpc from {request.remote_addr} | UA: {request.user_agent.string[:50]}..."
+    )
+    return jsonify(
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32600,
+                "message": "GET-only endpoint. Use query params: ?method=X&params=JSON",
+            },
+            "id": None,
+        }
+    ), 405
+
+
 @app.route("/rpc", methods=["GET"])
 def rpc_endpoint():
     """GET /rpc — JSON-RPC 2.0 endpoint (pull-based, query params).
