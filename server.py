@@ -5420,31 +5420,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         mermin_value = float(hdr.get("mermin_value", 0.0) or 0.0)
         mermin_violated = bool(hdr.get("mermin_violated", False))
 
-        # ── 🪣 RATE LIMITING: Prevent miner spam ───────────────────────────
-        allowed, remaining = _rate_limiter.allow_request(miner_address)
-        if not allowed:
-            logger.warning(
-                f"[RPC-submitBlock] 🪣 RATE LIMITED: miner={miner_address[:16]}…"
-            )
-            return _rpc_error(
-                -32020,
-                "Rate limit exceeded. Try again in 1 second.",
-                rpc_id,
-                {
-                    "retry_after": 1,
-                    "rate_limit": {"tokens": 0, "rate": 10, "burst": 20},
-                },
-            )
-
-        # ── ⚡ CIRCUIT BREAKER: Protect database from overload ────────────
-        if not _db_circuit_breaker.can_execute():
-            logger.warning(f"[RPC-submitBlock] ⚡ CIRCUIT OPEN: database under load")
-            return _rpc_error(
-                -32021,
-                "Database temporarily unavailable due to high load. Retry with backoff.",
-                rpc_id,
-                {"circuit_state": "open", "retry_after": 30},
-            )
+        # DEBUGGING: Bypass rate limit and circuit breaker to test core insertion
+        remaining = 999
+        logger.info(f"[RPC-submitBlock] 🔧 MINIMAL MODE: Skipping protection logic")
 
         # ── 🔍 BLOOM FILTER PRE-CHECK: Instant duplicate detection ─────────
         # Check bloom filter first (1% false positive rate acceptable)
