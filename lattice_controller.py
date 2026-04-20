@@ -194,10 +194,9 @@ def _init_hyp_gamma():
         with _hyp_gamma_lock:
             if _hyp_gamma_instance is None:
                 try:
-                    tess = HyperbolicTessellation(depth=8)
-                    ldpc = LDPCCode(n=1024)  # Default rate is 0.625 (d_v=3, d_c=8)
-                    lwe = GeodesicLWE(tessellation=tess, ldpc_code=ldpc, sigma=2.5)
-                    _hyp_gamma_instance = HypGammaEngine(lwe=lwe, tessellation=tess)
+                    # HypGammaEngine is a singleton - no constructor args needed
+                    # It initializes tessellation, LDPC, LWE internally
+                    _hyp_gamma_instance = HypGammaEngine()
                     logger.info(
                         "✅ HypΓ engine initialized (tessellation depth=8, LDPC n=1024)"
                     )

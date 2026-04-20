@@ -7281,8 +7281,66 @@ def rpc_oracle_snapshot_proxy():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
+# SSE PROXY: /rpc/blocks/stream → localhost:8001 (SSE service)
 # ═══════════════════════════════════════════════════════════════════════════════════
+@app.route("/rpc/blocks/stream", methods=["GET"])
+def rpc_blocks_stream_proxy():
+    """Proxy SSE stream for block events from internal SSE server (port 8001)."""
+    try:
+        try:
+            import requests as _req
+        except ImportError:
+            logger.warning("[BLOCKS-STREAM] requests not available, using placeholder")
+            _req = None
+
+        if _req is None:
+
+            def placeholder():
+                yield b": SSE initializing, retry in 10s\n\n"
+                yield b'data: {"status":"initializing","retry_after":10}\n\n'
+
+            return Response(placeholder(), mimetype="text/event-stream")
+
+        sse_url = "http://localhost:8001/rpc/blocks/stream"
+
+        def generate():
+            try:
+                r = _req.get(
+                    sse_url,
+                    headers={"Accept": "text/event-stream"},
+                    stream=True,
+                    timeout=(5, 60),
+                )
+                for chunk in r.iter_content(chunk_size=1024):
+                    if chunk:
+                        yield chunk
+            except GeneratorExit:
+                pass
+            except Exception as e:
+                logger.debug(f"[BLOCKS-STREAM] Stream error: {e}")
+                yield f": SSE stream error: {e}\n\n".encode()
+
+        return Response(
+            generate(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+    except Exception as e:
+        logger.error(f"[BLOCKS-STREAM] Failed to proxy: {e}")
+
+        def fallback():
+            yield b": SSE unavailable\n\n"
+
+        return Response(fallback(), mimetype="text/event-stream")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
+# ═══════════════════════════════════════════════════════���═══════════════════════════
 @app.route("/rpc/methods", methods=["GET"])
 def rpc_methods():
     """GET /rpc/methods — introspection: list all available RPC methods."""
