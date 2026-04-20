@@ -5369,279 +5369,59 @@ def qtcl_pow_verify(
 
 def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
     """
-    🚀 qtcl_submitBlock — WEB-SCALE IDEMPOTENT BLOCK SUBMISSION
+    🚀 qtcl_submitBlock — ULTRA-MINIMAL: BARE INSERT ONLY
 
-    Handles 10,000 concurrent miners with:
-    - Atomic compare-and-swap block insertion
-    - Idempotent operations (same block submitted multiple times = same result)
-    - Rate limiting per miner
-    - Circuit breaker for database protection
-    - Bloom filter pre-check for instant duplicate detection
-
-    Returns immediately with 202 Accepted for non-critical path operations
+    Strip ALL complexity. Just parse and INSERT block.
+    Debugging to find actual root cause of transaction abort.
     """
-    _submit_start = time.time()
-
     try:
-        # ✅ FAST PATH: Parse and validate parameters
+        # Parse params
         if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
-            return _rpc_error(
-                -32602, "params[0] must be {header, transactions}", rpc_id
-            )
+            return _rpc_error(-32602, "params[0] required", rpc_id)
 
         data = params[0]
         if not isinstance(data, dict):
-            return _rpc_error(-32602, "params[0] must be a JSON object", rpc_id)
+            return _rpc_error(-32602, "params[0] must be dict", rpc_id)
 
         hdr = data.get("header", data)
-        txs = data.get("transactions", [])
 
-        height = int(hdr.get("block_height", hdr.get("height", 0)))
+        height = int(hdr.get("height", 0))
         block_hash = str(hdr.get("block_hash", ""))
         parent_hash = str(hdr.get("parent_hash", "0" * 64))
         merkle_root = str(hdr.get("merkle_root", "0" * 64))
-        timestamp_s = int(
-            hdr.get("timestamp_s", hdr.get("timestamp", hdr.get("timestamp_s", 0)))
-        )
+        timestamp_s = int(hdr.get("timestamp", 0))
         nonce = int(hdr.get("nonce", 0))
         miner_address = str(hdr.get("miner_address", ""))
-        difficulty_bits = int(
-            hdr.get(
-                "difficulty_bits", hdr.get("difficulty", hdr.get("difficulty_bits", 4))
-            )
-        )
-        w_entropy_hex = str(
-            hdr.get(
-                "w_entropy_hash",
-                hdr.get("w_entropy_seed", hdr.get("w_entropy_hash", "")),
-            )
-        )
-        w_state_fidelity = float(hdr.get("w_state_fidelity", 0.0) or 0.0)
-        mermin_value = float(hdr.get("mermin_value", 0.0) or 0.0)
-        mermin_violated = bool(hdr.get("mermin_violated", False))
+        difficulty_bits = int(hdr.get("difficulty", 4))
+        w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
-        # DEBUGGING: Bypass rate limit and circuit breaker to test core insertion
-        remaining = 999
-        logger.info(f"[RPC-submitBlock] 🔧 MINIMAL MODE: Skipping protection logic")
+        logger.info(f"[ULTRA-MINIMAL] h={height} hash={block_hash[:16]}...")
 
-        # ── 🔍 BLOOM FILTER PRE-CHECK: Instant duplicate detection ─────────
-        # Check bloom filter first (1% false positive rate acceptable)
-        # This eliminates 99% of duplicate block DB queries
-        # Note: Implementation would check bloom filter here if global bloom available
-
-        logger.info(
-            f"[RPC-submitBlock] 📥 RECEIVED h={height} hash={block_hash[:16]}… "
-            f"miner={miner_address[:16]}… rate_remaining={remaining}"
-        )
-
-        # ── 🔥 IDEMPOTENT INSERT: Atomic compare-and-swap ────────────────────
-        # Use PostgreSQL advisory locks for height-based serialization
-        # This prevents race conditions at the same height
-
-        _block_result = None
-        _existing_hash = None
-        _inserted = False
-
+        # ULTRA-MINIMAL: Just try to INSERT
         try:
             with get_db_cursor() as cur:
-                # 🎯 CRITICAL: Use advisory lock for this height to prevent races
-                # Lock ID = height (integers can be used directly as lock IDs)
-                cur.execute("SELECT pg_advisory_lock(%s)", (height,))
-
-                try:
-                    # 🏎️ FAST CHECK: Does this exact block already exist?
-                    cur.execute(
-                        "SELECT block_hash, height FROM blocks WHERE block_hash = %s LIMIT 1",
-                        (block_hash,),
-                    )
-                    existing_by_hash = cur.fetchone()
-
-                    if existing_by_hash:
-                        # Block already exists - return success immediately
-                        existing_height = existing_by_hash[1]
-                        logger.info(
-                            f"[RPC-submitBlock] 🔁 IDEMPOTENT: Block h={existing_height} already exists"
-                        )
-                        _block_result = "duplicate"
-                        _inserted = True  # Consider it inserted since it exists
-                    else:
-                        # Check if DIFFERENT block exists at this height (fork)
-                        cur.execute(
-                            "SELECT block_hash FROM blocks WHERE height = %s LIMIT 1",
-                            (height,),
-                        )
-                        existing_at_height = cur.fetchone()
-
-                        if existing_at_height:
-                            _existing_hash = existing_at_height[0]
-                            if _existing_hash != block_hash:
-                                logger.warning(
-                                    f"[RPC-submitBlock] ⚠️ FORK at h={height}: "
-                                    f"new={block_hash[:16]}… existing={_existing_hash[:16]}…"
-                                )
-                                _block_result = "fork"
-
-                        # No existing block at this height - safe to insert
-                        if _block_result != "fork":
-                            # 🚀 ATOMIC INSERT: Use ON CONFLICT for true idempotency
-                            # Match actual table schema: height, block_hash, parent_hash, merkle_root, timestamp, etc.
-                            cur.execute(
-                                """
-                                INSERT INTO blocks
-                                (height, block_hash, parent_hash, merkle_root, timestamp,
-                                 oracle_w_state_hash, miner_address, nonce,
-                                 difficulty, pq_curr, pq_last)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                ON CONFLICT (height) DO NOTHING
-                                RETURNING block_hash
-                            """,
-                                (
-                                    height,
-                                    block_hash,
-                                    parent_hash,
-                                    merkle_root,
-                                    timestamp_s,
-                                    w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                                    miner_address,
-                                    nonce,
-                                    difficulty_bits,
-                                    height,  # pq_curr
-                                    max(0, height - 1),  # pq_last
-                                ),
-                            )
-
-                            result = cur.fetchone()
-                            if result:
-                                # We inserted successfully
-                                logger.critical(
-                                    f"[RPC-submitBlock] ✅ INSERTED: h={height} hash={block_hash[:16]}…"
-                                )
-                                _block_result = "inserted"
-                                _inserted = True
-                            else:
-                                # Another transaction inserted first - check what
-                                cur.execute(
-                                    "SELECT block_hash FROM blocks WHERE height = %s",
-                                    (height,),
-                                )
-                                race_result = cur.fetchone()
-                                if race_result:
-                                    if race_result[0] == block_hash:
-                                        logger.info(
-                                            f"[RPC-submitBlock] 🔁 RACE WON: h={height} already in DB"
-                                        )
-                                        _block_result = "duplicate"
-                                        _inserted = True
-                                    else:
-                                        logger.warning(
-                                            f"[RPC-submitBlock] ⚠️ RACE LOST: h={height} different block inserted"
-                                        )
-                                        _block_result = "fork"
-                                        _existing_hash = race_result[0]
-                                else:
-                                    # Shouldn't happen - no block at height
-                                    _block_result = "error"
-
-                    # 📝 PERSIST TRANSACTIONS (only if block is in DB)
-                    if _inserted and txs:
-                        for tx in txs:
-                            tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
-                            if not tx_id:
-                                continue
-                            try:
-                                cur.execute(
-                                    """
-                                    INSERT INTO transactions
-                                    (tx_hash, from_address, to_address, amount,
-                                     tx_type, status, height, updated_at)
-                                    VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW())
-                                    ON CONFLICT (tx_hash) DO NOTHING
-                                """,
-                                    (
-                                        tx_id,
-                                        tx.get("from_addr", "0" * 64),
-                                        tx.get("to_addr", ""),
-                                        float(tx.get("amount", 0)),
-                                        tx.get("tx_type", "transfer"),
-                                        height,
-                                    ),
-                                )
-                            except Exception as tx_err:
-                                logger.debug(
-                                    f"[RPC-submitBlock] TX insert skipped: {tx_err}"
-                                )
-
-                finally:
-                    # 🔓 ALWAYS release advisory lock
-                    cur.execute("SELECT pg_advisory_unlock(%s)", (height,))
-
-        except Exception as dbe:
-            logger.exception(f"[RPC-submitBlock] ❌ DB error: {dbe}")
-            _db_circuit_breaker.record_failure()
-            return _rpc_error(-32603, f"Database error: {str(dbe)[:100]}", rpc_id)
-
-        # Record success for circuit breaker
-        _db_circuit_breaker.record_success()
-
-        # ── 📤 HANDLE RESULT ──────────────────────────────────────────────────
-        if _block_result == "fork":
-            return _rpc_error(
-                -32002,
-                f"Fork rejected: h={height} already has different block",
+                cur.execute(
+                    """
+                    INSERT INTO blocks
+                    (height, block_hash, parent_hash, merkle_root, timestamp,
+                     oracle_w_state_hash, miner_address, nonce, difficulty, pq_curr, pq_last)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (height) DO NOTHING
+                    """,
+                    (
+                        height, block_hash, parent_hash, merkle_root, timestamp_s,
+                        w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
+                        miner_address, nonce, difficulty_bits, height, max(0, height - 1),
+                    ),
+                )
+            logger.critical(f"[ULTRA-MINIMAL] ✅ ACCEPTED h={height}")
+            return _rpc_ok(
+                {"status": "accepted", "height": height, "block_hash": block_hash, "next_height": height + 1},
                 rpc_id,
-                {"existing_hash": _existing_hash, "your_hash": block_hash},
             )
-
-        if _block_result == "error":
-            return _rpc_error(-32603, "Block persistence failed", rpc_id)
-
-        # ✅ SUCCESS: Block is in database (either we inserted or it existed)
-        _elapsed = time.time() - _submit_start
-        logger.info(
-            f"[RPC-submitBlock] ✅ ACCEPTED h={height} in {_elapsed:.3f}s "
-            f"result={_block_result}"
-        )
-
-        # 🏗️ UPDATE HEIGHT CACHE (instant notification to all miners)
-        _height_cache.update_height(height, block_hash, difficulty_bits)
-
-        # 📡 ASYNC: Broadcast to P2P network (non-blocking)
-        try:
-            compact_block = {
-                "height": height,
-                "block_hash": block_hash,
-                "parent_hash": parent_hash,
-                "miner_address": miner_address,
-                "difficulty_bits": difficulty_bits,
-            }
-            # Fire-and-forget broadcast
-            threading.Thread(
-                target=_broadcast_block_to_peers, args=(compact_block,), daemon=True
-            ).start()
-        except Exception as broadcast_err:
-            logger.debug(f"[RPC-submitBlock] Broadcast deferred: {broadcast_err}")
-
-        # 💰 ASYNC: Settlement and chain state update (queue for background)
-        try:
-            _resp_reward = 7.20  # Default
-            if TessellationRewardSchedule:
-                _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height)
-        except:
-            pass
-
-        # Return success immediately - don't wait for settlement
-        return _rpc_ok(
-            {
-                "status": "accepted",
-                "height": height,
-                "block_hash": block_hash,
-                "next_height": height + 1,
-                "miner_reward_qtcl": _resp_reward,
-                "persistence": _block_result,  # 'inserted' or 'duplicate'
-                "processing_time_ms": round(_elapsed * 1000, 2),
-            },
-            rpc_id,
-        )
+        except Exception as e:
+            logger.exception(f"[ULTRA-MINIMAL] ❌ ERROR: {e}")
+            return _rpc_error(-32603, f"Error: {str(e)[:100]}", rpc_id)
 
     except Exception as e:
         logger.exception(f"[RPC-submitBlock] 💥 CRITICAL ERROR: {e}")
