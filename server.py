@@ -3549,12 +3549,12 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
             try:
                 # Try SQLite first
                 if (
-                    _LATTICE
-                    and hasattr(_LATTICE, "block_manager")
-                    and _LATTICE.block_manager
-                    and _LATTICE.block_manager.db
+                    LATTICE
+                    and hasattr(LATTICE, "block_manager")
+                    and LATTICE.block_manager
+                    and LATTICE.block_manager.db
                 ):
-                    db = _LATTICE.block_manager.db
+                    db = LATTICE.block_manager.db
                     if db._sqlite_conn:
                         try:
                             sql = """
