@@ -7215,6 +7215,56 @@ def rpc_endpoint():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# SSE PROXY: /rpc/oracle/snapshot → localhost:8001 (SSE service)
+# ═══════════════════════════════════════════════════════════════════════════════════
+@app.route("/rpc/oracle/snapshot", methods=["GET"])
+def rpc_oracle_snapshot_proxy():
+    """Proxy SSE stream from internal SSE server (port 8001) to external clients.
+
+    Koyeb exposes only the main web service (port 8000), so we proxy
+    SSE requests to the internal SSE server running on port 8001.
+    """
+    try:
+        import requests
+
+        # Stream from internal SSE server
+        sse_url = "http://localhost:8001/rpc/oracle/snapshot"
+
+        def generate():
+            try:
+                r = requests.get(
+                    sse_url,
+                    headers={"Accept": "text/event-stream"},
+                    stream=True,
+                    timeout=(5, 60),  # (connect timeout, read timeout)
+                )
+
+                # Stream SSE data to client
+                for chunk in r.iter_content(chunk_size=1024):
+                    if chunk:
+                        yield chunk
+            except GeneratorExit:
+                pass  # Client disconnected
+            except Exception as e:
+                logger.debug(f"[SSE-PROXY] Stream error: {e}")
+                # Return error as SSE comment
+                yield f": SSE stream error: {e}\n\n".encode()
+
+        return Response(
+            generate(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+    except Exception as e:
+        logger.error(f"[SSE-PROXY] Failed to proxy: {e}")
+        return jsonify({"error": "SSE stream unavailable", "message": str(e)}), 503
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
 # ═══════════════════════════════════════════════════════════════════════════════════
 @app.route("/rpc/methods", methods=["GET"])

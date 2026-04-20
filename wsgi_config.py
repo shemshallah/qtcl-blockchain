@@ -72,16 +72,17 @@ def application(environ, start_response):
         start_response("200 OK", [("Content-Type", "application/json")])
         return [b'{"jsonrpc":"2.0","result":{"status":"ok","healthy":true},"id":1}']
 
-    # GET /rpc waits for server (normal operation)
-    if path == "/rpc" or path.startswith("/rpc/"):
-        _load_done.wait(timeout=180)  # 3 minute timeout for RPC during startup
+    # GET /rpc - if server not ready, return 503 immediately (don't block client)
+    if method == "GET" and (path == "/rpc" or path.startswith("/rpc/")):
         if _full_app:
             return _full_app(environ, start_response)
+        # Server not ready - tell client to retry quickly
         start_response(
-            "503 Service Unavailable", [("Content-Type", "application/json")]
+            "503 Service Unavailable",
+            [("Content-Type", "application/json"), ("Retry-After", "5")],
         )
         return [
-            b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server still initializing, please wait"},"id":null}'
+            b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server initializing, retry in 5s"},"id":null}'
         ]
 
     # Standard timeout for other endpoints
