@@ -7223,31 +7223,42 @@ def rpc_oracle_snapshot_proxy():
 
     Koyeb exposes only the main web service (port 8000), so we proxy
     SSE requests to the internal SSE server running on port 8001.
+
+    If proxy fails, return a placeholder response so clients don't hang.
     """
     try:
-        import requests
+        # Try to import requests - if fail, generate placeholder
+        try:
+            import requests as _req
+        except ImportError:
+            logger.warning("[SSE-PROXY] requests not available, using placeholder")
+            _req = None
 
-        # Stream from internal SSE server
+        if _req is None:
+            # Return placeholder SSE that tells client to retry later
+            def placeholder():
+                yield b": SSE initializing, retry in 10s\n\n"
+                yield b'data: {"status":"initializing","retry_after":10}\n\n'
+
+            return Response(placeholder(), mimetype="text/event-stream")
+
         sse_url = "http://localhost:8001/rpc/oracle/snapshot"
 
         def generate():
             try:
-                r = requests.get(
+                r = _req.get(
                     sse_url,
                     headers={"Accept": "text/event-stream"},
                     stream=True,
-                    timeout=(5, 60),  # (connect timeout, read timeout)
+                    timeout=(5, 60),
                 )
-
-                # Stream SSE data to client
                 for chunk in r.iter_content(chunk_size=1024):
                     if chunk:
                         yield chunk
             except GeneratorExit:
-                pass  # Client disconnected
+                pass
             except Exception as e:
                 logger.debug(f"[SSE-PROXY] Stream error: {e}")
-                # Return error as SSE comment
                 yield f": SSE stream error: {e}\n\n".encode()
 
         return Response(
@@ -7261,7 +7272,12 @@ def rpc_oracle_snapshot_proxy():
         )
     except Exception as e:
         logger.error(f"[SSE-PROXY] Failed to proxy: {e}")
-        return jsonify({"error": "SSE stream unavailable", "message": str(e)}), 503
+
+        # Return a minimal placeholder instead of error
+        def fallback():
+            yield b": SSE unavailable\n\n"
+
+        return Response(fallback(), mimetype="text/event-stream")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
