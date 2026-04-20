@@ -2696,10 +2696,14 @@ def get_db_cursor():
 
     ⚛️  CRITICAL: Return connections to pool, never close them directly.
     Closing breaks the pool. Must use db_pool.putconn() to return.
+
+    FIX: Reset connection to ensure no aborted transaction state persists
     """
     conn = None
     try:
         conn = db_pool.get_connection()
+        # FIX: Ensure clean transaction state
+        conn.rollback()
         cur = conn.cursor()
         yield cur
         conn.commit()
@@ -2714,6 +2718,11 @@ def get_db_cursor():
     finally:
         if conn:
             try:
+                # FIX: Always rollback before returning to ensure clean state
+                try:
+                    conn.rollback()
+                except:
+                    pass
                 if db_pool.use_pooling and db_pool.pool:
                     db_pool.pool.putconn(conn)
                 else:
