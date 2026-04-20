@@ -7082,13 +7082,14 @@ def _start_p2p_broadcast():
 def rpc_endpoint_post():
     """POST /rpc — Accept JSON body and convert to internal processing (backward compatibility)."""
     try:
-        # Log POST usage for migration tracking
-        logger.info(
-            f"[RPC-POST] {request.method} /rpc from {request.remote_addr} | UA: {request.user_agent.string[:50]}..."
+        logger.warning(
+            f"[RPC-POST] RAW: {request.method} /rpc data_preview={request.data[:200]}"
         )
 
         # Parse JSON body
-        req_dict = request.get_json(force=True, silent=True) or {}
+        req_dict = request.get_json(force=True, silent=True)
+        logger.warning(f"[RPC-POST] parsed req_dict={req_dict}")
+
         if not req_dict:
             return jsonify(
                 {
@@ -7101,6 +7102,7 @@ def rpc_endpoint_post():
         method = req_dict.get("method")
         params = req_dict.get("params", [])
         rpc_id = req_dict.get("id", 1)
+        logger.warning(f"[RPC-POST] method={method} params_type={type(params)}")
 
         # Process same as GET
         if not method:
