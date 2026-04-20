@@ -36,32 +36,33 @@ import multiprocessing
 bind = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
 
 # ── Worker model ───────────────────────────────────────────────────────────────
-worker_class   = "gthread"
-workers        = 1          # 1 worker = shared in-memory cache state
-threads        = 200        # 🚀 200 threads for 10,000 miners (200 concurrent ops)
-                            # Each thread handles 50 miners via async I/O
+worker_class = "gthread"
+workers = 1  # 1 worker = shared in-memory cache state
+threads = 200  # 🚀 200 threads for 10,000 miners (200 concurrent ops)
+# Each thread handles 50 miners via async I/O
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
-timeout        = 120        # 120s timeout (blocks may take time to validate)
-graceful_timeout = 60       # 60s graceful shutdown
-keepalive      = 300        # 5 min keepalive for persistent miner connections
+timeout = 120  # 120s timeout (blocks may take time to validate)
+graceful_timeout = 60  # 60s graceful shutdown
+keepalive = 300  # 5 min keepalive for persistent miner connections
 
 # ── Lifecycle ──────────────────────────────────────────────────────────────────
-preload_app    = True       # 🚀 Preload for faster startup (cache init)
-max_requests   = 50000      # Recycle after 50k requests
+preload_app = False  # Disable preload - let wsgi_config handle lazy loading
+max_requests = 50000  # Recycle after 50k requests
 max_requests_jitter = 5000  # Spread recycling
 
 # ── Logging ────────────────────────────────────────────────────────────────────
-loglevel             = "info"
-accesslog            = "-"
-errorlog             = "-"
-access_log_format    = '%(h)s %(l)s %(t)s "%(r)s" %(s)s %(b)s %(D)s "%(a)s"'  # Added %(D)s for request time
+loglevel = "info"
+accesslog = "-"
+errorlog = "-"
+access_log_format = '%(h)s %(l)s %(t)s "%(r)s" %(s)s %(b)s %(D)s "%(a)s"'  # Added %(D)s for request time
 
 # ── Connection ─────────────────────────────────────────────────────────────────
-backlog          = 4096     # 🚀 4k backlog for connection bursts
-worker_connections = 2000   # 2k concurrent connections
+backlog = 4096  # 🚀 4k backlog for connection bursts
+worker_connections = 2000  # 2k concurrent connections
 
 # ── Hooks ──────────────────────────────────────────────────────────────────────
+
 
 def post_fork(server, worker):
     """
@@ -75,27 +76,33 @@ def post_fork(server, worker):
     Nothing to do here explicitly — lazy init handles everything.
     """
     import logging
-    log = logging.getLogger('gunicorn.error')
-    log.info(f"[GUNICORN] Worker pid={worker.pid} forked — PG conns will init on first request")
+
+    log = logging.getLogger("gunicorn.error")
+    log.info(
+        f"[GUNICORN] Worker pid={worker.pid} forked — PG conns will init on first request"
+    )
+
 
 def worker_exit(server, worker):
     """Close DB pool cleanly on worker shutdown."""
     try:
         import server as _srv
+
         _srv.db_pool.close_all()
     except Exception:
         pass
+
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE CLUSTER WORKER CONFIGURATION
 # ═════════════════════════════════════════════════════════════════════════════════
 
 ORACLE_WORKER_CONFIG = {
-    'oracle_1': {'port': 5000, 'workers': 4, 'threads': 2, 'timeout': 15},
-    'oracle_2': {'port': 5001, 'workers': 4, 'threads': 2, 'timeout': 15},
-    'oracle_3': {'port': 5002, 'workers': 2, 'threads': 2, 'timeout': 10},
-    'oracle_4': {'port': 5003, 'workers': 2, 'threads': 2, 'timeout': 10},
-    'oracle_5': {'port': 5004, 'workers': 2, 'threads': 2, 'timeout': 10}
+    "oracle_1": {"port": 5000, "workers": 4, "threads": 2, "timeout": 15},
+    "oracle_2": {"port": 5001, "workers": 4, "threads": 2, "timeout": 15},
+    "oracle_3": {"port": 5002, "workers": 2, "threads": 2, "timeout": 10},
+    "oracle_4": {"port": 5003, "workers": 2, "threads": 2, "timeout": 10},
+    "oracle_5": {"port": 5004, "workers": 2, "threads": 2, "timeout": 10},
 }
 
 TOTAL_ORACLE_WORKERS = 14
