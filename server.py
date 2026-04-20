@@ -7102,7 +7102,14 @@ def rpc_endpoint_post():
         method = req_dict.get("method")
         params = req_dict.get("params", [])
         rpc_id = req_dict.get("id", 1)
-        logger.warning(f"[RPC-POST] method={method} params_type={type(params)}")
+        logger.warning(
+            f"[RPC-POST] method={method} params_type={type(params)} params={str(params)[:100]}"
+        )
+
+        if method == "qtcl_submitBlock":
+            logger.warning(
+                f"[RPC-POST] SUBMIT BLOCK DETECTED! params={str(params)[:200]}"
+            )
 
         # Process same as GET
         if not method:

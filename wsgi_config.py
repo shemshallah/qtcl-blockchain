@@ -6,10 +6,13 @@ KEY: /health returns 200 in <100ms. Server loads in background.
 All other endpoints wait for server to load (max 30s).
 """
 
+import logging
 import os
 import sys
 import time
 import threading
+
+logger = logging.getLogger(__name__)
 
 # Add hlwe to path
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -67,10 +70,12 @@ def application(environ, start_response):
     if path in ("/health", "/health/"):
         return _health_app(environ, start_response)
 
-    # POST to /rpc returns 200 OK immediately (for Checkly health checks)
-    if method == "POST" and (path == "/rpc" or path.startswith("/rpc/")):
-        start_response("200 OK", [("Content-Type", "application/json")])
-        return [b'{"jsonrpc":"2.0","result":{"status":"ok","healthy":true},"id":1}']
+    # POST to /rpc - ACTUALLY PROCESS IT (was returning fake health for Checkly - breaking block submission!)
+    if method == "POST" and path == "/rpc":
+        # Pass through to real server to process the RPC call
+        logger.warning(f"[WSGI] POST /rpc - forwarding to full app for processing")
+        if _full_app:
+            return _full_app(environ, start_response)
 
     # GET /rpc - if server not ready, return 503 immediately (don't block client)
     if method == "GET" and (path == "/rpc" or path.startswith("/rpc/")):
