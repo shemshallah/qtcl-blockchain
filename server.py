@@ -5387,15 +5387,26 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         hdr = data.get("header", data)
         txs = data.get("transactions", [])
 
-        height = int(hdr.get("height", 0))
+        height = int(hdr.get("block_height", hdr.get("height", 0)))
         block_hash = str(hdr.get("block_hash", ""))
         parent_hash = str(hdr.get("parent_hash", "0" * 64))
         merkle_root = str(hdr.get("merkle_root", "0" * 64))
-        timestamp_s = int(hdr.get("timestamp_s", hdr.get("timestamp", 0)))
+        timestamp_s = int(
+            hdr.get("timestamp_s", hdr.get("timestamp", hdr.get("timestamp_s", 0)))
+        )
         nonce = int(hdr.get("nonce", 0))
         miner_address = str(hdr.get("miner_address", ""))
-        difficulty_bits = int(hdr.get("difficulty_bits", hdr.get("difficulty", 4)))
-        w_entropy_hex = str(hdr.get("w_entropy_hash", hdr.get("w_entropy_seed", "")))
+        difficulty_bits = int(
+            hdr.get(
+                "difficulty_bits", hdr.get("difficulty", hdr.get("difficulty_bits", 4))
+            )
+        )
+        w_entropy_hex = str(
+            hdr.get(
+                "w_entropy_hash",
+                hdr.get("w_entropy_seed", hdr.get("w_entropy_hash", "")),
+            )
+        )
         w_state_fidelity = float(hdr.get("w_state_fidelity", 0.0) or 0.0)
         mermin_value = float(hdr.get("mermin_value", 0.0) or 0.0)
         mermin_violated = bool(hdr.get("mermin_violated", False))
