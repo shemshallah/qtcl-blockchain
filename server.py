@@ -5506,33 +5506,29 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         # No existing block at this height - safe to insert
                         if _block_result != "fork":
                             # 🚀 ATOMIC INSERT: Use ON CONFLICT for true idempotency
+                            # Match actual table schema: height, block_hash, parent_hash, merkle_root, timestamp, etc.
                             cur.execute(
                                 """
                                 INSERT INTO blocks
-                                (height, block_number, block_hash, previous_hash, timestamp,
-                                 oracle_w_state_hash, validator_public_key, nonce,
-                                 difficulty, entropy_score, transactions_root,
-                                 pq_curr, pq_last, mermin_value, mermin_violated)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                (height, block_hash, parent_hash, merkle_root, timestamp,
+                                 oracle_w_state_hash, miner_address, nonce,
+                                 difficulty, pq_curr, pq_last)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (height) DO NOTHING
                                 RETURNING block_hash
                             """,
                                 (
                                     height,
-                                    height,
                                     block_hash,
                                     parent_hash,
+                                    merkle_root,
                                     timestamp_s,
                                     w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                                     miner_address,
                                     nonce,
                                     difficulty_bits,
-                                    w_state_fidelity,
-                                    merkle_root,
-                                    height,
-                                    max(0, height - 1),
-                                    mermin_value,
-                                    mermin_violated,
+                                    height,  # pq_curr
+                                    max(0, height - 1),  # pq_last
                                 ),
                             )
 
