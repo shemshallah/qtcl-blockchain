@@ -4311,15 +4311,35 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                     timeout_sec=5.0,
                 )
                 if w_snap:
+                    # Canonical DensityMatrixSnapshot fields — all 16³ pure-tensor metrics
                     result["w_state"] = {
-                        "purity": getattr(w_snap, "purity", None),
-                        "entropy": getattr(w_snap, "entropy", None),
-                        "coherence": getattr(w_snap, "coherence", None),
-                        "fidelity": getattr(w_snap, "fidelity", None),
-                        "snapshot_id": getattr(w_snap, "snapshot_id", None),
+                        "purity": float(getattr(w_snap, "purity", 0.0) or 0.0),
+                        "entropy": float(getattr(w_snap, "von_neumann_entropy", 0.0) or 0.0),
+                        "von_neumann_entropy": float(getattr(w_snap, "von_neumann_entropy", 0.0) or 0.0),
+                        "coherence": float(getattr(w_snap, "coherence_l1", 0.0) or 0.0),
+                        "coherence_l1": float(getattr(w_snap, "coherence_l1", 0.0) or 0.0),
+                        "coherence_renyi": float(getattr(w_snap, "coherence_renyi", 0.0) or 0.0),
+                        "coherence_geometric": float(getattr(w_snap, "coherence_geometric", 0.0) or 0.0),
+                        "quantum_discord": float(getattr(w_snap, "quantum_discord", 0.0) or 0.0),
+                        "fidelity": float(getattr(w_snap, "w_state_fidelity", 0.0) or 0.0),
+                        "w_state_fidelity": float(getattr(w_snap, "w_state_fidelity", 0.0) or 0.0),
+                        "w_state_strength": float(getattr(w_snap, "w_state_strength", 0.0) or 0.0),
+                        "phase_coherence": float(getattr(w_snap, "phase_coherence", 0.0) or 0.0),
+                        "entanglement_witness": float(getattr(w_snap, "entanglement_witness", 0.0) or 0.0),
+                        "trace_purity": float(getattr(w_snap, "trace_purity", 0.0) or 0.0),
+                        "density_matrix_hex": str(getattr(w_snap, "density_matrix_hex", "") or ""),
+                        "w_entropy_hash": str(getattr(w_snap, "w_entropy_hash", "") or ""),
+                        "timestamp_ns": int(getattr(w_snap, "timestamp_ns", 0) or 0),
+                        "lattice_refresh_counter": int(getattr(w_snap, "lattice_refresh_counter", 0) or 0),
+                        "tensor_shape": [16, 16, 16],
+                        "hilbert_dim": 4096,
+                        "snapshot_id": hashlib.sha256(
+                            f"{getattr(w_snap, 'timestamp_ns', 0)}_{getattr(w_snap, 'w_state_fidelity', 0)}".encode()
+                        ).hexdigest()[:16],
                     }
                     logger.debug(
-                        f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained"
+                        f"[RPC-METHOD] qtcl_getQuantumMetrics: 16³ snapshot OK "
+                        f"fid={result['w_state']['fidelity']:.4f} pur={result['w_state']['purity']:.4f}"
                     )
                 else:
                     logger.warning(
