@@ -1110,162 +1110,101 @@ _tx_worker_daemon.start()
 def _settle_block_rewards(
     height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list
 ) -> None:
-    """Extract settlement logic into reusable function.
+    """🔗 UNIFIED SETTLEMENT LOGIC — Single execution path, atomic updates.
 
-    Called by background settlement worker after block is persisted to database.
-    Handles all post-block-insert work:
-    - Wallet credits for miner reward
-    - Wallet credits for treasury
-    - Non-coinbase transaction settlement
-    - Chain state updates
-    - Block cache updates
-    - In-memory blockchain index updates
-
-    Args:
-        height: Block height
-        block_hash: Block hash (hex)
-        miner_address: Address of block miner
-        txs: All transactions in block (coinbase + non-coinbase)
-        non_coinbase_txs: Pre-filtered non-coinbase transactions only
+    Consolidated settlement with NO branching:
+      1. Fetch miner + treasury rewards from TessellationRewardSchedule
+      2. Collect transaction fees
+      3. Execute wallet updates (handles same/different addresses correctly)
+      4. Update chain state
     """
     _settle_log = logging.getLogger("SETTLE")
 
     try:
-        # ── Settle non-coinbase transactions (wallet updates) ──────────────
-        _settle_log.info(
-            f"[SETTLE] Processing h={height} {len(non_coinbase_txs)} non-coinbase txs"
-        )
+        # ════════════════════════════════════════════════════════════════════════════════
+        # UNIFIED SETTLEMENT LOGIC: One atomic operation sequence
+        # ════════════════════════════════════════════════════════════════════════════════
 
+        # PHASE 1: Gather settlement data
+        # ─────────────────────────────────────────────────────────────────────────────
+        _settle_log.info(f"[SETTLE] h={height} settlement start")
+
+        # Get miner and treasury rewards from canonical schedule
+        miner_reward_base = 720  # base units: 7.20 QTCL
+        treasury_reward_base = 80  # base units: 0.80 QTCL
+        if TessellationRewardSchedule:
+            rewards = TessellationRewardSchedule.get_rewards_for_height(height)
+            miner_reward_base = int(rewards.get("miner", 720))
+            treasury_reward_base = int(rewards.get("treasury", 80))
+
+        # Collect all transaction fees for treasury
+        total_tx_fees = 0
+        for tx in txs:
+            f = tx.get("fee", tx.get("fee_base", 0))
+            if f:
+                try:
+                    total_tx_fees += int(float(f) if isinstance(f, (float, str)) else f)
+                except (ValueError, TypeError):
+                    pass
+        treasury_reward_base += total_tx_fees
+
+        # Compute wallet fingerprints
+        miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+        treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
+        treasury_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
+
+        # PHASE 2: Execute settlement (single atomic transaction)
+        # ─────────────────────────────────────────────────────────────────────────────
         with get_db_cursor() as cur:
+            # Settlement path for transaction inputs (deductions from senders)
             for tx in non_coinbase_txs:
-                tx_sender = tx.get("from_addr", tx.get("from_address", ""))
-                tx_receiver = tx.get("to_addr", tx.get("to_address", ""))
+                tx_sender = tx.get("from_addr") or tx.get("from_address")
                 tx_amount = int(round(float(tx.get("amount", 0)) * 100))
                 tx_fee = int(round(float(tx.get("fee", 0)) * 100))
+                if tx_sender and tx_amount > 0:
+                    total_deduction = tx_amount + tx_fee
+                    cur.execute(
+                        "INSERT INTO wallet_addresses (address, balance, address_type, last_updated) VALUES (%s, %s, 'standard', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance - %s, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
+                        (tx_sender, -total_deduction, total_deduction),
+                    )
 
-                if not tx_sender or not tx_receiver or tx_amount <= 0:
-                    continue
+            # Settlement path for transaction outputs (credits to receivers)
+            for tx in non_coinbase_txs:
+                tx_receiver = tx.get("to_addr") or tx.get("to_address")
+                tx_amount = int(round(float(tx.get("amount", 0)) * 100))
+                if tx_receiver and tx_amount > 0:
+                    cur.execute(
+                        "INSERT INTO wallet_addresses (address, balance, address_type, last_updated) VALUES (%s, %s, 'standard', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance + %s, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
+                        (tx_receiver, tx_amount, tx_amount),
+                    )
 
-                total_deduction = tx_amount + tx_fee
-                cur.execute(
-                    """
-                    INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
-                    VALUES (%s, -%s, 'standard', NOW())
-                    ON CONFLICT (address) DO UPDATE SET
-                        balance = wallet_addresses.balance - %s,
-                        transaction_count = wallet_addresses.transaction_count + 1,
-                        last_updated = NOW()
-                """,
-                    (tx_sender, total_deduction, total_deduction),
-                )
-
-                cur.execute(
-                    """
-                    INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
-                    VALUES (%s, %s, 'standard', NOW())
-                    ON CONFLICT (address) DO UPDATE SET
-                        balance = wallet_addresses.balance + %s,
-                        transaction_count = wallet_addresses.transaction_count + 1,
-                        last_updated = NOW()
-                """,
-                    (tx_receiver, tx_amount, tx_amount),
-                )
-
-            _settle_log.info(
-                f"[SETTLE] ✅ TX settlement done: {len(non_coinbase_txs)} txs"
+            # MINER REWARD: Always insert/update miner wallet
+            cur.execute(
+                "INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated) VALUES (%s, %s, %s, %s, 1, 'miner', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance + EXCLUDED.balance, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
+                (miner_address, miner_fp, miner_fp, miner_reward_base),
             )
 
-        # ── SINGULAR LOGIC CHAIN: Credit miner + treasury rewards ────────────────────────────
-        # Step 1: Get rewards from TessellationRewardSchedule
-        # Step 2: Add transaction fees to treasury
-        # Step 3: Update wallets atomically (handles same address correctly)
-        _settle_log.info(f"[SETTLE] Crediting rewards for h={height}")
+            # TREASURY REWARD: Always insert/update treasury wallet
+            # (If same as miner address, ON CONFLICT DO UPDATE adds balance correctly)
+            cur.execute(
+                "INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated) VALUES (%s, %s, %s, %s, 1, 'treasury', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance + EXCLUDED.balance, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
+                (treasury_address, treasury_fp, treasury_fp, treasury_reward_base),
+            )
 
-        try:
-            # STEP 1: Fetch reward schedule
-            miner_reward_base = 720  # base units (7.20 QTCL)
-            treasury_reward_base = 80  # base units (0.80 QTCL)
+            # Update chain state
+            cur.execute(
+                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
+                (height, block_hash),
+            )
 
-            if TessellationRewardSchedule:
-                rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                miner_reward_base = int(rewards.get("miner", 720))
-                treasury_reward_base = int(rewards.get("treasury", 80))
+        # PHASE 3: Log completion
+        # ─────────────────────────────────────────────────────────────────────────────
+        _settle_log.warning(
+            f"[SETTLE] ✅ h={height}: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL, txs={len(non_coinbase_txs)}"
+        )
 
-            # STEP 2: Add transaction fees to treasury only
-            total_tx_fees = 0
-            for tx in txs:
-                f = tx.get("fee", tx.get("fee_base", 0))
-                if isinstance(f, (float, str)):
-                    try:
-                        total_tx_fees += int(float(f))
-                    except ValueError:
-                        _settle_log.debug(f"[SETTLE] Skipped malformed fee: {f}")
-
-            treasury_reward_base += total_tx_fees
-
-            # STEP 3: Prepare wallet update data
-            with get_db_cursor() as cur:
-                # Compute fingerprints
-                miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-                treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
-                treasury_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
-
-                # CASE A: Same address (miner == treasury) — COMBINE rewards in single UPDATE
-                if miner_address == treasury_address:
-                    combined_reward = miner_reward_base + treasury_reward_base
-                    _settle_log.info(
-                        f"[SETTLE] 🔀 COMBINED REWARDS: same address receives miner({miner_reward_base}) + treasury({treasury_reward_base}) = {combined_reward} base units"
-                    )
-                    cur.execute(
-                        """
-                        INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-                        VALUES (%s, %s, %s, %s, 2, 'miner_treasury_combined', NOW())
-                        ON CONFLICT (address) DO UPDATE SET
-                            balance = wallet_addresses.balance + EXCLUDED.balance,
-                            transaction_count = wallet_addresses.transaction_count + EXCLUDED.transaction_count,
-                            last_updated = NOW()
-                        """,
-                        (miner_address, miner_fp, miner_fp, combined_reward),
-                    )
-                # CASE B: Different addresses — UPDATE both separately (safe, no conflicts)
-                else:
-                    # Miner reward
-                    cur.execute(
-                        """
-                        INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-                        VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
-                        ON CONFLICT (address) DO UPDATE SET
-                            balance = wallet_addresses.balance + EXCLUDED.balance,
-                            transaction_count = wallet_addresses.transaction_count + 1,
-                            last_updated = NOW()
-                        """,
-                        (miner_address, miner_fp, miner_fp, miner_reward_base),
-                    )
-
-                    # Treasury reward
-                    if treasury_reward_base > 0:
-                        cur.execute(
-                            """
-                            INSERT INTO wallet_addresses
-                                (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-                            VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
-                            ON CONFLICT (address) DO UPDATE SET
-                                balance = wallet_addresses.balance + EXCLUDED.balance,
-                                transaction_count = wallet_addresses.transaction_count + 1,
-                                last_updated = NOW()
-                            """,
-                            (treasury_address, treasury_fp, treasury_fp, treasury_reward_base),
-                        )
-
-                # Log summary
-                _settle_log.warning(
-                    f"[SETTLE] ✅ Rewards credited: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL"
-                )
-
-        except Exception as reward_err:
-            _settle_log.error(f"[SETTLE] ❌ Reward settlement failed: {reward_err}", exc_info=True)
+    except Exception as err:
+        _settle_log.error(f"[SETTLE] ❌ h={height} settlement failed: {err}", exc_info=True)
 
         # ── Update chain state ───────────────────────────────────────────────
         try:
