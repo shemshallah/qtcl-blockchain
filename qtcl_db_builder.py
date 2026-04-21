@@ -3624,13 +3624,21 @@ def get_comprehensive_trigger_functions_sql() -> Dict[str, str]:
             _changes := jsonb_build_object('old', row_to_json(OLD));
         END IF;
         
-        -- Insert audit log
+        -- Insert audit log (use JSON to safely extract primary key regardless of column name)
         INSERT INTO audit_logs (
             event_type, actor_peer_id, action, resource_type, resource_id,
             changes, result, created_at
         ) VALUES (
             _event_type, _actor_peer_id, _action, TG_TABLE_NAME,
-            COALESCE(NEW.id::TEXT, OLD.id::TEXT, 'unknown'),
+            COALESCE(
+                (CASE WHEN TG_OP != 'DELETE' THEN row_to_json(NEW)->>'id' END),
+                (CASE WHEN TG_OP != 'DELETE' THEN row_to_json(NEW)->>'height' END),
+                (CASE WHEN TG_OP != 'DELETE' THEN row_to_json(NEW)->>'address' END),
+                (CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD)->>'id' END),
+                (CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD)->>'height' END),
+                (CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD)->>'address' END),
+                'unknown'
+            ),
             _changes, 'success', NOW()
         );
         
