@@ -1122,23 +1122,22 @@ def _settle_block_rewards(
 
     try:
         # ════════════════════════════════════════════════════════════════════════════════
-        # UNIFIED SETTLEMENT LOGIC: One atomic operation sequence
+        # MANDATORY SETTLEMENT: This MUST execute and update balances
         # ════════════════════════════════════════════════════════════════════════════════
 
-        # PHASE 1: Gather settlement data
-        # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.critical(f"[SETTLE-START] h={height} BEGINNING")
-        _settle_log.critical(f"[SETTLE-PARAMS] miner_address={miner_address}")
-        _settle_log.critical(f"[SETTLE-PARAMS] treasury_address={treasury_address}")
-        _settle_log.critical(f"[SETTLE-PARAMS] block_hash={block_hash}")
+        _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} SETTLEMENT EXECUTING NOW")
+        _settle_log.critical(f"   miner={miner_address}")
+        _settle_log.critical(f"   treasury={treasury_address}")
 
         # GUARD: Reject invalid inputs
         if not miner_address or len(str(miner_address).strip()) < 10:
-            _settle_log.critical(f"[SETTLE] ❌ INVALID miner_address: '{miner_address}' (length={len(str(miner_address)) if miner_address else 0})")
+            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
             return
         if not treasury_address or len(str(treasury_address).strip()) < 10:
-            _settle_log.critical(f"[SETTLE] ❌ INVALID treasury_address: '{treasury_address}' (length={len(str(treasury_address)) if treasury_address else 0})")
+            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {treasury_address}")
             return
+
+        _settle_log.critical(f"✅ [SETTLE-VALIDATE] Addresses valid, proceeding with settlement")
 
         # HARDCODED REWARDS — Single source of truth
         # Miner: 7.20 QTCL (720 base units)
@@ -5868,39 +5867,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception:
             _resp_reward = 7.20
 
-        # Enqueue settlement work to background worker (non-blocking)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # MANDATORY SYNCHRONOUS SETTLEMENT — NOT QUEUED, RUNS IMMEDIATELY
+        # This MUST execute before returning to client
+        # ═══════════════════════════════════════════════════════════════════════════════
+        logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height}")
         try:
-            _BLOCK_SETTLE_Q.put_nowait(
-                {
-                    "height": height,
-                    "block_hash": block_hash,
-                    "miner_address": miner_address,
-                    "txs": txs or [],
-                    "non_coinbase_txs": _non_coinbase_txs,
-                    "w_state_fidelity": w_state_fidelity,
-                    "difficulty_bits": difficulty_bits,
-                    "timestamp_s": timestamp_s,
-                }
+            _settle_block_rewards(
+                height, block_hash, miner_address, txs or [], _non_coinbase_txs
             )
-            logger.info(f"[RPC-submitBlock] ✅ Settlement enqueued for h={height}")
-        except _queue_mod2.Full:
-            logger.warning(
-                f"[RPC-submitBlock] Settlement queue full—executing synchronous fallback settlement for h={height}"
-            )
-            try:
-                _settle_block_rewards(
-                    height, block_hash, miner_address, txs or [], _non_coinbase_txs
-                )
-                logger.info(
-                    f"[RPC-submitBlock] ✅ Fallback settlement completed synchronously for h={height}"
-                )
-            except Exception as sync_err:
-                logger.error(
-                    f"[RPC-submitBlock] Fallback settlement failed: {sync_err}",
-                    exc_info=True,
-                )
-        except Exception as eq_err:
-            logger.warning(f"[RPC-submitBlock] ⚠️  Settlement enqueue failed: {eq_err}")
+            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE h={height}")
+        except Exception as settle_err:
+            logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
 
         # Return accepted immediately (settlement happens in background)
         logger.info(
