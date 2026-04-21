@@ -449,10 +449,8 @@ async function waitForServer(maxWaitMs = 60000) {
       const res = await fetch('/health', {method: 'GET', cache: 'no-store'});
       if (res.ok) {
         // Health is up — now check if /rpc is ready by doing a lightweight probe
-        const probe = await fetch(RPC, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getBlockHeight', params: [], id: 0}),
+        const probe = await fetch(`${RPC}?method=qtcl_getBlockHeight&params=%5B%5D&id=0`, {
+          method: 'GET',
           cache: 'no-store'
         });
         const ct = probe.headers.get('content-type') || '';
@@ -486,23 +484,18 @@ function setStatus(text, color) {
   if (cp) cp.style.borderColor = c.replace('var(--', 'rgba(').replace(')', ', .25)');
 }
 
-// ── RPC Helper — validates JSON, retries on 503, surfaces real errors ──
+// ── RPC Helper — GET /rpc?method=…&params=…&id=… (we ask nicely, never POST) ──
 async function rpc(method, params, retries = 3) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(RPC, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({jsonrpc: '2.0', method, params, id: _rid++}),
-        cache: 'no-store'
-      });
+      const id = _rid++;
+      const url = `${RPC}?method=${encodeURIComponent(method)}&params=${encodeURIComponent(JSON.stringify(params))}&id=${id}`;
+      const res = await fetch(url, { method: 'GET', cache: 'no-store' });
 
-      // Check content-type before trying to parse
       const ct = res.headers.get('content-type') || '';
       if (!ct.includes('json')) {
         const text = await res.text();
         if (res.status === 503 || text.includes('Server') || text.includes('starting')) {
-          // Server not ready — wait and retry
           _serverReady = false;
           setStatus('INIT…', 'am');
           if (attempt < retries) { await sleep(4000 + attempt * 2000); continue; }
@@ -513,7 +506,6 @@ async function rpc(method, params, retries = 3) {
 
       const data = await res.json();
       if (data.error) {
-        // -32000 = server initializing
         if (data.error.code === -32000 && attempt < retries) {
           _serverReady = false;
           setStatus('INIT…', 'am');
@@ -533,7 +525,6 @@ async function rpc(method, params, retries = 3) {
     }
   }
 }
-
 // ── Format Helpers ──────────────────────────────────────────────────
 const fmtTime = ts => ts ? new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : '—';
 const fmtAmount = v => {
