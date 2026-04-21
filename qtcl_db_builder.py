@@ -3506,8 +3506,11 @@ def get_comprehensive_trigger_functions_sql() -> Dict[str, str]:
         SET block_height = NEW.height,
             chain_head_hash = NEW.block_hash,
             updated_at = NOW()
-        WHERE connection_state = 'connected';
-        
+        WHERE peer_id IN (
+            SELECT DISTINCT peer_id FROM peer_connections
+            WHERE connection_state = 'connected'
+        );
+
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
