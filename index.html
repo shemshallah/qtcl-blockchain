@@ -437,16 +437,101 @@ let _exPage = 0;
 const EX_PER_PAGE = 20;
 let _exMaxHeight = 0;
 
-// ── RPC Helper ──────────────────────────────────────────────────────
-async function rpc(method, params) {
-  const res = await fetch(RPC, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({jsonrpc: '2.0', method, params, id: _rid++})
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message || 'RPC error');
-  return data.result;
+// ── Server readiness state ───────────────────────────────────────────
+let _serverReady = false;
+let _serverCheckInFlight = false;
+
+async function waitForServer(maxWaitMs = 60000) {
+  if (_serverReady) return true;
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch('/health', {method: 'GET', cache: 'no-store'});
+      if (res.ok) {
+        // Health is up — now check if /rpc is ready by doing a lightweight probe
+        const probe = await fetch(RPC, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({jsonrpc: '2.0', method: 'qtcl_getBlockHeight', params: [], id: 0}),
+          cache: 'no-store'
+        });
+        const ct = probe.headers.get('content-type') || '';
+        if (probe.ok && ct.includes('json')) {
+          const data = await probe.json();
+          if (!data.error || data.error.code !== -32000) {
+            _serverReady = true;
+            setStatus('LIVE', 'gr');
+            return true;
+          }
+        }
+      }
+    } catch(e) {}
+    setStatus('INIT…', 'am');
+    await sleep(3000);
+  }
+  setStatus('OFFLINE', 're');
+  return false;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function setStatus(text, color) {
+  const el = document.getElementById('ct');
+  const dot = document.querySelector('.cd');
+  const cp = document.getElementById('cp');
+  if (el) el.textContent = text;
+  const colors = {gr: 'var(--gr)', am: 'var(--am)', re: 'var(--re)', cy: 'var(--cy)'};
+  const c = colors[color] || colors.cy;
+  if (dot) dot.style.background = c;
+  if (cp) cp.style.borderColor = c.replace('var(--', 'rgba(').replace(')', ', .25)');
+}
+
+// ── RPC Helper — validates JSON, retries on 503, surfaces real errors ──
+async function rpc(method, params, retries = 3) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(RPC, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({jsonrpc: '2.0', method, params, id: _rid++}),
+        cache: 'no-store'
+      });
+
+      // Check content-type before trying to parse
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('json')) {
+        const text = await res.text();
+        if (res.status === 503 || text.includes('Server') || text.includes('starting')) {
+          // Server not ready — wait and retry
+          _serverReady = false;
+          setStatus('INIT…', 'am');
+          if (attempt < retries) { await sleep(4000 + attempt * 2000); continue; }
+          throw new Error('Server initializing — please wait');
+        }
+        throw new Error(`Non-JSON response (${res.status}): ${text.slice(0, 80)}`);
+      }
+
+      const data = await res.json();
+      if (data.error) {
+        // -32000 = server initializing
+        if (data.error.code === -32000 && attempt < retries) {
+          _serverReady = false;
+          setStatus('INIT…', 'am');
+          await sleep(4000 + attempt * 2000);
+          continue;
+        }
+        throw new Error(data.error.message || `RPC error ${data.error.code}`);
+      }
+      _serverReady = true;
+      return data.result;
+    } catch(e) {
+      if (attempt < retries && (e.message.includes('initializing') || e.message.includes('fetch'))) {
+        await sleep(3000 + attempt * 2000);
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 // ── Format Helpers ──────────────────────────────────────────────────
@@ -748,27 +833,55 @@ function renderTxCard(tx, idx) {
 
 async function fetchChain() {
   try {
-    const res = await rpc('qtcl_getBlockRange', [-30, -1]);
-    const blocks = res && res.blocks ? res.blocks : [];
+    // 1. Get authoritative tip height from DB
+    let tipHeight = 0;
+    try {
+      const heightRes = await rpc('qtcl_getBlockHeight', []);
+      tipHeight = (heightRes && heightRes.height !== undefined) ? parseInt(heightRes.height) : 0;
+      document.getElementById('s-height').textContent = tipHeight.toLocaleString();
+      _exMaxHeight = tipHeight;
+    } catch(e) { console.warn('Height fetch failed:', e.message); }
 
-    // If we got blocks, also try to fetch their full data (for transactions)
+    // 2. Try getBlockRange (cache) first
+    let blocks = [];
+    try {
+      const rangeRes = await rpc('qtcl_getBlockRange', [-25, -1]);
+      blocks = rangeRes && rangeRes.blocks ? rangeRes.blocks : [];
+    } catch(e) { console.warn('Range fetch failed:', e.message); }
+
+    // 3. If cache is empty or sparse, fetch individually from DB (authoritative)
+    if (blocks.length < 5 && tipHeight > 0) {
+      const fromH = Math.max(0, tipHeight - 19);
+      const toH = tipHeight;
+      const fetches = [];
+      for (let h = toH; h >= fromH; h--) {
+        fetches.push(rpc('qtcl_getBlock', [h]).catch(() => null));
+      }
+      const fetched = (await Promise.all(fetches)).filter(Boolean);
+      // Merge: prefer DB results over cache
+      const byHeight = {};
+      blocks.forEach(b => { byHeight[b.height] = b; });
+      fetched.forEach(b => { if (b) byHeight[b.height] = b; });
+      blocks = Object.values(byHeight).sort((a, b) => b.height - a.height);
+    }
+
     _chainBlocks = blocks;
 
     if (blocks.length > 0) {
       const maxH = Math.max(...blocks.map(b => b.height));
-      _exMaxHeight = maxH;
-      document.getElementById('s-height').textContent = maxH.toLocaleString();
+      _exMaxHeight = Math.max(_exMaxHeight, maxH);
+      document.getElementById('s-height').textContent = _exMaxHeight.toLocaleString();
+      document.getElementById('s-height-sub').textContent = `blocks confirmed`;
       const latest = blocks.find(b => b.height === maxH);
       if (latest) {
         document.getElementById('s-diff').textContent = latest.difficulty || '—';
         const qf = latest.w_state_fidelity || latest.quantum_fidelity || 0;
         document.getElementById('s-qf').textContent = qf.toFixed(4);
-        // Calculate avg block time from last 10 blocks
-        const sorted = [...blocks].sort((a, b) => a.height - b.height);
+        // Avg block time
+        const sorted = [...blocks].sort((a, b) => a.height - b.height).filter(b => b.timestamp || b.timestamp_s);
         if (sorted.length >= 2) {
-          const first = sorted[0], last = sorted[sorted.length - 1];
-          const tFirst = first.timestamp || first.timestamp_s || 0;
-          const tLast = last.timestamp || last.timestamp_s || 0;
+          const tFirst = sorted[0].timestamp || sorted[0].timestamp_s;
+          const tLast = sorted[sorted.length-1].timestamp || sorted[sorted.length-1].timestamp_s;
           if (tFirst && tLast && tLast > tFirst) {
             const avg = (tLast - tFirst) / (sorted.length - 1);
             document.getElementById('s-blocktime').textContent = avg.toFixed(1);
@@ -778,11 +891,11 @@ async function fetchChain() {
     }
 
     renderChainRail(blocks);
-    document.getElementById('ct').textContent = 'LIVE';
+    setStatus('LIVE', 'gr');
   } catch(e) {
     console.error('Chain fetch error:', e);
-    document.getElementById('ct').textContent = 'ERROR';
-    document.getElementById('chain-scroll').innerHTML = `<div class="error-msg" style="margin:10px">Chain sync failed: ${e.message}</div>`;
+    setStatus('ERROR', 're');
+    document.getElementById('chain-scroll').innerHTML = `<div class="error-msg" style="margin:10px">Chain sync error: ${e.message}</div>`;
   }
 }
 
@@ -811,31 +924,29 @@ async function fetchExplorerPage() {
   tbody.innerHTML = `<tr><td colspan="9"><div class="loading"><div class="spinner"></div>Loading...</div></td></tr>`;
 
   try {
-    // Calculate range for current page
     const toH = Math.max(0, _exMaxHeight - _exPage * EX_PER_PAGE);
     const fromH = Math.max(0, toH - EX_PER_PAGE + 1);
 
-    const res = await rpc('qtcl_getBlockRange', [fromH, toH]);
-    const blocks = res && res.blocks ? res.blocks : [];
+    // Always try individual block fetches for DB accuracy
+    const promises = [];
+    for (let h = toH; h >= fromH; h--) {
+      promises.push(rpc('qtcl_getBlock', [h]).catch(() => null));
+    }
+    const fetched = (await Promise.all(promises)).filter(Boolean);
+    const blocks = fetched.sort((a, b) => b.height - a.height);
 
-    // If no cached blocks, try fetching by height
-    if (blocks.length === 0 && _exMaxHeight > 0) {
-      // Fallback to individual block fetches (up to 5)
-      const promises = [];
-      for (let h = toH; h >= fromH && promises.length < 10; h--) {
-        promises.push(rpc('qtcl_getBlock', [h]).catch(() => null));
-      }
-      const fetched = (await Promise.all(promises)).filter(Boolean);
-      renderExTable(fetched.sort((a, b) => b.height - a.height));
-    } else {
-      renderExTable(blocks.sort((a, b) => b.height - a.height));
+    // Update max height if we learned more
+    if (blocks.length > 0) {
+      const maxSeen = Math.max(...blocks.map(b => b.height));
+      _exMaxHeight = Math.max(_exMaxHeight, maxSeen);
     }
 
-    document.getElementById('ex-count').textContent = `${_exMaxHeight + 1} total`;
+    renderExTable(blocks);
+    document.getElementById('ex-count').textContent = `${_exMaxHeight + 1} blocks`;
     const totalPages = Math.ceil((_exMaxHeight + 1) / EX_PER_PAGE);
     document.getElementById('ex-page-info').textContent = `Page ${_exPage + 1} / ${totalPages}`;
     document.getElementById('ex-prev').disabled = _exPage === 0;
-    document.getElementById('ex-next').disabled = (_exPage + 1) >= totalPages;
+    document.getElementById('ex-next').disabled = toH <= 0 || fromH === 0 && toH < EX_PER_PAGE;
   } catch(e) {
     tbody.innerHTML = `<tr><td colspan="9"><div class="error-msg" style="margin:10px">Load failed: ${e.message}</div></td></tr>`;
   }
@@ -964,6 +1075,16 @@ document.getElementById('tx-modal').addEventListener('click', e => {
 // ═══════════════════════════════════════════════════════════════════
 
 async function init() {
+  setStatus('CONNECTING…', 'am');
+  document.getElementById('chain-scroll').innerHTML = '<div class="loading"><div class="spinner"></div>Waiting for server…</div>';
+
+  const ready = await waitForServer(90000);
+  if (!ready) {
+    document.getElementById('chain-scroll').innerHTML = '<div class="error-msg" style="margin:10px">Server unreachable. Check deployment status.</div>';
+    return;
+  }
+
+  setStatus('LIVE', 'gr');
   await fetchChain();
   await fetchStats();
   await fetchExplorerPage();
