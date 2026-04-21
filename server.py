@@ -1127,7 +1127,18 @@ def _settle_block_rewards(
 
         # PHASE 1: Gather settlement data
         # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.critical(f"[SETTLE-START] h={height} settlement BEGINNING (miner={miner_address[:16]}…)")
+        _settle_log.critical(f"[SETTLE-START] h={height} BEGINNING")
+        _settle_log.critical(f"[SETTLE-PARAMS] miner_address={miner_address}")
+        _settle_log.critical(f"[SETTLE-PARAMS] treasury_address={treasury_address}")
+        _settle_log.critical(f"[SETTLE-PARAMS] block_hash={block_hash}")
+
+        # GUARD: Reject invalid inputs
+        if not miner_address or len(str(miner_address).strip()) < 10:
+            _settle_log.critical(f"[SETTLE] ❌ INVALID miner_address: '{miner_address}' (length={len(str(miner_address)) if miner_address else 0})")
+            return
+        if not treasury_address or len(str(treasury_address).strip()) < 10:
+            _settle_log.critical(f"[SETTLE] ❌ INVALID treasury_address: '{treasury_address}' (length={len(str(treasury_address)) if treasury_address else 0})")
+            return
 
         # HARDCODED REWARDS — Single source of truth
         # Miner: 7.20 QTCL (720 base units)
@@ -1167,6 +1178,16 @@ def _settle_block_rewards(
         _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL, {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
 
         with get_db_cursor() as cur:
+            # TEST: Verify database connectivity with simple SELECT
+            try:
+                cur.execute("SELECT COUNT(*) FROM wallet_addresses")
+                _test_count = cur.fetchone()[0] if cur.fetchone() else 0
+                cur.execute("SELECT COUNT(*) FROM wallet_addresses")  # Re-execute since we consumed the result
+                _test_count = cur.fetchone()[0]
+                _settle_log.critical(f"[SETTLE-TEST] ✅ Database connectivity OK: {_test_count} wallets exist")
+            except Exception as _test_err:
+                _settle_log.critical(f"[SETTLE-TEST] ❌ Database connectivity FAILED: {_test_err}")
+                return
             # MINER REWARD — MANDATORY, ALWAYS EXECUTED
             _miner_sql = """
             INSERT INTO wallet_addresses
@@ -1179,7 +1200,13 @@ def _settle_block_rewards(
                 last_updated = NOW()
             """
             cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
+            _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
+
+            # VERIFY MINER WALLET WAS UPDATED
+            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (miner_address,))
+            _miner_balance = cur.fetchone()
+            _miner_balance_val = _miner_balance[0] if _miner_balance else None
+            _settle_log.critical(f"[SETTLE-VERIFY] Miner {miner_address[:16]}… balance after INSERT: {_miner_balance_val} base units ({_miner_balance_val/100 if _miner_balance_val else 0:.2f} QTCL)")
 
             # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
             _treasury_sql = """
@@ -1193,7 +1220,13 @@ def _settle_block_rewards(
                 last_updated = NOW()
             """
             cur.execute(_treasury_sql, (treasury_address, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury executed: {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+
+            # VERIFY TREASURY WALLET WAS UPDATED
+            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (treasury_address,))
+            _treasury_balance = cur.fetchone()
+            _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
+            _settle_log.critical(f"[SETTLE-VERIFY] Treasury {treasury_address[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
 
             # TRANSACTION FEES TO TREASURY — OPTIONAL
             if non_coinbase_txs:
