@@ -2027,29 +2027,31 @@ class QuantumLatticeController:
         self.w_state_constructor = WStateConstructor(self.field)
         self.noise_bath = NonMarkovianNoiseBath()
 
-        # Quantum state — NATIVE 64³ 3D DENSITY TENSOR (NOT 256×256)
-        # 64×64×64 spatial-temporal field representation of quantum coherence
+        # Quantum state — NATIVE 16³ 3D DENSITY TENSOR (NOT 256×256)
+        # 16×16×16 spatial-temporal field representation of quantum coherence
         # Initialized as coherent 3D W-state with Gaussian envelope
-        _DIM = 64  # 64³ = 262,144 elements (native 3D quantum field)
+        # 4 qubits × 4 qubits = 16³ tensor
+        _DIM = 16  # 16³ = 4,096 elements (native 3D quantum field)
 
-        # Initialize 64³ density tensor — SERVER LATTICE (GROUND TRUTH)
+        # Initialize 16³ density tensor — SERVER LATTICE (GROUND TRUTH)
         # Streamed to all clients via SSE /rpc/oracle/snapshot
-        # Clients receive this, compute measurements, average with neighbors → quantum mesh
+        # 4 qubits × 4 qubits → 16³ tensor measurement
         self.current_density_matrix = np.zeros((_DIM, _DIM, _DIM), dtype=np.complex64)
 
         # Multi-mode coherent quantum state (superposition of spatial W-state modes)
-        _num_modes = 8
+        # Centered within 16³ grid
+        _num_modes = 4
         for _m in range(_num_modes):
-            _cx = 16 + _m * 4
-            _cy = 16 + _m * 4
-            _cz = 32
+            _cx = 4 + _m * 3
+            _cy = 4 + _m * 3
+            _cz = 8
 
             for i in range(_DIM):
                 for j in range(_DIM):
                     for k in range(_DIM):
-                        _dx = (i - _cx) / 20.0
-                        _dy = (j - _cy) / 20.0
-                        _dz = (k - _cz) / 20.0
+                        _dx = (i - _cx) / 4.0
+                        _dy = (j - _cy) / 4.0
+                        _dz = (k - _cz) / 4.0
                         _r2 = _dx * _dx + _dy * _dy + _dz * _dz
                         _envelope = np.exp(-_r2 / 2.0)
                         _phase = 2 * np.pi * _m / _num_modes
