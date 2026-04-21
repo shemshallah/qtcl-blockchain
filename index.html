@@ -833,7 +833,7 @@ function renderTxCard(tx, idx) {
 
 async function fetchChain() {
   try {
-    // 1. Get authoritative tip height from DB
+    // 1. Get authoritative tip height from DB first — ALWAYS
     let tipHeight = 0;
     try {
       const heightRes = await rpc('qtcl_getBlockHeight', []);
@@ -842,27 +842,31 @@ async function fetchChain() {
       _exMaxHeight = tipHeight;
     } catch(e) { console.warn('Height fetch failed:', e.message); }
 
-    // 2. Try getBlockRange (cache) first
+    // 2. Fetch the last 25 blocks using POSITIVE absolute heights derived from tip
+    //    Negative indices are not supported by qtcl_getBlockRange — always use real heights.
     let blocks = [];
-    try {
-      const rangeRes = await rpc('qtcl_getBlockRange', [-25, -1]);
-      blocks = rangeRes && rangeRes.blocks ? rangeRes.blocks : [];
-    } catch(e) { console.warn('Range fetch failed:', e.message); }
+    if (tipHeight >= 0) {
+      const fromH = Math.max(0, tipHeight - 24);
+      const toH   = tipHeight;
+      try {
+        const rangeRes = await rpc('qtcl_getBlockRange', [fromH, toH]);
+        blocks = rangeRes && rangeRes.blocks ? rangeRes.blocks : [];
+      } catch(e) { console.warn('Range fetch failed:', e.message); }
 
-    // 3. If cache is empty or sparse, fetch individually from DB (authoritative)
-    if (blocks.length < 5 && tipHeight > 0) {
-      const fromH = Math.max(0, tipHeight - 19);
-      const toH = tipHeight;
-      const fetches = [];
-      for (let h = toH; h >= fromH; h--) {
-        fetches.push(rpc('qtcl_getBlock', [h]).catch(() => null));
+      // 3. Fall back to individual fetches if range returned sparse/empty data
+      //    (handles servers where getBlockRange only returns in-memory cache)
+      if (blocks.length < Math.min(5, toH - fromH + 1)) {
+        const fetches = [];
+        for (let h = toH; h >= fromH; h--) {
+          fetches.push(rpc('qtcl_getBlock', [h]).catch(() => null));
+        }
+        const fetched = (await Promise.all(fetches)).filter(Boolean);
+        // Merge: DB-fetched results override range cache
+        const byHeight = {};
+        blocks.forEach(b => { byHeight[b.height] = b; });
+        fetched.forEach(b => { if (b) byHeight[b.height] = b; });
+        blocks = Object.values(byHeight).sort((a, b) => b.height - a.height);
       }
-      const fetched = (await Promise.all(fetches)).filter(Boolean);
-      // Merge: prefer DB results over cache
-      const byHeight = {};
-      blocks.forEach(b => { byHeight[b.height] = b; });
-      fetched.forEach(b => { if (b) byHeight[b.height] = b; });
-      blocks = Object.values(byHeight).sort((a, b) => b.height - a.height);
     }
 
     _chainBlocks = blocks;
@@ -924,18 +928,33 @@ async function fetchExplorerPage() {
   tbody.innerHTML = `<tr><td colspan="9"><div class="loading"><div class="spinner"></div>Loading...</div></td></tr>`;
 
   try {
-    const toH = Math.max(0, _exMaxHeight - _exPage * EX_PER_PAGE);
+    const toH   = Math.max(0, _exMaxHeight - _exPage * EX_PER_PAGE);
     const fromH = Math.max(0, toH - EX_PER_PAGE + 1);
 
-    // Always try individual block fetches for DB accuracy
-    const promises = [];
-    for (let h = toH; h >= fromH; h--) {
-      promises.push(rpc('qtcl_getBlock', [h]).catch(() => null));
-    }
-    const fetched = (await Promise.all(promises)).filter(Boolean);
-    const blocks = fetched.sort((a, b) => b.height - a.height);
+    // Try getBlockRange first — single call, DB-authoritative, real heights
+    let blocks = [];
+    try {
+      const rangeRes = await rpc('qtcl_getBlockRange', [fromH, toH]);
+      blocks = rangeRes && rangeRes.blocks ? rangeRes.blocks : [];
+    } catch(e) { /* fall through to individual fetches */ }
 
-    // Update max height if we learned more
+    // Individual fallback: fires only when range returned sparse/empty results
+    if (blocks.length < Math.min(3, toH - fromH + 1)) {
+      const promises = [];
+      for (let h = toH; h >= fromH; h--) {
+        promises.push(rpc('qtcl_getBlock', [h]).catch(() => null));
+      }
+      const fetched = (await Promise.all(promises)).filter(Boolean);
+      // Merge, preferring freshly-fetched data over range cache
+      const byHeight = {};
+      blocks.forEach(b => { byHeight[b.height] = b; });
+      fetched.forEach(b => { if (b) byHeight[b.height] = b; });
+      blocks = Object.values(byHeight);
+    }
+
+    blocks.sort((a, b) => b.height - a.height);
+
+    // Update max height if we learned more from this page
     if (blocks.length > 0) {
       const maxSeen = Math.max(...blocks.map(b => b.height));
       _exMaxHeight = Math.max(_exMaxHeight, maxSeen);
@@ -943,10 +962,10 @@ async function fetchExplorerPage() {
 
     renderExTable(blocks);
     document.getElementById('ex-count').textContent = `${_exMaxHeight + 1} blocks`;
-    const totalPages = Math.ceil((_exMaxHeight + 1) / EX_PER_PAGE);
+    const totalPages = Math.max(1, Math.ceil((_exMaxHeight + 1) / EX_PER_PAGE));
     document.getElementById('ex-page-info').textContent = `Page ${_exPage + 1} / ${totalPages}`;
     document.getElementById('ex-prev').disabled = _exPage === 0;
-    document.getElementById('ex-next').disabled = toH <= 0 || fromH === 0 && toH < EX_PER_PAGE;
+    document.getElementById('ex-next').disabled = _exPage >= totalPages - 1;
   } catch(e) {
     tbody.innerHTML = `<tr><td colspan="9"><div class="error-msg" style="margin:10px">Load failed: ${e.message}</div></td></tr>`;
   }
