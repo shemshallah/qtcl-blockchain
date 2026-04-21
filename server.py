@@ -1127,7 +1127,7 @@ def _settle_block_rewards(
 
         # PHASE 1: Gather settlement data
         # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.info(f"[SETTLE] h={height} settlement start")
+        _settle_log.critical(f"[SETTLE-START] h={height} settlement BEGINNING (miner={miner_address[:16]}…)")
 
         # Get miner and treasury rewards from canonical schedule
         miner_reward_base = 720  # base units: 7.20 QTCL
@@ -1183,6 +1183,7 @@ def _settle_block_rewards(
                 "INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated) VALUES (%s, %s, %s, %s, 1, 'miner', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance + EXCLUDED.balance, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
                 (miner_address, miner_fp, miner_fp, miner_reward_base),
             )
+            _settle_log.info(f"[SETTLE] Miner {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
 
             # TREASURY REWARD: Always insert/update treasury wallet
             # (If same as miner address, ON CONFLICT DO UPDATE adds balance correctly)
@@ -1190,6 +1191,7 @@ def _settle_block_rewards(
                 "INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated) VALUES (%s, %s, %s, %s, 1, 'treasury', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance + EXCLUDED.balance, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
                 (treasury_address, treasury_fp, treasury_fp, treasury_reward_base),
             )
+            _settle_log.info(f"[SETTLE] Treasury {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
 
             # Update chain state
             cur.execute(
@@ -1262,6 +1264,7 @@ def _block_settle_worker_thread():
     This worker dequeues settlement jobs and delegates to _settle_block_rewards.
     """
     _settle_log = logging.getLogger("SETTLE")
+    _settle_log.critical("[SETTLE-WORKER] 🚀 Settlement worker thread STARTED")
     while True:
         try:
             job = _BLOCK_SETTLE_Q.get(timeout=1.0)
@@ -1274,14 +1277,17 @@ def _block_settle_worker_thread():
             txs = job.get("txs", [])
             non_coinbase_txs = job.get("non_coinbase_txs", [])
 
+            _settle_log.critical(f"[SETTLE-WORKER] 📥 Processing job: h={height} miner={miner_address[:16]}…")
+
             try:
                 # Delegate to _settle_block_rewards function
                 _settle_block_rewards(
                     height, block_hash, miner_address, txs, non_coinbase_txs
                 )
+                _settle_log.critical(f"[SETTLE-WORKER] ✅ Job completed: h={height}")
             except Exception as settle_err:
-                _settle_log.error(
-                    f"[SETTLE] ❌ h={height}: {settle_err}", exc_info=True
+                _settle_log.critical(
+                    f"[SETTLE-WORKER] ❌ Job FAILED h={height}: {settle_err}", exc_info=True
                 )
 
         except _queue_mod2.Empty:
@@ -5360,9 +5366,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         difficulty_bits = int(hdr.get("difficulty", 4))
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
-        logger.info(f"[ULTRA-MINIMAL] h={height} hash={block_hash[:16]}...")
+        logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}... processing...")
 
-        # ULTRA-MINIMAL: Just try to INSERT
+        # INSERT BLOCK INTO DATABASE
+        _block_rowcount = 0
         try:
             with get_db_cursor() as cur:
                 cur.execute(
@@ -5379,18 +5386,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         miner_address, nonce, difficulty_bits, height, max(0, height - 1),
                     ),
                 )
-            logger.critical(f"[ULTRA-MINIMAL] ✅ ACCEPTED h={height}")
-            return _rpc_ok(
-                {"status": "accepted", "height": height, "block_hash": block_hash, "next_height": height + 1},
-                rpc_id,
-            )
+                _block_rowcount = cur.rowcount
+            logger.critical(f"[RPC-submitBlock] ✅ Block inserted h={height}")
         except Exception as e:
-            logger.exception(f"[ULTRA-MINIMAL] ❌ ERROR: {e}")
+            logger.exception(f"[RPC-submitBlock] ❌ Block insert ERROR: {e}")
             return _rpc_error(-32603, f"Error: {str(e)[:100]}", rpc_id)
 
-    except Exception as e:
-        logger.exception(f"[RPC-submitBlock] 💥 CRITICAL ERROR: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)[:100]}", rpc_id)
+        # EXTRACT TRANSACTIONS FROM BLOCK DATA
+        txs = data.get("transactions", data.get("txs", []))
+        logger.info(f"[RPC-submitBlock] h={height}: {len(txs or [])} transactions in block")
+
+        # Extract W-state attestation data
+        w_state_fidelity = float(data.get("w_state_fidelity", 0.0))
 
         # ═══════════════════════════════════════════════════════════════════════
         # CATHEDRAL-GRADE: BLOCK SIGNATURE VERIFICATION (HypΓ Schnorr-Γ)
