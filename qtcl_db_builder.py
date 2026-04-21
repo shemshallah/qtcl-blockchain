@@ -3410,52 +3410,6 @@ def get_comprehensive_trigger_functions_sql() -> Dict[str, str]:
     $$ LANGUAGE plpgsql SECURITY DEFINER;
     """
     
-    # Function 2: Block Reward Distribution
-    functions['fn_distribute_block_rewards'] = """
-    -- ═════════════════════════════════════════════════════════════════════════════
-    -- TRIGGER FUNCTION: fn_distribute_block_rewards()
-    -- Auto-credits miner and treasury on new block
-    -- ═════════════════════════════════════════════════════════════════════════════
-    CREATE OR REPLACE FUNCTION fn_distribute_block_rewards()
-    RETURNS TRIGGER AS $$
-    DECLARE
-        _miner_reward NUMERIC(30,0) := 5000000000;  -- 50 QTCL in base units
-        _treasury_reward NUMERIC(30,0) := 1000000000;  -- 10 QTCL
-        _treasury_address VARCHAR(255) := 'qtcl1treasury0000000000000000000000000000';
-    BEGIN
-        -- Credit miner if address provided
-        IF NEW.miner_address IS NOT NULL AND NEW.miner_address != '' THEN
-            INSERT INTO wallet_addresses (
-                address, balance, address_type, balance_at_height, 
-                public_key, wallet_fingerprint, created_at, updated_at
-            ) VALUES (
-                NEW.miner_address, _miner_reward, 'miner', NEW.height,
-                'pending', 'pending', NOW(), NOW()
-            )
-            ON CONFLICT (address) DO UPDATE
-            SET balance = wallet_addresses.balance + _miner_reward,
-                balance_at_height = NEW.height,
-                updated_at = NOW();
-        END IF;
-        
-        -- Credit treasury
-        INSERT INTO wallet_addresses (
-            address, balance, address_type, balance_at_height,
-            public_key, wallet_fingerprint, created_at, updated_at
-        ) VALUES (
-            _treasury_address, _treasury_reward, 'treasury', NEW.height,
-            'treasury_key', 'treasury_fp', NOW(), NOW()
-        )
-        ON CONFLICT (address) DO UPDATE
-        SET balance = wallet_addresses.balance + _treasury_reward,
-            balance_at_height = NEW.height,
-            updated_at = NOW();
-        
-        RETURN NEW;
-    END;
-    $$ LANGUAGE plpgsql SECURITY DEFINER;
-    """
-    
     # Function 3: Transaction Validation
     functions['fn_validate_transaction'] = """
     -- ═════════════════════════════════════════════════════════════════════════════
@@ -3678,15 +3632,6 @@ def get_trigger_definitions_sql() -> Dict[str, str]:
         EXECUTE FUNCTION fn_balance_history();
     """
     
-    triggers['blocks_reward'] = """
-    -- Trigger: Block reward distribution on blocks
-    DROP TRIGGER IF EXISTS trg_blocks_reward ON blocks;
-    CREATE TRIGGER trg_blocks_reward
-        AFTER INSERT ON blocks
-        FOR EACH ROW
-        EXECUTE FUNCTION fn_distribute_block_rewards();
-    """
-    
     triggers['tx_validate'] = """
     -- Trigger: Transaction validation on transactions
     DROP TRIGGER IF EXISTS trg_tx_validate ON transactions;
@@ -3779,29 +3724,6 @@ def get_sqlite_trigger_definitions() -> Dict[str, str]:
             NEW.balance,
             NEW.balance - OLD.balance,
             strftime('%s', 'now');
-    END;
-    """
-    
-    triggers['blocks_reward'] = """
-    -- SQLite Trigger: Block reward distribution
-    CREATE TRIGGER IF NOT EXISTS trg_blocks_reward
-    AFTER INSERT ON blocks
-    BEGIN
-        -- Credit miner (simplified for SQLite)
-        INSERT OR REPLACE INTO wallet_addresses (
-            address, balance, address_type, balance_at_height,
-            public_key, wallet_fingerprint, created_at, updated_at
-        )
-        SELECT 
-            NEW.miner_address,
-            COALESCE((SELECT balance FROM wallet_addresses WHERE address = NEW.miner_address), 0) + 5000000000,
-            'miner',
-            NEW.height,
-            'pending',
-            'pending',
-            datetime('now'),
-            datetime('now')
-        WHERE NEW.miner_address IS NOT NULL AND NEW.miner_address != '';
     END;
     """
     
@@ -4565,21 +4487,21 @@ For more information, see the documentation in docs/:
         builder = QuantumTemporalCoherenceLedgerServer(
             tessellation_depth=args.tessellation_depth
         )
-        
-        if args.rebuild and args.force:
-            logger.warning(f"{CLR.ERROR}[REBUILD] DESTRUCTIVE OPERATION{CLR.E}")
-            builder.rebuild_complete()
-        
+
+        # Always do a hard reset on comprehensive setup
+        logger.warning(f"{CLR.ERROR}[REBUILD] DESTRUCTIVE OPERATION — FULL RESET TO GENESIS{CLR.E}")
+        builder.rebuild_complete()
+
         # Then apply security
         sm = QTCLSecurityManager()
         sm.comprehensive_security_setup(args.password)
-        
+
         logger.info(f"\n{CLR.HEADER}{'='*80}{CLR.E}")
         logger.info(f"{CLR.OK}✓ COMPREHENSIVE SETUP COMPLETE{CLR.E}")
         logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}\n")
         return
     
-    # Default: rebuild
+    # Default: rebuild with --rebuild flag
     if args.rebuild:
         if not args.force:
             logger.error(f"{CLR.ERROR}Use --force to confirm rebuild{CLR.E}")
@@ -4589,9 +4511,22 @@ For more information, see the documentation in docs/:
         )
         builder.rebuild_complete()
         return
-    
-    # No specific action - show help
-    print_usage()
+
+    # No specific action - default to comprehensive hard reset to genesis
+    logger.warning(f"{CLR.ERROR}[DEFAULT] No arguments specified — performing COMPREHENSIVE HARD RESET TO GENESIS{CLR.E}")
+    builder = QuantumTemporalCoherenceLedgerServer(
+        tessellation_depth=args.tessellation_depth
+    )
+    logger.warning(f"{CLR.ERROR}[REBUILD] DESTRUCTIVE OPERATION — DROPPING ALL TABLES{CLR.E}")
+    builder.rebuild_complete()
+
+    # Then apply security
+    sm = QTCLSecurityManager()
+    sm.comprehensive_security_setup(args.password)
+
+    logger.info(f"\n{CLR.HEADER}{'='*80}{CLR.E}")
+    logger.info(f"{CLR.OK}✓ GENESIS COMPLETE — DATABASE RESET TO ZERO{CLR.E}")
+    logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}\n")
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
