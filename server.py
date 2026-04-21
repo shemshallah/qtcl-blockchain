@@ -5668,10 +5668,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     _existing_block_hash = _existing_row[0]
                     if _existing_block_hash == block_hash:
                         # TRUE DUPLICATE: Same hash, already accepted
-                        logger.info(
-                            f"[RPC-submitBlock] 🔁 TRUE DUPLICATE: h={height} hash={block_hash[:16]}… already in DB"
+                        logger.critical(
+                            f"[RPC-submitBlock] 🔁 DUPLICATE DETECTED: h={height} hash matches={block_hash[:16]}…"
                         )
                         _block_insert_result = "duplicate"
+                    else:
+                        logger.critical(
+                            f"[RPC-submitBlock] ⚠️  DIFFERENT HASH AT HEIGHT: h={height} new={block_hash[:16]}… db={_existing_block_hash[:16]}…"
+                        )
                     else:
                         # FORK ATTEMPT: Different hash at same height
                         logger.warning(
@@ -5785,16 +5789,32 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         elif _block_insert_result == "duplicate":
             # True duplicate - already in DB
+            # BUT: still run settlement in case first submission's settlement failed
             logger.info(
-                f"[RPC-submitBlock] 🔁 ACCEPTED (duplicate): h={height} already in DB"
+                f"[RPC-submitBlock] 🔁 ACCEPTED (duplicate): h={height} already in DB — running settlement anyway"
             )
+
+            # Extract transactions (same as new block path)
+            txs = data.get("transactions", data.get("txs", []))
+            _non_coinbase_txs = [tx for tx in (txs or []) if tx.get("tx_type", "").lower() != "coinbase"]
+
+            # RUN SETTLEMENT FOR DUPLICATE (in case first attempt failed)
+            logger.critical(f"[RPC-submitBlock] 🔥 RUNNING SETTLEMENT FOR DUPLICATE h={height}")
+            try:
+                _settle_block_rewards(
+                    height, block_hash, miner_address, txs or [], _non_coinbase_txs
+                )
+                logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height}")
+            except Exception as settle_err:
+                logger.critical(f"[RPC-submitBlock] ⚠️  Settlement for duplicate failed: {settle_err}")
+
             return _rpc_ok(
                 {
                     "status": "accepted",
                     "height": height,
                     "block_hash": block_hash,
                     "next_height": height + 1,
-                    "diagnostic": {"note": "Block already in database - accepted"},
+                    "diagnostic": {"note": "Block already in database - settlement may have been applied"},
                 },
                 rpc_id,
             )
