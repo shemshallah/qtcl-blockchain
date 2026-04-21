@@ -3993,9 +3993,10 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                     for tr in tx_rows:
                         txs.append({
                             "tx_id": tr[0],
+                            "tx_hash": tr[0],
                             "from_addr": tr[1] or "",
                             "to_addr": tr[2] or "",
-                            "amount": int(tr[3]) if tr[3] is not None else 0,
+                            "amount": tr[3],  # Keep as-is, don't cast to int
                             "tx_index": int(tr[4]) if tr[4] is not None else 0,
                             "tx_type": tr[5] or "transfer",
                             "status": tr[6] or "confirmed",

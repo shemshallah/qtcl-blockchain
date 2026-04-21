@@ -539,9 +539,12 @@ const fmtTime = ts => {
   }
 };
 const fmtAmount = v => {
-  if (!v && v !== 0) return '—';
-  const n = parseInt(v);
+  if (v === null || v === undefined || v === '') return '—';
+  // Convert to number, handle both string and numeric
+  const n = typeof v === 'string' ? parseFloat(v) : Number(v);
+  if (isNaN(n)) return '—';
   if (n === 0) return '0 QTCL';
+  // Assume satoshis (divide by 1e8 for QTCL)
   return (n / 1e8).toFixed(8).replace(/\.?0+$/, '') + ' QTCL';
 };
 const hashBadge = (h, cls) => h
