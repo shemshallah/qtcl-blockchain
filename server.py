@@ -1236,10 +1236,41 @@ def _ensure_wallet_addresses_table() -> None:
         logger.warning(f"[STARTUP] ⚠️  wallet_addresses DDL: {e}")
 
 
+def _ensure_pending_rewards_table() -> None:
+    """Ensure pending_rewards table exists at startup.
+    Treasury rewards are queued at block h and confirm at block h+1."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pending_rewards (
+                    id BIGSERIAL PRIMARY KEY,
+                    height BIGINT NOT NULL,
+                    reward_type VARCHAR(32) NOT NULL,
+                    recipient VARCHAR(255) NOT NULL,
+                    amount BIGINT NOT NULL,
+                    confirmed_at_height BIGINT DEFAULT NULL,
+                    status VARCHAR(16) DEFAULT 'pending',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    UNIQUE(height, reward_type, recipient)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_pending_rewards_status ON pending_rewards(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_pending_rewards_height ON pending_rewards(height)")
+        logger.info("[STARTUP] ✅ pending_rewards table ready")
+    except Exception as e:
+        logger.warning(f"[STARTUP] ⚠️  pending_rewards DDL: {e}")
+
+
 threading.Thread(
     target=_ensure_wallet_addresses_table,
     daemon=True,
     name="WalletTableInit",
+).start()
+
+threading.Thread(
+    target=_ensure_pending_rewards_table,
+    daemon=True,
+    name="PendingRewardsInit",
 ).start()
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -5928,15 +5959,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         return _rpc_error(-32002, f"Fork rejected at h={height}", rpc_id, data={"existing_hash":_ex_hash})
 
                 cur.execute("""INSERT INTO blocks
-                    (height, block_number, block_hash, previous_hash, timestamp,
-                     oracle_w_state_hash, validator_public_key, nonce,
-                     difficulty, entropy_score, transactions_root, pq_curr, pq_last,
-                     mermin_value, mermin_violated)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (height, height, block_hash, parent_hash, timestamp_s,
+                    (height, block_hash, parent_hash, merkle_root, timestamp,
+                     miner_address, nonce, difficulty,
+                     pq_curr, pq_last, oracle_w_state_hash, tx_count)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (height, block_hash, parent_hash, merkle_root, timestamp_s,
+                     miner_address, nonce, difficulty_bits,
+                     height, max(0, height-1),
                      w_entropy_hex[:64] if w_entropy_hex else "0"*64,
-                     miner_address, nonce, difficulty_bits, 0.0, merkle_root,
-                     height, max(0, height-1), 0.0, False))
+                     len(txs or [])))
                 _block_is_new = True
                 logger.critical(f"[SUBMIT-BLOCK] ✅ BLOCK INSERTED h={height}")
 
