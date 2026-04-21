@@ -797,14 +797,17 @@ function renderBlockDetail(b, container) {
 }
 
 function renderTxCard(tx, idx) {
-  const isCoinbase = tx.tx_type === 'coinbase' || tx.from_addr === '' || tx.from_addr === 'coinbase' || (tx.from_addr && /^0{16,}$/.test(tx.from_addr));
+  const isCoinbase = tx.tx_type === 'coinbase' || tx.from_addr === '' || tx.from_addr === 'coinbase' || tx.from_addr === 'COINBASE' || tx.from_addr === 'TREASURY' || (tx.from_addr && /^0{16,}$/.test(tx.from_addr));
   const hash = tx.tx_id || tx.tx_hash || '';
   const from = tx.from_addr || '';
   const to = tx.to_addr || '';
   const amount = tx.amount;
   const wProof = tx.w_proof || '';
   const typeClass = isCoinbase ? 'coinbase' : '';
-  const typeLabel = isCoinbase ? '⚡ COINBASE' : (tx.tx_type || 'transfer').toUpperCase();
+  const isTreasury = tx.from_addr === 'TREASURY';
+  const typeLabel = isCoinbase
+    ? (isTreasury ? '🏛 TREASURY' : '⛏ MINER REWARD')
+    : (tx.tx_type || 'transfer').toUpperCase();
 
   return `
     <div class="tx-card ${typeClass}">
@@ -814,7 +817,7 @@ function renderTxCard(tx, idx) {
           <div class="tx-hash">${hash || 'no hash'}</div>
           <div class="tx-flow">
             ${isCoinbase
-              ? `<span class="tx-addr" style="color:var(--go)">⚡ Block Reward → ${to ? shortAddr(to) : 'miner'}</span>`
+              ? `<span class="tx-addr" style="color:var(--go)">${isTreasury ? '🏛 Treasury Reward' : '⛏ Block Reward'} → ${to ? shortAddr(to) : (isTreasury ? 'treasury' : 'miner')}</span>`
               : `<span class="tx-addr">${from || 'unknown'}</span>
                  <span class="tx-arrow">→</span>
                  <span class="tx-addr">${to || 'unknown'}</span>`

@@ -3431,48 +3431,10 @@ class BlockManager:
             block = self.pending_block
             block.timestamp_s = int(time.time())
 
-            # ── Generate coinbase transactions ──────────────────────────────────
-            # Get miner reward for this block height (default: 720 QTCL)
-            MINER_REWARD_BASE = 72000  # in base units (720.00 QTCL)
-            TREASURY_REWARD_BASE = 8000  # in base units (80.00 QTCL)
-            TREASURY_ADDRESS = "qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1"
-
-            miner_reward = MINER_REWARD_BASE
-            treasury_reward = TREASURY_REWARD_BASE
-
-            # Miner coinbase (pay block reward to miner)
-            miner_coinbase = QuantumTransaction(
-                tx_id=f"coinbase_{block.block_height}_{block.miner_address[:8]}",
-                sender_addr="COINBASE",
-                receiver_addr=block.miner_address,
-                amount=Decimal(miner_reward) / 100,
-                nonce=block.block_height,
-                timestamp_ns=int(time.time() * 1e9),
-                fee=0,
-                tx_type="coinbase",
-            )
-            miner_coinbase.from_addr = miner_coinbase.sender_addr
-            miner_coinbase.to_addr = miner_coinbase.receiver_addr
-
-            # Treasury coinbase (pay treasury share)
-            treasury_coinbase = QuantumTransaction(
-                tx_id=f"treasury_{block.block_height}",
-                sender_addr="COINBASE",
-                receiver_addr=TREASURY_ADDRESS,
-                amount=Decimal(treasury_reward) / 100,
-                nonce=block.block_height,
-                timestamp_ns=int(time.time() * 1e9),
-                fee=0,
-                tx_type="coinbase",
-            )
-            treasury_coinbase.from_addr = treasury_coinbase.sender_addr
-            treasury_coinbase.to_addr = treasury_coinbase.receiver_addr
-
-            # Prepend coinbase transactions to block
-            block.transactions = [
-                miner_coinbase,
-                treasury_coinbase,
-            ] + block.transactions
+            # Server generates all reward txs authoritatively:
+            #   - miner_reward tx (7.2 QTCL) server writes on block acceptance
+            #   - coinbase tx (0.8 QTCL from prior block pending_rewards) server writes
+            # Client sends NO coinbase txs — block.transactions has only user txs.
 
             block.tx_count = len(block.transactions)
 

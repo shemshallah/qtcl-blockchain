@@ -693,7 +693,7 @@ _LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
 # TESSELLATION REWARD SCHEDULE (modular reward distribution)
 # ═════════════════════════════════════════════════════════════════════════════════
 
-_TREASURY_ADDRESS = "qtcl1treasury0reward0dist0address00000000000000000000001"
+_TREASURY_ADDRESS = os.environ.get("TREASURY_ADDRESS", "qtcl1treasury0reward0dist0address00000000000000000000001")
 _BLOCK_REWARD_TOTAL = 8.0
 _DEFAULT_MINER_REWARD = 7.2
 _DEFAULT_TREASURY_REWARD = 0.8
@@ -1629,6 +1629,28 @@ def _settle_block_rewards(
                     "confirmed_at_height = %s WHERE id = %s",
                     (height, _pr_id),
                 )
+                # Write treasury reward as a coinbase tx in THIS block (h)
+                # This is the visible "coinbase" in the block explorer:
+                # block N+1 contains coinbase=0.8 QTCL from block N's treasury queue
+                _treas_tx_id = f"treasury_coinbase_{height - 1}_{_pr_recipient[:8]}"
+                try:
+                    cur.execute(
+                        """INSERT INTO transactions
+                        (tx_hash, from_address, to_address, amount, tx_type, status,
+                         height, block_hash, updated_at)
+                        VALUES (%s, %s, %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
+                        ON CONFLICT (tx_hash) DO NOTHING""",
+                        (
+                            _treas_tx_id,
+                            "TREASURY",
+                            _pr_recipient,
+                            _pr_amount / 100.0,
+                            height,
+                            block_hash,
+                        ),
+                    )
+                except Exception as _ttx_e:
+                    _settle_log.debug(f"[SETTLE] treasury tx insert: {_ttx_e}")
                 _settle_log.info(
                     f"[SETTLE] ✅ CONFIRMED prior h={height - 1} treasury "
                     f"{_pr_recipient[:20]}… +{_pr_amount / 100:.2f} QTCL"
@@ -5938,20 +5960,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 except Exception:
                     pass
 
-        # ── Validate coinbase presence & miner reward ────────────────────────
-        if len(_coinbase_txs) < 1:
-            return _rpc_error(
-                -32003, "Block must have at least one coinbase transaction", rpc_id
-            )
-        if len(_coinbase_txs) > 1:
-            return _rpc_error(
-                -32003,
-                f"Block has too many coinbase transactions: {len(_coinbase_txs)} "
-                f"(only miner coinbase allowed; treasury is deferred via pending_rewards)",
-                rpc_id,
-            )
-
-        # Validate miner coinbase amount (7.2 QTCL + miner fee share)
+        # ── Rewards (base units) — server-authoritative, not from client ─────
+        # Coinbase txs from client are ignored — server generates coinbase
+        # (treasury 0.8 QTCL from prior block's pending_rewards) itself.
         _scheduled_miner_reward = 720
         if TessellationRewardSchedule:
             try:
@@ -5959,26 +5970,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _scheduled_miner_reward = int(round(float(_r.get("miner", 7.2)) * 100))
             except Exception:
                 pass
-        _cb = _coinbase_txs[0]
-        _cb_to = _cb.get("to_addr", _cb.get("to_address", ""))
-        _cb_amount_base = int(round(float(_cb.get("amount", 0)) * 100))
-        if _cb_to != miner_address:
-            return _rpc_error(
-                -32003,
-                f"Coinbase recipient mismatch: {_cb_to} != {miner_address}",
-                rpc_id,
-            )
-        _expected_miner = _scheduled_miner_reward + (_total_fees // 2)
-        if abs(_cb_amount_base - _expected_miner) > 1:
-            return _rpc_error(
-                -32003,
-                f"Invalid miner coinbase: got {_cb_amount_base} base units, "
-                f"expected {_expected_miner} (reward={_scheduled_miner_reward} + fees/2={_total_fees // 2})",
-                rpc_id,
-            )
-
-        # ── Rewards (base units) ─────────────────────────────────────────────
-        _miner_reward = _expected_miner
+        _miner_reward = _scheduled_miner_reward + (_total_fees // 2)
         _treas_reward = 80 + (_total_fees - _total_fees // 2)
         if TessellationRewardSchedule:
             try:
@@ -6050,8 +6042,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _block_is_new = True
                 logger.critical(f"[SUBMIT-BLOCK] ✅ BLOCK INSERTED h={height}")
 
-                # Persist ALL transactions (coinbase + non-coinbase) cryptographically linked
+                # Persist non-coinbase transactions only (client coinbase ignored;
+                # server generates authoritative coinbase from pending_rewards below)
                 for tx in txs or []:
+                    _tx_type = str(tx.get("tx_type", "transfer")).lower()
+                    if _tx_type == "coinbase":
+                        continue  # skip — server owns coinbase generation
                     tx_id = str(tx.get("tx_id") or tx.get("tx_hash", ""))
                     if not tx_id:
                         continue
@@ -6065,20 +6061,62 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 block_hash=EXCLUDED.block_hash, updated_at=NOW()""",
                             (
                                 tx_id,
-                                str(
-                                    tx.get(
-                                        "from_addr", tx.get("from_address", "0" * 64)
-                                    )
-                                ),
+                                str(tx.get("from_addr", tx.get("from_address", ""))),
                                 str(tx.get("to_addr", tx.get("to_address", ""))),
                                 float(tx.get("amount", 0)),
-                                str(tx.get("tx_type", "transfer")),
+                                _tx_type,
                                 height,
                                 block_hash,
                             ),
                         )
                     except Exception as _tx_e:
                         logger.debug(f"[SUBMIT-BLOCK] TX insert {tx_id[:16]}…: {_tx_e}")
+
+                # Server generates miner_reward tx (7.2 QTCL) for this block
+                _miner_tx_id = f"miner_reward_{height}_{miner_address[:8]}"
+                try:
+                    cur.execute(
+                        """INSERT INTO transactions
+                        (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
+                        VALUES (%s, 'BLOCK_REWARD', %s, %s, 'miner_reward', 'confirmed', %s, %s, NOW())
+                        ON CONFLICT (tx_hash) DO NOTHING""",
+                        (_miner_tx_id, miner_address, _miner_reward / 100.0, height, block_hash),
+                    )
+                except Exception as _mte:
+                    logger.debug(f"[SUBMIT-BLOCK] miner_reward tx insert: {_mte}")
+
+                # Server generates coinbase tx (0.8 QTCL treasury from PRIOR block h-1)
+                # This IS the coinbase for this block — always from pending_rewards[height-1]
+                try:
+                    cur.execute(
+                        "SELECT id, recipient, amount FROM pending_rewards WHERE height=%s AND status='pending'",
+                        (height - 1,),
+                    )
+                    _prior_pending = cur.fetchall() or []
+                    for _pp in _prior_pending:
+                        _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
+                        _coinbase_tx_id = f"coinbase_{height}_{height - 1}_{_pp_recipient[:8]}"
+                        cur.execute(
+                            """INSERT INTO transactions
+                            (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
+                            VALUES (%s, 'TREASURY', %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
+                            ON CONFLICT (tx_hash) DO NOTHING""",
+                            (_coinbase_tx_id, _pp_recipient, _pp_amount / 100.0, height, block_hash),
+                        )
+                        cur.execute(
+                            "INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated) "
+                            "VALUES (%s,%s,%s,%s,1,'treasury',NOW()) ON CONFLICT (address) DO UPDATE SET "
+                            "balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()",
+                            (_pp_recipient, hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64],
+                             hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64], _pp_amount),
+                        )
+                        cur.execute(
+                            "UPDATE pending_rewards SET status='confirmed', confirmed_at_height=%s WHERE id=%s",
+                            (height, _pp_id),
+                        )
+                        logger.info(f"[SUBMIT-BLOCK] 🏛 COINBASE h={height}: treasury from h={height-1} +{_pp_amount/100:.2f} QTCL → {_pp_recipient[:20]}…")
+                except Exception as _cbe:
+                    logger.debug(f"[SUBMIT-BLOCK] coinbase gen: {_cbe}")
 
                 # Settle non-coinbase transactions atomically
                 for tx in _non_coinbase_txs:
@@ -6103,11 +6141,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             ),
                         )
 
-                # Miner 7.2 QTCL + fee share credited NOW (embedded as coinbase in this block)
+                # Credit miner wallet (7.2 QTCL + fee share) immediately
                 cur.execute(
-                    """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type)
-                    VALUES (%s,%s,%s,%s,1,'miner') ON CONFLICT (address) DO UPDATE SET
-                    balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1""",
+                    """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
+                    VALUES (%s,%s,%s,%s,1,'miner',NOW()) ON CONFLICT (address) DO UPDATE SET
+                    balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
                     (
                         miner_address,
                         hashlib.sha256(miner_address.encode()).hexdigest()[:64],
@@ -6116,7 +6154,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     ),
                 )
 
-                # Treasury 0.8 QTCL queued → confirms at height+1
+                # Queue THIS block's treasury 0.8 QTCL → becomes coinbase in block h+1
                 try:
                     cur.execute(
                         """INSERT INTO pending_rewards (height, reward_type, recipient, amount, status)
@@ -6128,7 +6166,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     logger.debug(f"[SUBMIT-BLOCK] pending_rewards insert: {_pre}")
 
                 logger.info(
-                    f"[SUBMIT-BLOCK] 💰 REWARDS: miner=+{_miner_reward / 100:.2f} QTCL (now), treasury={_treas_reward / 100:.2f} QTCL (confirms h={height + 1})"
+                    f"[SUBMIT-BLOCK] REWARDS h={height}: miner=+{_miner_reward/100:.2f} QTCL (now), treasury={_treas_reward/100:.2f} QTCL queued (coinbase at h={height+1})"
                 )
 
         except Exception as _db_e:
