@@ -78,6 +78,8 @@ _RPC_THREAD_POOL = _cf.ThreadPoolExecutor(
 _RPC_INLINE_METHODS: frozenset = frozenset(
     {
         "qtcl_getBlockHeight",
+        "qtcl_getBlock",
+        "qtcl_getBlockRange",
         "qtcl_getQuantumMetrics",
         "qtcl_getLatestDMSnapshot",
         "qtcl_getLatestDMSnapshots",
@@ -4121,10 +4123,11 @@ def _cache_block(block_dict):
 
 
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)
+    """qtcl_getBlockRange — return blocks from DB (authoritative), with cache fallback
 
     params: [from_height, to_height]
     Negative to_height means "from end" (e.g., [-20, -1] = last 20 blocks)
+    DB-AUTHORITATIVE: Fetches from database first, fills gaps from cache if needed.
     """
     try:
         if not isinstance(params, (list, tuple)) or len(params) < 2:
@@ -4132,30 +4135,74 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         from_h = int(params[0])
         to_h = int(params[1])
 
-        blocks = []
-        with _BLOCK_CACHE_LOCK:
-            logger.debug(
-                f"[RPC] getBlockRange cache debug: keys={list(_BLOCK_CACHE.keys())[:5]}"
-            )
-
-            # Handle negative to_height: "from end"
-            if to_h < 0:
+        # Handle negative to_height: "from end"
+        if to_h < 0:
+            with _BLOCK_CACHE_LOCK:
                 max_height = max(_BLOCK_CACHE.keys()) if _BLOCK_CACHE else 0
-                to_h = max_height
-                from_h = max(
-                    0, to_h + from_h + 1
-                )  # from_h was negative (e.g., -20 means 20 blocks before end)
+            to_h = max_height
+            from_h = max(0, to_h + from_h + 1)
 
-            if to_h - from_h > 99:
-                to_h = from_h + 99
-            if from_h < 0:
-                from_h = 0
+        if to_h - from_h > 99:
+            to_h = from_h + 99
+        if from_h < 0:
+            from_h = 0
 
-            for h in range(from_h, to_h + 1):
-                if h in _BLOCK_CACHE:
-                    blocks.append(_BLOCK_CACHE[h])
+        blocks_by_height = {}
 
-        logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
+        # Try DB first (authoritative source)
+        try:
+            if LATTICE and hasattr(LATTICE, "block_manager") and LATTICE.block_manager and LATTICE.block_manager.db:
+                db = LATTICE.block_manager.db
+                if db._sqlite_conn:
+                    try:
+                        sql = """
+                            SELECT height, block_hash, timestamp, w_state_hash,
+                                   parent_hash, nonce, difficulty,
+                                   coherence_snapshot, merkle_root, tx_count
+                            FROM blocks WHERE height >= ? AND height <= ?
+                            ORDER BY height ASC
+                        """
+                        cursor = db._sqlite_conn.execute(sql, (from_h, to_h))
+                        rows = cursor.fetchall()
+                        for row in rows:
+                            h = row[0]
+                            blocks_by_height[h] = {
+                                "height": h,
+                                "block_height": h,
+                                "block_hash": row[1],
+                                "hash": row[1],
+                                "parent_hash": row[4] or ("0" * 64),
+                                "previous_hash": row[4] or ("0" * 64),
+                                "merkle_root": row[8] or ("0" * 64),
+                                "timestamp_s": int(row[2]) if row[2] else 0,
+                                "timestamp": int(row[2]) if row[2] else 0,
+                                "difficulty": int(float(row[6])) if row[6] else 5,
+                                "nonce": int(row[5]) if row[5] else 0,
+                                "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                                "w_entropy_hash": row[3] or "",
+                                "pq_curr": h,
+                                "pq_last": max(0, h - 1),
+                                "tx_count": int(row[9]) if row[9] else 0,
+                                "mined": True,
+                                "finalized": True,
+                            }
+                        logger.debug(f"[RPC] getBlockRange({from_h}, {to_h}) fetched {len(rows)} from SQLite")
+                    except Exception as _se:
+                        logger.debug(f"[RPC] SQLite range query failed: {_se}")
+        except Exception as _e:
+            logger.debug(f"[RPC] SQLite path failed: {_e}")
+
+        # Fallback to cache for gaps
+        if len(blocks_by_height) < (to_h - from_h + 1):
+            with _BLOCK_CACHE_LOCK:
+                for h in range(from_h, to_h + 1):
+                    if h not in blocks_by_height and h in _BLOCK_CACHE:
+                        blocks_by_height[h] = _BLOCK_CACHE[h]
+
+        # Sort by height ascending
+        blocks = sorted(blocks_by_height.values(), key=lambda b: b["height"])
+
+        logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)}/{to_h - from_h + 1} blocks")
         return _rpc_ok(
             {
                 "blocks": blocks,
@@ -4168,7 +4215,6 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
 
     except Exception as e:
         logger.warning(f"[RPC-METHOD] qtcl_getBlockRange: {e}")
-        return _rpc_error(-32603, str(e), rpc_id)
         logger.exception(f"[RPC] _rpc_getBlockRange exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
@@ -7223,9 +7269,12 @@ def rpc_endpoint():
                 },
                 "id": None,
             }
-            return Response(
+            response = Response(
                 json.dumps(discovery_response), status=200, mimetype="application/json"
             )
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            return response
 
         # Parse params (JSON-encoded, URL-decoded, default to empty list)
         params_str = request.args.get("params", "[]")
@@ -7268,14 +7317,21 @@ def rpc_endpoint():
 
         # CRITICAL: Always HTTP 200, never status codes >= 400
         json_payload = json.dumps(result)
-        return Response(json_payload, status=200, mimetype="application/json")
+        response = Response(json_payload, status=200, mimetype="application/json")
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
     except Exception as e:
         logger.exception(f"[RPC] GET endpoint error: {e}")
         # Even on unexpected error, return HTTP 200 with JSON-RPC error
         error_response = _rpc_error(-32603, str(e), None)
-        return Response(
+        response = Response(
             json.dumps(error_response), status=200, mimetype="application/json"
         )
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        return response
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

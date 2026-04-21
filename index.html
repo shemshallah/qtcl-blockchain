@@ -842,16 +842,23 @@ async function fetchChain() {
       try {
         const rangeRes = await rpc('qtcl_getBlockRange', [fromH, toH]);
         blocks = rangeRes && rangeRes.blocks ? rangeRes.blocks : [];
+        console.log(`[Chain] getBlockRange(${fromH}, ${toH}) returned ${blocks.length} blocks`);
       } catch(e) { console.warn('Range fetch failed:', e.message); }
 
       // 3. Fall back to individual fetches if range returned sparse/empty data
-      //    (handles servers where getBlockRange only returns in-memory cache)
+      //    SEQUENTIAL FETCHING: avoid race conditions when tab switches
       if (blocks.length < Math.min(5, toH - fromH + 1)) {
-        const fetches = [];
+        console.log(`[Chain] Range sparse (${blocks.length} < ${Math.min(5, toH - fromH + 1)}), falling back to sequential fetches`);
+        const fetched = [];
         for (let h = toH; h >= fromH; h--) {
-          fetches.push(rpc('qtcl_getBlock', [h]).catch(() => null));
+          try {
+            const block = await rpc('qtcl_getBlock', [h]);
+            if (block) fetched.push(block);
+          } catch(e) {
+            console.debug(`[Chain] Failed to fetch block ${h}: ${e.message}`);
+          }
         }
-        const fetched = (await Promise.all(fetches)).filter(Boolean);
+        console.log(`[Chain] Sequential fallback fetched ${fetched.length} blocks`);
         // Merge: DB-fetched results override range cache
         const byHeight = {};
         blocks.forEach(b => { byHeight[b.height] = b; });
@@ -927,20 +934,31 @@ async function fetchExplorerPage() {
     try {
       const rangeRes = await rpc('qtcl_getBlockRange', [fromH, toH]);
       blocks = rangeRes && rangeRes.blocks ? rangeRes.blocks : [];
-    } catch(e) { /* fall through to individual fetches */ }
+      console.log(`[Explorer] getBlockRange(${fromH}, ${toH}) returned ${blocks.length} blocks`);
+    } catch(e) { 
+      console.warn(`[Explorer] getBlockRange failed: ${e.message}`);
+    }
 
-    // Individual fallback: fires only when range returned sparse/empty results
+    // Individual fallback: fires ONLY when range returned sparse results
+    // Fetch sequentially to avoid race conditions when tab switches
     if (blocks.length < Math.min(3, toH - fromH + 1)) {
-      const promises = [];
+      console.log(`[Explorer] Range sparse (${blocks.length} < ${Math.min(3, toH - fromH + 1)}), falling back to individual fetches`);
+      const fetched = [];
       for (let h = toH; h >= fromH; h--) {
-        promises.push(rpc('qtcl_getBlock', [h]).catch(() => null));
+        try {
+          const block = await rpc('qtcl_getBlock', [h]);
+          if (block) fetched.push(block);
+        } catch(e) {
+          console.debug(`[Explorer] Failed to fetch block ${h}: ${e.message}`);
+        }
       }
-      const fetched = (await Promise.all(promises)).filter(Boolean);
+      
       // Merge, preferring freshly-fetched data over range cache
       const byHeight = {};
       blocks.forEach(b => { byHeight[b.height] = b; });
       fetched.forEach(b => { if (b) byHeight[b.height] = b; });
       blocks = Object.values(byHeight);
+      console.log(`[Explorer] Individual fallback fetched ${fetched.length} blocks, total now ${blocks.length}`);
     }
 
     blocks.sort((a, b) => b.height - a.height);
