@@ -624,7 +624,10 @@ import uuid
 # RPC SNAPSHOT DISTRIBUTION (replaces SSE)
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # ENTROPY POOL INTEGRATION
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+# TessellationRewardSchedule is defined in-server (line ~687)
+# OraclePersistence is defined in-server (line ~758)
 
 try:
     from globals import (
@@ -632,10 +635,26 @@ try:
         set_current_block_field,
         get_block_field_entropy,
         initialize_system as init_entropy_system,
-        TessellationRewardSchedule,
     )
 
     ENTROPY_AVAILABLE = True
+except ImportError:
+    ENTROPY_AVAILABLE = False
+    logger.warning("[ENTROPY] Block field entropy not available - will use fallback")
+    pass  # Use in-server definition
+
+try:
+    from globals import (
+        initialize_block_field_entropy,
+        set_current_block_field,
+        get_block_field_entropy,
+        initialize_system as init_entropy_system,
+    )
+
+    ENTROPY_AVAILABLE = True
+except ImportError:
+    ENTROPY_AVAILABLE = False
+    logger.warning("[ENTROPY] Block field entropy not available - will use fallback")
 except ImportError:
     ENTROPY_AVAILABLE = False
     TessellationRewardSchedule = None
@@ -667,6 +686,293 @@ ORACLE_W_STATE_MANAGER = None
 LATTICE = None
 _ORACLE_INIT_EVENT = threading.Event()  # set once oracle is ready (or failed)
 _LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# TESSELLATION REWARD SCHEDULE (modular reward distribution)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+_TREASURY_ADDRESS = "qtcl1treasury0reward0dist0address00000000000000000000001"
+_BLOCK_REWARD_TOTAL = 8.0
+_DEFAULT_MINER_REWARD = 7.2
+_DEFAULT_TREASURY_REWARD = 0.8
+_REWARD_SCHEDULE: dict = {}
+
+
+class TessellationRewardSchedule:
+    """Modular reward schedule for QTCL block rewards.
+
+    Usage:
+        rewards = TessellationRewardSchedule.get_rewards_for_height(height)
+        miner = rewards['miner']        # 7.2 QTCL
+        treasury = rewards['treasury']  # 0.8 QTCL
+    """
+
+    TREASURY_ADDRESS = _TREASURY_ADDRESS
+
+    @classmethod
+    def get_rewards_for_height(cls, height: int) -> dict:
+        """Get reward allocation for a given block height."""
+        if height in _REWARD_SCHEDULE:
+            return _REWARD_SCHEDULE[height].copy()
+        return {"miner": _DEFAULT_MINER_REWARD, "treasury": _DEFAULT_TREASURY_REWARD}
+
+    @classmethod
+    def get_miner_reward_qtcl(cls, height: int) -> float:
+        """Get miner reward in QTCL for a given height."""
+        return cls.get_rewards_for_height(height).get("miner", _DEFAULT_MINER_REWARD)
+
+    @classmethod
+    def get_treasury_reward_qtcl(cls, height: int) -> float:
+        """Get treasury reward in QTCL for a given height."""
+        return cls.get_rewards_for_height(height).get(
+            "treasury", _DEFAULT_TREASURY_REWARD
+        )
+
+    @classmethod
+    def get_total_reward(cls, height: int) -> float:
+        """Get total block reward for a given height."""
+        r = cls.get_rewards_for_height(height)
+        return r.get("miner", _DEFAULT_MINER_REWARD) + r.get(
+            "treasury", _DEFAULT_TREASURY_REWARD
+        )
+
+    @classmethod
+    def set_reward_schedule(
+        cls, height: int, miner_reward: float, treasury_reward: float
+    ):
+        """Set custom reward schedule for a specific height."""
+        _REWARD_SCHEDULE[height] = {"miner": miner_reward, "treasury": treasury_reward}
+        logger.info(
+            f"[REWARD] Schedule set for h={height}: miner={miner_reward}, treasury={treasury_reward}"
+        )
+
+    @classmethod
+    def configure_distribution(
+        cls, total_reward: float = _BLOCK_REWARD_TOTAL, miner_ratio: float = 0.9
+    ):
+        """Configure reward distribution ratios globally."""
+        global _DEFAULT_MINER_REWARD, _DEFAULT_TREASURY_REWARD
+        _DEFAULT_MINER_REWARD = total_reward * miner_ratio
+        _DEFAULT_TREASURY_REWARD = total_reward * (1.0 - miner_ratio)
+        logger.info(
+            f"[REWARD] Distribution: total={total_reward}, miner={_DEFAULT_MINER_REWARD}, treasury={_DEFAULT_TREASURY_REWARD}"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# ORACLE LOCAL SQLITE PERSISTENCE (dual-write with database)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+_ORACLE_DB_PATH = os.getenv("ORACLE_DB_PATH", "data/qtcl_oracle.db")
+_ORACLE_SQLITE_DB = None
+_oracle_sqlite_lock = threading.RLock()
+
+
+def _ensure_oracle_sqlite():
+    """Ensure oracle SQLite tables exist for local persistence."""
+    global _ORACLE_SQLITE_DB
+    import sqlite3
+    from pathlib import Path
+
+    Path(_ORACLE_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(_ORACLE_DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.row_factory = sqlite3.Row
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS oracle_measurements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cycle INTEGER NOT NULL,
+            oracle_id TEXT NOT NULL,
+            timestamp_ns INTEGER NOT NULL,
+            dm_re TEXT NOT NULL,
+            dm_im TEXT NOT NULL,
+            fidelity REAL NOT NULL,
+            coherence REAL,
+            w_state_fidelity REAL,
+            w_state_coherence REAL,
+            node_ip TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(cycle, oracle_id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_om_cycle ON oracle_measurements(cycle, oracle_id)"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS oracle_block_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_height INTEGER NOT NULL,
+            block_hash TEXT NOT NULL,
+            cycle INTEGER NOT NULL,
+            observation_data TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(block_height, cycle)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_obo_height ON oracle_block_observations(block_height)"
+    )
+
+    conn.commit()
+    _ORACLE_SQLITE_DB = conn
+    logger.info(f"[ORACLE-SQLITE] ✅ Local persistence ready: {_ORACLE_DB_PATH}")
+    return conn
+
+
+def _get_oracle_sqlite_conn():
+    """Get or create oracle SQLite connection."""
+    global _ORACLE_SQLITE_DB
+    with _oracle_sqlite_lock:
+        if _ORACLE_SQLITE_DB is None:
+            _ensure_oracle_sqlite()
+        return _ORACLE_SQLITE_DB
+
+
+def persist_oracle_measurement(
+    cycle: int,
+    oracle_id: str,
+    dm_re: list,
+    dm_im: list,
+    fidelity: float,
+    coherence: float = None,
+    w_state_fidelity: float = None,
+    w_state_coherence: float = None,
+    node_ip: str = None,
+) -> bool:
+    """Persist oracle measurement to local SQLite (dual-write with database).
+
+    Args:
+        cycle: Measurement cycle number
+        oracle_id: Oracle identifier
+        dm_re: Real parts of quantum state (64 elements)
+        dm_im: Imaginary parts of quantum state (64 elements)
+        fidelity: Measurement fidelity
+        coherence: Quantum coherence (optional)
+        w_state_fidelity: W-state fidelity (optional)
+        w_state_coherence: W-state coherence (optional)
+        node_ip: Source node IP (optional)
+    """
+    try:
+        import sqlite3
+
+        conn = _get_oracle_sqlite_conn()
+        timestamp_ns = int(time.time() * 1e9)
+
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT OR REPLACE INTO oracle_measurements
+            (cycle, oracle_id, timestamp_ns, dm_re, dm_im, fidelity, coherence,
+             w_state_fidelity, w_state_coherence, node_ip)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                cycle,
+                oracle_id,
+                timestamp_ns,
+                ",".join(str(v) for v in dm_re),
+                ",".join(str(v) for v in dm_im),
+                fidelity,
+                coherence,
+                w_state_fidelity,
+                w_state_coherence,
+                node_ip,
+            ),
+        )
+        conn.commit()
+        logger.debug(
+            f"[ORACLE-SQLITE] 📝 Measurement persisted: cycle={cycle} oracle={oracle_id}"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"[ORACLE-SQLITE] Persist failed: {e}")
+        return False
+
+
+def persist_oracle_block_observation(
+    block_height: int,
+    block_hash: str,
+    cycle: int,
+    observation_data: dict,
+) -> bool:
+    """Persist block-associated oracle observation to local SQLite."""
+    try:
+        import json
+
+        conn = _get_oracle_sqlite_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT OR REPLACE INTO oracle_block_observations
+            (block_height, block_hash, cycle, observation_data)
+            VALUES (?, ?, ?, ?)""",
+            (block_height, block_hash, cycle, json.dumps(observation_data)),
+        )
+        conn.commit()
+        logger.debug(
+            f"[ORACLE-SQLITE] 📝 Block obs persisted: h={block_height} cycle={cycle}"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"[ORACLE-SQLITE] Block obs persist failed: {e}")
+        return False
+
+
+def get_oracle_consensus_from_sqlite(cycle: int = None) -> dict:
+    """Compute consensus from local oracle measurements.
+
+    Returns dict with 'dm_re', 'dm_im', 'fidelity', 'oracles' count.
+    """
+    try:
+        conn = _get_oracle_sqlite_conn()
+        cur = conn.cursor()
+
+        if cycle is None:
+            cur.execute("SELECT MAX(cycle) FROM oracle_measurements")
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return {"dm_re": [], "dm_im": [], "fidelity": 0.0, "oracles": 0}
+            cycle = row[0]
+
+        cur.execute(
+            "SELECT * FROM oracle_measurements WHERE cycle = ? ORDER BY id",
+            (cycle,),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return {"dm_re": [], "dm_im": [], "fidelity": 0.0, "oracles": 0}
+
+        n = len((rows[0]["dm_re"] or "").split(","))
+        if n == 0:
+            return {"dm_re": [], "dm_im": [], "fidelity": 0.0, "oracles": 0}
+
+        re_acc = [0.0] * n
+        im_acc = [0.0] * n
+        fid_acc = 0.0
+
+        for row in rows:
+            dm_re_str = row["dm_re"] or ""
+            dm_im_str = row["dm_im"] or ""
+            dm_re = [float(v) for v in dm_re_str.split(",") if v]
+            dm_im = [float(v) for v in dm_im_str.split(",") if v]
+            fid = row["fidelity"] or 0.0
+
+            for i in range(min(n, len(dm_re))):
+                re_acc[i] += dm_re[i]
+                im_acc[i] += dm_im[i]
+            fid_acc += fid
+
+        count = len(rows)
+        return {
+            "dm_re": [v / count for v in re_acc],
+            "dm_im": [v / count for v in im_acc],
+            "fidelity": fid_acc / count,
+            "oracles": count,
+            "cycle": cycle,
+        }
+    except Exception as e:
+        logger.warning(f"[ORACLE-SQLITE] Consensus failed: {e}")
+        return {"dm_re": [], "dm_im": [], "fidelity": 0.0, "oracles": 0}
 
 
 def _sync_lattice_blocks_to_cache():
@@ -1110,147 +1416,144 @@ _tx_worker_daemon.start()
 def _settle_block_rewards(
     height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list
 ) -> None:
-    """🔗 UNIFIED SETTLEMENT LOGIC — Single execution path, atomic updates.
+    """Extract settlement logic into reusable function.
 
-    Consolidated settlement with NO branching:
-      1. Fetch miner + treasury rewards from TessellationRewardSchedule
-      2. Collect transaction fees
-      3. Execute wallet updates (handles same/different addresses correctly)
-      4. Update chain state
+    Called by background settlement worker after block is persisted to database.
+    Handles all post-block-insert work:
+    - Wallet credits for miner reward
+    - Wallet credits for treasury
+    - Non-coinbase transaction settlement
+    - Chain state updates
+    - Block cache updates
+    - In-memory blockchain index updates
+
+    Args:
+        height: Block height
+        block_hash: Block hash (hex)
+        miner_address: Address of block miner
+        txs: All transactions in block (coinbase + non-coinbase)
+        non_coinbase_txs: Pre-filtered non-coinbase transactions only
     """
     _settle_log = logging.getLogger("SETTLE")
 
     try:
-        # ════════════════════════════════════════════════════════════════════════════════
-        # MANDATORY SETTLEMENT: This MUST execute and update balances
-        # ════════════════════════════════════════════════════════════════════════════════
+        # ── Settle non-coinbase transactions (wallet updates) ──────────────
+        _settle_log.info(
+            f"[SETTLE] Processing h={height} {len(non_coinbase_txs)} non-coinbase txs"
+        )
 
-        _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} SETTLEMENT EXECUTING NOW")
-        _settle_log.critical(f"   miner={miner_address}")
-        _settle_log.critical(f"   treasury={treasury_address}")
+        with get_db_cursor() as cur:
+            for tx in non_coinbase_txs:
+                tx_sender = tx.get("from_addr", tx.get("from_address", ""))
+                tx_receiver = tx.get("to_addr", tx.get("to_address", ""))
+                tx_amount = int(round(float(tx.get("amount", 0)) * 100))
+                tx_fee = int(round(float(tx.get("fee", 0)) * 100))
 
-        # GUARD: Reject invalid inputs
-        if not miner_address or len(str(miner_address).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
-            return
-        if not treasury_address or len(str(treasury_address).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {treasury_address}")
-            return
+                if not tx_sender or not tx_receiver or tx_amount <= 0:
+                    continue
 
-        _settle_log.critical(f"✅ [SETTLE-VALIDATE] Addresses valid, proceeding with settlement")
+                total_deduction = tx_amount + tx_fee
+                cur.execute(
+                    """
+                    INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
+                    VALUES (%s, -%s, 'standard', NOW())
+                    ON CONFLICT (address) DO UPDATE SET
+                        balance = wallet_addresses.balance - %s,
+                        transaction_count = wallet_addresses.transaction_count + 1,
+                        last_updated = NOW()
+                """,
+                    (tx_sender, total_deduction, total_deduction),
+                )
 
-        # HARDCODED REWARDS — Single source of truth
-        # Miner: 7.20 QTCL (720 base units)
-        # Treasury: 0.80 QTCL (80 base units)
-        # These scale with TessellationRewardSchedule but have explicit hardcoded defaults
-        miner_reward_base = 720  # base units: 7.20 QTCL
-        treasury_reward_base = 80  # base units: 0.80 QTCL
+                cur.execute(
+                    """
+                    INSERT INTO wallet_addresses (address, balance, address_type, last_updated)
+                    VALUES (%s, %s, 'standard', NOW())
+                    ON CONFLICT (address) DO UPDATE SET
+                        balance = wallet_addresses.balance + %s,
+                        transaction_count = wallet_addresses.transaction_count + 1,
+                        last_updated = NOW()
+                """,
+                    (tx_receiver, tx_amount, tx_amount),
+                )
 
-        # Try to get from schedule, but use hardcoded defaults if unavailable
+            _settle_log.info(
+                f"[SETTLE] ✅ TX settlement done: {len(non_coinbase_txs)} txs"
+            )
+
+        # ── Credit miner + treasury rewards ────────────────────────────────
+        _settle_log.info(f"[SETTLE] Crediting rewards for h={height}")
+
         try:
             if TessellationRewardSchedule:
                 rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                miner_reward_base = int(rewards.get("miner", 720))
-                treasury_reward_base = int(rewards.get("treasury", 80))
-                _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL")
-        except Exception as sch_err:
-            _settle_log.warning(f"[SETTLE] Schedule lookup failed: {sch_err}, using hardcoded: 7.20 + 0.80")
+                miner_reward = float(rewards.get("miner", 7.2))
+                treasury_reward = float(rewards.get("treasury", 0.8))
+            else:
+                miner_reward = 7.2
+                treasury_reward = 0.8
 
-        # Collect all transaction fees for treasury
-        total_tx_fees = 0
-        for tx in txs:
-            f = tx.get("fee", tx.get("fee_base", 0))
-            if f:
-                try:
-                    total_tx_fees += int(float(f) if isinstance(f, (float, str)) else f)
-                except (ValueError, TypeError):
-                    pass
-        treasury_reward_base += total_tx_fees
+            # Add transaction fees (split 50/50 between miner and treasury)
+            total_fees = 0.0
+            for tx in txs:
+                f = tx.get("fee", tx.get("fee_base", 0))
+                if isinstance(f, (float, str)):
+                    try:
+                        total_fees += float(f)
+                    except ValueError:
+                        _settle_log.debug(f"[SETTLE] Skipped malformed fee: {f}")
 
-        # Compute wallet fingerprints
-        miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-        treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
-        treasury_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
+            miner_fee_share = total_fees / 2
+            treasury_fee_share = total_fees - miner_fee_share
 
-        # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
-        # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL, {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+            miner_reward += miner_fee_share
+            treasury_reward += treasury_fee_share
 
-        with get_db_cursor() as cur:
-            # TEST: Verify database connectivity with simple SELECT
-            try:
-                cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                _test_count = cur.fetchone()[0] if cur.fetchone() else 0
-                cur.execute("SELECT COUNT(*) FROM wallet_addresses")  # Re-execute since we consumed the result
-                _test_count = cur.fetchone()[0]
-                _settle_log.critical(f"[SETTLE-TEST] ✅ Database connectivity OK: {_test_count} wallets exist")
-            except Exception as _test_err:
-                _settle_log.critical(f"[SETTLE-TEST] ❌ Database connectivity FAILED: {_test_err}")
-                return
-            # MINER REWARD — MANDATORY, ALWAYS EXECUTED
-            _miner_sql = """
-            INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-            VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
-            ON CONFLICT (address) DO UPDATE SET
-                balance = wallet_addresses.balance + %s,
-                transaction_count = wallet_addresses.transaction_count + 1,
-                address_type = 'miner',
-                last_updated = NOW()
-            """
-            cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
+            with get_db_cursor() as cur:
+                # Miner reward
+                _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+                cur.execute(
+                    """
+                    INSERT INTO wallet_addresses
+                        (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+                    VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
+                    ON CONFLICT (address) DO UPDATE SET
+                        balance = wallet_addresses.balance + EXCLUDED.balance,
+                        transaction_count = wallet_addresses.transaction_count + 1,
+                        last_updated = NOW()
+                """,
+                    (miner_address, _miner_fp, _miner_fp, int(miner_reward * 100)),
+                )
 
-            # VERIFY MINER WALLET WAS UPDATED
-            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (miner_address,))
-            _miner_balance = cur.fetchone()
-            _miner_balance_val = _miner_balance[0] if _miner_balance else None
-            _settle_log.critical(f"[SETTLE-VERIFY] Miner {miner_address[:16]}… balance after INSERT: {_miner_balance_val} base units ({_miner_balance_val/100 if _miner_balance_val else 0:.2f} QTCL)")
+                # Treasury reward
+                if TessellationRewardSchedule and treasury_reward > 0:
+                    treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
+                    _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[
+                        :64
+                    ]
+                    cur.execute(
+                        """
+                        INSERT INTO wallet_addresses
+                            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
+                        VALUES (%s, %s, %s, %s, 1, 'treasury')
+                        ON CONFLICT (address) DO UPDATE SET
+                            balance = wallet_addresses.balance + EXCLUDED.balance,
+                            transaction_count = wallet_addresses.transaction_count + 1
+                    """,
+                        (
+                            treasury_address,
+                            _treas_fp,
+                            _treas_fp,
+                            int(treasury_reward * 100),
+                        ),
+                    )
 
-            # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
-            _treasury_sql = """
-            INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-            VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
-            ON CONFLICT (address) DO UPDATE SET
-                balance = wallet_addresses.balance + %s,
-                transaction_count = wallet_addresses.transaction_count + 1,
-                address_type = 'treasury',
-                last_updated = NOW()
-            """
-            cur.execute(_treasury_sql, (treasury_address, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+                _settle_log.info(
+                    f"[SETTLE] ✅ Rewards credited: miner={miner_reward:.2f}, treasury={treasury_reward:.2f} QTCL"
+                )
 
-            # VERIFY TREASURY WALLET WAS UPDATED
-            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (treasury_address,))
-            _treasury_balance = cur.fetchone()
-            _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
-            _settle_log.critical(f"[SETTLE-VERIFY] Treasury {treasury_address[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
-
-            # TRANSACTION FEES TO TREASURY — OPTIONAL
-            if non_coinbase_txs:
-                for tx in non_coinbase_txs:
-                    tx_fee = int(round(float(tx.get("fee", 0)) * 100))
-                    if tx_fee > 0:
-                        cur.execute(
-                            "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
-                            (tx_fee, treasury_address),
-                        )
-
-            # UPDATE CHAIN STATE
-            cur.execute(
-                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
-                (height, block_hash),
-            )
-
-        # PHASE 3: Log completion
-        # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.warning(
-            f"[SETTLE] ✅ h={height}: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL, txs={len(non_coinbase_txs)}"
-        )
-
-    except Exception as err:
-        _settle_log.error(f"[SETTLE] ❌ h={height} settlement failed: {err}", exc_info=True)
+        except Exception as reward_err:
+            _settle_log.warning(f"[SETTLE] ⚠️  Reward credit failed: {reward_err}")
 
         # ── Update chain state ───────────────────────────────────────────────
         try:
@@ -1308,7 +1611,6 @@ def _block_settle_worker_thread():
     This worker dequeues settlement jobs and delegates to _settle_block_rewards.
     """
     _settle_log = logging.getLogger("SETTLE")
-    _settle_log.critical("[SETTLE-WORKER] 🚀 Settlement worker thread STARTED")
     while True:
         try:
             job = _BLOCK_SETTLE_Q.get(timeout=1.0)
@@ -1321,17 +1623,14 @@ def _block_settle_worker_thread():
             txs = job.get("txs", [])
             non_coinbase_txs = job.get("non_coinbase_txs", [])
 
-            _settle_log.critical(f"[SETTLE-WORKER] 📥 Processing job: h={height} miner={miner_address[:16]}…")
-
             try:
                 # Delegate to _settle_block_rewards function
                 _settle_block_rewards(
                     height, block_hash, miner_address, txs, non_coinbase_txs
                 )
-                _settle_log.critical(f"[SETTLE-WORKER] ✅ Job completed: h={height}")
             except Exception as settle_err:
-                _settle_log.critical(
-                    f"[SETTLE-WORKER] ❌ Job FAILED h={height}: {settle_err}", exc_info=True
+                _settle_log.error(
+                    f"[SETTLE] ❌ h={height}: {settle_err}", exc_info=True
                 )
 
         except _queue_mod2.Empty:
@@ -5410,10 +5709,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         difficulty_bits = int(hdr.get("difficulty", 4))
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
-        logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}... processing...")
+        logger.info(f"[ULTRA-MINIMAL] h={height} hash={block_hash[:16]}...")
 
-        # INSERT BLOCK INTO DATABASE
-        _block_rowcount = 0
+        # ULTRA-MINIMAL: Just try to INSERT
         try:
             with get_db_cursor() as cur:
                 cur.execute(
@@ -5425,23 +5723,36 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     ON CONFLICT (height) DO NOTHING
                     """,
                     (
-                        height, block_hash, parent_hash, merkle_root, timestamp_s,
+                        height,
+                        block_hash,
+                        parent_hash,
+                        merkle_root,
+                        timestamp_s,
                         w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                        miner_address, nonce, difficulty_bits, height, max(0, height - 1),
+                        miner_address,
+                        nonce,
+                        difficulty_bits,
+                        height,
+                        max(0, height - 1),
                     ),
                 )
-                _block_rowcount = cur.rowcount
-            logger.critical(f"[RPC-submitBlock] ✅ Block inserted h={height}")
+            logger.critical(f"[ULTRA-MINIMAL] ✅ ACCEPTED h={height}")
+            return _rpc_ok(
+                {
+                    "status": "accepted",
+                    "height": height,
+                    "block_hash": block_hash,
+                    "next_height": height + 1,
+                },
+                rpc_id,
+            )
         except Exception as e:
-            logger.exception(f"[RPC-submitBlock] ❌ Block insert ERROR: {e}")
+            logger.exception(f"[ULTRA-MINIMAL] ❌ ERROR: {e}")
             return _rpc_error(-32603, f"Error: {str(e)[:100]}", rpc_id)
 
-        # EXTRACT TRANSACTIONS FROM BLOCK DATA
-        txs = data.get("transactions", data.get("txs", []))
-        logger.info(f"[RPC-submitBlock] h={height}: {len(txs or [])} transactions in block")
-
-        # Extract W-state attestation data
-        w_state_fidelity = float(data.get("w_state_fidelity", 0.0))
+    except Exception as e:
+        logger.exception(f"[RPC-submitBlock] 💥 CRITICAL ERROR: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)[:100]}", rpc_id)
 
         # ═══════════════════════════════════════════════════════════════════════
         # CATHEDRAL-GRADE: BLOCK SIGNATURE VERIFICATION (HypΓ Schnorr-Γ)
@@ -5466,17 +5777,20 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ═══════════════════════════════════════════════════════════════════════
 
         # Get reward schedule for validation
-        _scheduled_miner_reward = 720.0  # default
-        _scheduled_treasury_reward = 80.0  # default
         if TessellationRewardSchedule:
             try:
                 _rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                _scheduled_miner_reward = float(_rewards.get("miner", 720))
-                _scheduled_treasury_reward = float(_rewards.get("treasury", 80))
+                _scheduled_miner_reward = float(_rewards.get("miner", 7.2))
+                _scheduled_treasury_reward = float(_rewards.get("treasury", 0.8))
             except Exception as _e:
                 logger.warning(
                     f"[RPC-submitBlock] Could not fetch reward schedule: {_e}"
                 )
+                _scheduled_miner_reward = 7.2
+                _scheduled_treasury_reward = 0.8
+        else:
+            _scheduled_miner_reward = 7.2
+            _scheduled_treasury_reward = 0.8
 
         # Calculate expected total coinbase (miner + treasury + fees)
         _total_fees = 0
@@ -5668,14 +5982,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     _existing_block_hash = _existing_row[0]
                     if _existing_block_hash == block_hash:
                         # TRUE DUPLICATE: Same hash, already accepted
-                        logger.critical(
-                            f"[RPC-submitBlock] 🔁 DUPLICATE DETECTED: h={height} hash matches={block_hash[:16]}…"
+                        logger.info(
+                            f"[RPC-submitBlock] 🔁 TRUE DUPLICATE: h={height} hash={block_hash[:16]}… already in DB"
                         )
                         _block_insert_result = "duplicate"
-                    else:
-                        logger.critical(
-                            f"[RPC-submitBlock] ⚠️  DIFFERENT HASH AT HEIGHT: h={height} new={block_hash[:16]}… db={_existing_block_hash[:16]}…"
-                        )
                     else:
                         # FORK ATTEMPT: Different hash at same height
                         logger.warning(
@@ -5789,32 +6099,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         elif _block_insert_result == "duplicate":
             # True duplicate - already in DB
-            # BUT: still run settlement in case first submission's settlement failed
             logger.info(
-                f"[RPC-submitBlock] 🔁 ACCEPTED (duplicate): h={height} already in DB — running settlement anyway"
+                f"[RPC-submitBlock] 🔁 ACCEPTED (duplicate): h={height} already in DB"
             )
-
-            # Extract transactions (same as new block path)
-            txs = data.get("transactions", data.get("txs", []))
-            _non_coinbase_txs = [tx for tx in (txs or []) if tx.get("tx_type", "").lower() != "coinbase"]
-
-            # RUN SETTLEMENT FOR DUPLICATE (in case first attempt failed)
-            logger.critical(f"[RPC-submitBlock] 🔥 RUNNING SETTLEMENT FOR DUPLICATE h={height}")
-            try:
-                _settle_block_rewards(
-                    height, block_hash, miner_address, txs or [], _non_coinbase_txs
-                )
-                logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height}")
-            except Exception as settle_err:
-                logger.critical(f"[RPC-submitBlock] ⚠️  Settlement for duplicate failed: {settle_err}")
-
             return _rpc_ok(
                 {
                     "status": "accepted",
                     "height": height,
                     "block_hash": block_hash,
                     "next_height": height + 1,
-                    "diagnostic": {"note": "Block already in database - settlement may have been applied"},
+                    "diagnostic": {"note": "Block already in database - accepted"},
                 },
                 rpc_id,
             )
@@ -5854,6 +6148,35 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # Broadcast via available P2P mechanisms
             _broadcast_block_to_peers(compact_block)
             logger.info(f"[RPC-submitBlock] 📡 Broadcasted h={height} to P2P network")
+
+            # ── Fan-out RPC broadcast to all known peers (block + h+1 command) ─────
+            try:
+                _fanout_block_rpc(height, block_hash, miner_address, compact_block)
+            except Exception as fanout_err:
+                logger.warning(
+                    f"[RPC-submitBlock] Fan-out broadcast failed: {fanout_err}"
+                )
+
+            # ── Persist oracle block observation to local SQLite ───────────────────
+            try:
+                _cycle = (
+                    getattr(ORACLE_W_STATE_MANAGER, "_cycle_counter", height)
+                    if ORACLE_W_STATE_MANAGER
+                    else height
+                )
+                _obs_data = {
+                    "height": height,
+                    "block_hash": block_hash,
+                    "miner": miner_address,
+                    "difficulty_bits": difficulty_bits,
+                    "timestamp_s": timestamp_s,
+                }
+                persist_oracle_block_observation(height, block_hash, _cycle, _obs_data)
+            except Exception as oracle_persist_err:
+                logger.debug(
+                    f"[RPC-submitBlock] Oracle persist failed (non-critical): {oracle_persist_err}"
+                )
+
         except Exception as broadcast_err:
             logger.warning(
                 f"[RPC-submitBlock] P2P broadcast failed (non-critical): {broadcast_err}"
@@ -5882,25 +6205,44 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             _resp_reward = (
                 TessellationRewardSchedule.get_miner_reward_qtcl(height)
                 if TessellationRewardSchedule
-                else 7.20
+                else 7.2
             )
         except Exception:
-            _resp_reward = 7.20
+            _resp_reward = 7.2
 
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # MANDATORY SYNCHRONOUS SETTLEMENT — NOT QUEUED, RUNS IMMEDIATELY
-        # Settlement FAILURE = RPC FAILURE (no silent failures)
-        # ═══════════════════════════════════════════════════════════════════════════════
-        logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height} miner={miner_address[:16]}…")
+        # Enqueue settlement work to background worker (non-blocking)
         try:
-            _settle_block_rewards(
-                height, block_hash, miner_address, txs or [], _non_coinbase_txs
+            _BLOCK_SETTLE_Q.put_nowait(
+                {
+                    "height": height,
+                    "block_hash": block_hash,
+                    "miner_address": miner_address,
+                    "txs": txs or [],
+                    "non_coinbase_txs": _non_coinbase_txs,
+                    "w_state_fidelity": w_state_fidelity,
+                    "difficulty_bits": difficulty_bits,
+                    "timestamp_s": timestamp_s,
+                }
             )
-            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height}")
-        except Exception as settle_err:
-            logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
-            # FAIL THE RPC CALL — don't hide settlement errors
-            return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
+            logger.info(f"[RPC-submitBlock] ✅ Settlement enqueued for h={height}")
+        except _queue_mod2.Full:
+            logger.warning(
+                f"[RPC-submitBlock] Settlement queue full—executing synchronous fallback settlement for h={height}"
+            )
+            try:
+                _settle_block_rewards(
+                    height, block_hash, miner_address, txs or [], _non_coinbase_txs
+                )
+                logger.info(
+                    f"[RPC-submitBlock] ✅ Fallback settlement completed synchronously for h={height}"
+                )
+            except Exception as sync_err:
+                logger.error(
+                    f"[RPC-submitBlock] Fallback settlement failed: {sync_err}",
+                    exc_info=True,
+                )
+        except Exception as eq_err:
+            logger.warning(f"[RPC-submitBlock] ⚠️  Settlement enqueue failed: {eq_err}")
 
         # Return accepted immediately (settlement happens in background)
         logger.info(
@@ -5995,6 +6337,88 @@ def _broadcast_block_to_peers(compact_block: dict) -> int:
 
     except Exception as e:
         logger.warning(f"[P2P-BROADCAST] Failed: {e}")
+        return 0
+
+
+def _fanout_block_rpc(
+    height: int,
+    block_hash: str,
+    miner_address: str,
+    compact_block: dict,
+) -> int:
+    """Fan-out RPC broadcast: sends block + next_height (h+1) command to all known peers.
+
+    This triggers immediate mining on peers by including theys next_height in the payload.
+
+    Args:
+        height: Current block height
+        block_hash: Current block hash
+        miner_address: Miner who solved the block
+        compact_block: Full block data
+
+    Returns:
+        Number of peers notified
+    """
+    peers_notified = 0
+    next_height = height + 1
+
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT node_id, external_addr 
+                FROM peer_registry 
+                WHERE last_seen > NOW() - INTERVAL '2 minutes'
+            """)
+            peers = cur.fetchall()
+
+        if not peers:
+            logger.debug("[FANOUT-RPC] No active peers to broadcast to")
+            return 0
+
+        rpc_payload = {
+            "jsonrpc": "2.0",
+            "method": "qtcl_blockSolved",
+            "params": {
+                "height": height,
+                "block_hash": block_hash,
+                "next_height": next_height,
+                "miner_address": miner_address,
+                "compact_block": compact_block,
+            },
+            "id": 1,
+        }
+
+        for node_id, external_addr in peers:
+            try:
+                if not external_addr or ":" not in external_addr:
+                    continue
+                host, port = external_addr.rsplit(":", 1)
+                rpc_url = f"http://{host}:{port}/rpc"
+
+                def _send_rpc(url: str, payload: dict):
+                    try:
+                        requests.post(url, json=payload, timeout=3)
+                    except Exception:
+                        pass
+
+                threading.Thread(
+                    target=_send_rpc,
+                    args=(rpc_url, rpc_payload),
+                    daemon=True,
+                    name=f"FanoutRPC-{node_id[:8]}",
+                ).start()
+
+                peers_notified += 1
+            except Exception as _peer_err:
+                logger.debug(f"[FANOUT-RPC] Failed for {node_id[:16]}: {_peer_err}")
+
+        logger.info(
+            f"[FANOUT-RPC] 📡 Block h={height} + next_height={next_height} → {peers_notified} peers"
+        )
+        return peers_notified
+
+    except Exception as e:
+        logger.warning(f"[FANOUT-RPC] Failed: {e}")
         return 0
 
 
