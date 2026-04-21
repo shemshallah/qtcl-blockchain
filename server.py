@@ -1196,7 +1196,7 @@ def _settle_block_rewards(
                         _settle_log.debug(f"[SETTLE] Skipped malformed fee: {f}")
 
             with get_db_cursor() as cur:
-                # Miner reward
+                # Miner reward (reward is already in base units, no need to multiply by 100)
                 _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
                 cur.execute(
                     """
@@ -1208,10 +1208,10 @@ def _settle_block_rewards(
                         transaction_count = wallet_addresses.transaction_count + 1,
                         last_updated = NOW()
                 """,
-                    (miner_address, _miner_fp, _miner_fp, int(miner_reward * 100)),
+                    (miner_address, _miner_fp, _miner_fp, int(miner_reward)),
                 )
 
-                # Treasury reward
+                # Treasury reward (already in base units, no need to multiply by 100)
                 if TessellationRewardSchedule and treasury_reward > 0:
                     treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
                     _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[
@@ -1230,7 +1230,7 @@ def _settle_block_rewards(
                             treasury_address,
                             _treas_fp,
                             _treas_fp,
-                            int(treasury_reward * 100),
+                            int(treasury_reward),
                         ),
                     )
 
