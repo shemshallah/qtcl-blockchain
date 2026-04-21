@@ -5869,16 +5869,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # ═══════════════════════════════════════════════════════════════════════════════
         # MANDATORY SYNCHRONOUS SETTLEMENT — NOT QUEUED, RUNS IMMEDIATELY
-        # This MUST execute before returning to client
+        # Settlement FAILURE = RPC FAILURE (no silent failures)
         # ═══════════════════════════════════════════════════════════════════════════════
-        logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height}")
+        logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height} miner={miner_address[:16]}…")
         try:
             _settle_block_rewards(
                 height, block_hash, miner_address, txs or [], _non_coinbase_txs
             )
-            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE h={height}")
+            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height}")
         except Exception as settle_err:
             logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
+            # FAIL THE RPC CALL — don't hide settlement errors
+            return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
 
         # Return accepted immediately (settlement happens in background)
         logger.info(
