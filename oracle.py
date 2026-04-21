@@ -2046,14 +2046,17 @@ class OracleNode:
 
             return BlockFieldReading(
                 oracle_id=self.oracle_id,
+                pq_curr=int(pq_curr),
+                pq_last=int(pq_last),
+                entropy=entropy_val,
                 fidelity=fid_val,
                 coherence=coh_val,
-                entropy=entropy_val,
+                timestamp_ns=time.time_ns(),
+                oracle_dm=None,  # pure-tensor mode — no 2D matrix produced
                 pq0_oracle_fidelity=fid_val,
                 pq0_IV_fidelity=max(0.0, min(1.0, fid_val * 0.98)),
                 pq0_V_fidelity=max(0.0, min(1.0, fid_val * 0.96)),
-                oracle_dm=None,  # pure-tensor mode — no 2D matrix produced
-                mermin_violation=False,
+                mermin_violation=0.0,
             )
         except Exception as _exc:
             logger.debug(f"[ORACLE-NODE-{self.oracle_id}] measure failed: {_exc}")
@@ -2634,14 +2637,17 @@ class OracleWStateManager:
 
                 reading = BlockFieldReading(
                     oracle_id=node_idx,
+                    pq_curr=int(pq_curr),
+                    pq_last=int(pq_last),
+                    entropy=_node_entropy,
                     fidelity=_node_fid,
                     coherence=_node_coh,
-                    entropy=_node_entropy,
+                    timestamp_ns=time.time_ns(),
+                    oracle_dm=None,  # no 2D DM in pure-tensor mode
                     pq0_oracle_fidelity=_pq0_o,
                     pq0_IV_fidelity=_pq0_iv,
                     pq0_V_fidelity=_pq0_v,
-                    oracle_dm=None,  # no 2D DM in pure-tensor mode
-                    mermin_violation=False,
+                    mermin_violation=0.0,
                 )
                 readings.append(reading)
                 with self._bf_lock:
@@ -2652,9 +2658,13 @@ class OracleWStateManager:
         bf_ms = (time.time_ns() - measure_start_ns) / 1e6
 
         if len(readings) < 3:
-            logger.warning(
-                f"[ORACLE CLUSTER] Only {len(readings)}/5 readings — degraded"
-            )
+            # Rate-limit the degraded warning to once per 10s
+            _now_deg = time.time()
+            if _now_deg - getattr(self, "_last_degraded_warn_ts", 0.0) > 10.0:
+                logger.warning(
+                    f"[ORACLE CLUSTER] Only {len(readings)}/5 readings — degraded"
+                )
+                self._last_degraded_warn_ts = _now_deg
             if len(readings) == 0:
                 return None
 
@@ -2787,6 +2797,10 @@ class OracleWStateManager:
         while self.running:
             try:
                 snapshot = self._extract_snapshot()
+                if snapshot is None:
+                    # Backpressure on failure — don't spam the log or CPU
+                    time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
+                    continue
                 if snapshot:
                     # ← SSE STREAMING: 16³ pure-tensor snapshot (4096 complex64 elements)
                     # density_matrix is the 16³ amplitude tensor itself (not a 2D matrix).
