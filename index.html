@@ -526,7 +526,18 @@ async function rpc(method, params, retries = 3) {
   }
 }
 // ── Format Helpers ──────────────────────────────────────────────────
-const fmtTime = ts => ts ? new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : '—';
+const fmtTime = ts => {
+  if (!ts) return '—';
+  try {
+    // Handle both seconds and milliseconds
+    const ms = ts > 1e10 ? ts : ts * 1000;
+    const d = new Date(ms);
+    if (isNaN(d.getTime())) return '—';
+    return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  } catch(e) {
+    return '—';
+  }
+};
 const fmtAmount = v => {
   if (!v && v !== 0) return '—';
   const n = parseInt(v);
