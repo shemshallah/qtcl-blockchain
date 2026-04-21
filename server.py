@@ -3696,39 +3696,35 @@ def _get_canonical_node() -> Optional[dict]:
 
 
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockHeight — current chain tip height.
-
-    🔴 CRITICAL: DB-AUTHORITATIVE, ALWAYS FRESH, NO CACHING
-    This query MUST return the actual current block height.
-    Client depends on this for mining loop progression (h → h+1 → h+2...).
+    """qtcl_getBlockHeight — current chain tip height via Neon Postgres.
+    
+    Direct query, no caching complexity.
     """
     try:
-        db_tip = query_latest_block()
-
-        if db_tip is None:
-            height = 0
-            tip_hash = "0" * 64
-        else:
-            height = int(db_tip["height"])
-            tip_hash = str(db_tip.get("hash", "") or "0" * 64)
-
-        # 🔴 CRITICAL LOGGING: Verify DB state
-        logger.critical(
-            f"[RPC-HEIGHT] 📊 CHAIN TIP: h={height} hash={tip_hash[:16]}… (DB-authoritative, always fresh)"
-        )
-
+        height = 0
+        tip_hash = "0" * 64
+        
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT height, block_hash FROM blocks 
+                ORDER BY height DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+            if row:
+                height = row[0]
+                tip_hash = row[1] or "0" * 64
+                
         return _rpc_ok(
             {
                 "height": height,
                 "tip_hash": tip_hash,
                 "ts": time.time(),
-                "source": "DB-authoritative",  # Signal to client this is ground truth
             },
             rpc_id,
         )
     except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
-        return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id)
+        logger.exception(f"[RPC-HEIGHT] Error: {e}")
+        return _rpc_ok({"height": 0, "tip_hash": "0" * 64, "ts": time.time()}, rpc_id)
 
 
 def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
@@ -3934,15 +3930,14 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlock — block by height or hash.
-
-    DB-AUTHORITATIVE: queries PostgreSQL blocks table directly.
-    params: [height] (list) or {height: int} or {hash: str}
-    Returns full block header + transaction list for chain sync.
+    """qtcl_getBlock — block by height or hash via Neon Postgres.
+    
+    Direct DB query only, no SQLite fallback complexity.
     """
     try:
         height = None
         block_hash = None
+        
         if isinstance(params, list) and len(params) >= 1:
             height = int(params[0])
         elif isinstance(params, dict):
@@ -3951,69 +3946,18 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
             if height is not None:
                 height = int(height)
 
-        def _query_block_at_height(h: int) -> Optional[dict]:
-            """Full block query from database (authoritative source)."""
-            try:
-                # Try SQLite first
-                if (
-                    LATTICE
-                    and hasattr(LATTICE, "block_manager")
-                    and LATTICE.block_manager
-                    and LATTICE.block_manager.db
-                ):
-                    db = LATTICE.block_manager.db
-                    if db._sqlite_conn:
-                        try:
-                            sql = """
-                                SELECT height, block_hash, timestamp, w_state_hash,
-                                       parent_hash, nonce, difficulty,
-                                       coherence_snapshot, merkle_root, tx_count
-                                FROM blocks WHERE height = ? LIMIT 1
-                            """
-                            cursor = db._sqlite_conn.execute(sql, (h,))
-                            row = cursor.fetchone()
-                            if not row:
-                                return None
-                            block = {
-                                "height": row[0],
-                                "block_height": row[0],
-                                "block_hash": row[1],
-                                "hash": row[1],
-                                "parent_hash": row[4] or ("0" * 64),
-                                "previous_hash": row[4] or ("0" * 64),
-                                "merkle_root": row[8] or ("0" * 64),
-                                "timestamp_s": int(row[2]) if row[2] else 0,
-                                "timestamp": int(row[2]) if row[2] else 0,
-                                "difficulty": int(float(row[6])) if row[6] else 5,
-                                "nonce": int(row[5]) if row[5] else 0,
-                                "w_state_fidelity": float(row[7])
-                                if row[7] is not None
-                                else 0.0,
-                                "w_entropy_hash": row[3] or "",
-                                "pq_curr": h,
-                                "pq_last": max(0, h - 1),
-                                "tx_count": int(row[9]) if row[9] else 0,
-                                "mined": True,
-                                "finalized": True,
-                            }
-                            return block
-                        except Exception as _se:
-                            logger.debug(f"[RPC] SQLite query failed: {_se}")
-
-                # Fallback to PostgreSQL
-                with get_db_cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT height, block_hash, timestamp, w_state_hash,
-                               parent_hash, nonce, difficulty,
-                               coherence_snapshot, merkle_root, tx_count
-                        FROM blocks WHERE height = %s LIMIT 1
-                    """,
-                        (h,),
-                    )
-                    row = cur.fetchone()
-                    if not row:
-                        return None
+        block = None
+        
+        if height is not None:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT height, block_hash, timestamp, w_state_hash,
+                           parent_hash, nonce, difficulty,
+                           coherence_snapshot, merkle_root, tx_count
+                    FROM blocks WHERE height = %s LIMIT 1
+                """, (height,))
+                row = cur.fetchone()
+                if row:
                     block = {
                         "height": row[0],
                         "block_height": row[0],
@@ -4026,79 +3970,48 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "timestamp": int(row[2]) if row[2] else 0,
                         "difficulty": int(float(row[6])) if row[6] else 5,
                         "nonce": int(row[5]) if row[5] else 0,
-                        "w_state_fidelity": float(row[7])
-                        if row[7] is not None
-                        else 0.0,
+                        "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
                         "w_entropy_hash": row[3] or "",
-                        "pq_curr": h,
-                        "pq_last": max(0, h - 1),
+                        "pq_curr": height,
+                        "pq_last": max(0, height - 1),
                         "tx_count": int(row[9]) if row[9] else 0,
                         "mined": True,
                         "finalized": True,
                     }
-                    # Fetch transactions for this block
-                    cur.execute(
-                        """
+                    
+                    # Fetch transactions
+                    cur.execute("""
                         SELECT tx_hash, from_address, to_address, amount,
                                transaction_index, tx_type, status,
                                quantum_state_hash, metadata
                         FROM transactions
                         WHERE height = %s
                         ORDER BY transaction_index ASC
-                    """,
-                        (h,),
-                    )
+                    """, (height,))
                     tx_rows = cur.fetchall()
                     txs = []
                     for tr in tx_rows:
-                        txs.append(
-                            {
-                                "tx_id": tr[0],
-                                "from_addr": tr[1] or "",
-                                "to_addr": tr[2] or "",
-                                "amount": int(tr[3]) if tr[3] is not None else 0,
-                                "tx_index": int(tr[4]) if tr[4] is not None else 0,
-                                "tx_type": tr[5] or "transfer",
-                                "status": tr[6] or "confirmed",
-                                "w_proof": tr[7] or "",
-                                "metadata": tr[8] if tr[8] else None,
-                            }
-                        )
+                        txs.append({
+                            "tx_id": tr[0],
+                            "from_addr": tr[1] or "",
+                            "to_addr": tr[2] or "",
+                            "amount": int(tr[3]) if tr[3] is not None else 0,
+                            "tx_index": int(tr[4]) if tr[4] is not None else 0,
+                            "tx_type": tr[5] or "transfer",
+                            "status": tr[6] or "confirmed",
+                            "w_proof": tr[7] or "",
+                            "metadata": tr[8] if tr[8] else None,
+                        })
                     block["transactions"] = txs
                     block["tx_count"] = len(txs)
-                    return block
-            except Exception as e:
-                logger.exception(f"[RPC] _query_block_at_height({h}): {e}")
-                return None
-
-        block = None
-        if height is not None:
-            block = _query_block_at_height(height)
-
-            # Fallback: check in-memory cache (for genesis and recently mined blocks)
-            if block is None:
-                with _BLOCK_CACHE_LOCK:
-                    if height in _BLOCK_CACHE:
-                        block = _BLOCK_CACHE[height]
-                        logger.debug(f"[RPC] Block h={height} served from cache")
+                    
         elif block_hash:
-            row = query_block_by_hash(block_hash)
-            if row:
-                block = _query_block_at_height(row["height"])
-
-            # Fallback: search cache by hash
-            if block is None:
-                with _BLOCK_CACHE_LOCK:
-                    for h, b in _BLOCK_CACHE.items():
-                        if (
-                            b.get("block_hash") == block_hash
-                            or b.get("hash") == block_hash
-                        ):
-                            block = b
-                            logger.debug(
-                                f"[RPC] Block hash={block_hash[:16]}... served from cache"
-                            )
-                            break
+            with get_db_cursor() as cur:
+                cur.execute("SELECT height FROM blocks WHERE block_hash = %s LIMIT 1", (block_hash,))
+                row = cur.fetchone()
+                if row:
+                    height = row[0]
+                    return _rpc_getBlock([height], rpc_id)
 
         if block is None:
             return _rpc_error(-32000, "Block not found", rpc_id)
@@ -4123,11 +4036,10 @@ def _cache_block(block_dict):
 
 
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockRange — return blocks from DB (authoritative), with cache fallback
+    """qtcl_getBlockRange — blocks from Neon Postgres.
 
     params: [from_height, to_height]
-    Negative to_height means "from end" (e.g., [-20, -1] = last 20 blocks)
-    DB-AUTHORITATIVE: Fetches from database first, fills gaps from cache if needed.
+    Direct query, no cache complexity.
     """
     try:
         if not isinstance(params, (list, tuple)) or len(params) < 2:
@@ -4137,9 +4049,11 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
 
         # Handle negative to_height: "from end"
         if to_h < 0:
-            with _BLOCK_CACHE_LOCK:
-                max_height = max(_BLOCK_CACHE.keys()) if _BLOCK_CACHE else 0
-            to_h = max_height
+            with get_db_cursor() as cur:
+                cur.execute("SELECT MAX(height) FROM blocks")
+                row = cur.fetchone()
+                max_h = row[0] if row and row[0] is not None else 0
+            to_h = max_h
             from_h = max(0, to_h + from_h + 1)
 
         if to_h - from_h > 99:
@@ -4147,62 +4061,38 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         if from_h < 0:
             from_h = 0
 
-        blocks_by_height = {}
+        blocks = []
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT height, block_hash, timestamp, w_state_hash,
+                       parent_hash, nonce, difficulty,
+                       coherence_snapshot, merkle_root, tx_count
+                FROM blocks 
+                WHERE height >= %s AND height <= %s
+                ORDER BY height ASC
+            """, (from_h, to_h))
+            for row in cur.fetchall():
+                blocks.append({
+                    "height": row[0],
+                    "block_height": row[0],
+                    "block_hash": row[1],
+                    "hash": row[1],
+                    "parent_hash": row[4] or ("0" * 64),
+                    "previous_hash": row[4] or ("0" * 64),
+                    "merkle_root": row[8] or ("0" * 64),
+                    "timestamp_s": int(row[2]) if row[2] else 0,
+                    "timestamp": int(row[2]) if row[2] else 0,
+                    "difficulty": int(float(row[6])) if row[6] else 5,
+                    "nonce": int(row[5]) if row[5] else 0,
+                    "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                    "w_entropy_hash": row[3] or "",
+                    "pq_curr": row[0],
+                    "pq_last": max(0, row[0] - 1),
+                    "tx_count": int(row[9]) if row[9] else 0,
+                    "mined": True,
+                    "finalized": True,
+                })
 
-        # Try DB first (authoritative source)
-        try:
-            if LATTICE and hasattr(LATTICE, "block_manager") and LATTICE.block_manager and LATTICE.block_manager.db:
-                db = LATTICE.block_manager.db
-                if db._sqlite_conn:
-                    try:
-                        sql = """
-                            SELECT height, block_hash, timestamp, w_state_hash,
-                                   parent_hash, nonce, difficulty,
-                                   coherence_snapshot, merkle_root, tx_count
-                            FROM blocks WHERE height >= ? AND height <= ?
-                            ORDER BY height ASC
-                        """
-                        cursor = db._sqlite_conn.execute(sql, (from_h, to_h))
-                        rows = cursor.fetchall()
-                        for row in rows:
-                            h = row[0]
-                            blocks_by_height[h] = {
-                                "height": h,
-                                "block_height": h,
-                                "block_hash": row[1],
-                                "hash": row[1],
-                                "parent_hash": row[4] or ("0" * 64),
-                                "previous_hash": row[4] or ("0" * 64),
-                                "merkle_root": row[8] or ("0" * 64),
-                                "timestamp_s": int(row[2]) if row[2] else 0,
-                                "timestamp": int(row[2]) if row[2] else 0,
-                                "difficulty": int(float(row[6])) if row[6] else 5,
-                                "nonce": int(row[5]) if row[5] else 0,
-                                "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
-                                "w_entropy_hash": row[3] or "",
-                                "pq_curr": h,
-                                "pq_last": max(0, h - 1),
-                                "tx_count": int(row[9]) if row[9] else 0,
-                                "mined": True,
-                                "finalized": True,
-                            }
-                        logger.debug(f"[RPC] getBlockRange({from_h}, {to_h}) fetched {len(rows)} from SQLite")
-                    except Exception as _se:
-                        logger.debug(f"[RPC] SQLite range query failed: {_se}")
-        except Exception as _e:
-            logger.debug(f"[RPC] SQLite path failed: {_e}")
-
-        # Fallback to cache for gaps
-        if len(blocks_by_height) < (to_h - from_h + 1):
-            with _BLOCK_CACHE_LOCK:
-                for h in range(from_h, to_h + 1):
-                    if h not in blocks_by_height and h in _BLOCK_CACHE:
-                        blocks_by_height[h] = _BLOCK_CACHE[h]
-
-        # Sort by height ascending
-        blocks = sorted(blocks_by_height.values(), key=lambda b: b["height"])
-
-        logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)}/{to_h - from_h + 1} blocks")
         return _rpc_ok(
             {
                 "blocks": blocks,
@@ -4214,7 +4104,6 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         )
 
     except Exception as e:
-        logger.warning(f"[RPC-METHOD] qtcl_getBlockRange: {e}")
         logger.exception(f"[RPC] _rpc_getBlockRange exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
