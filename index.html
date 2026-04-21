@@ -543,8 +543,9 @@ const fmtAmount = v => {
   const n = typeof v === 'string' ? parseFloat(v) : Number(v);
   if (isNaN(n)) return '—';
   if (n === 0) return '0 QTCL';
-  // DB stores QTCL directly (e.g. 7.2 = 7.2 QTCL)
-  return n.toFixed(8).replace(/\.?0+$/, '') + ' QTCL';
+  // DB stores base units (NUMERIC(30,0) integer): 720 = 7.2 QTCL, 80 = 0.8 QTCL
+  const qtcl = n / 100;
+  return qtcl.toFixed(8).replace(/\.?0+$/, '') + ' QTCL';
 };
 const hashBadge = (h, cls) => h
   ? `<span class="${cls}" style="font-family:var(--mono);font-size:9px;word-break:break-all;line-height:1.5">${h}</span>`

@@ -1644,7 +1644,7 @@ def _settle_block_rewards(
                             _treas_tx_id,
                             "TREASURY",
                             _pr_recipient,
-                            _pr_amount / 100.0,
+                            _pr_amount,  # base units
                             height,
                             block_hash,
                         ),
@@ -6080,7 +6080,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
                         VALUES (%s, 'BLOCK_REWARD', %s, %s, 'miner_reward', 'confirmed', %s, %s, NOW())
                         ON CONFLICT (tx_hash) DO NOTHING""",
-                        (_miner_tx_id, miner_address, _miner_reward / 100.0, height, block_hash),
+                        (_miner_tx_id, miner_address, _miner_reward, height, block_hash),  # base units (720 = 7.2 QTCL)
                     )
                 except Exception as _mte:
                     logger.debug(f"[SUBMIT-BLOCK] miner_reward tx insert: {_mte}")
@@ -6101,7 +6101,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
                             VALUES (%s, 'TREASURY', %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
                             ON CONFLICT (tx_hash) DO NOTHING""",
-                            (_coinbase_tx_id, _pp_recipient, _pp_amount / 100.0, height, block_hash),
+                            (_coinbase_tx_id, _pp_recipient, _pp_amount, height, block_hash),  # base units (80 = 0.8 QTCL)
                         )
                         cur.execute(
                             "INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated) "
@@ -6116,7 +6116,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         )
                         logger.info(f"[SUBMIT-BLOCK] 🏛 COINBASE h={height}: treasury from h={height-1} +{_pp_amount/100:.2f} QTCL → {_pp_recipient[:20]}…")
                 except Exception as _cbe:
-                    logger.debug(f"[SUBMIT-BLOCK] coinbase gen: {_cbe}")
+                    logger.warning(f"[SUBMIT-BLOCK] ⚠️  coinbase gen FAILED h={height}: {_cbe}")
 
                 # Settle non-coinbase transactions atomically
                 for tx in _non_coinbase_txs:
