@@ -540,12 +540,11 @@ const fmtTime = ts => {
 };
 const fmtAmount = v => {
   if (v === null || v === undefined || v === '') return '—';
-  // Convert to number, handle both string and numeric
   const n = typeof v === 'string' ? parseFloat(v) : Number(v);
   if (isNaN(n)) return '—';
   if (n === 0) return '0 QTCL';
-  // Assume satoshis (divide by 1e8 for QTCL)
-  return (n / 1e8).toFixed(8).replace(/\.?0+$/, '') + ' QTCL';
+  // DB stores QTCL directly (e.g. 7.2 = 7.2 QTCL)
+  return n.toFixed(8).replace(/\.?0+$/, '') + ' QTCL';
 };
 const hashBadge = (h, cls) => h
   ? `<span class="${cls}" style="font-family:var(--mono);font-size:9px;word-break:break-all;line-height:1.5">${h}</span>`
@@ -798,7 +797,7 @@ function renderBlockDetail(b, container) {
 }
 
 function renderTxCard(tx, idx) {
-  const isCoinbase = tx.tx_type === 'coinbase' || tx.from_addr === '' || tx.from_addr === 'coinbase';
+  const isCoinbase = tx.tx_type === 'coinbase' || tx.from_addr === '' || tx.from_addr === 'coinbase' || (tx.from_addr && /^0{16,}$/.test(tx.from_addr));
   const hash = tx.tx_id || tx.tx_hash || '';
   const from = tx.from_addr || '';
   const to = tx.to_addr || '';
@@ -815,7 +814,7 @@ function renderTxCard(tx, idx) {
           <div class="tx-hash">${hash || 'no hash'}</div>
           <div class="tx-flow">
             ${isCoinbase
-              ? `<span class="tx-addr" style="color:var(--go)">⚡ Block Reward</span>`
+              ? `<span class="tx-addr" style="color:var(--go)">⚡ Block Reward → ${to ? shortAddr(to) : 'miner'}</span>`
               : `<span class="tx-addr">${from || 'unknown'}</span>
                  <span class="tx-arrow">→</span>
                  <span class="tx-addr">${to || 'unknown'}</span>`
