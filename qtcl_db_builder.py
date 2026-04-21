@@ -1293,6 +1293,25 @@ CREATE TABLE peer_reputation (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- TABLE: pending_rewards
+-- Treasury rewards queued at block h, confirmed at block h+1.
+-- Miner reward is credited immediately via coinbase TX in the mined block;
+-- treasury 0.8 QTCL requires NEXT block confirmation (Bitcoin-style maturation).
+CREATE TABLE pending_rewards (
+    id BIGSERIAL PRIMARY KEY,
+    height BIGINT NOT NULL,
+    reward_type VARCHAR(32) NOT NULL,
+    recipient VARCHAR(255) NOT NULL,
+    amount BIGINT NOT NULL,
+    confirmed_at_height BIGINT DEFAULT NULL,
+    status VARCHAR(16) DEFAULT 'pending',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(height, reward_type, recipient)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_rewards_status ON pending_rewards(status);
+CREATE INDEX IF NOT EXISTS idx_pending_rewards_height ON pending_rewards(height);
+
 -- TABLE: pseudoqubits
 CREATE TABLE pseudoqubits (
     pq_id BIGINT PRIMARY KEY,
