@@ -1129,13 +1129,22 @@ def _settle_block_rewards(
         # ─────────────────────────────────────────────────────────────────────────────
         _settle_log.critical(f"[SETTLE-START] h={height} settlement BEGINNING (miner={miner_address[:16]}…)")
 
-        # Get miner and treasury rewards from canonical schedule
+        # HARDCODED REWARDS — Single source of truth
+        # Miner: 7.20 QTCL (720 base units)
+        # Treasury: 0.80 QTCL (80 base units)
+        # These scale with TessellationRewardSchedule but have explicit hardcoded defaults
         miner_reward_base = 720  # base units: 7.20 QTCL
         treasury_reward_base = 80  # base units: 0.80 QTCL
-        if TessellationRewardSchedule:
-            rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-            miner_reward_base = int(rewards.get("miner", 720))
-            treasury_reward_base = int(rewards.get("treasury", 80))
+
+        # Try to get from schedule, but use hardcoded defaults if unavailable
+        try:
+            if TessellationRewardSchedule:
+                rewards = TessellationRewardSchedule.get_rewards_for_height(height)
+                miner_reward_base = int(rewards.get("miner", 720))
+                treasury_reward_base = int(rewards.get("treasury", 80))
+                _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL")
+        except Exception as sch_err:
+            _settle_log.warning(f"[SETTLE] Schedule lookup failed: {sch_err}, using hardcoded: 7.20 + 0.80")
 
         # Collect all transaction fees for treasury
         total_tx_fees = 0
@@ -1153,47 +1162,50 @@ def _settle_block_rewards(
         treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
         treasury_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
 
-        # PHASE 2: Execute settlement (single atomic transaction)
+        # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
         # ─────────────────────────────────────────────────────────────────────────────
+        _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL, {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+
         with get_db_cursor() as cur:
-            # Settlement path for transaction inputs (deductions from senders)
-            for tx in non_coinbase_txs:
-                tx_sender = tx.get("from_addr") or tx.get("from_address")
-                tx_amount = int(round(float(tx.get("amount", 0)) * 100))
-                tx_fee = int(round(float(tx.get("fee", 0)) * 100))
-                if tx_sender and tx_amount > 0:
-                    total_deduction = tx_amount + tx_fee
-                    cur.execute(
-                        "INSERT INTO wallet_addresses (address, balance, address_type, last_updated) VALUES (%s, %s, 'standard', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance - %s, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
-                        (tx_sender, -total_deduction, total_deduction),
-                    )
+            # MINER REWARD — MANDATORY, ALWAYS EXECUTED
+            _miner_sql = """
+            INSERT INTO wallet_addresses
+            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+            VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                balance = wallet_addresses.balance + %s,
+                transaction_count = wallet_addresses.transaction_count + 1,
+                address_type = 'miner',
+                last_updated = NOW()
+            """
+            cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
+            _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
 
-            # Settlement path for transaction outputs (credits to receivers)
-            for tx in non_coinbase_txs:
-                tx_receiver = tx.get("to_addr") or tx.get("to_address")
-                tx_amount = int(round(float(tx.get("amount", 0)) * 100))
-                if tx_receiver and tx_amount > 0:
-                    cur.execute(
-                        "INSERT INTO wallet_addresses (address, balance, address_type, last_updated) VALUES (%s, %s, 'standard', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance + %s, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
-                        (tx_receiver, tx_amount, tx_amount),
-                    )
+            # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
+            _treasury_sql = """
+            INSERT INTO wallet_addresses
+            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+            VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                balance = wallet_addresses.balance + %s,
+                transaction_count = wallet_addresses.transaction_count + 1,
+                address_type = 'treasury',
+                last_updated = NOW()
+            """
+            cur.execute(_treasury_sql, (treasury_address, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
+            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury executed: {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
 
-            # MINER REWARD: Always insert/update miner wallet
-            cur.execute(
-                "INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated) VALUES (%s, %s, %s, %s, 1, 'miner', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance + EXCLUDED.balance, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
-                (miner_address, miner_fp, miner_fp, miner_reward_base),
-            )
-            _settle_log.info(f"[SETTLE] Miner {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
+            # TRANSACTION FEES TO TREASURY — OPTIONAL
+            if non_coinbase_txs:
+                for tx in non_coinbase_txs:
+                    tx_fee = int(round(float(tx.get("fee", 0)) * 100))
+                    if tx_fee > 0:
+                        cur.execute(
+                            "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
+                            (tx_fee, treasury_address),
+                        )
 
-            # TREASURY REWARD: Always insert/update treasury wallet
-            # (If same as miner address, ON CONFLICT DO UPDATE adds balance correctly)
-            cur.execute(
-                "INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated) VALUES (%s, %s, %s, %s, 1, 'treasury', NOW()) ON CONFLICT (address) DO UPDATE SET balance = wallet_addresses.balance + EXCLUDED.balance, transaction_count = wallet_addresses.transaction_count + 1, last_updated = NOW()",
-                (treasury_address, treasury_fp, treasury_fp, treasury_reward_base),
-            )
-            _settle_log.info(f"[SETTLE] Treasury {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
-
-            # Update chain state
+            # UPDATE CHAIN STATE
             cur.execute(
                 "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
                 (height, block_hash),
