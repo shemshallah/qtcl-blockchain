@@ -1585,6 +1585,26 @@ def _settle_block_rewards(
                 f"[SETTLE] 💰 Miner {miner_address[:16]}… += {miner_reward_base / 100:.2f} QTCL (confirmed h={height})"
             )
 
+            # PHASE 2b — record miner coinbase as a transaction row (visible in block explorer)
+            _miner_tx_id = f"coinbase_{height}_{miner_address[:16]}"
+            cur.execute("SAVEPOINT sp_miner_tx")
+            try:
+                cur.execute(
+                    """INSERT INTO transactions
+                    (tx_hash, from_address, to_address, amount, tx_type, status,
+                     height, block_hash, transaction_index, updated_at)
+                    VALUES (%s, 'COINBASE', %s, %s, 'coinbase', 'confirmed', %s, %s, 0, NOW())
+                    ON CONFLICT (tx_hash) DO NOTHING""",
+                    (_miner_tx_id, miner_address, miner_reward_base, height, block_hash),
+                )
+                cur.execute("RELEASE SAVEPOINT sp_miner_tx")
+                _settle_log.info(
+                    f"[SETTLE] ⛏ Miner coinbase tx inserted: {_miner_tx_id}"
+                )
+            except Exception as _mtx_e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_miner_tx")
+                _settle_log.warning(f"[SETTLE] miner coinbase tx insert failed: {_mtx_e}")
+
             # PHASE 3 — treasury reward QUEUED (confirms at height+1)
             cur.execute(
                 "INSERT INTO pending_rewards "

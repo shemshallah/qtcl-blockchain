@@ -798,7 +798,7 @@ function renderBlockDetail(b, container) {
 }
 
 function renderTxCard(tx, idx) {
-  const isCoinbase = tx.tx_type === 'coinbase' || tx.from_addr === '' || tx.from_addr === 'coinbase' || tx.from_addr === 'COINBASE' || tx.from_addr === 'TREASURY' || (tx.from_addr && /^0{16,}$/.test(tx.from_addr));
+  const isCoinbase = tx.tx_type === 'coinbase' || tx.tx_type === 'miner_reward' || tx.from_addr === '' || tx.from_addr === 'coinbase' || tx.from_addr === 'COINBASE' || tx.from_addr === 'BLOCK_REWARD' || tx.from_addr === 'TREASURY' || (tx.from_addr && /^0{16,}$/.test(tx.from_addr));
   const hash = tx.tx_id || tx.tx_hash || '';
   const from = tx.from_addr || '';
   const to = tx.to_addr || '';
