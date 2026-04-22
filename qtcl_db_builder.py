@@ -3422,7 +3422,11 @@ def get_comprehensive_trigger_functions_sql() -> Dict[str, str]:
                 NEW.balance,
                 _delta,
                 NOW()
-            );
+            )
+            ON CONFLICT (address, block_height) DO UPDATE SET
+                balance = EXCLUDED.balance,
+                delta = EXCLUDED.delta,
+                snapshot_timestamp = NOW();
         END IF;
         
         RETURN NEW;
@@ -3734,7 +3738,7 @@ def get_sqlite_trigger_definitions() -> Dict[str, str]:
     CREATE TRIGGER IF NOT EXISTS trg_balance_history
     AFTER UPDATE OF balance ON wallet_addresses
     BEGIN
-        INSERT INTO address_balance_history (
+        INSERT OR REPLACE INTO address_balance_history (
             address, block_height, block_hash, balance, delta, snapshot_timestamp
         )
         SELECT 
