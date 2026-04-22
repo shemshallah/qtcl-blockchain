@@ -6096,6 +6096,25 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _block_is_new = True
                 logger.critical(f"[SUBMIT-BLOCK] ✅ BLOCK INSERTED h={height}")
 
+                # Ensure transactions table exists (Neon cold-start guard)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS transactions (
+                        tx_hash            VARCHAR(255) PRIMARY KEY,
+                        from_address       VARCHAR(255) NOT NULL DEFAULT '',
+                        to_address         VARCHAR(255) NOT NULL DEFAULT '',
+                        amount             NUMERIC(30,0) NOT NULL DEFAULT 0,
+                        tx_type            VARCHAR(64)  NOT NULL DEFAULT 'transfer',
+                        status             VARCHAR(32)  NOT NULL DEFAULT 'pending',
+                        height             BIGINT,
+                        block_hash         VARCHAR(255),
+                        transaction_index  INTEGER DEFAULT 0,
+                        quantum_state_hash VARCHAR(255),
+                        metadata           JSONB,
+                        updated_at         TIMESTAMPTZ DEFAULT NOW(),
+                        created_at         TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+
                 # Persist non-coinbase transactions only (client coinbase ignored;
                 # server generates authoritative coinbase from pending_rewards below)
                 for tx in txs or []:
@@ -6143,6 +6162,21 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 except Exception as _mte:
                     cur.execute("ROLLBACK TO SAVEPOINT sp_miner_tx")
                     logger.warning(f"[SUBMIT-BLOCK] miner_reward tx insert failed: {_mte}")
+
+                # Ensure pending_rewards table exists before querying it
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS pending_rewards (
+                        id                 BIGSERIAL PRIMARY KEY,
+                        height             BIGINT NOT NULL,
+                        reward_type        VARCHAR(32) NOT NULL,
+                        recipient          VARCHAR(255) NOT NULL,
+                        amount             BIGINT NOT NULL,
+                        confirmed_at_height BIGINT DEFAULT NULL,
+                        status             VARCHAR(16) DEFAULT 'pending',
+                        created_at         TIMESTAMPTZ DEFAULT NOW(),
+                        UNIQUE(height, reward_type, recipient)
+                    )
+                """)
 
                 # Server generates coinbase tx (0.8 QTCL treasury from PRIOR block h-1)
                 # This IS the coinbase for this block — always from pending_rewards[height-1]
@@ -6229,6 +6263,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
                 logger.info(
                     f"[SUBMIT-BLOCK] REWARDS h={height}: miner=+{_miner_reward/100:.2f} QTCL (now), treasury={_treas_reward/100:.2f} QTCL queued (coinbase at h={height+1})"
+                )
+
+                # Update tx_count to reflect actual rows written (coinbase + non-coinbase)
+                # Client submits 0 coinbase txs; server generates them — so recount from DB
+                cur.execute(
+                    "UPDATE blocks SET tx_count = (SELECT COUNT(*) FROM transactions WHERE height = %s) WHERE height = %s",
+                    (height, height),
                 )
 
         except Exception as _db_e:
