@@ -4,6 +4,16 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>QTCL · Quantum Token Chain Ledger</title>
+<link rel="icon" type="image/png" sizes="32x32" href="favicon.png"/>
+<link rel="icon" type="image/png" sizes="16x16" href="favicon.png"/>
+<link rel="shortcut icon" type="image/png" href="favicon.png"/>
+<link rel="apple-touch-icon" type="image/png" sizes="180x180" href="favicon.png"/>
+<meta name="msapplication-TileImage" content="favicon.png"/>
+<meta name="theme-color" content="#020509"/>
+<meta property="og:title" content="QTCL — Quantum Tessellation Chain Ledger"/>
+<meta property="og:description" content="Post-quantum blockchain secured by hyperbolic geometry and HypΓ encryption. Alpha mining now live."/>
+<meta property="og:image" content="favicon.png"/>
+<meta name="twitter:card" content="summary_large_image"/>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;500;600&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet"/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -240,6 +250,63 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 .pg-btn:disabled{opacity:.35;cursor:not-allowed}
 .pg-info{font-family:var(--mono);font-size:8px;color:var(--dim2)}
 
+/* ── LANDING PAGE ── */
+#landing.page.active{display:flex;flex-direction:column;gap:0;padding:0;max-width:none}
+.lp-hero{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:80px 40px 60px;overflow:hidden;border-bottom:1px solid var(--border)}
+.lp-hero-bg{position:absolute;inset:0;background:radial-gradient(ellipse 70% 60% at 50% 0%,rgba(0,212,255,.06) 0%,transparent 65%),radial-gradient(ellipse 50% 50% at 80% 80%,rgba(124,58,237,.05) 0%,transparent 60%);pointer-events:none}
+.lp-logo-wrap{margin-bottom:32px;position:relative;width:96px;height:96px;display:flex;align-items:center;justify-content:center}
+.lp-logo-ring{position:absolute;inset:-20px;border-radius:50%;border:1px solid rgba(0,212,255,.12);animation:lp-ring 4s linear infinite}
+.lp-logo-ring2{position:absolute;inset:-36px;border-radius:50%;border:1px solid rgba(124,58,237,.08);animation:lp-ring 7s linear infinite reverse}
+@keyframes lp-ring{to{transform:rotate(360deg)}}
+.lp-logo{width:96px;height:96px;border-radius:50%;border:2px solid rgba(0,212,255,.2);box-shadow:0 0 40px rgba(0,212,255,.12),0 0 80px rgba(124,58,237,.06);display:block}
+.lp-wordmark{font-family:var(--disp);font-size:clamp(28px,5vw,48px);font-weight:900;letter-spacing:10px;color:var(--cy);text-shadow:0 0 40px rgba(0,212,255,.4),0 0 80px rgba(0,212,255,.15);margin-bottom:6px}
+.lp-sub{font-family:var(--mono);font-size:10px;letter-spacing:4px;color:var(--dim2);text-transform:uppercase;margin-bottom:28px}
+.lp-tagline{font-family:var(--body);font-size:clamp(14px,2vw,17px);font-weight:300;color:var(--br);max-width:640px;line-height:1.65;margin:0 auto 36px;opacity:.9}
+.lp-alpha-banner{display:inline-flex;align-items:center;gap:10px;background:linear-gradient(135deg,rgba(0,232,138,.08),rgba(0,212,255,.06));border:1px solid rgba(0,232,138,.25);border-radius:4px;padding:10px 20px;font-family:var(--mono);font-size:9px;letter-spacing:1.5px;color:var(--gr);text-transform:uppercase;margin-bottom:40px}
+.lp-alpha-dot{width:7px;height:7px;border-radius:50%;background:var(--gr);box-shadow:0 0 8px var(--gr);animation:pulse 2s infinite;flex-shrink:0}
+.lp-cta-row{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;align-items:center}
+.lp-cta-primary{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,rgba(0,212,255,.18),rgba(124,58,237,.14));border:1px solid rgba(0,212,255,.35);border-radius:4px;padding:13px 28px;font-family:var(--disp);font-size:9px;font-weight:700;letter-spacing:3px;color:var(--cy);cursor:pointer;text-decoration:none;transition:all .25s;text-transform:uppercase}
+.lp-cta-primary:hover{background:linear-gradient(135deg,rgba(0,212,255,.28),rgba(124,58,237,.22));border-color:var(--cy);box-shadow:0 0 28px rgba(0,212,255,.18);transform:translateY(-1px)}
+.lp-cta-discord{display:inline-flex;align-items:center;gap:8px;background:rgba(88,101,242,.12);border:1px solid rgba(88,101,242,.3);border-radius:4px;padding:13px 24px;font-family:var(--disp);font-size:8px;font-weight:700;letter-spacing:2px;color:#7289da;cursor:pointer;text-decoration:none;transition:all .25s;text-transform:uppercase}
+.lp-cta-discord:hover{background:rgba(88,101,242,.22);border-color:rgba(88,101,242,.6);box-shadow:0 0 20px rgba(88,101,242,.15);transform:translateY(-1px)}
+.lp-section{padding:52px 40px;border-bottom:1px solid var(--border);max-width:1200px;margin:0 auto;width:100%}
+.lp-section-label{font-family:var(--mono);font-size:8px;letter-spacing:3px;text-transform:uppercase;color:var(--cy);opacity:.6;margin-bottom:10px}
+.lp-section-title{font-family:var(--disp);font-size:clamp(16px,2.5vw,22px);font-weight:700;letter-spacing:3px;color:var(--wh);margin-bottom:20px}
+.lp-section-body{font-family:var(--body);font-size:14px;font-weight:300;color:var(--tx);line-height:1.75;max-width:780px}
+.lp-section-body p{margin-bottom:14px}
+.lp-section-body p:last-child{margin-bottom:0}
+.lp-section-body strong{color:var(--br);font-weight:500}
+.lp-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;margin-top:28px}
+.lp-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r8);padding:22px 20px;position:relative;overflow:hidden;transition:border-color .2s}
+.lp-card:hover{border-color:var(--border2)}
+.lp-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+.lp-card.cy::before{background:linear-gradient(90deg,transparent,var(--cy),transparent)}
+.lp-card.vi::before{background:linear-gradient(90deg,transparent,var(--vi),transparent)}
+.lp-card.gr::before{background:linear-gradient(90deg,transparent,var(--gr),transparent)}
+.lp-card.go::before{background:linear-gradient(90deg,transparent,var(--go),transparent)}
+.lp-card-icon{font-size:22px;margin-bottom:12px;display:block}
+.lp-card-title{font-family:var(--disp);font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}
+.lp-card.cy .lp-card-title{color:var(--cy)}
+.lp-card.vi .lp-card-title{color:#a78bfa}
+.lp-card.gr .lp-card-title{color:var(--gr)}
+.lp-card.go .lp-card-title{color:var(--go)}
+.lp-card-body{font-family:var(--body);font-size:12.5px;font-weight:300;color:var(--tx);line-height:1.65}
+.lp-mining-box{margin-top:28px;background:linear-gradient(135deg,rgba(0,232,138,.05),rgba(0,212,255,.04));border:1px solid rgba(0,232,138,.2);border-radius:var(--r8);padding:28px;display:flex;flex-direction:column;gap:16px}
+.lp-mining-title{font-family:var(--disp);font-size:11px;font-weight:700;letter-spacing:3px;color:var(--gr);text-transform:uppercase}
+.lp-mining-body{font-family:var(--body);font-size:14px;font-weight:300;color:var(--br);line-height:1.7}
+.lp-mining-body strong{color:var(--wh);font-weight:500}
+.lp-mining-note{font-family:var(--mono);font-size:8.5px;color:var(--dim2);letter-spacing:.5px;line-height:1.7;border-left:2px solid rgba(0,232,138,.2);padding-left:14px}
+.lp-mining-note span{color:var(--am)}
+.lp-mining-actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.lp-footer-strip{padding:24px 40px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;background:rgba(0,0,0,.3);border-top:1px solid var(--border)}
+.lp-footer-left{font-family:var(--mono);font-size:8px;color:var(--dim2);letter-spacing:1px}
+.lp-footer-right{font-family:var(--mono);font-size:8px;color:var(--dim2);letter-spacing:1px}
+.lp-tech-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-top:20px}
+.lp-tech-item{background:rgba(0,0,0,.25);border:1px solid var(--border);border-radius:var(--r4);padding:10px 14px}
+.lp-tech-key{font-family:var(--mono);font-size:7.5px;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim2);margin-bottom:4px}
+.lp-tech-val{font-family:var(--mono);font-size:9.5px;color:var(--tx)}
+@media(max-width:700px){.lp-hero{padding:50px 20px 40px}.lp-section{padding:36px 20px}.lp-cta-row{flex-direction:column}.lp-footer-strip{flex-direction:column;text-align:center}}
+
 /* ── SCROLLBAR GLOBAL ── */
 *::-webkit-scrollbar{width:4px;height:4px}
 *::-webkit-scrollbar-track{background:transparent}
@@ -276,14 +343,158 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 
 <!-- NAV -->
 <div id="nav">
-  <div class="tab active" data-page="dashboard">DASHBOARD</div>
+  <div class="tab active" data-page="landing">QTCL</div>
+  <div class="tab" data-page="dashboard">DASHBOARD</div>
   <div class="tab" data-page="explorer">CHAIN EXPLORER</div>
   <div class="tab" data-page="network">NETWORK</div>
   <div class="tab" data-page="hyp">HYPΓ DOCS</div>
 </div>
 
+<!-- ═══════════════════ LANDING PAGE ═══════════════════ -->
+<div id="landing" class="page active">
+  <!-- HERO -->
+  <div class="lp-hero">
+    <div class="lp-hero-bg"></div>
+    <div class="lp-logo-wrap">
+      <div class="lp-logo-ring"></div>
+      <div class="lp-logo-ring2"></div>
+      <img src="favicon.png" class="lp-logo" alt="QTCL"/>
+    </div>
+    <div class="lp-wordmark">QTCL</div>
+    <div class="lp-sub">Quantum Token Chain Ledger</div>
+    <p class="lp-tagline">
+      The first blockchain secured by <strong style="color:var(--cy)">hyperbolic geometry</strong>.
+      Post-quantum cryptography baked into the consensus layer via HypΓ encryption —
+      not bolted on top. Built for a world where quantum computers are a threat, not a theory.
+    </p>
+    <div class="lp-alpha-banner">
+      <span class="lp-alpha-dot"></span>
+      Alpha Network Live · Mining Open · Join the First Nodes
+    </div>
+    <div class="lp-cta-row">
+      <a class="lp-cta-primary" href="#" onclick="document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById('dashboard').classList.add('active');document.querySelector('[data-page=dashboard]').classList.add('active');return false;">
+        ⛓ &nbsp;Open Dashboard
+      </a>
+      <a class="lp-cta-discord" href="https://discord.gg/b8eMJyXw" target="_blank" rel="noopener">
+        <svg width="16" height="12" viewBox="0 0 127.14 96.36" fill="currentColor" style="flex-shrink:0"><path d="M107.7 8.07A105.15 105.15 0 0 0 81.47 0a72.06 72.06 0 0 0-3.36 6.83 97.68 97.68 0 0 0-29.11 0A72.37 72.37 0 0 0 45.64 0a105.89 105.89 0 0 0-26.25 8.09C2.79 32.65-1.71 56.6.54 80.21a105.73 105.73 0 0 0 32.17 16.15 77.7 77.7 0 0 0 6.89-11.11 68.42 68.42 0 0 1-10.85-5.18c.91-.66 1.8-1.34 2.66-2a75.57 75.57 0 0 0 64.32 0c.87.71 1.76 1.39 2.66 2a68.68 68.68 0 0 1-10.87 5.19 77 77 0 0 0 6.89 11.1 105.25 105.25 0 0 0 32.19-16.14c2.64-27.38-4.51-51.11-18.9-72.14zM42.45 65.69C36.18 65.69 31 60 31 53s5-12.74 11.43-12.74S54 46 53.89 53s-5.05 12.69-11.44 12.69zm42.24 0C78.41 65.69 73.25 60 73.25 53s5-12.74 11.44-12.74S96.23 46 96.12 53s-5.04 12.69-11.43 12.69z"/></svg>
+        Join Discord
+      </a>
+    </div>
+  </div>
+
+  <!-- ABOUT QTCL -->
+  <div class="lp-section">
+    <div class="lp-section-label">Protocol Overview</div>
+    <div class="lp-section-title">WHAT IS QTCL?</div>
+    <div class="lp-section-body">
+      <p>
+        <strong>QTCL</strong> is a quantum-classical hybrid blockchain where the security model is derived not from
+        elliptic curve assumptions — already threatened by quantum algorithms — but from the hardness of the
+        <strong>Hyperbolic Closest Vector Problem (HCVP)</strong>, a geometric problem defined over the
+        <strong>{8,3} Poincaré disk tessellation</strong>.
+      </p>
+      <p>
+        Every block is an edge primitive in a depth-8 hyperbolic lattice of
+        <strong>159,744 edge slots</strong>. Consensus is achieved through
+        <strong>W-state tripartite quantum entanglement</strong>, with fidelity scores broadcast by distributed
+        oracle nodes. Proof-of-Work binds classical mining effort to the quantum oracle state — making QTCL's
+        security simultaneously classical and quantum-hard.
+      </p>
+    </div>
+    <div class="lp-cards">
+      <div class="lp-card cy">
+        <span class="lp-card-icon">📐</span>
+        <div class="lp-card-title">Hyperbolic Geometry</div>
+        <div class="lp-card-body">Blocks live as edge primitives in the {8,3} Poincaré disk — a space with exponentially growing surface area that makes brute-force traversal computationally intractable.</div>
+      </div>
+      <div class="lp-card vi">
+        <span class="lp-card-icon">🔐</span>
+        <div class="lp-card-title">HypΓ Encryption</div>
+        <div class="lp-card-body">Post-quantum signatures via Schnorr-Γ over PSL(2,ℝ). Key pairs are walks over the Fuchsian group generators; challenge binding uses Fiat-Shamir with SHA3-256.</div>
+      </div>
+      <div class="lp-card gr">
+        <span class="lp-card-icon">⚛️</span>
+        <div class="lp-card-title">Quantum Oracle Consensus</div>
+        <div class="lp-card-body">W-state fidelity scores from distributed oracle nodes govern difficulty calibration and block validity. Non-Markovian bath physics governs oracle coherence globally.</div>
+      </div>
+      <div class="lp-card go">
+        <span class="lp-card-icon">⛏</span>
+        <div class="lp-card-title">Classical PoW Bridge</div>
+        <div class="lp-card-body">SHA-256 proof-of-work anchors quantum-derived entropy to classical compute, making the chain verifiable by any node without quantum hardware.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- HYPGAMMA SECTION -->
+  <div class="lp-section">
+    <div class="lp-section-label">Cryptographic Primitive</div>
+    <div class="lp-section-title">HypΓ ENCRYPTION</div>
+    <div class="lp-section-body">
+      <p>
+        <strong>HypΓ</strong> (Hyperbolic Gamma) is a purpose-built post-quantum cryptosystem developed for QTCL.
+        It operates entirely within the non-Euclidean geometry of the Poincaré half-plane model, where the
+        <strong>geodesic distance metric</strong> serves as the trapdoor function.
+      </p>
+      <p>
+        The encryption scheme — <strong>GeodesicLWE</strong> — is a hyperbolic analogue of Learning With Errors
+        (LWE), hardened by LDPC error coupling over the tessellation's Tanner graph. Signature verification uses
+        eigendecomposition-based matrix exponentiation with precision escalation to 210 decimal places, preventing
+        catastrophic cancellation even under 256-bit challenge scalars.
+      </p>
+    </div>
+    <div class="lp-tech-grid">
+      <div class="lp-tech-item"><div class="lp-tech-key">Signature Scheme</div><div class="lp-tech-val" style="color:var(--cy)">Schnorr-Γ / Fiat-Shamir</div></div>
+      <div class="lp-tech-item"><div class="lp-tech-key">Group</div><div class="lp-tech-val" style="color:var(--vi)">PSL(2,ℝ) / Fuchsian Γ</div></div>
+      <div class="lp-tech-item"><div class="lp-tech-key">Encryption</div><div class="lp-tech-val" style="color:var(--gr)">GeodesicLWE (HCVP)</div></div>
+      <div class="lp-tech-item"><div class="lp-tech-key">Error Coupling</div><div class="lp-tech-val" style="color:var(--go)">LDPC / Tanner Graph BP</div></div>
+      <div class="lp-tech-item"><div class="lp-tech-key">Tessellation</div><div class="lp-tech-val" style="color:var(--cy)">{8,3} Poincaré Disk, Depth 8</div></div>
+      <div class="lp-tech-item"><div class="lp-tech-key">Hash Function</div><div class="lp-tech-val" style="color:var(--tx)">SHA3-256 (challenge + PoW)</div></div>
+      <div class="lp-tech-item"><div class="lp-tech-key">Key Size</div><div class="lp-tech-val" style="color:var(--tx)">1024-bit walk index · ~2000-bit pk</div></div>
+      <div class="lp-tech-item"><div class="lp-tech-key">Address Derivation</div><div class="lp-tech-val" style="color:var(--tx)">SHA3-256² (public key)</div></div>
+    </div>
+  </div>
+
+  <!-- ALPHA MINING CTA -->
+  <div class="lp-section">
+    <div class="lp-section-label">Early Access</div>
+    <div class="lp-section-title">JOIN THE ALPHA</div>
+    <div class="lp-mining-box">
+      <div class="lp-mining-title">⛏ &nbsp;Get the Client — Mine Now</div>
+      <div class="lp-mining-body">
+        The QTCL alpha network is <strong>live and open</strong>. Download the mining client, connect to the network,
+        and become one of the founding nodes of the first hyperbolic-geometry blockchain.
+        <strong>Beta Miners and Beta Nodes will be rewarded</strong> — contribution records are being tracked from genesis.
+        When the reward program launches, it will be announced here and throughout the community.
+      </div>
+      <div class="lp-mining-note">
+        <span>⚠ &nbsp;Alpha Notice:</span> Periodic chain wipes are possible until the network reaches stability.
+        All mining records and node contributions are logged independently of chain state and will be honored at Beta launch.
+        Early participants assume alpha risk — and earn alpha recognition.
+      </div>
+      <div class="lp-mining-actions">
+        <a class="lp-cta-primary" href="https://discord.gg/b8eMJyXw" target="_blank" rel="noopener">
+          ⛏ &nbsp;Get the Client
+        </a>
+        <a class="lp-cta-discord" href="https://discord.gg/b8eMJyXw" target="_blank" rel="noopener">
+          <svg width="16" height="12" viewBox="0 0 127.14 96.36" fill="currentColor" style="flex-shrink:0"><path d="M107.7 8.07A105.15 105.15 0 0 0 81.47 0a72.06 72.06 0 0 0-3.36 6.83 97.68 97.68 0 0 0-29.11 0A72.37 72.37 0 0 0 45.64 0a105.89 105.89 0 0 0-26.25 8.09C2.79 32.65-1.71 56.6.54 80.21a105.73 105.73 0 0 0 32.17 16.15 77.7 77.7 0 0 0 6.89-11.11 68.42 68.42 0 0 1-10.85-5.18c.91-.66 1.8-1.34 2.66-2a75.57 75.57 0 0 0 64.32 0c.87.71 1.76 1.39 2.66 2a68.68 68.68 0 0 1-10.87 5.19 77 77 0 0 0 6.89 11.1 105.25 105.25 0 0 0 32.19-16.14c2.64-27.38-4.51-51.11-18.9-72.14zM42.45 65.69C36.18 65.69 31 60 31 53s5-12.74 11.43-12.74S54 46 53.89 53s-5.05 12.69-11.44 12.69zm42.24 0C78.41 65.69 73.25 60 73.25 53s5-12.74 11.44-12.74S96.23 46 96.12 53s-5.04 12.69-11.43 12.69z"/></svg>
+          discord.gg/b8eMJyXw
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- FOOTER STRIP -->
+  <div class="lp-footer-strip">
+    <div class="lp-footer-left">© 2025 QTCL · Quantum Tessellation Chain Ledger · All rights reserved</div>
+    <div class="lp-footer-right" style="display:flex;gap:20px;align-items:center">
+      <span style="color:var(--dim)">HypΓ Cryptosystem · PSL(2,ℝ) · {8,3} Tessellation</span>
+      <a href="https://discord.gg/b8eMJyXw" target="_blank" rel="noopener" style="color:#7289da;text-decoration:none;letter-spacing:.5px">Discord ↗</a>
+    </div>
+  </div>
+</div>
+
 <!-- ═══════════════════ DASHBOARD PAGE ═══════════════════ -->
-<div id="dashboard" class="page active">
+<div id="dashboard" class="page">
 
   <!-- Stats Row -->
   <div class="stat-row">
