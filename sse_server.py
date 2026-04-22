@@ -21,6 +21,7 @@ import json
 import queue
 import threading
 import logging
+import requests
 from flask import Flask, Response, request
 
 # Configure logging
@@ -153,41 +154,53 @@ def rpc_blocks_recent():
       - limit: max blocks to return (default 20, max 100)
       - offset: pagination offset (default 0)
     
-    Response: {
-        "jsonrpc": "2.0",
-        "result": [
-            {
-                "height": 2,
-                "hash": "0000...",
-                "parent_hash": "0000...",
-                "timestamp": 1234567890,
-                "tx_count": 2,
-                "transactions": [
-                    {"tx_id": "...", "from_addr": "...", "to_addr": "...", "amount": 7.2, "tx_type": "coinbase"},
-                    {"tx_id": "...", "from_addr": "...", "to_addr": "...", "amount": 0.8, "tx_type": "coinbase"}
-                ],
-                "miner_address": "...",
-                "finalized": true
-            }
-        ],
-        "id": null
-    }
+    This endpoint queries the main server via RPC calls since SSE server
+    has no direct DB access. Falls back to empty list if server unavailable.
     """
     try:
-        import os
+        import requests
+        
         limit = min(int(request.args.get("limit", 20)), 100)
         offset = int(request.args.get("offset", 0))
         
-        # This would query the database in real implementation
-        # For now, return stub with proper structure
+        # Get server address from environment or default
+        server_url = os.getenv('MAIN_SERVER_URL', 'http://localhost:8000')
+        
+        # Query main server for block height
+        try:
+            height_resp = requests.get(
+                f"{server_url}/rpc?method=qtcl_getBlockHeight&params=%5B%5D&id=1",
+                timeout=5
+            )
+            height_data = height_resp.json()
+            max_height = height_data.get("result", {}).get("height", 0) if height_data.get("result") else 0
+        except:
+            max_height = 0
+        
+        blocks = []
+        if max_height > 0:
+            from_h = max(0, max_height - limit + 1)
+            # Fetch individual blocks with transactions
+            for h in range(max_height, max(from_h - 1, -1), -1):
+                try:
+                    block_resp = requests.get(
+                        f"{server_url}/rpc?method=qtcl_getBlock&params=%5B{h}%5D&id=1",
+                        timeout=3
+                    )
+                    block_data = block_resp.json()
+                    if block_data.get("result"):
+                        blocks.append(block_data["result"])
+                except:
+                    pass
+        
         return {
             "jsonrpc": "2.0",
-            "result": [],  # Will be populated by server.py with actual blocks from DB
+            "result": blocks,
             "id": None
         }, 200
     except Exception as e:
         logger.error(f"[SSE] /rpc/blocks/recent error: {e}")
-        return {"error": str(e)}, 500
+        return {"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}, 500
 
 
 @app.route("/rpc/blocks/stream", methods=["GET"])
@@ -441,6 +454,86 @@ def rpc_config_rewards():
         },
         "id": None
     }, 200
+
+
+@app.route("/rpc/transactions/recent", methods=["GET"])
+def rpc_transactions_recent():
+    """RPC GET: Fetch recent transactions (paginated).
+    
+    Query params:
+      - page: page number (default 0)
+      - per_page: items per page (default 50, max 200)
+      - type: filter by type (coinbase, transfer, miner_reward, etc.)
+      - address: filter by from_addr or to_addr
+    
+    Queries main server RPC endpoint qtcl_getTransactions.
+    """
+    try:
+        server_url = os.getenv('MAIN_SERVER_URL', 'http://localhost:8000')
+        
+        page = int(request.args.get("page", 0))
+        per_page = min(int(request.args.get("per_page", 50)), 200)
+        tx_type = request.args.get("type")
+        address = request.args.get("address")
+        
+        # Build params for main server RPC call
+        params = {
+            "page": page,
+            "per_page": per_page,
+        }
+        if tx_type:
+            params["type"] = tx_type
+        if address:
+            params["address"] = address
+        
+        # Encode params as JSON for RPC call
+        import json
+        params_json = json.dumps(params)
+        
+        try:
+            resp = requests.get(
+                f"{server_url}/rpc?method=qtcl_getTransactions&params={params_json}&id=1",
+                timeout=5
+            )
+            data = resp.json()
+            return data, 200
+        except:
+            return {
+                "jsonrpc": "2.0",
+                "result": {"transactions": [], "total": 0, "pages": 0, "page": page},
+                "id": None
+            }, 200
+    except Exception as e:
+        logger.error(f"[SSE] /rpc/transactions/recent error: {e}")
+        return {"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}, 500
+
+
+@app.route("/rpc/block/<int:height>/transactions", methods=["GET"])
+def rpc_block_transactions(height):
+    """RPC GET: Fetch all transactions in a specific block.
+    
+    Returns transactions array with miner + treasury rewards.
+    Queries main server qtcl_getBlockTransactions RPC method.
+    """
+    try:
+        server_url = os.getenv('MAIN_SERVER_URL', 'http://localhost:8000')
+        
+        try:
+            resp = requests.get(
+                f"{server_url}/rpc?method=qtcl_getBlockTransactions&params=%5B{height}%5D&id=1",
+                timeout=3
+            )
+            data = resp.json()
+            return data, 200
+        except:
+            return {
+                "jsonrpc": "2.0",
+                "result": {"height": height, "tx_count": 0, "transactions": []},
+                "id": None
+            }, 200
+    except Exception as e:
+        logger.error(f"[SSE] /rpc/block/{height}/transactions error: {e}")
+        return {"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}, 500
 
 
 if __name__ == "__main__":
