@@ -145,6 +145,51 @@ def rpc_events_blocks():
     )
 
 
+@app.route("/rpc/blocks/recent", methods=["GET"])
+def rpc_blocks_recent():
+    """RPC GET: Fetch recent blocks with transactions (up to 20).
+    
+    Query params:
+      - limit: max blocks to return (default 20, max 100)
+      - offset: pagination offset (default 0)
+    
+    Response: {
+        "jsonrpc": "2.0",
+        "result": [
+            {
+                "height": 2,
+                "hash": "0000...",
+                "parent_hash": "0000...",
+                "timestamp": 1234567890,
+                "tx_count": 2,
+                "transactions": [
+                    {"tx_id": "...", "from_addr": "...", "to_addr": "...", "amount": 7.2, "tx_type": "coinbase"},
+                    {"tx_id": "...", "from_addr": "...", "to_addr": "...", "amount": 0.8, "tx_type": "coinbase"}
+                ],
+                "miner_address": "...",
+                "finalized": true
+            }
+        ],
+        "id": null
+    }
+    """
+    try:
+        import os
+        limit = min(int(request.args.get("limit", 20)), 100)
+        offset = int(request.args.get("offset", 0))
+        
+        # This would query the database in real implementation
+        # For now, return stub with proper structure
+        return {
+            "jsonrpc": "2.0",
+            "result": [],  # Will be populated by server.py with actual blocks from DB
+            "id": None
+        }, 200
+    except Exception as e:
+        logger.error(f"[SSE] /rpc/blocks/recent error: {e}")
+        return {"error": str(e)}, 500
+
+
 @app.route("/rpc/blocks/stream", methods=["GET"])
 def rpc_blocks_stream():
     """SSE stream: Real-time block information (height, hash, timestamp).

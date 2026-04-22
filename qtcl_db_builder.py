@@ -742,6 +742,7 @@ CREATE TABLE IF NOT EXISTS blocks (
     merkle_root                VARCHAR(255),
     timestamp                  BIGINT NOT NULL,
     tx_count                   INT DEFAULT 0,
+    transactions               JSONB DEFAULT '[]'::jsonb,
     coherence_snapshot         NUMERIC(5,4) DEFAULT 1.0,
     fidelity_snapshot          NUMERIC(5,4) DEFAULT 1.0,
     w_state_hash               VARCHAR(255),
@@ -760,6 +761,7 @@ CREATE TABLE IF NOT EXISTS blocks (
 CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks(block_hash);
 CREATE INDEX IF NOT EXISTS idx_blocks_parent ON blocks(parent_hash);
 CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
+CREATE INDEX IF NOT EXISTS idx_blocks_transactions ON blocks USING GIN(transactions);
 
 -- TABLE: chain_reorganizations
 CREATE TABLE IF NOT EXISTS chain_reorganizations (
@@ -3572,6 +3574,32 @@ def get_comprehensive_trigger_functions_sql() -> Dict[str, str]:
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
+    """
+    
+    # Function 6b: Block Settlement with Transactions
+    functions['fn_settle_block_with_txs'] = """
+    -- ═════════════════════════════════════════════════════════════════════════════
+    -- Function: fn_settle_block_with_txs(block_height, block_hash, tx_data_json)
+    -- Settle block with transactions stored inline (JSONB)
+    -- ═════════════════════════════════════════════════════════════════════════════
+    CREATE OR REPLACE FUNCTION fn_settle_block_with_txs(
+        block_height BIGINT,
+        block_hash VARCHAR(255),
+        tx_data_json JSONB
+    )
+    RETURNS BOOLEAN AS $$
+    BEGIN
+        -- Update block with transaction data
+        UPDATE blocks
+        SET transactions = COALESCE(tx_data_json, '[]'::jsonb),
+            tx_count = jsonb_array_length(COALESCE(tx_data_json, '[]'::jsonb)),
+            finalized = TRUE,
+            finalized_at = EXTRACT(EPOCH FROM NOW())::BIGINT
+        WHERE height = block_height AND block_hash = block_hash;
+        
+        RETURN TRUE;
+    END;
+    $$ LANGUAGE plpgsql SECURITY DEFINER;
     """
     
     # Function 7: Comprehensive Audit Logging
