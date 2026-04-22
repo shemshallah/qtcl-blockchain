@@ -747,7 +747,7 @@ CREATE TABLE blocks (
     w_state_hash               VARCHAR(255),
     hyp_witness                VARCHAR(255),
     miner_address              VARCHAR(255),
-    difficulty                 INT DEFAULT 6,
+    difficulty                 INT DEFAULT 4,  -- Set by BLOCK_DIFFICULTY env var via globals.py
     nonce                      BIGINT DEFAULT 0,
     pq_curr                    INTEGER DEFAULT 1,
     pq_last                    INTEGER DEFAULT 0,

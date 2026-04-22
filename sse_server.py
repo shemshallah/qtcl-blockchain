@@ -336,6 +336,44 @@ def health():
     }, 200
 
 
+@app.route("/rpc/config/difficulty", methods=["GET"])
+def rpc_config_difficulty():
+    """RPC GET: Return current block mining difficulty (leading zeroes).
+    
+    Used by miners to know target PoW difficulty when building blocks.
+    """
+    import os
+    difficulty = int(os.getenv('BLOCK_DIFFICULTY', '4'))
+    return {
+        "jsonrpc": "2.0",
+        "result": {
+            "difficulty": difficulty,
+            "leading_zeroes": difficulty,
+            "description": f"Blocks require {difficulty} leading zero bytes in hash"
+        },
+        "id": None
+    }, 200
+
+
+@app.route("/rpc/config", methods=["GET"])
+def rpc_config():
+    """RPC GET: Return all configurable parameters for block building.
+    
+    Includes: difficulty, reward schedule, network constants.
+    """
+    import os
+    return {
+        "jsonrpc": "2.0",
+        "result": {
+            "block_difficulty": int(os.getenv('BLOCK_DIFFICULTY', '4')),
+            "max_peers": int(os.getenv('MAX_PEERS', '32')),
+            "oracle_min_peers": int(os.getenv('ORACLE_MIN_PEERS', '3')),
+            "wstate_mode": os.getenv('WSTATE_MODE', 'normal'),
+        },
+        "id": None
+    }, 200
+
+
 if __name__ == "__main__":
     # Development only — production uses gunicorn
     app.run(debug=False, host="0.0.0.0", port=int(os.environ.get("PORT", 8001)))
