@@ -1852,77 +1852,122 @@ class QuantumTemporalCoherenceLedgerServer:
     def drop_all_tables(self):
         logger.info(f"{CLR.ERROR}[DROP] Dropping ALL existing tables, functions, triggers, roles...{CLR.E}")
         try:
+            # Clear any failed transaction first
+            try:
+                self.conn.rollback()
+            except:
+                pass
+            
             if self.db_mode == "postgres":
                 # Drop triggers first (explicitly)
-                self.cursor.execute("""
-                    SELECT trigger_name, event_object_table 
-                    FROM information_schema.triggers 
-                    WHERE trigger_schema = 'public'
-                """)
-                triggers = self.cursor.fetchall()
-                for trig_name, tbl_name in triggers:
-                    try:
-                        self.cursor.execute(f"DROP TRIGGER IF EXISTS {trig_name} ON {tbl_name} CASCADE;")
-                    except:
-                        pass
+                try:
+                    self.cursor.execute("""
+                        SELECT trigger_name, event_object_table 
+                        FROM information_schema.triggers 
+                        WHERE trigger_schema = 'public'
+                    """)
+                    triggers = self.cursor.fetchall()
+                    for trig_name, tbl_name in triggers:
+                        try:
+                            self.cursor.execute(f"DROP TRIGGER IF EXISTS {trig_name} ON {tbl_name} CASCADE;")
+                            self._commit()
+                        except Exception as e:
+                            logger.debug(f"[DROP] Trigger error (ignored): {e}")
+                            self.conn.rollback()
+                except Exception as e:
+                    logger.debug(f"[DROP] Triggers query failed (ignored): {e}")
+                    self.conn.rollback()
                 
                 # Drop functions
-                self.cursor.execute("""
-                    SELECT routine_name FROM information_schema.routines 
-                    WHERE routine_schema = 'public' AND routine_type = 'FUNCTION'
-                """)
-                functions = [r[0] for r in self.cursor.fetchall()]
-                for fname in functions:
-                    try:
-                        self.cursor.execute(f"DROP FUNCTION IF EXISTS {fname}() CASCADE;")
-                    except:
+                try:
+                    self.cursor.execute("""
+                        SELECT routine_name FROM information_schema.routines 
+                        WHERE routine_schema = 'public' AND routine_type = 'FUNCTION'
+                    """)
+                    functions = [r[0] for r in self.cursor.fetchall()]
+                    for fname in functions:
                         try:
-                            self.cursor.execute(f"DROP FUNCTION IF EXISTS {fname} CASCADE;")
-                        except:
-                            pass
+                            self.cursor.execute(f"DROP FUNCTION IF EXISTS {fname}() CASCADE;")
+                            self._commit()
+                        except Exception:
+                            try:
+                                self.cursor.execute(f"DROP FUNCTION IF EXISTS {fname} CASCADE;")
+                                self._commit()
+                            except Exception as e:
+                                logger.debug(f"[DROP] Function error (ignored): {e}")
+                                self.conn.rollback()
+                except Exception as e:
+                    logger.debug(f"[DROP] Functions query failed (ignored): {e}")
+                    self.conn.rollback()
                 
                 # Drop roles (except superuser/system)
-                self.cursor.execute("""
-                    SELECT rolname FROM pg_roles 
-                    WHERE rolname NOT IN ('postgres', 'pg_database_owner')
-                """)
-                roles = [r[0] for r in self.cursor.fetchall()]
-                for rname in roles:
-                    try:
-                        self.cursor.execute(f"DROP ROLE IF EXISTS {rname};")
-                    except:
-                        pass
-                
-                self._commit()
+                try:
+                    self.cursor.execute("""
+                        SELECT rolname FROM pg_roles 
+                        WHERE rolname NOT IN ('postgres', 'pg_database_owner')
+                    """)
+                    roles = [r[0] for r in self.cursor.fetchall()]
+                    for rname in roles:
+                        try:
+                            self.cursor.execute(f"DROP ROLE IF EXISTS {rname};")
+                            self._commit()
+                        except Exception as e:
+                            logger.debug(f"[DROP] Role error (ignored): {e}")
+                            self.conn.rollback()
+                except Exception as e:
+                    logger.debug(f"[DROP] Roles query failed (ignored): {e}")
+                    self.conn.rollback()
                 
                 # NOW drop tables
-                self.cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public';")
-                tables = [r[0] for r in self.cursor.fetchall()]
-                for tname in tables:
-                    self.cursor.execute(f"DROP TABLE IF EXISTS {tname} CASCADE;")
-                    self._commit()
-            else:
-                # SQLite: just drop all tables
-                self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-                tables = [r[0] for r in self.cursor.fetchall()]
-                for tname in tables:
-                    self.cursor.execute(f"DROP TABLE IF EXISTS {tname};")
-                    
-                # Drop all triggers
-                self.cursor.execute("SELECT name FROM sqlite_master WHERE type='trigger';")
-                triggers = [r[0] for r in self.cursor.fetchall()]
-                for trig in triggers:
+                try:
+                    self.cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public';")
+                    tables = [r[0] for r in self.cursor.fetchall()]
+                    for tname in tables:
+                        try:
+                            self.cursor.execute(f"DROP TABLE IF EXISTS {tname} CASCADE;")
+                            self._commit()
+                        except Exception as e:
+                            logger.debug(f"[DROP] Table {tname} error (ignored): {e}")
+                            self.conn.rollback()
+                except Exception as e:
+                    logger.debug(f"[DROP] Tables query failed (will retry): {e}")
                     try:
-                        self.cursor.execute(f"DROP TRIGGER IF EXISTS {trig};")
+                        self.conn.rollback()
                     except:
                         pass
+            else:
+                # SQLite: just drop all tables
+                try:
+                    self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                    tables = [r[0] for r in self.cursor.fetchall()]
+                    for tname in tables:
+                        try:
+                            self.cursor.execute(f"DROP TABLE IF EXISTS {tname};")
+                        except Exception as e:
+                            logger.debug(f"[DROP] Table {tname} error (ignored): {e}")
+                except Exception as e:
+                    logger.debug(f"[DROP] Tables query failed (ignored): {e}")
+                
+                # Drop all triggers
+                try:
+                    self.cursor.execute("SELECT name FROM sqlite_master WHERE type='trigger';")
+                    triggers = [r[0] for r in self.cursor.fetchall()]
+                    for trig in triggers:
+                        try:
+                            self.cursor.execute(f"DROP TRIGGER IF EXISTS {trig};")
+                        except Exception as e:
+                            logger.debug(f"[DROP] Trigger error (ignored): {e}")
+                except Exception as e:
+                    logger.debug(f"[DROP] Triggers query failed (ignored): {e}")
             
             self._commit()
-            logger.info(f"{CLR.OK}[DROP] ✓ ALL tables, triggers, functions, roles dropped{CLR.E}")
+            logger.info(f"{CLR.OK}[DROP] ✓ Database cleanup complete{CLR.E}")
         except Exception as e:
-            logger.error(f"{CLR.ERROR}[DROP] Failed: {e}{CLR.E}")
-            self.conn.rollback()
-            raise
+            logger.warning(f"{CLR.ERROR}[DROP] Cleanup error (continuing): {e}{CLR.E}")
+            try:
+                self.conn.rollback()
+            except:
+                pass
 
     def create_schema(self):
         logger.info(f"{CLR.QUANTUM}[SCHEMA] Creating schema ({self.db_mode})...{CLR.E}")
