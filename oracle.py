@@ -1973,6 +1973,7 @@ class OracleNode:
                 if _lat is None:
                     try:
                         from globals import get_lattice as _glf
+
                         _lat = _glf()
                     except Exception:
                         pass
@@ -1981,28 +1982,33 @@ class OracleNode:
                 _cdm = getattr(_lat, "current_density_matrix", None)
                 if _cdm is None or not hasattr(_cdm, "shape"):
                     return None
-                if _cdm.ndim != 3 or _cdm.shape != (64, 64, 64):
+                # Direct 16³ measurement - no reduction needed
+                if _cdm.ndim != 3 or _cdm.shape != (16, 16, 16):
                     return None
-                _psi_64 = np.ascontiguousarray(_cdm, dtype=np.complex64)
-                psi_16 = _psi_64.reshape(16, 4, 16, 4, 16, 4).sum(axis=(1, 3, 5))
+                psi_16 = np.ascontiguousarray(_cdm, dtype=np.complex64)
                 _n2 = float(np.sum(np.abs(psi_16) ** 2))
                 if _n2 > 1e-12:
                     psi_16 = psi_16 / np.sqrt(_n2)
 
-            # Target tensor for fidelity: reduce _w8_target 64³ → 16³
+            # Target tensor for fidelity: direct 16³ from _w8_target
             psi_target_16 = None
             _lat = lattice
             if _lat is None:
                 try:
                     from globals import get_lattice as _glf
+
                     _lat = _glf()
                 except Exception:
                     pass
             if _lat is not None:
                 _t = getattr(_lat, "_w8_target", None)
-                if _t is not None and hasattr(_t, "shape") and _t.ndim == 3 and _t.shape == (64, 64, 64):
-                    _t64 = np.ascontiguousarray(_t, dtype=np.complex64)
-                    psi_target_16 = _t64.reshape(16, 4, 16, 4, 16, 4).sum(axis=(1, 3, 5))
+                if (
+                    _t is not None
+                    and hasattr(_t, "shape")
+                    and _t.ndim == 3
+                    and _t.shape == (16, 16, 16)
+                ):
+                    psi_target_16 = np.ascontiguousarray(_t, dtype=np.complex64)
                     _tn = float(np.sum(np.abs(psi_target_16) ** 2))
                     if _tn > 1e-12:
                         psi_target_16 = psi_target_16 / np.sqrt(_tn)
@@ -2029,11 +2035,12 @@ class OracleNode:
             # L1 coherence (normalized)
             _abs_p = np.abs(psi_node).ravel()
             _sum_a = float(np.sum(_abs_p))
-            _sum_a2 = float(np.sum(_abs_p ** 2))
+            _sum_a2 = float(np.sum(_abs_p**2))
             _N_m1 = float(psi_node.size - 1)
             coh_val = (
-                max(0.0, min(1.0, float((_sum_a ** 2 - _sum_a2) / _N_m1)))
-                if _N_m1 > 0 else 0.0
+                max(0.0, min(1.0, float((_sum_a**2 - _sum_a2) / _N_m1)))
+                if _N_m1 > 0
+                else 0.0
             )
 
             # Fidelity
@@ -2437,20 +2444,21 @@ class OracleWStateManager:
         if cdm is None or not hasattr(cdm, "shape"):
             logger.debug("[ORACLE CLUSTER] Lattice DM not ready (no shape)")
             return None
-        # Accept native 64³ 3D quantum field tensor (262,144 complex64 elements)
-        if cdm.ndim != 3 or cdm.shape[0] != 64 or cdm.shape[1] != 64 or cdm.shape[2] != 64:
+        # Accept native 16³ 3D quantum field tensor (4,096 complex64 elements)
+        # 4 qubits × 4 qubits = 16³ tensor for measurement
+        if (
+            cdm.ndim != 3
+            or cdm.shape[0] != 16
+            or cdm.shape[1] != 16
+            or cdm.shape[2] != 16
+        ):
             logger.debug(
-                f"[ORACLE CLUSTER] Lattice DM shape={cdm.shape} — expected (64,64,64)"
+                f"[ORACLE CLUSTER] Lattice DM shape={cdm.shape} — expected (16,16,16)"
             )
             return None
 
-        # ── Step 1B: Reduce 64³ → 16³ via 4×4×4 block-sum (coherent downsampling) ─
-        # Preserves quantum phase; each 16³ voxel aggregates 64 (4³) fine-grain amplitudes.
-        # Result: 4096-element 3D quantum field — the canonical 16³ representation
-        # that flows to all clients via /rpc/oracle/snapshot.
-        psi_64 = np.ascontiguousarray(cdm, dtype=np.complex64)
-        # Reshape (64,64,64) → (16,4,16,4,16,4) then sum over the "4" axes
-        psi_16 = psi_64.reshape(16, 4, 16, 4, 16, 4).sum(axis=(1, 3, 5))
+        # Direct 16³ measurement - no reduction needed
+        psi_16 = np.ascontiguousarray(cdm, dtype=np.complex64)
 
         # Normalize ‖ψ₁₆‖² = 1 (proper pure-state amplitude)
         _amp2_sum = float(np.sum(np.abs(psi_16) ** 2))
@@ -2487,19 +2495,18 @@ class OracleWStateManager:
         # ─────────────────────────────────────────────────────────────────────────
         measure_start_ns = time.time_ns()
 
-        # Reduce lattice's 64³ target to 16³ for Born-rule overlap
-        _w8_target_64 = getattr(LATTICE, "_w8_target", None)
+        # Direct 16³ target for Born-rule overlap
+        _w8_target = getattr(LATTICE, "_w8_target", None)
         psi_target_16 = None
-        if _w8_target_64 is not None and hasattr(_w8_target_64, "shape"):
+        if _w8_target is not None and hasattr(_w8_target, "shape"):
             try:
-                if _w8_target_64.ndim == 3 and _w8_target_64.shape == (64, 64, 64):
-                    _t64 = np.ascontiguousarray(_w8_target_64, dtype=np.complex64)
-                    psi_target_16 = _t64.reshape(16, 4, 16, 4, 16, 4).sum(axis=(1, 3, 5))
+                if _w8_target.ndim == 3 and _w8_target.shape == (16, 16, 16):
+                    psi_target_16 = np.ascontiguousarray(_w8_target, dtype=np.complex64)
                     _tn = float(np.sum(np.abs(psi_target_16) ** 2))
                     if _tn > 1e-12:
                         psi_target_16 = psi_target_16 / np.sqrt(_tn)
             except Exception as _te:
-                logger.debug(f"[ORACLE CLUSTER] target reduce failed: {_te}")
+                logger.debug(f"[ORACLE CLUSTER] target load failed: {_te}")
                 psi_target_16 = None
 
         # Probability distribution over 4096 voxels
@@ -2509,21 +2516,23 @@ class OracleWStateManager:
             p_r = p_r / _psum  # ensure Σp = 1 (defensive after block-sum renorm)
 
         # PURITY: P = Σ p²  (pure state limit = 1, maximally mixed = 1/4096)
-        purity_val = float(np.sum(p_r ** 2))
+        purity_val = float(np.sum(p_r**2))
 
         # VON NEUMANN ENTROPY (position basis):
         # S = −Σ p log p
         _p_flat = p_r.ravel()
         _p_nz = _p_flat[_p_flat > 1e-16]
-        von_neumann_entropy_val = float(-np.sum(_p_nz * np.log(_p_nz))) if _p_nz.size > 0 else 0.0
+        von_neumann_entropy_val = (
+            float(-np.sum(_p_nz * np.log(_p_nz))) if _p_nz.size > 0 else 0.0
+        )
 
         # COHERENCE L1 (position basis, normalized):
         # Full L1 = Σ|ψᵢψⱼ*| for i≠j = (Σ|ψᵢ|)² − Σ|ψᵢ|²
         # Normalized by dim−1 = 4095 to map to [0,1]
         _abs_psi = np.abs(psi_16).ravel()
         _sum_abs = float(np.sum(_abs_psi))
-        _sum_abs2 = float(np.sum(_abs_psi ** 2))
-        _l1_full = _sum_abs ** 2 - _sum_abs2
+        _sum_abs2 = float(np.sum(_abs_psi**2))
+        _l1_full = _sum_abs**2 - _sum_abs2
         _N_minus_1 = float(psi_16.size - 1)
         coherence_l1_val = float(_l1_full / _N_minus_1) if _N_minus_1 > 0 else 0.0
         # Clamp to [0,1]
@@ -2554,9 +2563,11 @@ class OracleWStateManager:
         _p_x = np.sum(p_r, axis=(1, 2))  # marginal along x
         _p_y = np.sum(p_r, axis=(0, 2))  # marginal along y
         _p_z = np.sum(p_r, axis=(0, 1))  # marginal along z
+
         def _shannon(v):
             v = v[v > 1e-16]
             return float(-np.sum(v * np.log(v))) if v.size > 0 else 0.0
+
         _S_x = _shannon(_p_x)
         _S_y = _shannon(_p_y)
         _S_z = _shannon(_p_z)
@@ -2599,7 +2610,9 @@ class OracleWStateManager:
         for node_idx, node in enumerate(self.nodes):
             try:
                 # Per-oracle σ-noise: phase jitter seeded by (cycle × prime + node_id)
-                _sigma_seed = (int(self.lattice_refresh_counter) * 0x9E3779B1 + node_idx) & 0xFFFFFFFF
+                _sigma_seed = (
+                    int(self.lattice_refresh_counter) * 0x9E3779B1 + node_idx
+                ) & 0xFFFFFFFF
                 _rng = np.random.default_rng(_sigma_seed)
                 _phase_noise = _rng.uniform(-0.05, 0.05, size=psi_16.shape)  # ±50 mrad
                 _psi_node = psi_16 * np.exp(1j * _phase_noise.astype(np.float32))
@@ -2611,7 +2624,7 @@ class OracleWStateManager:
                 if _p_node_sum > 1e-12:
                     _p_node = _p_node / _p_node_sum
 
-                _node_purity = float(np.sum(_p_node ** 2))
+                _node_purity = float(np.sum(_p_node**2))
                 _pnf = _p_node.ravel()
                 _pnz = _pnf[_pnf > 1e-16]
                 _node_entropy = (
@@ -2619,8 +2632,8 @@ class OracleWStateManager:
                 )
                 _node_abs = np.abs(_psi_node).ravel()
                 _node_abs_sum = float(np.sum(_node_abs))
-                _node_abs2_sum = float(np.sum(_node_abs ** 2))
-                _node_l1 = (_node_abs_sum ** 2 - _node_abs2_sum) / _N_minus_1
+                _node_abs2_sum = float(np.sum(_node_abs**2))
+                _node_l1 = (_node_abs_sum**2 - _node_abs2_sum) / _N_minus_1
                 _node_coh = max(0.0, min(1.0, float(_node_l1)))
 
                 if psi_target_16 is not None:
@@ -2685,7 +2698,8 @@ class OracleWStateManager:
 
         # Nodes within 5% of median are "accepted"
         accepted = [
-            r for r in readings
+            r
+            for r in readings
             if abs(r.fidelity - cons_fidelity) <= 0.05 * max(abs(cons_fidelity), 1e-6)
         ]
 
@@ -2776,12 +2790,13 @@ class OracleWStateManager:
             self.density_matrix_buffer.append(snapshot)
 
         total_ms = (time.time_ns() - measurement_start_ns) / 1e6
-        logger.info(
-            f"[ORACLE CLUSTER] cycle={current_cycle} "
-            f"F={cons_fidelity:.4f} C={cons_coherence:.6f} "
-            f"S={von_neumann_entropy_val:.4f} P={purity_val:.4f} "
-            f"| Total={total_ms:.1f}ms BF={bf_ms:.1f}ms"
-        )
+        # Logging disabled - spam reduction. Use [ORACLE-MULTIPLEX] for periodic metrics.
+        # logger.info(
+        #     f"[ORACLE CLUSTER] cycle={current_cycle} "
+        #     f"F={cons_fidelity:.4f} C={cons_coherence:.6f} "
+        #     f"S={von_neumann_entropy_val:.4f} P={purity_val:.4f} "
+        #     f"| Total={total_ms:.1f}ms BF={bf_ms:.1f}ms"
+        # )
         return snapshot
 
     # ── Background threads ────────────────────────────────────────────────────

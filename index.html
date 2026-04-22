@@ -883,6 +883,10 @@ async function selectBlock(height) {
   try {
     const block = await rpc('qtcl_getBlock', [height]);
     if (!block) throw new Error('Block not found');
+    if (!block.transactions || block.transactions.length === 0) {
+      const txRes = await rpc('qtcl_getBlockTransactions', [height]).catch(()=>({transactions:[]}));
+      if (txRes && txRes.transactions) block.transactions = txRes.transactions;
+    }
     renderBlockDetail(block, detailScroll);
   } catch(e) {
     detailScroll.innerHTML = `<div style="padding:16px"><div class="error-msg">Failed to load block: ${e.message}</div></div>`;
@@ -1008,36 +1012,35 @@ function renderBlockDetail(b, container) {
 }
 
 function renderTxCard(tx, idx) {
-  const isCoinbase = tx.tx_type === 'coinbase' || tx.tx_type === 'miner_reward' || tx.from_addr === '' || tx.from_addr === 'coinbase' || tx.from_addr === 'COINBASE' || tx.from_addr === 'BLOCK_REWARD' || tx.from_addr === 'TREASURY' || (tx.from_addr && /^0{16,}$/.test(tx.from_addr));
+  const isCoinbase = tx.tx_type === 'coinbase' || tx.tx_type === 'miner_reward' || tx.tx_type === 'treasury_reward' || tx.from_addr === '' || tx.from_addr === 'coinbase' || tx.from_addr === 'COINBASE' || tx.from_addr === 'BLOCK_REWARD' || tx.from_addr === 'TREASURY' || (tx.from_addr && /^0{16,}$/.test(tx.from_addr));
   const hash = tx.tx_id || tx.tx_hash || '';
   const from = tx.from_addr || '';
   const to = tx.to_addr || '';
-  const amount = tx.amount;
+  const amount = parseFloat(tx.amount || 0).toFixed(4);
   const wProof = tx.w_proof || '';
   const typeClass = isCoinbase ? 'coinbase' : '';
-  const isTreasury = tx.from_addr === 'TREASURY';
-  const typeLabel = isCoinbase
-    ? (isTreasury ? '🏛 TREASURY' : '⛏ MINER REWARD')
-    : (tx.tx_type || 'transfer').toUpperCase();
+  const isTreasury = tx.tx_type === 'treasury_reward' || tx.from_addr === 'TREASURY';
+  const isMinerReward = tx.tx_type === 'miner_reward' || (tx.from_addr === 'BLOCK_REWARD' && !isTreasury);
+  const typeLabel = tx.tx_type ? (tx.tx_type === 'miner_reward' ? '⛏ MINER REWARD' : tx.tx_type === 'treasury_reward' ? '🏛 TREASURY REWARD' : (tx.tx_type || 'transfer').toUpperCase()) : 'TRANSFER';
 
   return `
     <div class="tx-card ${typeClass}">
       <div class="tx-head">
-        <span class="tx-type-badge">${typeLabel}</span>
+        <span class="tx-type-badge" style="background:${isMinerReward?'rgba(255,107,107,0.3)':isTreasury?'rgba(78,205,196,0.3)':'rgba(108,92,231,0.3)'};color:${isMinerReward?'#FF6B6B':isTreasury?'#4ECDC4':'#6C5CE7'}">${typeLabel}</span>
         <div class="tx-main">
-          <div class="tx-hash">${hash || 'no hash'}</div>
+          <div class="tx-hash">${hash ? hash.substring(0,16)+'…' : 'no hash'}</div>
           <div class="tx-flow">
             ${isCoinbase
-              ? `<span class="tx-addr" style="color:var(--go)">${isTreasury ? '🏛 Treasury Reward' : '⛏ Block Reward'} → ${to ? shortAddr(to) : (isTreasury ? 'treasury' : 'miner')}</span>`
-              : `<span class="tx-addr">${from || 'unknown'}</span>
+              ? `<span class="tx-addr" style="color:${isMinerReward?'#FF6B6B':isTreasury?'#4ECDC4':'#95E1D3'};font-weight:600">${isMinerReward ? '⛏ Miner Reward' : '🏛 Treasury Reward'} → ${to ? shortAddr(to) : (isTreasury ? 'treasury' : 'miner')}</span>`
+              : `<span class="tx-addr">${from ? shortAddr(from) : 'unknown'}</span>
                  <span class="tx-arrow">→</span>
-                 <span class="tx-addr">${to || 'unknown'}</span>`
+                 <span class="tx-addr">${to ? shortAddr(to) : 'unknown'}</span>`
             }
           </div>
-          ${tx.status ? `<div style="font-size:7px;font-family:var(--mono);color:var(--dim2);margin-top:2px">STATUS: <span style="color:var(--gr)">${tx.status.toUpperCase()}</span> · INDEX: ${tx.tx_index !== undefined ? tx.tx_index : idx}</div>` : ''}
+          ${tx.status || tx.tx_index !== undefined ? `<div style="font-size:7px;font-family:var(--mono);color:var(--dim2);margin-top:2px">STATUS: <span style="color:var(--gr)">${(tx.status || 'confirmed').toUpperCase()}</span> · INDEX: ${tx.tx_index !== undefined ? tx.tx_index : idx} · TIME: ${tx.timestamp ? new Date(tx.timestamp*1000).toLocaleString() : '?'}</div>` : ''}
         </div>
-        <div class="tx-amount" style="${isCoinbase ? 'color:var(--go)' : ''}">
-          ${fmtAmount(amount)}
+        <div class="tx-amount" style="color:${isCoinbase ? (isMinerReward?'#FF6B6B':'#4ECDC4') : 'var(--vi)'}">
+          +${amount} QTCL
         </div>
       </div>
       ${wProof ? `<div class="tx-proof"><span class="tx-proof-label">W-PROOF:</span> ${wProof}</div>` : ''}

@@ -73,7 +73,7 @@ def application(environ, start_response):
     # POST to /rpc - ACTUALLY PROCESS IT (was returning fake health for Checkly - breaking block submission!)
     if method == "POST" and path == "/rpc":
         # Pass through to real server to process the RPC call
-        logger.warning(f"[WSGI] POST /rpc - forwarding to full app for processing")
+        # logger.warning(f"[WSGI] POST /rpc - forwarding to full app for processing")
         if _full_app:
             return _full_app(environ, start_response)
 

@@ -4016,6 +4016,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "tx_count": int(row[9]) if row[9] else 0,
                         "mined": True,
                         "finalized": True,
+                        "transactions": [],
                     }
                     
                     # CRITICAL: Fetch ALL transactions for this block
@@ -4039,15 +4040,20 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                                 "from_addr": tr[1] or "",
                                 "to_addr": tr[2] or "",
                                 "amount": amount_val,
+                                "block_height": height,
                                 "tx_index": int(tr[6]) if tr[6] is not None else idx,
                                 "tx_type": tr[4] or "transfer",
                                 "status": tr[5] or "confirmed",
+                                "timestamp": int(row[2]) if row[2] else 0,
+                                "fee": 0.0,
                                 "w_proof": "",
                                 "metadata": None,
                             })
                     except Exception as _tx_sel_e:
                         logger.warning(f"[RPC-GETBLOCK] tx SELECT FAILED h={height}: {_tx_sel_e}")
                         txs = []
+                    
+                    block["transactions"] = txs
                     
                     block["transactions"] = txs
                     block["tx_count"] = len(txs)
@@ -6028,6 +6034,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             return _rpc_error(-32602, "Missing block_hash", rpc_id)
         if not miner_address:
             return _rpc_error(-32602, "Missing miner_address", rpc_id)
+        if not txs or not isinstance(txs, list):
+            return _rpc_error(-32602, "Block must include transactions array", rpc_id)
+        tx_types = [tx.get("tx_type","") for tx in txs]
+        if "miner_reward" not in tx_types or "treasury_reward" not in tx_types:
+            return _rpc_error(-32602, "Block must include miner_reward and treasury_reward transactions", rpc_id)
 
         # ══════════════════════════════════════════════════════════════════════════
         # COHERENT TRANSACTION PIPELINE — Validate Client Coinbases, Then Persist
