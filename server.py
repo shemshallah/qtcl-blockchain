@@ -7557,6 +7557,16 @@ logger.info("[HEALTH] ✅ /health and /ready endpoints mounted (immediate 200 OK
 
 
 # ═══ STATIC FILE & ROOT SERVING ═══
+@app.route("/favicon.png", methods=["GET"])
+def serve_favicon():
+    """Serve favicon.png from the repo root for browser tab icon display."""
+    import os
+    from flask import send_file
+    favicon_path = os.path.join(os.path.dirname(__file__), "favicon.png")
+    if os.path.exists(favicon_path):
+        return send_file(favicon_path, mimetype="image/png")
+    return "", 404
+
 @app.route("/", methods=["GET"])
 def serve_root():
     """GET / — Serve index.html as the dashboard."""
