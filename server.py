@@ -1633,24 +1633,20 @@ def _settle_block_rewards(
                 # This is the visible "coinbase" in the block explorer:
                 # block N+1 contains coinbase=0.8 QTCL from block N's treasury queue
                 _treas_tx_id = f"treasury_coinbase_{height - 1}_{_pr_recipient[:8]}"
+                cur.execute("SAVEPOINT sp_treas_tx")
                 try:
                     cur.execute(
                         """INSERT INTO transactions
                         (tx_hash, from_address, to_address, amount, tx_type, status,
                          height, block_hash, updated_at)
-                        VALUES (%s, %s, %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
+                        VALUES (%s, 'TREASURY', %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
                         ON CONFLICT (tx_hash) DO NOTHING""",
-                        (
-                            _treas_tx_id,
-                            "TREASURY",
-                            _pr_recipient,
-                            _pr_amount,  # base units
-                            height,
-                            block_hash,
-                        ),
+                        (_treas_tx_id, _pr_recipient, _pr_amount, height, block_hash),
                     )
+                    cur.execute("RELEASE SAVEPOINT sp_treas_tx")
                 except Exception as _ttx_e:
-                    _settle_log.debug(f"[SETTLE] treasury tx insert: {_ttx_e}")
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_treas_tx")
+                    _settle_log.warning(f"[SETTLE] treasury tx insert failed: {_ttx_e}")
                 _settle_log.info(
                     f"[SETTLE] ✅ CONFIRMED prior h={height - 1} treasury "
                     f"{_pr_recipient[:20]}… +{_pr_amount / 100:.2f} QTCL"
@@ -6051,6 +6047,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     tx_id = str(tx.get("tx_id") or tx.get("tx_hash", ""))
                     if not tx_id:
                         continue
+                    cur.execute("SAVEPOINT sp_tx")
                     try:
                         cur.execute(
                             """INSERT INTO transactions
@@ -6070,23 +6067,28 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             ),
                         )
                     except Exception as _tx_e:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_tx")
                         logger.debug(f"[SUBMIT-BLOCK] TX insert {tx_id[:16]}…: {_tx_e}")
 
                 # Server generates miner_reward tx (7.2 QTCL) for this block
                 _miner_tx_id = f"miner_reward_{height}_{miner_address[:8]}"
+                cur.execute("SAVEPOINT sp_miner_tx")
                 try:
                     cur.execute(
                         """INSERT INTO transactions
                         (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
                         VALUES (%s, 'BLOCK_REWARD', %s, %s, 'miner_reward', 'confirmed', %s, %s, NOW())
                         ON CONFLICT (tx_hash) DO NOTHING""",
-                        (_miner_tx_id, miner_address, _miner_reward, height, block_hash),  # base units (720 = 7.2 QTCL)
+                        (_miner_tx_id, miner_address, _miner_reward, height, block_hash),
                     )
+                    cur.execute("RELEASE SAVEPOINT sp_miner_tx")
                 except Exception as _mte:
-                    logger.debug(f"[SUBMIT-BLOCK] miner_reward tx insert: {_mte}")
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_miner_tx")
+                    logger.warning(f"[SUBMIT-BLOCK] miner_reward tx insert failed: {_mte}")
 
                 # Server generates coinbase tx (0.8 QTCL treasury from PRIOR block h-1)
                 # This IS the coinbase for this block — always from pending_rewards[height-1]
+                cur.execute("SAVEPOINT sp_coinbase")
                 try:
                     cur.execute(
                         "SELECT id, recipient, amount FROM pending_rewards WHERE height=%s AND status='pending'",
@@ -6101,7 +6103,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
                             VALUES (%s, 'TREASURY', %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
                             ON CONFLICT (tx_hash) DO NOTHING""",
-                            (_coinbase_tx_id, _pp_recipient, _pp_amount, height, block_hash),  # base units (80 = 0.8 QTCL)
+                            (_coinbase_tx_id, _pp_recipient, _pp_amount, height, block_hash),
                         )
                         cur.execute(
                             "INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated) "
@@ -6114,9 +6116,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             "UPDATE pending_rewards SET status='confirmed', confirmed_at_height=%s WHERE id=%s",
                             (height, _pp_id),
                         )
-                        logger.info(f"[SUBMIT-BLOCK] 🏛 COINBASE h={height}: treasury from h={height-1} +{_pp_amount/100:.2f} QTCL → {_pp_recipient[:20]}…")
+                        logger.info(f"[SUBMIT-BLOCK] COINBASE h={height}: treasury from h={height-1} +{_pp_amount/100:.2f} QTCL → {_pp_recipient[:20]}…")
+                    cur.execute("RELEASE SAVEPOINT sp_coinbase")
                 except Exception as _cbe:
-                    logger.warning(f"[SUBMIT-BLOCK] ⚠️  coinbase gen FAILED h={height}: {_cbe}")
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_coinbase")
+                    logger.warning(f"[SUBMIT-BLOCK] coinbase gen skipped h={height} (no prior pending or table missing): {_cbe}")
 
                 # Settle non-coinbase transactions atomically
                 for tx in _non_coinbase_txs:
