@@ -3402,6 +3402,41 @@ def _lazy_ensure_blocks():
                     f"[SCHEMA] 🌱 Genesis block auto-created: h=0  hash={genesis_hash[:16]}…"
                 )
 
+        # Create transactions table — canonical store for coinbase + transfer txs
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    tx_hash             VARCHAR(255) PRIMARY KEY,
+                    from_address        VARCHAR(255) NOT NULL DEFAULT '',
+                    to_address          VARCHAR(255) NOT NULL DEFAULT '',
+                    amount              NUMERIC(30,0) NOT NULL DEFAULT 0,
+                    tx_type             VARCHAR(64)  NOT NULL DEFAULT 'transfer',
+                    status              VARCHAR(32)  NOT NULL DEFAULT 'pending',
+                    height              BIGINT,
+                    block_hash          VARCHAR(255),
+                    transaction_index   INTEGER      DEFAULT 0,
+                    quantum_state_hash  VARCHAR(255),
+                    metadata            JSONB,
+                    updated_at          TIMESTAMPTZ  DEFAULT NOW(),
+                    created_at          TIMESTAMPTZ  DEFAULT NOW()
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tx_height ON transactions(height)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tx_from ON transactions(from_address)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tx_to ON transactions(to_address)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(tx_type)"
+            )
+            logger.info("[SCHEMA] ✅ transactions table ready")
+        except Exception as _tx_ddl_e:
+            logger.debug(f"[SCHEMA] transactions table creation: {_tx_ddl_e}")
+
         # Create quantum_field_distribution table with triggers for neighbor broadcast
         try:
             cur.execute("""
@@ -4017,29 +4052,32 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "finalized": True,
                     }
                     
-                    # Fetch transactions
-                    cur.execute("""
-                        SELECT tx_hash, from_address, to_address, amount,
-                               transaction_index, tx_type, status,
-                               quantum_state_hash, metadata
-                        FROM transactions
-                        WHERE height = %s
-                        ORDER BY transaction_index ASC
-                    """, (height,))
-                    tx_rows = cur.fetchall()
+                    # Fetch transactions — safe minimal SELECT (no optional cols)
+                    try:
+                        cur.execute("""
+                            SELECT tx_hash, from_address, to_address, amount,
+                                   tx_type, status
+                            FROM transactions
+                            WHERE height = %s
+                            ORDER BY created_at ASC, tx_hash ASC
+                        """, (height,))
+                        tx_rows = cur.fetchall()
+                    except Exception as _tx_sel_e:
+                        logger.warning(f"[RPC-GETBLOCK] tx SELECT failed h={height}: {_tx_sel_e}")
+                        tx_rows = []
                     txs = []
-                    for tr in tx_rows:
+                    for idx, tr in enumerate(tx_rows):
                         txs.append({
                             "tx_id": tr[0],
                             "tx_hash": tr[0],
                             "from_addr": tr[1] or "",
                             "to_addr": tr[2] or "",
                             "amount": float(tr[3]) if tr[3] is not None else 0.0,
-                            "tx_index": int(tr[4]) if tr[4] is not None else 0,
-                            "tx_type": tr[5] or "transfer",
-                            "status": tr[6] or "confirmed",
-                            "w_proof": tr[7] or "",
-                            "metadata": tr[8] if tr[8] else None,
+                            "tx_index": idx,
+                            "tx_type": tr[4] or "transfer",
+                            "status": tr[5] or "confirmed",
+                            "w_proof": "",
+                            "metadata": None,
                         })
                     block["transactions"] = txs
                     block["tx_count"] = len(txs)
