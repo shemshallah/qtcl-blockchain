@@ -1707,6 +1707,23 @@ def _settle_block_rewards(
             _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
 
         _settle_log.info(f"[SETTLE] ✅ Block h={height} settlement complete")
+        
+        # ── BROADCAST TO SSE SERVICE ──────────────────────────────────────
+        # After block is fully settled with all transactions, push to SSE clients
+        try:
+            block_event = {
+                "height": height,
+                "hash": block_hash,
+                "block_hash": block_hash,
+                "timestamp": int(time.time()),
+                "miner": miner_address,
+                "tx_count": len(txs or []),
+                "status": "confirmed"
+            }
+            _push_to_sse_service("/push/block", block_event)
+            _settle_log.debug(f"[SETTLE] 📡 SSE broadcast sent for h={height}")
+        except Exception as sse_err:
+            _settle_log.warning(f"[SETTLE] ⚠️  SSE broadcast failed (non-critical): {sse_err}")
 
     except Exception as settle_err:
         _settle_log.error(f"[SETTLE] ❌ h={height}: {settle_err}", exc_info=True)
@@ -4005,7 +4022,7 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
 def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlock — block by height or hash via Neon Postgres.
     
-    Direct DB query only, no SQLite fallback complexity.
+    ALWAYS includes transactions array (7.2 miner + 0.8 treasury coinbases)
     """
     try:
         height = None
@@ -4052,33 +4069,37 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "finalized": True,
                     }
                     
-                    # Fetch transactions — safe minimal SELECT (no optional cols)
+                    # CRITICAL: Fetch ALL transactions for this block
+                    txs = []
                     try:
                         cur.execute("""
                             SELECT tx_hash, from_address, to_address, amount,
-                                   tx_type, status
+                                   tx_type, status, transaction_index
                             FROM transactions
                             WHERE height = %s
-                            ORDER BY created_at ASC, tx_hash ASC
+                            ORDER BY transaction_index ASC, created_at ASC
                         """, (height,))
                         tx_rows = cur.fetchall()
+                        logger.debug(f"[RPC-GETBLOCK] h={height} found {len(tx_rows)} transactions")
+                        
+                        for idx, tr in enumerate(tx_rows):
+                            amount_val = float(tr[3]) if tr[3] is not None else 0.0
+                            txs.append({
+                                "tx_id": tr[0],
+                                "tx_hash": tr[0],
+                                "from_addr": tr[1] or "",
+                                "to_addr": tr[2] or "",
+                                "amount": amount_val,
+                                "tx_index": int(tr[6]) if tr[6] is not None else idx,
+                                "tx_type": tr[4] or "transfer",
+                                "status": tr[5] or "confirmed",
+                                "w_proof": "",
+                                "metadata": None,
+                            })
                     except Exception as _tx_sel_e:
-                        logger.warning(f"[RPC-GETBLOCK] tx SELECT failed h={height}: {_tx_sel_e}")
-                        tx_rows = []
-                    txs = []
-                    for idx, tr in enumerate(tx_rows):
-                        txs.append({
-                            "tx_id": tr[0],
-                            "tx_hash": tr[0],
-                            "from_addr": tr[1] or "",
-                            "to_addr": tr[2] or "",
-                            "amount": float(tr[3]) if tr[3] is not None else 0.0,
-                            "tx_index": idx,
-                            "tx_type": tr[4] or "transfer",
-                            "status": tr[5] or "confirmed",
-                            "w_proof": "",
-                            "metadata": None,
-                        })
+                        logger.warning(f"[RPC-GETBLOCK] tx SELECT FAILED h={height}: {_tx_sel_e}")
+                        txs = []
+                    
                     block["transactions"] = txs
                     block["tx_count"] = len(txs)
                     
@@ -4182,6 +4203,70 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
 
     except Exception as e:
         logger.exception(f"[RPC] _rpc_getBlockRange exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_getBlockTransactions(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getBlockTransactions — Get all transactions for a specific block.
+    
+    params: [height] or {height: int}
+    Returns: {height: int, tx_count: int, transactions: [...]}
+    
+    Displays both miner (7.2 QTCL) and treasury (0.8 QTCL) coinbase transactions.
+    """
+    try:
+        height = None
+        
+        if isinstance(params, list) and len(params) >= 1:
+            height = int(params[0])
+        elif isinstance(params, dict):
+            height = params.get("height")
+            if height is not None:
+                height = int(height)
+        
+        if height is None:
+            return _rpc_error(-32602, "height required (array or dict)", rpc_id)
+        
+        txs = []
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT tx_hash, from_address, to_address, amount,
+                           tx_type, status, transaction_index
+                    FROM transactions
+                    WHERE height = %s
+                    ORDER BY transaction_index ASC, created_at ASC
+                """, (height,))
+                tx_rows = cur.fetchall()
+                logger.info(f"[RPC-GETBLOCKTXNS] h={height}: {len(tx_rows)} transactions found")
+                
+                for idx, tr in enumerate(tx_rows):
+                    amount_val = float(tr[3]) if tr[3] is not None else 0.0
+                    txs.append({
+                        "tx_id": tr[0],
+                        "tx_hash": tr[0],
+                        "from_addr": tr[1] or "",
+                        "to_addr": tr[2] or "",
+                        "amount": amount_val,
+                        "tx_index": int(tr[6]) if tr[6] is not None else idx,
+                        "tx_type": tr[4] or "transfer",
+                        "status": tr[5] or "confirmed",
+                    })
+        except Exception as _txn_e:
+            logger.warning(f"[RPC-GETBLOCKTXNS] SELECT failed h={height}: {_txn_e}")
+            txs = []
+        
+        return _rpc_ok(
+            {
+                "height": height,
+                "tx_count": len(txs),
+                "transactions": txs,
+            },
+            rpc_id,
+        )
+    
+    except Exception as e:
+        logger.exception(f"[RPC] _rpc_getBlockTransactions exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
@@ -6143,6 +6228,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 block_hash,
                             ),
                         )
+                        cur.execute("RELEASE SAVEPOINT sp_tx")
+                        logger.info(f"[SUBMIT-BLOCK] TXN h={height}: {tx_id[:16]}… ({_tx_type}) confirmed")
                     except Exception as _tx_e:
                         cur.execute("ROLLBACK TO SAVEPOINT sp_tx")
                         logger.debug(f"[SUBMIT-BLOCK] TX insert {tx_id[:16]}…: {_tx_e}")
@@ -6159,9 +6246,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         (_miner_tx_id, miner_address, _miner_reward, height, block_hash),
                     )
                     cur.execute("RELEASE SAVEPOINT sp_miner_tx")
+                    logger.critical(f"[SUBMIT-BLOCK] ⛏️ MINER REWARD TX h={height}: {_miner_tx_id} → {miner_address[:16]}… amount={_miner_reward/100:.2f} QTCL")
                 except Exception as _mte:
                     cur.execute("ROLLBACK TO SAVEPOINT sp_miner_tx")
-                    logger.warning(f"[SUBMIT-BLOCK] miner_reward tx insert failed: {_mte}")
+                    logger.error(f"[SUBMIT-BLOCK] ❌ MINER REWARD INSERT FAILED h={height}: {_mte}")
 
                 # Ensure pending_rewards table exists before querying it
                 cur.execute("""
@@ -6190,13 +6278,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     for _pp in _prior_pending:
                         _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
                         _coinbase_tx_id = f"coinbase_{height}_{height - 1}_{_pp_recipient[:8]}"
-                        cur.execute(
-                            """INSERT INTO transactions
-                            (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
-                            VALUES (%s, 'TREASURY', %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
-                            ON CONFLICT (tx_hash) DO NOTHING""",
-                            (_coinbase_tx_id, _pp_recipient, _pp_amount, height, block_hash),
-                        )
+                        try:
+                            cur.execute(
+                                """INSERT INTO transactions
+                                (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
+                                VALUES (%s, 'TREASURY', %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
+                                ON CONFLICT (tx_hash) DO NOTHING""",
+                                (_coinbase_tx_id, _pp_recipient, _pp_amount, height, block_hash),
+                            )
+                            logger.critical(f"[SUBMIT-BLOCK] 🏛️ TREASURY COINBASE h={height}: {_coinbase_tx_id} → {_pp_recipient[:16]}… amount={_pp_amount/100:.2f} QTCL (from h={height-1})")
+                        except Exception as _tcbe:
+                            logger.error(f"[SUBMIT-BLOCK] ❌ TREASURY COINBASE INSERT FAILED h={height}: {_tcbe}")
+                            continue
                         cur.execute(
                             "INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated) "
                             "VALUES (%s,%s,%s,%s,1,'treasury',NOW()) ON CONFLICT (address) DO UPDATE SET "
@@ -6258,8 +6351,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         ON CONFLICT (height, reward_type, recipient) DO NOTHING""",
                         (height, _treasury_address, _treas_reward),
                     )
+                    logger.critical(f"[SUBMIT-BLOCK] ⏳ TREASURY QUEUED h={height}: {_treas_reward/100:.2f} QTCL → {_treasury_address[:16]}… (coinbase at h={height+1})")
                 except Exception as _pre:
-                    logger.debug(f"[SUBMIT-BLOCK] pending_rewards insert: {_pre}")
+                    logger.error(f"[SUBMIT-BLOCK] ❌ TREASURY QUEUEING FAILED h={height}: {_pre}")
 
                 logger.info(
                     f"[SUBMIT-BLOCK] REWARDS h={height}: miner=+{_miner_reward/100:.2f} QTCL (now), treasury={_treas_reward/100:.2f} QTCL queued (coinbase at h={height+1})"
@@ -6810,6 +6904,7 @@ _RPC_METHODS: Dict[str, Any] = {
     # DEPRECATED: qtcl_pushOracleDM (replaced by SSE stream /rpc/oracle/snapshot for 16³ tensors)
     # "qtcl_pushOracleDM": _rpc_pushOracleDM,
     # ── NEW: Transaction Explorer ─────────────────────────────────────────────────
+    "qtcl_getBlockTransactions": _rpc_getBlockTransactions,
     "qtcl_getTransactions": _rpc_getTransactions,
     # P2P DHT methods
     "qtcl_getDHTTable": _p2p_rpc_get_dht_table,

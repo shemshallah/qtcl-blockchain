@@ -1348,6 +1348,54 @@ async function init() {
 
 init();
 
+// ═══ SSE BLOCK STREAM LISTENER ═══════════════════════════════════════════════════
+// Real-time block events: when a new block is confirmed, immediately refresh display
+function startBlockSSEListener() {
+  try {
+    const sseUrl = `${RPC.replace('/rpc', '')}/rpc/events/blocks`;
+    const blockSSE = new EventSource(sseUrl);
+    
+    blockSSE.addEventListener('message', async (event) => {
+      try {
+        const blockEvent = JSON.parse(event.data);
+        console.log(`[SSE-BLOCK] 📦 NEW BLOCK h=${blockEvent.height} txs=${blockEvent.tx_count}`);
+        
+        // Immediately refresh chain view and stats
+        await fetchChain();
+        await fetchStats();
+        
+        // If this block's detail is visible, refresh it too
+        if (_selectedHeight === blockEvent.height) {
+          try {
+            const block = await rpc('qtcl_getBlock', [blockEvent.height]);
+            if (block) {
+              const detailScroll = document.getElementById('detail-scroll');
+              if (detailScroll.style.display !== 'none') renderBlockDetail(block, detailScroll);
+            }
+          } catch(e) {
+            console.debug(`[SSE-BLOCK] Detail refresh failed: ${e.message}`);
+          }
+        }
+      } catch(parseErr) {
+        console.debug(`[SSE-BLOCK] Parse error: ${parseErr}`);
+      }
+    });
+    
+    blockSSE.addEventListener('error', (err) => {
+      console.warn(`[SSE-BLOCK] Connection error, will retry in 3s...`);
+      blockSSE.close();
+      setTimeout(() => startBlockSSEListener(), 3000);
+    });
+    
+    console.log(`[SSE-BLOCK] 🔗 Connected to block stream: ${sseUrl}`);
+  } catch(e) {
+    console.warn(`[SSE-BLOCK] Setup failed: ${e.message}, will retry in 5s`);
+    setTimeout(() => startBlockSSEListener(), 5000);
+  }
+}
+
+startBlockSSEListener();
+
 // Auto-refresh chain every 8s
 setInterval(async () => {
   await fetchChain();
