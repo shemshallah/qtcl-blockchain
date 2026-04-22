@@ -1850,21 +1850,75 @@ class QuantumTemporalCoherenceLedgerServer:
             logger.info(f"{CLR.OK}[DB] SQLite opened in WAL mode{CLR.E}")
 
     def drop_all_tables(self):
-        logger.info(f"{CLR.ERROR}[DROP] Dropping ALL existing tables...{CLR.E}")
+        logger.info(f"{CLR.ERROR}[DROP] Dropping ALL existing tables, functions, triggers, roles...{CLR.E}")
         try:
             if self.db_mode == "postgres":
+                # Drop triggers first (explicitly)
+                self.cursor.execute("""
+                    SELECT trigger_name, event_object_table 
+                    FROM information_schema.triggers 
+                    WHERE trigger_schema = 'public'
+                """)
+                triggers = self.cursor.fetchall()
+                for trig_name, tbl_name in triggers:
+                    try:
+                        self.cursor.execute(f"DROP TRIGGER IF EXISTS {trig_name} ON {tbl_name} CASCADE;")
+                    except:
+                        pass
+                
+                # Drop functions
+                self.cursor.execute("""
+                    SELECT routine_name FROM information_schema.routines 
+                    WHERE routine_schema = 'public' AND routine_type = 'FUNCTION'
+                """)
+                functions = [r[0] for r in self.cursor.fetchall()]
+                for fname in functions:
+                    try:
+                        self.cursor.execute(f"DROP FUNCTION IF EXISTS {fname}() CASCADE;")
+                    except:
+                        try:
+                            self.cursor.execute(f"DROP FUNCTION IF EXISTS {fname} CASCADE;")
+                        except:
+                            pass
+                
+                # Drop roles (except superuser/system)
+                self.cursor.execute("""
+                    SELECT rolname FROM pg_roles 
+                    WHERE rolname NOT IN ('postgres', 'pg_database_owner')
+                """)
+                roles = [r[0] for r in self.cursor.fetchall()]
+                for rname in roles:
+                    try:
+                        self.cursor.execute(f"DROP ROLE IF EXISTS {rname};")
+                    except:
+                        pass
+                
+                self._commit()
+                
+                # NOW drop tables
                 self.cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public';")
                 tables = [r[0] for r in self.cursor.fetchall()]
                 for tname in tables:
                     self.cursor.execute(f"DROP TABLE IF EXISTS {tname} CASCADE;")
                     self._commit()
             else:
+                # SQLite: just drop all tables
                 self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
                 tables = [r[0] for r in self.cursor.fetchall()]
                 for tname in tables:
                     self.cursor.execute(f"DROP TABLE IF EXISTS {tname};")
+                    
+                # Drop all triggers
+                self.cursor.execute("SELECT name FROM sqlite_master WHERE type='trigger';")
+                triggers = [r[0] for r in self.cursor.fetchall()]
+                for trig in triggers:
+                    try:
+                        self.cursor.execute(f"DROP TRIGGER IF EXISTS {trig};")
+                    except:
+                        pass
+            
             self._commit()
-            logger.info(f"{CLR.OK}[DROP] {len(tables)} tables dropped{CLR.E}")
+            logger.info(f"{CLR.OK}[DROP] ✓ ALL tables, triggers, functions, roles dropped{CLR.E}")
         except Exception as e:
             logger.error(f"{CLR.ERROR}[DROP] Failed: {e}{CLR.E}")
             self.conn.rollback()
@@ -4614,15 +4668,21 @@ For more information, see the documentation in docs/:
     builder = QuantumTemporalCoherenceLedgerServer(
         tessellation_depth=args.tessellation_depth
     )
-    logger.warning(f"{CLR.ERROR}[REBUILD] DESTRUCTIVE OPERATION — DROPPING ALL TABLES{CLR.E}")
+    
+    # ALWAYS do a complete wipe and rebuild
+    logger.warning(f"{CLR.ERROR}[REBUILD] ⚠️  DESTRUCTIVE OPERATION — COMPLETE WIPE AND REBUILD{CLR.E}")
+    logger.warning(f"{CLR.ERROR}[REBUILD] Dropping ALL tables, functions, triggers, roles...{CLR.E}")
     builder.rebuild_complete()
+    logger.warning(f"{CLR.OK}[REBUILD] ✓ Database completely wiped and rebuilt from scratch{CLR.E}")
 
     # Then apply security
+    logger.warning(f"{CLR.ERROR}[SECURITY] Applying comprehensive security...{CLR.E}")
     sm = QTCLSecurityManager()
     sm.comprehensive_security_setup(args.password)
 
     logger.info(f"\n{CLR.HEADER}{'='*80}{CLR.E}")
     logger.info(f"{CLR.OK}✓ GENESIS COMPLETE — DATABASE RESET TO ZERO{CLR.E}")
+    logger.info(f"{CLR.OK}✓ All tables, functions, triggers dropped and recreated{CLR.E}")
     logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}\n")
 
 
