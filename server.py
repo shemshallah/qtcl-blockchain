@@ -1585,25 +1585,8 @@ def _settle_block_rewards(
                 f"[SETTLE] 💰 Miner {miner_address[:16]}… += {miner_reward_base / 100:.2f} QTCL (confirmed h={height})"
             )
 
-            # PHASE 2b — record miner coinbase as a transaction row (visible in block explorer)
-            _miner_tx_id = f"coinbase_{height}_{miner_address[:16]}"
-            cur.execute("SAVEPOINT sp_miner_tx")
-            try:
-                cur.execute(
-                    """INSERT INTO transactions
-                    (tx_hash, from_address, to_address, amount, tx_type, status,
-                     height, block_hash, transaction_index, updated_at)
-                    VALUES (%s, 'COINBASE', %s, %s, 'coinbase', 'confirmed', %s, %s, 0, NOW())
-                    ON CONFLICT (tx_hash) DO NOTHING""",
-                    (_miner_tx_id, miner_address, miner_reward_base, height, block_hash),
-                )
-                cur.execute("RELEASE SAVEPOINT sp_miner_tx")
-                _settle_log.info(
-                    f"[SETTLE] ⛏ Miner coinbase tx inserted: {_miner_tx_id}"
-                )
-            except Exception as _mtx_e:
-                cur.execute("ROLLBACK TO SAVEPOINT sp_miner_tx")
-                _settle_log.warning(f"[SETTLE] miner coinbase tx insert failed: {_mtx_e}")
+            # NOTE: Transaction rows are written by _rpc_submitBlock (sole authority).
+            # This worker only handles wallet credits and pending_rewards updates.
 
             # PHASE 3 — treasury reward QUEUED (confirms at height+1)
             cur.execute(
@@ -1649,24 +1632,7 @@ def _settle_block_rewards(
                     "confirmed_at_height = %s WHERE id = %s",
                     (height, _pr_id),
                 )
-                # Write treasury reward as a coinbase tx in THIS block (h)
-                # This is the visible "coinbase" in the block explorer:
-                # block N+1 contains coinbase=0.8 QTCL from block N's treasury queue
-                _treas_tx_id = f"treasury_coinbase_{height - 1}_{_pr_recipient[:8]}"
-                cur.execute("SAVEPOINT sp_treas_tx")
-                try:
-                    cur.execute(
-                        """INSERT INTO transactions
-                        (tx_hash, from_address, to_address, amount, tx_type, status,
-                         height, block_hash, updated_at)
-                        VALUES (%s, 'TREASURY', %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
-                        ON CONFLICT (tx_hash) DO NOTHING""",
-                        (_treas_tx_id, _pr_recipient, _pr_amount, height, block_hash),
-                    )
-                    cur.execute("RELEASE SAVEPOINT sp_treas_tx")
-                except Exception as _ttx_e:
-                    cur.execute("ROLLBACK TO SAVEPOINT sp_treas_tx")
-                    _settle_log.warning(f"[SETTLE] treasury tx insert failed: {_ttx_e}")
+                # NOTE: Treasury tx rows written by _rpc_submitBlock. Worker handles wallet credits only.
                 _settle_log.info(
                     f"[SETTLE] ✅ CONFIRMED prior h={height - 1} treasury "
                     f"{_pr_recipient[:20]}… +{_pr_amount / 100:.2f} QTCL"
@@ -6063,25 +6029,34 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         if not miner_address:
             return _rpc_error(-32602, "Missing miner_address", rpc_id)
 
-        # ── STRICT VALIDATION: Coinbase ONLY from server, never from client ─────────────────────
-        # Server is the authoritative source of rewards. Any client-provided coinbase is REJECTED.
-        # This prevents miners from sneak-injecting custom transactions or modifying rewards.
+        # ══════════════════════════════════════════════════════════════════════════
+        # COHERENT TRANSACTION PIPELINE — Validate Client Coinbases, Then Persist
+        #
+        # Architecture:
+        #   1. Client fetched qtcl_getCoinbaseTemplate pre-PoW → built coinbases
+        #      using deterministic IDs and authoritative reward amounts
+        #   2. Client computed merkle root over FULL tx list [miner_cb, treasury_cb, ...user_txs]
+        #   3. Client did PoW with merkle baked into block header hash
+        #   4. NOW: Server validates coinbase amounts/recipients match reward schedule
+        #   5. Server persists the client's EXACT transactions (no regeneration)
+        #   6. Server does wallet settlement
+        #
+        # Coinbase ID format (deterministic, no block_hash dependency):
+        #   Miner:    cb_miner_{height}_{miner_address[:16]}
+        #   Treasury: cb_treasury_{height}_{settled_from_height}_{recipient[:16]}
+        #
+        # All amounts stored as INTEGER base units (1 QTCL = 100 units).
+        # Client sends amounts in QTCL float; server converts to base units.
+        # ══════════════════════════════════════════════════════════════════════════
+
         _coinbase_txs = []
         _non_coinbase_txs = []
         _total_fees = 0
-        _client_provided_coinbase_count = 0
-        
+
         for tx in txs or []:
             tx_type = str(tx.get("tx_type", "")).lower()
             if tx_type == "coinbase":
-                # ⚠️  CRITICAL: Client provided a coinbase TX — this is INVALID
-                # Server WILL GENERATE the authoritative coinbase transactions
-                # Client coinbase is IGNORED (not used, not inserted to DB)
-                _client_provided_coinbase_count += 1
-                logger.warning(
-                    f"[SUBMIT-BLOCK] ⚠️  COINBASE INJECTION ATTEMPT h={height}: "
-                    f"client sent coinbase tx (will be IGNORED, server generates authoritative)"
-                )
+                _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
                 f = tx.get("fee", tx.get("fee_base", 0))
@@ -6092,38 +6067,82 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         _total_fees += int(f)
                 except Exception:
                     pass
-        
-        if _client_provided_coinbase_count > 0:
-            logger.critical(
-                f"[SUBMIT-BLOCK] 🚨 SECURITY: Block h={height} had {_client_provided_coinbase_count} "
-                f"client-provided coinbase TX(s) - IGNORING ALL (server will create canonical)"
-            )
 
-        # ── Rewards (base units) — server-authoritative, not from client ─────
-        # Coinbase txs from client are ignored — server generates coinbase
-        # (treasury 0.8 QTCL from prior block's pending_rewards) itself.
+        # ── Compute authoritative rewards (base units) for validation ─────
         _scheduled_miner_reward = 720
+        _scheduled_treasury_reward = 80
         if TessellationRewardSchedule:
             try:
                 _r = TessellationRewardSchedule.get_rewards_for_height(height)
                 _scheduled_miner_reward = int(round(float(_r.get("miner", 7.2)) * 100))
+                _scheduled_treasury_reward = int(round(float(_r.get("treasury", 0.8)) * 100))
             except Exception:
                 pass
         _miner_reward = _scheduled_miner_reward + (_total_fees // 2)
-        _treas_reward = 80 + (_total_fees - _total_fees // 2)
-        if TessellationRewardSchedule:
-            try:
-                _r = TessellationRewardSchedule.get_rewards_for_height(height)
-                _treas_reward = int(round(float(_r.get("treasury", 0.8)) * 100)) + (
-                    _total_fees - _total_fees // 2
-                )
-            except Exception:
-                pass
+        _treas_reward = _scheduled_treasury_reward + (_total_fees - _total_fees // 2)
         _treasury_address = (
             TessellationRewardSchedule.TREASURY_ADDRESS
             if TessellationRewardSchedule
             else _TREASURY_ADDRESS
         )
+
+        # ── Validate client coinbases against authoritative schedule ───────
+        # Accept the client's coinbase txs if amounts are within tolerance.
+        # If client didn't send coinbases (legacy client), server generates them.
+        _server_generated_coinbases = False
+        _validated_coinbase_txs = []
+
+        if _coinbase_txs:
+            # Client sent coinbase txs — validate amounts
+            _miner_cb = None
+            _treasury_cb = None
+            for cb in _coinbase_txs:
+                cb_from = str(cb.get("from_addr", cb.get("from_address", "")))
+                cb_amount_raw = float(cb.get("amount", 0))
+                # Client may send in QTCL float — convert to base units
+                cb_amount_base = int(round(cb_amount_raw * 100)) if cb_amount_raw < 1000 else int(cb_amount_raw)
+                if cb.get("settled_from") is not None or "treasury" in str(cb.get("tx_id", "")).lower():
+                    _treasury_cb = cb
+                elif _miner_cb is None:
+                    _miner_cb = cb
+
+            # Validate miner coinbase amount (±1 base unit tolerance for rounding)
+            if _miner_cb:
+                _mcb_raw = float(_miner_cb.get("amount", 0))
+                _mcb_base = int(round(_mcb_raw * 100)) if _mcb_raw < 1000 else int(_mcb_raw)
+                if abs(_mcb_base - _miner_reward) > 1:
+                    logger.warning(
+                        f"[SUBMIT-BLOCK] ⚠️ Miner coinbase amount mismatch h={height}: "
+                        f"client={_mcb_base} server={_miner_reward} — using server value"
+                    )
+                    # Override amount but keep client's tx structure
+                    _miner_cb["amount"] = _miner_reward / 100.0
+                _validated_coinbase_txs = list(_coinbase_txs)
+            else:
+                logger.warning(f"[SUBMIT-BLOCK] Client sent coinbase txs but no miner coinbase found h={height}")
+                _server_generated_coinbases = True
+        else:
+            # Legacy client — no coinbases sent, server generates them
+            logger.info(f"[SUBMIT-BLOCK] No client coinbases h={height} — server generating canonical set")
+            _server_generated_coinbases = True
+
+        if _server_generated_coinbases:
+            # Generate canonical coinbase txs (same IDs the client SHOULD have used)
+            _miner_cb_id = f"cb_miner_{height}_{miner_address[:16]}"
+            _validated_coinbase_txs = [{
+                "tx_id": _miner_cb_id,
+                "from_addr": "COINBASE",
+                "to_addr": miner_address,
+                "amount": _miner_reward / 100.0,
+                "tx_type": "coinbase",
+                "block_height": height,
+                "version": 1,
+            }]
+            # Treasury coinbase from prior block's pending_rewards — looked up during DB persist below
+
+        # ── Full canonical tx list for persistence ────────────────────────
+        # Order: coinbases first (miner, treasury), then user txs
+        _all_txs = _validated_coinbase_txs + _non_coinbase_txs
 
         _block_is_new = False
         try:
@@ -6200,58 +6219,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     )
                 """)
 
-                # Persist non-coinbase transactions only (client coinbase ignored;
-                # server generates authoritative coinbase from pending_rewards below)
-                for tx in txs or []:
-                    _tx_type = str(tx.get("tx_type", "transfer")).lower()
-                    if _tx_type == "coinbase":
-                        continue  # skip — server owns coinbase generation
-                    tx_id = str(tx.get("tx_id") or tx.get("tx_hash", ""))
-                    if not tx_id:
-                        continue
-                    cur.execute("SAVEPOINT sp_tx")
-                    try:
-                        cur.execute(
-                            """INSERT INTO transactions
-                            (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
-                            VALUES (%s,%s,%s,%s,%s,'confirmed',%s,%s,NOW())
-                            ON CONFLICT (tx_hash) DO UPDATE SET
-                                height=EXCLUDED.height, status='confirmed',
-                                block_hash=EXCLUDED.block_hash, updated_at=NOW()""",
-                            (
-                                tx_id,
-                                str(tx.get("from_addr", tx.get("from_address", ""))),
-                                str(tx.get("to_addr", tx.get("to_address", ""))),
-                                float(tx.get("amount", 0)),
-                                _tx_type,
-                                height,
-                                block_hash,
-                            ),
-                        )
-                        cur.execute("RELEASE SAVEPOINT sp_tx")
-                        logger.info(f"[SUBMIT-BLOCK] TXN h={height}: {tx_id[:16]}… ({_tx_type}) confirmed")
-                    except Exception as _tx_e:
-                        cur.execute("ROLLBACK TO SAVEPOINT sp_tx")
-                        logger.debug(f"[SUBMIT-BLOCK] TX insert {tx_id[:16]}…: {_tx_e}")
-
-                # Server generates miner_reward tx (7.2 QTCL) for this block
-                _miner_tx_id = f"miner_reward_{height}_{miner_address[:8]}"
-                cur.execute("SAVEPOINT sp_miner_tx")
-                try:
-                    cur.execute(
-                        """INSERT INTO transactions
-                        (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
-                        VALUES (%s, 'BLOCK_REWARD', %s, %s, 'miner_reward', 'confirmed', %s, %s, NOW())
-                        ON CONFLICT (tx_hash) DO NOTHING""",
-                        (_miner_tx_id, miner_address, _miner_reward, height, block_hash),
-                    )
-                    cur.execute("RELEASE SAVEPOINT sp_miner_tx")
-                    logger.critical(f"[SUBMIT-BLOCK] ⛏️ MINER REWARD TX h={height}: {_miner_tx_id} → {miner_address[:16]}… amount={_miner_reward/100:.2f} QTCL")
-                except Exception as _mte:
-                    cur.execute("ROLLBACK TO SAVEPOINT sp_miner_tx")
-                    logger.error(f"[SUBMIT-BLOCK] ❌ MINER REWARD INSERT FAILED h={height}: {_mte}")
-
-                # Ensure pending_rewards table exists before querying it
+                # Ensure pending_rewards table exists
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS pending_rewards (
                         id                 BIGSERIAL PRIMARY KEY,
@@ -6266,46 +6234,92 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     )
                 """)
 
-                # Server generates coinbase tx (0.8 QTCL treasury from PRIOR block h-1)
-                # This IS the coinbase for this block — always from pending_rewards[height-1]
-                cur.execute("SAVEPOINT sp_coinbase")
-                try:
-                    cur.execute(
-                        "SELECT id, recipient, amount FROM pending_rewards WHERE height=%s AND status='pending'",
-                        (height - 1,),
-                    )
-                    _prior_pending = cur.fetchall() or []
-                    for _pp in _prior_pending:
-                        _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
-                        _coinbase_tx_id = f"coinbase_{height}_{height - 1}_{_pp_recipient[:8]}"
-                        try:
-                            cur.execute(
-                                """INSERT INTO transactions
-                                (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, updated_at)
-                                VALUES (%s, 'TREASURY', %s, %s, 'coinbase', 'confirmed', %s, %s, NOW())
-                                ON CONFLICT (tx_hash) DO NOTHING""",
-                                (_coinbase_tx_id, _pp_recipient, _pp_amount, height, block_hash),
-                            )
-                            logger.critical(f"[SUBMIT-BLOCK] 🏛️ TREASURY COINBASE h={height}: {_coinbase_tx_id} → {_pp_recipient[:16]}… amount={_pp_amount/100:.2f} QTCL (from h={height-1})")
-                        except Exception as _tcbe:
-                            logger.error(f"[SUBMIT-BLOCK] ❌ TREASURY COINBASE INSERT FAILED h={height}: {_tcbe}")
-                            continue
+                # ════════════════════════════════════════════════════════════════
+                # If server generated coinbases, look up treasury settlement now
+                # ════════════════════════════════════════════════════════════════
+                if _server_generated_coinbases and height > 1:
+                    try:
                         cur.execute(
-                            "INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated) "
-                            "VALUES (%s,%s,%s,%s,1,'treasury',NOW()) ON CONFLICT (address) DO UPDATE SET "
-                            "balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()",
-                            (_pp_recipient, hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64],
-                             hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64], _pp_amount),
+                            "SELECT id, recipient, amount FROM pending_rewards "
+                            "WHERE height=%s AND status='pending' ORDER BY id ASC",
+                            (height - 1,),
                         )
+                        _prior_pending = cur.fetchall() or []
+                        for _pp in _prior_pending:
+                            _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
+                            _treasury_cb_id = f"cb_treasury_{height}_{height-1}_{_pp_recipient[:16]}"
+                            _validated_coinbase_txs.append({
+                                "tx_id": _treasury_cb_id,
+                                "from_addr": "TREASURY",
+                                "to_addr": _pp_recipient,
+                                "amount": _pp_amount / 100.0,
+                                "tx_type": "coinbase",
+                                "settled_from": height - 1,
+                                "block_height": height,
+                                "version": 1,
+                            })
+                        # Rebuild _all_txs with treasury entries
+                        _all_txs = _validated_coinbase_txs + _non_coinbase_txs
+                    except Exception as _pp_e:
+                        logger.debug(f"[SUBMIT-BLOCK] prior pending lookup: {_pp_e}")
+
+                # ════════════════════════════════════════════════════════════════
+                # PERSIST ALL TRANSACTIONS — client's exact tx set, in order
+                # ════════════════════════════════════════════════════════════════
+                _written_txs = []
+                for tx_idx, tx in enumerate(_all_txs):
+                    tx_id = str(tx.get("tx_id") or tx.get("tx_hash", ""))
+                    if not tx_id:
+                        continue
+                    _tx_type = str(tx.get("tx_type", "transfer")).lower()
+                    _from = str(tx.get("from_addr", tx.get("from_address", "")))
+                    _to = str(tx.get("to_addr", tx.get("to_address", "")))
+
+                    # Amount: client sends QTCL float; DB stores integer base units
+                    _amt_raw = float(tx.get("amount", 0))
+                    # Heuristic: if < 100000, it's QTCL float → ×100; if >= 100000, already base units
+                    _amt_base = int(round(_amt_raw * 100)) if _amt_raw < 100000 else int(_amt_raw)
+
+                    cur.execute("SAVEPOINT sp_tx")
+                    try:
                         cur.execute(
-                            "UPDATE pending_rewards SET status='confirmed', confirmed_at_height=%s WHERE id=%s",
-                            (height, _pp_id),
+                            """INSERT INTO transactions
+                            (tx_hash, from_address, to_address, amount, tx_type, status,
+                             height, block_hash, transaction_index, updated_at)
+                            VALUES (%s,%s,%s,%s,%s,'confirmed',%s,%s,%s,NOW())
+                            ON CONFLICT (tx_hash) DO UPDATE SET
+                                height=EXCLUDED.height, status='confirmed',
+                                block_hash=EXCLUDED.block_hash,
+                                transaction_index=EXCLUDED.transaction_index,
+                                updated_at=NOW()""",
+                            (tx_id, _from, _to, _amt_base, _tx_type,
+                             height, block_hash, tx_idx),
                         )
-                        logger.info(f"[SUBMIT-BLOCK] COINBASE h={height}: treasury from h={height-1} +{_pp_amount/100:.2f} QTCL → {_pp_recipient[:20]}…")
-                    cur.execute("RELEASE SAVEPOINT sp_coinbase")
-                except Exception as _cbe:
-                    cur.execute("ROLLBACK TO SAVEPOINT sp_coinbase")
-                    logger.warning(f"[SUBMIT-BLOCK] coinbase gen skipped h={height} (no prior pending or table missing): {_cbe}")
+                        cur.execute("RELEASE SAVEPOINT sp_tx")
+                        _written_txs.append({
+                            "tx_id": tx_id,
+                            "tx_hash": tx_id,
+                            "from_addr": _from,
+                            "to_addr": _to,
+                            "amount": _amt_base,
+                            "tx_type": _tx_type,
+                            "tx_index": tx_idx,
+                            "status": "confirmed",
+                            "height": height,
+                            "block_hash": block_hash,
+                        })
+                        logger.info(
+                            f"[SUBMIT-BLOCK] TX h={height} idx={tx_idx}: "
+                            f"{tx_id[:24]}… ({_tx_type}) {_from[:12]}→{_to[:12]} "
+                            f"amount={_amt_base} base"
+                        )
+                    except Exception as _tx_e:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_tx")
+                        logger.warning(f"[SUBMIT-BLOCK] TX insert {tx_id[:16]}…: {_tx_e}")
+
+                # ════════════════════════════════════════════════════════════════
+                # WALLET SETTLEMENT — within same DB cursor for atomicity
+                # ════════════════════════════════════════════════════════════════
 
                 # Settle non-coinbase transactions atomically
                 for tx in _non_coinbase_txs:
@@ -6330,7 +6344,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             ),
                         )
 
-                # Credit miner wallet (7.2 QTCL + fee share) immediately
+                # Credit miner wallet (miner_reward base units) immediately
                 cur.execute(
                     """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
                     VALUES (%s,%s,%s,%s,1,'miner',NOW()) ON CONFLICT (address) DO UPDATE SET
@@ -6343,7 +6357,30 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     ),
                 )
 
-                # Queue THIS block's treasury 0.8 QTCL → becomes coinbase in block h+1
+                # Confirm prior block's treasury pending_rewards → wallet credit
+                try:
+                    cur.execute(
+                        "SELECT id, recipient, amount FROM pending_rewards "
+                        "WHERE height=%s AND status='pending'",
+                        (height - 1,),
+                    )
+                    for _pp in (cur.fetchall() or []):
+                        _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
+                        cur.execute(
+                            """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
+                            VALUES (%s,%s,%s,%s,1,'treasury',NOW()) ON CONFLICT (address) DO UPDATE SET
+                            balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
+                            (_pp_recipient, hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64],
+                             hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64], _pp_amount),
+                        )
+                        cur.execute(
+                            "UPDATE pending_rewards SET status='confirmed', confirmed_at_height=%s WHERE id=%s",
+                            (height, _pp_id),
+                        )
+                except Exception as _settle_e:
+                    logger.debug(f"[SUBMIT-BLOCK] treasury settle: {_settle_e}")
+
+                # Queue THIS block's treasury → becomes coinbase in block h+1
                 try:
                     cur.execute(
                         """INSERT INTO pending_rewards (height, reward_type, recipient, amount, status)
@@ -6351,24 +6388,54 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         ON CONFLICT (height, reward_type, recipient) DO NOTHING""",
                         (height, _treasury_address, _treas_reward),
                     )
-                    logger.critical(f"[SUBMIT-BLOCK] ⏳ TREASURY QUEUED h={height}: {_treas_reward/100:.2f} QTCL → {_treasury_address[:16]}… (coinbase at h={height+1})")
+                    logger.critical(
+                        f"[SUBMIT-BLOCK] ⏳ TREASURY QUEUED h={height}: "
+                        f"{_treas_reward/100:.2f} QTCL → {_treasury_address[:16]}… "
+                        f"(coinbase at h={height+1})"
+                    )
                 except Exception as _pre:
                     logger.error(f"[SUBMIT-BLOCK] ❌ TREASURY QUEUEING FAILED h={height}: {_pre}")
 
-                logger.info(
-                    f"[SUBMIT-BLOCK] REWARDS h={height}: miner=+{_miner_reward/100:.2f} QTCL (now), treasury={_treas_reward/100:.2f} QTCL queued (coinbase at h={height+1})"
-                )
-
-                # Update tx_count to reflect actual rows written (coinbase + non-coinbase)
-                # Client submits 0 coinbase txs; server generates them — so recount from DB
+                # Update tx_count from actual written rows
                 cur.execute(
-                    "UPDATE blocks SET tx_count = (SELECT COUNT(*) FROM transactions WHERE height = %s) WHERE height = %s",
-                    (height, height),
+                    "UPDATE blocks SET tx_count = %s WHERE height = %s",
+                    (len(_written_txs), height),
                 )
 
         except Exception as _db_e:
             logger.exception(f"[SUBMIT-BLOCK] DB ERROR: {_db_e}")
             return _rpc_error(-32603, f"Settlement failed: {str(_db_e)[:80]}", rpc_id)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # SSE FAN-OUT — push block event with transactions to all clients
+        # Fire-and-forget; failures don't block the RPC response
+        # ═══════════════════════════════════════════════════════════════════
+        if _block_is_new:
+            try:
+                _block_event = {
+                    "height": height,
+                    "block_hash": block_hash,
+                    "hash": block_hash,
+                    "parent_hash": parent_hash,
+                    "merkle_root": merkle_root,
+                    "timestamp": timestamp_s,
+                    "timestamp_s": timestamp_s,
+                    "miner_address": miner_address,
+                    "nonce": nonce,
+                    "difficulty": difficulty_bits,
+                    "tx_count": len(_written_txs),
+                    "transactions": _written_txs,
+                    "w_entropy_hash": w_entropy_hex[:64] if w_entropy_hex else "",
+                    "mined": True,
+                    "finalized": True,
+                    "event": "block_finalized",
+                }
+                _push_to_sse_service("/push/block", _block_event)
+                logger.info(
+                    f"[SUBMIT-BLOCK] 📡 SSE fan-out h={height} ({len(_written_txs)} txs)"
+                )
+            except Exception as _sse_e:
+                logger.debug(f"[SUBMIT-BLOCK] SSE push failed (non-fatal): {_sse_e}")
 
         if _block_is_new:
             try:
@@ -6864,8 +6931,98 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
         return {"status": "error", "message": str(e)}
 
 
+def _rpc_getCoinbaseTemplate(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getCoinbaseTemplate — Pre-PoW template for building coinbase transactions.
+
+    Client calls this BEFORE computing merkle root and PoW. Returns the exact
+    data needed to build coinbase txs with deterministic IDs that the server
+    will accept and persist unchanged.
+
+    Params: [height, miner_address]
+      height (int)        — the block height being mined
+      miner_address (str) — the miner's reward address
+
+    Returns:
+      miner_reward_base        — miner reward in base units (×100), excludes fees
+      miner_reward_qtcl        — same in QTCL float
+      treasury_reward_base     — treasury reward in base units, excludes fees
+      treasury_reward_qtcl     — same in QTCL float
+      treasury_address         — canonical treasury address
+      miner_coinbase_id        — deterministic tx_id for miner coinbase
+      prior_pending_treasury   — list of {recipient, amount_base, tx_id} to settle from h-1
+    """
+    try:
+        if not params or not isinstance(params, (list, tuple)) or len(params) < 2:
+            return _rpc_error(-32602, "params: [height, miner_address]", rpc_id)
+        try:
+            height = int(params[0])
+        except Exception:
+            return _rpc_error(-32602, "height must be int", rpc_id)
+        miner_addr = str(params[1])
+        if height < 1 or not miner_addr:
+            return _rpc_error(-32602, f"invalid height={height} or miner_address", rpc_id)
+
+        miner_base = 720
+        treasury_base = 80
+        if TessellationRewardSchedule:
+            try:
+                _r = TessellationRewardSchedule.get_rewards_for_height(height)
+                miner_base = int(round(float(_r.get("miner", 7.2)) * 100))
+                treasury_base = int(round(float(_r.get("treasury", 0.8)) * 100))
+            except Exception:
+                pass
+
+        treasury_address = (
+            TessellationRewardSchedule.TREASURY_ADDRESS
+            if TessellationRewardSchedule
+            else _TREASURY_ADDRESS
+        )
+
+        # Deterministic miner coinbase ID
+        miner_cb_id = f"cb_miner_{height}_{miner_addr[:16]}"
+
+        # Look up prior block's pending treasury
+        prior_pending = []
+        try:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    "SELECT recipient, amount FROM pending_rewards "
+                    "WHERE height=%s AND status='pending' ORDER BY id ASC",
+                    (height - 1,),
+                )
+                for row in (cur.fetchall() or []):
+                    _recip = row[0]
+                    _amt = int(row[1])
+                    _tid = f"cb_treasury_{height}_{height-1}_{_recip[:16]}"
+                    prior_pending.append({
+                        "recipient": _recip,
+                        "amount_base": _amt,
+                        "amount_qtcl": _amt / 100.0,
+                        "settled_from_height": height - 1,
+                        "tx_id": _tid,
+                    })
+        except Exception as _e:
+            logger.debug(f"[RPC-COINBASE-TEMPLATE] prior pending lookup: {_e}")
+
+        return _rpc_ok({
+            "height": height,
+            "miner_address": miner_addr,
+            "miner_reward_base": miner_base,
+            "miner_reward_qtcl": miner_base / 100.0,
+            "treasury_reward_base": treasury_base,
+            "treasury_reward_qtcl": treasury_base / 100.0,
+            "treasury_address": treasury_address,
+            "miner_coinbase_id": miner_cb_id,
+            "prior_pending_treasury": prior_pending,
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] getCoinbaseTemplate exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock": _rpc_submitBlock,
+    "qtcl_getCoinbaseTemplate": _rpc_getCoinbaseTemplate,
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,

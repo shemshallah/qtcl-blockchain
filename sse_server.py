@@ -43,6 +43,9 @@ _blocks_lock = threading.RLock()
 _metrics_clients = []
 _metrics_lock = threading.RLock()
 
+_transactions_clients = []
+_transactions_lock = threading.RLock()
+
 _next_client_id = 0
 _client_id_lock = threading.Lock()
 
@@ -377,6 +380,68 @@ def push_metric():
         return {"error": str(e)}, 500
 
 
+@app.route("/push/transaction", methods=["POST"])
+def push_transaction():
+    """Internal: main server pushes transaction event, fan-out to /rpc/transactions/stream."""
+    try:
+        payload = request.get_json()
+        if not payload:
+            return {"error": "No payload"}, 400
+        with _transactions_lock:
+            for client_id, client_queue in _transactions_clients:
+                try:
+                    client_queue.put_nowait(payload)
+                except queue.Full:
+                    try:
+                        client_queue.get_nowait()
+                        client_queue.put_nowait(payload)
+                    except:
+                        pass
+        return {"status": "ok", "clients": len(_transactions_clients)}, 200
+    except Exception as e:
+        logger.error(f"[SSE] /push/transaction error: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route("/rpc/transactions/stream", methods=["GET", "OPTIONS"])
+def rpc_transactions_stream():
+    """SSE stream: Real-time transaction events."""
+    if request.method == "OPTIONS":
+        return "", 204
+    client_id = _allocate_client_id()
+    client_queue = queue.Queue(maxsize=200)
+    with _transactions_lock:
+        _transactions_clients.append((client_id, client_queue))
+    logger.info(f"[SSE] /rpc/transactions/stream client {client_id} connected")
+
+    def tx_generator():
+        try:
+            while True:
+                try:
+                    tx = client_queue.get(timeout=1.0)
+                    if tx:
+                        yield f"data: {json.dumps(tx)}\n\n"
+                except queue.Empty:
+                    yield ": heartbeat\n\n"
+        except GeneratorExit:
+            logger.info(f"[SSE] /rpc/transactions/stream client {client_id} disconnected")
+        finally:
+            with _transactions_lock:
+                _transactions_clients[:] = [
+                    (cid, q) for cid, q in _transactions_clients if cid != client_id
+                ]
+
+    return Response(
+        tx_generator(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -391,6 +456,7 @@ def health():
         "snapshot_clients": len(_snapshot_clients),
         "blocks_clients": len(_blocks_clients),
         "metrics_clients": len(_metrics_clients),
+        "transactions_clients": len(_transactions_clients),
     }, 200
 
 

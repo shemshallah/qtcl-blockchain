@@ -1358,13 +1358,27 @@ function startBlockSSEListener() {
     blockSSE.addEventListener('message', async (event) => {
       try {
         const blockEvent = JSON.parse(event.data);
-        console.log(`[SSE-BLOCK] 📦 NEW BLOCK h=${blockEvent.height} txs=${blockEvent.tx_count}`);
+        const txCount = blockEvent.tx_count || (blockEvent.transactions ? blockEvent.transactions.length : 0);
+        console.log(`[SSE-BLOCK] 📦 NEW BLOCK h=${blockEvent.height} txs=${txCount}`);
         
-        // Immediately refresh chain view and stats
+        // If SSE push includes full transactions, instant-render without DB round-trip
+        if (blockEvent.transactions && blockEvent.transactions.length > 0 && _selectedHeight === blockEvent.height) {
+          try {
+            const detailScroll = document.getElementById('detail-scroll');
+            if (detailScroll && detailScroll.style.display !== 'none') {
+              renderBlockDetail(blockEvent, detailScroll);
+              console.log(`[SSE-BLOCK] ⚡ Instant render h=${blockEvent.height} (${blockEvent.transactions.length} txs from SSE push)`);
+            }
+          } catch(renderErr) {
+            console.debug(`[SSE-BLOCK] Instant render failed: ${renderErr.message}`);
+          }
+        }
+        
+        // Always refresh chain + stats from DB for authoritative state
         await fetchChain();
         await fetchStats();
         
-        // If this block's detail is visible, refresh it too
+        // Re-fetch from DB for authoritative data if block detail is open
         if (_selectedHeight === blockEvent.height) {
           try {
             const block = await rpc('qtcl_getBlock', [blockEvent.height]);
