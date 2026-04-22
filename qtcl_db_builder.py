@@ -3665,6 +3665,41 @@ def get_comprehensive_trigger_functions_sql() -> Dict[str, str]:
     $$ LANGUAGE plpgsql;
     """
     
+    # Function 8: Sync Transactions to Block JSONB
+    functions['fn_sync_transactions_to_block'] = """
+    -- ═════════════════════════════════════════════════════════════════════════════
+    -- Function: fn_sync_transactions_to_block()
+    -- Automatically populate block transactions JSONB when transactions are inserted
+    -- ═════════════════════════════════════════════════════════════════════════════
+    CREATE OR REPLACE FUNCTION fn_sync_transactions_to_block()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        -- When a transaction is inserted, update the block's transactions JSONB
+        UPDATE blocks
+        SET transactions = (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'tx_id', tx_id,
+                    'from_addr', from_address,
+                    'to_addr', to_address,
+                    'amount', amount,
+                    'tx_type', tx_type,
+                    'block_height', block_height
+                )
+            )
+            FROM transactions
+            WHERE block_hash = blocks.block_hash
+        ),
+        tx_count = (
+            SELECT COUNT(*) FROM transactions WHERE block_hash = blocks.block_hash
+        )
+        WHERE block_hash = NEW.block_hash;
+        
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+    
     return functions
 
 
@@ -3747,9 +3782,19 @@ def get_trigger_definitions_sql() -> Dict[str, str]:
         EXECUTE FUNCTION fn_audit_log();
     """
     
+    triggers['sync_block_txs'] = """
+    -- Trigger: Sync transactions to block JSONB on transaction insert
+    DROP TRIGGER IF EXISTS trg_sync_block_txs ON transactions;
+    CREATE TRIGGER trg_sync_block_txs
+        AFTER INSERT ON transactions
+        FOR EACH ROW
+        EXECUTE FUNCTION fn_sync_transactions_to_block();
+    """
+    
     return triggers
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 # 10.4: SQLITE TRIGGER DEFINITIONS (Client Mode)
 # ─────────────────────────────────────────────────────────────────────────────
