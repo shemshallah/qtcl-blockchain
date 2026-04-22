@@ -359,16 +359,40 @@ def rpc_config_difficulty():
 def rpc_config():
     """RPC GET: Return all configurable parameters for block building.
     
-    Includes: difficulty, reward schedule, network constants.
+    Includes: difficulty, rewards, network constants.
+    Authoritative source for all network parameters.
     """
     import os
     return {
         "jsonrpc": "2.0",
         "result": {
             "block_difficulty": int(os.getenv('BLOCK_DIFFICULTY', '4')),
+            "miner_reward": float(os.getenv('MINER_REWARD', '7.2')),
+            "treasury_reward": float(os.getenv('TREASURY_REWARD', '0.8')),
             "max_peers": int(os.getenv('MAX_PEERS', '32')),
             "oracle_min_peers": int(os.getenv('ORACLE_MIN_PEERS', '3')),
             "wstate_mode": os.getenv('WSTATE_MODE', 'normal'),
+        },
+        "id": None
+    }, 200
+
+
+@app.route("/rpc/config/rewards", methods=["GET"])
+def rpc_config_rewards():
+    """RPC GET: Return miner and treasury reward amounts (authoritative, server-only).
+    
+    Used by miners to construct proper coinbase transactions.
+    Cannot be overridden by client.
+    """
+    import os
+    miner = float(os.getenv('MINER_REWARD', '7.2'))
+    treasury = float(os.getenv('TREASURY_REWARD', '0.8'))
+    return {
+        "jsonrpc": "2.0",
+        "result": {
+            "miner_reward": miner,
+            "treasury_reward": treasury,
+            "total_per_block": miner + treasury,
         },
         "id": None
     }, 200
