@@ -1707,23 +1707,6 @@ def _settle_block_rewards(
             _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
 
         _settle_log.info(f"[SETTLE] ✅ Block h={height} settlement complete")
-        
-        # ── BROADCAST TO SSE SERVICE ──────────────────────────────────────
-        # After block is fully settled with all transactions, push to SSE clients
-        try:
-            block_event = {
-                "height": height,
-                "hash": block_hash,
-                "block_hash": block_hash,
-                "timestamp": int(time.time()),
-                "miner": miner_address,
-                "tx_count": len(txs or []),
-                "status": "confirmed"
-            }
-            _push_to_sse_service("/push/block", block_event)
-            _settle_log.debug(f"[SETTLE] 📡 SSE broadcast sent for h={height}")
-        except Exception as sse_err:
-            _settle_log.warning(f"[SETTLE] ⚠️  SSE broadcast failed (non-critical): {sse_err}")
 
     except Exception as settle_err:
         _settle_log.error(f"[SETTLE] ❌ h={height}: {settle_err}", exc_info=True)
@@ -6080,14 +6063,25 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         if not miner_address:
             return _rpc_error(-32602, "Missing miner_address", rpc_id)
 
-        # ── Extract coinbase & non-coinbase transactions ─────────────────────
+        # ── STRICT VALIDATION: Coinbase ONLY from server, never from client ─────────────────────
+        # Server is the authoritative source of rewards. Any client-provided coinbase is REJECTED.
+        # This prevents miners from sneak-injecting custom transactions or modifying rewards.
         _coinbase_txs = []
         _non_coinbase_txs = []
         _total_fees = 0
+        _client_provided_coinbase_count = 0
+        
         for tx in txs or []:
             tx_type = str(tx.get("tx_type", "")).lower()
             if tx_type == "coinbase":
-                _coinbase_txs.append(tx)
+                # ⚠️  CRITICAL: Client provided a coinbase TX — this is INVALID
+                # Server WILL GENERATE the authoritative coinbase transactions
+                # Client coinbase is IGNORED (not used, not inserted to DB)
+                _client_provided_coinbase_count += 1
+                logger.warning(
+                    f"[SUBMIT-BLOCK] ⚠️  COINBASE INJECTION ATTEMPT h={height}: "
+                    f"client sent coinbase tx (will be IGNORED, server generates authoritative)"
+                )
             else:
                 _non_coinbase_txs.append(tx)
                 f = tx.get("fee", tx.get("fee_base", 0))
@@ -6098,6 +6092,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         _total_fees += int(f)
                 except Exception:
                     pass
+        
+        if _client_provided_coinbase_count > 0:
+            logger.critical(
+                f"[SUBMIT-BLOCK] 🚨 SECURITY: Block h={height} had {_client_provided_coinbase_count} "
+                f"client-provided coinbase TX(s) - IGNORING ALL (server will create canonical)"
+            )
 
         # ── Rewards (base units) — server-authoritative, not from client ─────
         # Coinbase txs from client are ignored — server generates coinbase
