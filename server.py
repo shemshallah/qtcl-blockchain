@@ -7031,6 +7031,63 @@ def _rpc_getCoinbaseTemplate(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# WALLET VAULT v2 RPC — password verification, info, migration
+# Server NEVER returns private keys. NEVER stores passwords.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _server_wallet_path():
+    import os as _os
+    base = _os.environ.get("QTCL_WALLET_DIR", _os.path.expanduser("~/.qtcl"))
+    from pathlib import Path as _P
+    return _P(base) / "wallet.json"
+
+def _rpc_wallet_verify(params, rpc_id):
+    """Verify wallet password WITHOUT returning private key."""
+    try:
+        password = params.get("password", "")
+        if not password:
+            return _rpc_error(-32602, "password required", rpc_id)
+        wp = _server_wallet_path()
+        if not wp.exists():
+            return _rpc_ok({"valid": False, "reason": "no_wallet"}, rpc_id)
+        import json as _j
+        raw = _j.loads(wp.read_text())
+        if "vault_version" not in raw:
+            return _rpc_ok({"valid": False, "reason": "invalid_format"}, rpc_id)
+        enc_pk = raw.get("encrypted_private_key")
+        if not enc_pk:
+            return _rpc_ok({"valid": False, "reason": "missing_encrypted_key"}, rpc_id)
+        from hyp_lwe import verify_wallet_password
+        is_valid = verify_wallet_password(enc_pk, password)
+        result = {"valid": is_valid}
+        if is_valid:
+            result["address"] = raw.get("address", "")
+            result["vault_version"] = raw.get("vault_version")
+        return _rpc_ok(result, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Verification failed: {str(e)}", rpc_id)
+
+def _rpc_wallet_info(params, rpc_id):
+    """Get wallet info (address, public key) WITHOUT password. Never returns private key."""
+    try:
+        wp = _server_wallet_path()
+        if not wp.exists():
+            return _rpc_ok({"exists": False}, rpc_id)
+        import json as _j
+        raw = _j.loads(wp.read_text())
+        result = {"exists": True, "address": raw.get("address", ""),
+                  "public_key": raw.get("public_key", ""),
+                  "vault_version": raw.get("vault_version", 0),
+                  "is_legacy": "vault_version" not in raw,
+                  "has_shamir": "shamir_config" in raw}
+        if "shamir_config" in raw:
+            result["shamir_threshold"] = raw["shamir_config"].get("threshold", 0)
+        return _rpc_ok(result, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Wallet info failed: {str(e)}", rpc_id)
+
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock": _rpc_submitBlock,
     "qtcl_getCoinbaseTemplate": _rpc_getCoinbaseTemplate,
@@ -7087,6 +7144,9 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_hyp_decryptMessage": qtcl_hyp_decryptMessage,
     "qtcl_hyp_signBlock": qtcl_hyp_signBlock,
     "qtcl_hyp_verifyBlock": qtcl_hyp_verifyBlock,
+    # ── Wallet Vault v2 RPC (Cathedral-Grade) ─────────────────────────────────
+    "qtcl_wallet_verify": _rpc_wallet_verify,
+    "qtcl_wallet_info": _rpc_wallet_info,
     # ── Client-mesh compatibility aliases ─────────────────────────────────────
     "qtcl_getChainStatus": lambda p, rid: _rpc_getBlockHeight(p, rid),
     "qtcl_getSyncStatus": lambda p, rid: _rpc_getBlockHeight(p, rid),
@@ -8585,26 +8645,27 @@ threading.Thread(
 def _deferred_server_wallet_init():
     """Initialize HYP-WALLET on server for coinbase signing (non-blocking)."""
     try:
-        # Add hlwe directory to path
         _hlwe_dir = os.path.join(os.path.dirname(__file__), "hlwe")
         if _hlwe_dir not in sys.path:
             sys.path.insert(0, _hlwe_dir)
 
-        # Import wallet from existing miner module
         _miner_path = os.path.expanduser("~/.qtcl")
         _wallet_file = os.path.join(_miner_path, "wallet.json")
 
         if os.path.exists(_wallet_file):
-            logger.info(f"[HYP-WALLET-SERVER] 📍 Found server wallet at {_wallet_file}")
-            logger.info(f"[HYP-WALLET-SERVER]    Server can sign coinbase transactions")
+            import json as _wj
+            try:
+                _wraw = _wj.loads(open(_wallet_file).read())
+                if "vault_version" in _wraw:
+                    logger.info(f"[HYP-WALLET-SERVER] ✅ Vault v{_wraw['vault_version']} wallet at {_wallet_file}")
+                else:
+                    logger.warning(
+                        "[HYP-WALLET-SERVER] ⚠️  Unrecognized wallet format — create a new wallet"
+                    )
+            except Exception:
+                logger.info(f"[HYP-WALLET-SERVER] 📍 Found wallet at {_wallet_file}")
         else:
-            logger.info(
-                f"[HYP-WALLET-SERVER] 📭 No server wallet found at {_wallet_file}"
-            )
-            logger.info(
-                f"[HYP-WALLET-SERVER]    Create one with: python qtcl-miner/qtcl_client.py"
-            )
-            logger.info(f"[HYP-WALLET-SERVER]    Then select 'Wallet → Create New'")
+            logger.info(f"[HYP-WALLET-SERVER] 📭 No server wallet at {_wallet_file}")
     except Exception as _wallet_err:
         logger.warning(f"[HYP-WALLET-SERVER] ⚠️  Server wallet check: {_wallet_err}")
 
