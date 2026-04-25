@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QTCL Bridge — Cross-Chain Transfer Protocol</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
+:root {
+  --void:#060609; --surf:#0b0b12; --card:#10101c; --card2:#151528;
+  --brd:#1a1a32; --brd2:#2a2a4a;
+  --t1:#e4e4ef; --t2:#8888a8; --t3:#55556e;
+  --lock:#ff6b35; --lockG:rgba(255,107,53,.12);
+  --unlock:#00d4aa; --unlockG:rgba(0,212,170,.12);
+  --attest:#7b68ee; --attestG:rgba(123,104,238,.1);
+  --ok:#00ff88; --fail:#ff3355; --warn:#ffaa00;
+  --mono:'JetBrains Mono',monospace; --sans:'DM Sans',sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--sans);background:var(--void);color:var(--t1);min-height:100vh}
+body::before{content:'';position:fixed;inset:0;
+  background:linear-gradient(rgba(123,104,238,.02) 1px,transparent 1px),
+             linear-gradient(90deg,rgba(123,104,238,.02) 1px,transparent 1px);
+  background-size:48px 48px;pointer-events:none;z-index:0}
+.c{max-width:960px;margin:0 auto;padding:16px;position:relative;z-index:1}
+
+/* ── Header ── */
+.hdr{text-align:center;padding:32px 0 20px}
+.hdr h1{font-size:1.8rem;font-weight:700;letter-spacing:-.02em;
+  background:linear-gradient(135deg,var(--lock),var(--attest),var(--unlock));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hdr .sub{font-family:var(--mono);font-size:.65rem;color:var(--t3);margin-top:6px;
+  letter-spacing:.15em;text-transform:uppercase}
+.conn{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:10px;
+  font-family:var(--mono);font-size:.65rem;color:var(--t2)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--fail);animation:p 2s infinite}
+.dot.on{background:var(--ok)}
+@keyframes p{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* ── Stats ── */
+.sg{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:20px 0}
+.sc{background:var(--card);border:1px solid var(--brd);border-radius:8px;padding:14px;
+  transition:border-color .3s}
+.sc:hover{border-color:var(--brd2)}
+.sl{font-family:var(--mono);font-size:.6rem;color:var(--t3);text-transform:uppercase;letter-spacing:.1em}
+.sv{font-size:1.5rem;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+.su{font-size:.65rem;color:var(--t2);font-weight:400}
+
+/* ── Tabs ── */
+.tabs{display:flex;gap:2px;margin:20px 0 14px;background:var(--surf);border-radius:8px;
+  padding:3px;border:1px solid var(--brd)}
+.tab{flex:1;padding:9px 12px;text-align:center;font-family:var(--mono);font-size:.7rem;
+  font-weight:500;color:var(--t3);background:0;border:0;border-radius:6px;cursor:pointer;
+  transition:.3s;text-transform:uppercase;letter-spacing:.06em}
+.tab:hover{color:var(--t2)}
+.tab.on{background:var(--card);color:var(--t1);box-shadow:0 2px 8px rgba(0,0,0,.3)}
+
+/* ── Panels ── */
+.pan{display:none}.pan.on{display:block}
+
+/* ── Form ── */
+.bf{background:var(--card);border:1px solid var(--brd);border-radius:10px;padding:20px}
+.dir{display:flex;gap:6px;margin-bottom:16px}
+.db{flex:1;padding:10px;border:2px solid var(--brd);border-radius:6px;background:0;
+  color:var(--t2);font-family:var(--mono);font-size:.75rem;cursor:pointer;transition:.3s;text-align:center}
+.db:hover{border-color:var(--brd2)}
+.db.al{border-color:var(--lock);background:var(--lockG);color:var(--lock)}
+.db.au{border-color:var(--unlock);background:var(--unlockG);color:var(--unlock)}
+.fg{margin-bottom:14px}
+.fg label{display:block;font-family:var(--mono);font-size:.6rem;color:var(--t3);
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+.fg input{width:100%;padding:9px 12px;background:var(--surf);border:1px solid var(--brd);
+  border-radius:5px;color:var(--t1);font-family:var(--mono);font-size:.8rem;outline:0;transition:.3s}
+.fg input:focus{border-color:var(--attest)}
+.fg input::placeholder{color:var(--t3)}
+.fb{background:var(--surf);border:1px solid var(--brd);border-radius:5px;padding:10px;
+  margin:14px 0;font-family:var(--mono);font-size:.7rem}
+.fr{display:flex;justify-content:space-between;padding:3px 0;color:var(--t2)}
+.fr.tot{border-top:1px solid var(--brd);margin-top:5px;padding-top:7px;color:var(--t1);font-weight:600}
+.sbtn{width:100%;padding:12px;border:0;border-radius:7px;font-family:var(--sans);
+  font-size:.95rem;font-weight:600;cursor:pointer;transition:.3s;text-transform:uppercase;
+  letter-spacing:.04em}
+.sbtn.lk{background:linear-gradient(135deg,var(--lock),#ff8855);color:#fff}
+.sbtn.ul{background:linear-gradient(135deg,var(--unlock),#00eecc);color:#060609}
+.sbtn:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(0,0,0,.4)}
+.sbtn:disabled{opacity:.35;cursor:not-allowed;transform:none;box-shadow:none}
+
+/* ── Request list ── */
+.rl{display:flex;flex-direction:column;gap:6px}
+.rc{background:var(--card);border:1px solid var(--brd);border-radius:7px;padding:12px 14px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
+  transition:.3s;cursor:pointer}
+.rc:hover{border-color:var(--brd2);background:var(--card2)}
+.ri .id{font-family:var(--mono);font-size:.6rem;color:var(--t3);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.ri .am{font-size:1.05rem;font-weight:600;margin-top:1px}
+.ri .ad{font-family:var(--mono);font-size:.58rem;color:var(--t2);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rs{font-family:var(--mono);font-size:.6rem;font-weight:600;padding:3px 8px;
+  border-radius:10px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+.rs.locked{background:var(--lockG);color:var(--lock)}
+.rs.attesting{background:var(--attestG);color:var(--attest)}
+.rs.attested{background:rgba(0,255,136,.1);color:var(--ok)}
+.rs.completed{background:rgba(0,255,136,.08);color:#00cc66}
+.rs.expired,.rs.failed{background:rgba(255,51,85,.1);color:var(--fail)}
+.rs.burn_verified{background:var(--unlockG);color:var(--unlock)}
+.rs.refunded{background:rgba(255,170,0,.1);color:var(--warn)}
+
+/* ── Oracle grid ── */
+.og{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:14px}
+.oc{background:var(--card);border:1px solid var(--brd);border-radius:6px;padding:10px;
+  text-align:center;font-family:var(--mono);font-size:.6rem}
+.oc .on{color:var(--t3);text-transform:uppercase;letter-spacing:.05em}
+.oc .os{margin-top:4px;font-size:.7rem;font-weight:600}
+.oc.yes .os{color:var(--ok)}
+.oc.no .os{color:var(--t3)}
+
+/* ── Toast ── */
+.toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--brd2);
+  border-radius:8px;padding:12px 18px;font-family:var(--mono);font-size:.75rem;color:var(--t1);
+  box-shadow:0 8px 32px rgba(0,0,0,.5);transform:translateY(100px);opacity:0;transition:.4s;z-index:999}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.err{border-color:var(--fail);color:var(--fail)}
+.toast.ok{border-color:var(--ok);color:var(--ok)}
+
+/* ── Info section ── */
+.info{background:var(--card);border:1px solid var(--brd);border-radius:8px;padding:16px;
+  margin-top:16px;font-family:var(--mono);font-size:.7rem;color:var(--t2);line-height:1.7}
+.info h3{color:var(--t1);font-size:.8rem;margin-bottom:8px;font-weight:600}
+.info code{background:var(--surf);padding:1px 5px;border-radius:3px;font-size:.65rem;color:var(--attest)}
+
+/* ── Empty state ── */
+.empty{text-align:center;padding:40px;color:var(--t3);font-family:var(--mono);font-size:.75rem}
+
+@media(max-width:600px){
+  .sg{grid-template-columns:1fr 1fr}
+  .og{grid-template-columns:repeat(3,1fr)}
+  .hdr h1{font-size:1.4rem}
+}
+</style>
+</head>
+<body>
+<div class="c">
+  <!-- Header -->
+  <div class="hdr">
+    <h1>QTCL BRIDGE</h1>
+    <div class="sub">Cross-Chain Transfer Protocol · QTCL ↔ wQTCL (Base)</div>
+    <div class="conn">
+      <div class="dot" id="connDot"></div>
+      <span id="connText">Connecting…</span>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="sg">
+    <div class="sc"><div class="sl">TVL Locked</div><div class="sv" id="sLocked">—</div></div>
+    <div class="sc"><div class="sl">Total Bridged</div><div class="sv" id="sBridged">—</div></div>
+    <div class="sc"><div class="sl">Fees Collected</div><div class="sv" id="sFees">—</div></div>
+    <div class="sc"><div class="sl">Requests</div><div class="sv" id="sReqs">—</div></div>
+    <div class="sc"><div class="sl">Chain Height</div><div class="sv" id="sHeight">—</div></div>
+    <div class="sc"><div class="sl">TVL Utilization</div><div class="sv" id="sTvl">—</div></div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab on" data-t="bridge" onclick="showTab('bridge')">Bridge</button>
+    <button class="tab" data-t="history" onclick="showTab('history')">History</button>
+    <button class="tab" data-t="oracles" onclick="showTab('oracles')">Oracles</button>
+    <button class="tab" data-t="info" onclick="showTab('info')">Protocol</button>
+  </div>
+
+  <!-- Bridge Panel -->
+  <div class="pan on" id="pan-bridge">
+    <div class="bf">
+      <div class="dir">
+        <button class="db al" id="dirLock" onclick="setDir('lock')">🔒 QTCL → wQTCL</button>
+        <button class="db" id="dirUnlock" onclick="setDir('unlock')">🔓 wQTCL → QTCL</button>
+      </div>
+      <div class="fg">
+        <label>QTCL Address</label>
+        <input type="text" id="fQtcl" placeholder="qtcl1..." />
+      </div>
+      <div class="fg">
+        <label>Base (Ethereum) Address</label>
+        <input type="text" id="fEth" placeholder="0x..." />
+      </div>
+      <div class="fg">
+        <label>Amount (QTCL)</label>
+        <input type="number" id="fAmt" placeholder="100.00" min="1" max="10000" step="0.01" oninput="calcFee()" />
+      </div>
+      <div class="fb" id="feeBox">
+        <div class="fr"><span>Bridge Fee (0.1%)</span><span id="feeFee">—</span></div>
+        <div class="fr"><span>Min Fee</span><span>1.00 QTCL</span></div>
+        <div class="fr tot"><span>You Receive</span><span id="feeNet">—</span></div>
+      </div>
+      <button class="sbtn lk" id="submitBtn" onclick="submitBridge()">Lock & Bridge</button>
+    </div>
+  </div>
+
+  <!-- History Panel -->
+  <div class="pan" id="pan-history">
+    <div class="fg" style="margin-bottom:12px">
+      <label>Search by Address</label>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="hAddr" placeholder="qtcl1... or 0x..." style="flex:1" />
+        <button class="sbtn lk" style="width:auto;padding:8px 16px;font-size:.75rem" onclick="loadHistory()">Search</button>
+      </div>
+    </div>
+    <div class="rl" id="histList">
+      <div class="empty">Enter an address to view bridge history</div>
+    </div>
+  </div>
+
+  <!-- Oracles Panel -->
+  <div class="pan" id="pan-oracles">
+    <div style="font-family:var(--mono);font-size:.7rem;color:var(--t2);margin-bottom:10px">
+      Bridge attestation requires 3-of-5 oracle consensus
+    </div>
+    <div class="og" id="oracleGrid">
+      <div class="oc no"><div class="on">Primary</div><div class="os">—</div></div>
+      <div class="oc no"><div class="on">Secondary</div><div class="os">—</div></div>
+      <div class="oc no"><div class="on">Validation</div><div class="os">—</div></div>
+      <div class="oc no"><div class="on">Arbiter</div><div class="os">—</div></div>
+      <div class="oc no"><div class="on">Metrics</div><div class="os">—</div></div>
+    </div>
+    <div style="margin-top:16px;font-family:var(--mono);font-size:.65rem;color:var(--t3)">
+      Pending Attestations
+    </div>
+    <div class="rl" id="pendList" style="margin-top:8px">
+      <div class="empty">No pending attestations</div>
+    </div>
+  </div>
+
+  <!-- Info Panel -->
+  <div class="pan" id="pan-info">
+    <div class="info">
+      <h3>Bridge Protocol</h3>
+      Every QTCL is mined, never minted. The bridge operates as an escrow relay:
+      QTCL locked on the native chain backs wQTCL minted on Base. Total circulating
+      supply across both chains always equals total mined supply.
+      <br><br>
+      <h3>Bridge Flow (Outbound: QTCL → wQTCL)</h3>
+      1. Call <code>qtcl_bridge_lock</code> with amount + Base destination<br>
+      2. QTCL debited from sender, credited to bridge escrow<br>
+      3. 3-of-5 oracles attest to the lock event<br>
+      4. Relayer mints equivalent wQTCL on Base<br>
+      5. Bridge request marked completed
+      <br><br>
+      <h3>Bridge Flow (Inbound: wQTCL → QTCL)</h3>
+      1. Burn wQTCL on Base contract<br>
+      2. Relayer submits <code>qtcl_bridge_burnProof</code><br>
+      3. 3-of-5 oracles verify the burn<br>
+      4. QTCL unlocked from escrow to destination<br>
+      5. Bridge request marked completed
+      <br><br>
+      <h3>Fees & Limits</h3>
+      Fee: 0.1% (min 1 QTCL) · Range: 1–10,000 QTCL per request<br>
+      TVL cap: 100,000 QTCL (Phase 1) · Cooldown: 60s per address
+      <br><br>
+      <h3>Reward Schedule (Post-Genesis)</h3>
+      Depth 5: miner 7.20 + treasury 0.80 = 8.00 QTCL/block<br>
+      Depth 6: miner 7.40 + treasury 0.60 = 8.00 QTCL/block<br>
+      Depth 7: miner 7.60 + treasury 0.40 = 8.00 QTCL/block<br>
+      Depth 8: miner 7.80 + treasury 0.20 = 8.00 QTCL/block<br>
+      Total supply: 498,401,280 QTCL across 62,300,160 blocks
+      <br><br>
+      <h3>RPC Endpoints</h3>
+      <code>qtcl_bridge_lock</code> · <code>qtcl_bridge_attest</code> ·
+      <code>qtcl_bridge_status</code> · <code>qtcl_bridge_history</code> ·
+      <code>qtcl_bridge_stats</code> · <code>qtcl_bridge_burnProof</code> ·
+      <code>qtcl_bridge_complete</code> · <code>qtcl_bridge_pendingAttestations</code> ·
+      <code>qtcl_bridge_refund</code>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const RPC = 'https://qtcl-blockchain.koyeb.app/rpc';
+let bridgeDir = 'lock';
+let connected = false;
+
+// ── RPC helper ──
+async function rpc(method, params=[]) {
+  const r = await fetch(RPC, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({jsonrpc:'2.0', method, params, id: Date.now()})
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+  return j.result;
+}
+
+// ── Toast ──
+function toast(msg, type='ok') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + type;
+  setTimeout(() => t.className = 'toast', 3500);
+}
+
+// ── Tabs ──
+function showTab(id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.t === id));
+  document.querySelectorAll('.pan').forEach(p => p.classList.toggle('on', p.id === 'pan-'+id));
+  if (id === 'oracles') loadPending();
+}
+
+// ── Direction ──
+function setDir(d) {
+  bridgeDir = d;
+  const lk = document.getElementById('dirLock');
+  const ul = document.getElementById('dirUnlock');
+  const btn = document.getElementById('submitBtn');
+  if (d === 'lock') {
+    lk.className = 'db al'; ul.className = 'db';
+    btn.className = 'sbtn lk'; btn.textContent = 'Lock & Bridge';
+  } else {
+    lk.className = 'db'; ul.className = 'db au';
+    btn.className = 'sbtn ul'; btn.textContent = 'Unlock from Bridge';
+  }
+}
+
+// ── Fee calc ──
+function calcFee() {
+  const amt = parseFloat(document.getElementById('fAmt').value) || 0;
+  const fee = Math.max(amt * 0.001, 1.0);
+  const net = Math.max(amt - fee, 0);
+  document.getElementById('feeFee').textContent = fee.toFixed(2) + ' QTCL';
+  document.getElementById('feeNet').textContent = net.toFixed(2) + ' QTCL';
+}
+
+// ── Submit ──
+async function submitBridge() {
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  try {
+    const qtcl = document.getElementById('fQtcl').value.trim();
+    const eth = document.getElementById('fEth').value.trim();
+    const amt = parseFloat(document.getElementById('fAmt').value) || 0;
+
+    if (!qtcl.startsWith('qtcl1')) throw new Error('Invalid QTCL address');
+    if (!eth.startsWith('0x') || eth.length !== 42) throw new Error('Invalid Base address');
+    if (amt < 1 || amt > 10000) throw new Error('Amount must be 1–10,000 QTCL');
+
+    let result;
+    if (bridgeDir === 'lock') {
+      result = await rpc('qtcl_bridge_lock', [{qtcl_address: qtcl, eth_address: eth, amount: amt}]);
+    } else {
+      // For unlock, we'd need a burn proof — show info
+      toast('Inbound bridge requires wQTCL burn on Base first. Use the relayer.', 'err');
+      return;
+    }
+
+    toast(`Locked! ID: ${result.request_id.slice(0,24)}…`, 'ok');
+    document.getElementById('fAmt').value = '';
+    refreshStats();
+  } catch(e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Stats ──
+async function refreshStats() {
+  try {
+    // Bridge stats
+    try {
+      const s = await rpc('qtcl_bridge_stats');
+      document.getElementById('sLocked').innerHTML = s.locked_qtcl.toFixed(2) + ' <span class="su">QTCL</span>';
+      document.getElementById('sBridged').innerHTML = s.bridged_qtcl.toFixed(2) + ' <span class="su">QTCL</span>';
+      document.getElementById('sFees').innerHTML = s.fees_qtcl.toFixed(2) + ' <span class="su">QTCL</span>';
+      document.getElementById('sReqs').textContent = s.total_requests;
+      document.getElementById('sTvl').innerHTML = s.tvl_pct.toFixed(1) + '<span class="su">%</span>';
+    } catch(e) {
+      // Bridge not deployed yet — show zeros
+      document.getElementById('sLocked').innerHTML = '0.00 <span class="su">QTCL</span>';
+      document.getElementById('sBridged').innerHTML = '0.00 <span class="su">QTCL</span>';
+      document.getElementById('sFees').innerHTML = '0.00 <span class="su">QTCL</span>';
+      document.getElementById('sReqs').textContent = '0';
+      document.getElementById('sTvl').innerHTML = '0.0<span class="su">%</span>';
+    }
+
+    // Chain height (always available)
+    const h = await rpc('qtcl_getBlockHeight');
+    document.getElementById('sHeight').textContent = h.height;
+    document.getElementById('connDot').classList.add('on');
+    document.getElementById('connText').textContent = `Block ${h.height} · Connected`;
+    connected = true;
+  } catch(e) {
+    document.getElementById('connDot').classList.remove('on');
+    document.getElementById('connText').textContent = 'Disconnected';
+    connected = false;
+  }
+}
+
+// ── History ──
+async function loadHistory() {
+  const addr = document.getElementById('hAddr').value.trim();
+  const list = document.getElementById('histList');
+  if (!addr) { list.innerHTML = '<div class="empty">Enter an address</div>'; return; }
+  try {
+    const r = await rpc('qtcl_bridge_history', [addr]);
+    if (!r.requests || r.requests.length === 0) {
+      list.innerHTML = '<div class="empty">No bridge history for this address</div>';
+      return;
+    }
+    list.innerHTML = r.requests.map(req => {
+      const icon = req.direction === 'qtcl_to_wqtcl' ? '🔒' : '🔓';
+      const addrs = req.direction === 'qtcl_to_wqtcl'
+        ? `${req.qtcl_address.slice(0,12)}… → ${(req.eth_address||'').slice(0,10)}…`
+        : `${(req.eth_address||'').slice(0,10)}… → ${req.qtcl_address.slice(0,12)}…`;
+      return `<div class="rc">
+        <div style="font-size:1.3rem">${icon}</div>
+        <div class="ri">
+          <div class="id">${req.request_id.slice(0,32)}…</div>
+          <div class="am">${req.amount_qtcl.toFixed(2)} QTCL</div>
+          <div class="ad">${addrs}</div>
+        </div>
+        <div class="rs ${req.status}">${req.status}</div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    list.innerHTML = `<div class="empty" style="color:var(--fail)">${e.message}</div>`;
+  }
+}
+
+// ── Pending attestations ──
+async function loadPending() {
+  try {
+    const r = await rpc('qtcl_bridge_pendingAttestations');
+    const list = document.getElementById('pendList');
+    if (!r.requests || r.requests.length === 0) {
+      list.innerHTML = '<div class="empty">No pending attestations</div>';
+      return;
+    }
+    list.innerHTML = r.requests.map(req => {
+      const icon = req.direction === 'qtcl_to_wqtcl' ? '🔒' : '🔓';
+      return `<div class="rc">
+        <div style="font-size:1.3rem">${icon}</div>
+        <div class="ri">
+          <div class="id">${req.request_id.slice(0,32)}…</div>
+          <div class="am">${req.amount_qtcl.toFixed(2)} QTCL — ${req.attestation_count}/3 attestations</div>
+        </div>
+        <div class="rs ${req.status}">${req.status}</div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('pendList').innerHTML = '<div class="empty">Bridge not available yet</div>';
+  }
+}
+
+// ── Init ──
+refreshStats();
+setInterval(refreshStats, 15000);
+</script>
+</body>
+</html>

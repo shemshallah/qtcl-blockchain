@@ -137,10 +137,10 @@ class TessellationRewardSchedule:
     }
 
     REWARDS: Dict[int, Dict[str, int]] = {
-        5: {'miner': 720, 'treasury': 80},
-        6: {'miner': 760, 'treasury': 40},
-        7: {'miner': 780, 'treasury': 20},
-        8: {'miner': 790, 'treasury': 10},
+        5: {'miner': 720, 'treasury': 80},   # 7.20 + 0.80 = 8.00 QTCL
+        6: {'miner': 740, 'treasury': 60},   # 7.40 + 0.60 = 8.00 QTCL
+        7: {'miner': 760, 'treasury': 40},   # 7.60 + 0.40 = 8.00 QTCL
+        8: {'miner': 780, 'treasury': 20},   # 7.80 + 0.20 = 8.00 QTCL
     }
 
     TOTAL_PER_BLOCK_BASE: int = 800

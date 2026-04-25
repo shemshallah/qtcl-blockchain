@@ -7173,6 +7173,14 @@ _RPC_METHODS: Dict[str, Any] = {
     ),
 }
 
+# ── Bridge Module ─────────────────────────────────────────────────────────────
+try:
+    from bridge import BRIDGE_RPC_METHODS
+    _RPC_METHODS.update(BRIDGE_RPC_METHODS)
+    logger.info(f"[BRIDGE] ✅ {len(BRIDGE_RPC_METHODS)} bridge RPC methods registered")
+except ImportError as e:
+    logger.warning(f"[BRIDGE] Bridge module not available: {e}")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTERPRISE P2P NETWORK — Inline Implementation (no external files)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -8007,6 +8015,22 @@ def serve_hyp_doc():
         return "hyp.html not found", 404
     except Exception as e:
         logger.error(f"[HYP] Failed to serve hyp.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/bridge", methods=["GET"])
+def serve_bridge_doc():
+    """GET /bridge — Serve bridge.html (cross-chain bridge dashboard)."""
+    try:
+        import os
+        from flask import send_file
+
+        bridge_path = os.path.join(os.path.dirname(__file__), "bridge.html")
+        if os.path.exists(bridge_path):
+            return send_file(bridge_path, mimetype="text/html")
+        return "bridge.html not found", 404
+    except Exception as e:
+        logger.error(f"[BRIDGE] Failed to serve bridge.html: {e}")
         return f"Error: {e}", 500
 
 
