@@ -167,6 +167,7 @@ body::before{content:'';position:fixed;inset:0;
     <button class="tab" data-t="history" onclick="showTab('history')">History</button>
     <button class="tab" data-t="oracles" onclick="showTab('oracles')">Oracles</button>
     <button class="tab" data-t="info" onclick="showTab('info')">Protocol</button>
+    <button class="tab" data-t="wallet" onclick="showTab('wallet')">Connect Wallet</button>
   </div>
 
   <!-- Bridge Panel -->
@@ -251,7 +252,7 @@ body::before{content:'';position:fixed;inset:0;
       2. Relayer submits <code>qtcl_bridge_burnProof</code><br>
       3. 3-of-5 oracles verify the burn<br>
       4. QTCL unlocked from escrow to destination<br>
-      5. Bridge request marked completed
+ la 5. Bridge request marked completed
       <br><br>
       <h3>Fees & Limits</h3>
       Fee: 0.1% (min 1 QTCL) · Range: 1–10,000 QTCL per request<br>
@@ -272,14 +273,53 @@ body::before{content:'';position:fixed;inset:0;
       <code>qtcl_bridge_refund</code>
     </div>
   </div>
+
+  <!-- Wallet Panel -->
+  <div class="pan" id="pan-wallet">
+    <div class="bf" style="text-align:center">
+      <div style="font-size:1.2rem;font-weight:600;margin-bottom:16px">Connect Base Wallet</div>
+      <button class="sbtn lk" id="connectBtn" onclick="connectWallet()">Connect MetaMask</button>
+      <div id="walletInfo" style="margin-top:16px;font-family:var(--mono);font-size:.8rem;display:none">
+        Connected: <span id="walletAddr" style="color:var(--attest)"></span>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.1/ethers.umd.min.js"></script>
 <script>
 const RPC = 'https://qtcl-blockchain.koyeb.app/rpc';
 let bridgeDir = 'lock';
 let connected = false;
+let userWallet = null;
+
+async function connectWallet() {
+  const btn = document.getElementById('connectBtn');
+  const info = document.getElementById('walletInfo');
+  const addrSpan = document.getElementById('walletAddr');
+  
+  if (!window.ethereum) {
+    toast('MetaMask not installed', 'err');
+    return;
+  }
+  
+  btn.disabled = true;
+  try {
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const accounts = await provider.send('eth_requestAccounts', []);
+    userWallet = accounts[0];
+    addrSpan.textContent = userWallet;
+    info.style.display = 'block';
+    btn.textContent = 'Wallet Connected';
+    toast('Wallet linked to Bridge', 'ok');
+  } catch(e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 // ── RPC helper ──
 async function rpc(method, params=[]) {
