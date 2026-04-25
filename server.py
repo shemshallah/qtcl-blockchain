@@ -7848,7 +7848,7 @@ def rpc_oracle_snapshot_proxy():
 
         # Return a minimal placeholder instead of error
         def fallback():
-            yield b": SSE unavailable\n\n"
+            yield b'data: {"status":"error","message":"SSE unavailable","retry_after":5}\n\n'
 
         return Response(fallback(), mimetype="text/event-stream")
 
@@ -7906,7 +7906,7 @@ def rpc_blocks_stream_proxy():
         logger.error(f"[BLOCKS-STREAM] Failed to proxy: {e}")
 
         def fallback():
-            yield b": SSE unavailable\n\n"
+            yield b'data: {"status":"error","message":"SSE unavailable","retry_after":5}\n\n'
 
         return Response(fallback(), mimetype="text/event-stream")
 
