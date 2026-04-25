@@ -4228,12 +4228,12 @@ class RpcBroadcastController:
     def _persist_snapshot_to_db(self, event: Dict[str, Any]) -> bool:
         """Write one snapshot event to quantum_snapshots table via _persist_chirp_snapshot."""
         try:
-             from globals import persist_chirp_snapshot
+            from globals import persist_chirp_snapshot
 
             snap = event.get("snapshot_data", {})
             snap["timestamp_ns"] = event.get("timestamp_ns", time.time_ns())
-            snap["chirp_number"] = event.get("cycle", 0)
             snap["snapshot_json"] = event.get("snapshot_json", "{}")
+            snap["chirp_number"] = event.get("cycle", 0)
             _persist_chirp_snapshot(snap)
             return True
         except ImportError:

@@ -282,6 +282,7 @@ def _dispatch_single(req: dict) -> Optional[dict]:
             return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
 
     # ── BRIDGE RPCS ───────────────────────────────────────────────────────────
+    from bridge import BRIDGE_RPC_METHODS
     if method in BRIDGE_RPC_METHODS:
         handler = BRIDGE_RPC_METHODS[method]
         try:
