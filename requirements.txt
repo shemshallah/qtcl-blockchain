@@ -38,6 +38,7 @@ requests>=2.31.0
 urllib3>=2.0.0
 msgpack>=1.0.7
 orjson>=3.9.0       # 5-8× faster JSON; drop-in stdlib replacement via _JsonShim
+web3>=6.0.0
 
 # ── Data validation ───────────────────────────────────────────────────────────
 pydantic>=2.0.0
