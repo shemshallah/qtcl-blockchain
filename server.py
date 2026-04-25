@@ -278,7 +278,17 @@ def _dispatch_single(req: dict) -> Optional[dict]:
     if not isinstance(method, str):
         return _rpc_error(-32600, "Invalid Request: method not a string", rpc_id)
     if method not in _RPC_METHODS:
-        return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
+        if method not in BRIDGE_RPC_METHODS:
+            return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
+
+    # ── BRIDGE RPCS ───────────────────────────────────────────────────────────
+    if method in BRIDGE_RPC_METHODS:
+        handler = BRIDGE_RPC_METHODS[method]
+        try:
+            return handler(params, rpc_id)
+        except Exception as e:
+            logger.exception(f"[RPC-BRIDGE] {method} error: {e}")
+            return _rpc_error(-32603, f"Bridge error: {str(e)}", rpc_id)
 
     handler = _RPC_METHODS[method]
 
@@ -693,7 +703,9 @@ _LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
 # TESSELLATION REWARD SCHEDULE (modular reward distribution)
 # ═════════════════════════════════════════════════════════════════════════════════
 
-_TREASURY_ADDRESS = os.environ.get("TREASURY_ADDRESS", "qtcl1treasury0reward0dist0address00000000000000000000001")
+_TREASURY_ADDRESS = os.environ.get(
+    "TREASURY_ADDRESS", "qtcl1treasury0reward0dist0address00000000000000000000001"
+)
 _BLOCK_REWARD_TOTAL = 8.0
 _DEFAULT_MINER_REWARD = 7.2
 _DEFAULT_TREASURY_REWARD = 0.8
@@ -3736,13 +3748,13 @@ def _get_canonical_node() -> Optional[dict]:
 
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height via Neon Postgres.
-    
+
     Direct query, no caching complexity.
     """
     try:
         height = 0
         tip_hash = "0" * 64
-        
+
         with get_db_cursor() as cur:
             cur.execute("""
                 SELECT height, block_hash FROM blocks 
@@ -3752,7 +3764,7 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
             if row:
                 height = row[0]
                 tip_hash = row[1] or "0" * 64
-                
+
         return _rpc_ok(
             {
                 "height": height,
@@ -3970,13 +3982,13 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlock — block by height or hash via Neon Postgres.
-    
+
     ALWAYS includes transactions array (7.2 miner + 0.8 treasury coinbases)
     """
     try:
         height = None
         block_hash = None
-        
+
         if isinstance(params, list) and len(params) >= 1:
             height = int(params[0])
         elif isinstance(params, dict):
@@ -3986,15 +3998,18 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                 height = int(height)
 
         block = None
-        
+
         if height is not None:
             with get_db_cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT height, block_hash, timestamp, w_state_hash,
                            parent_hash, nonce, difficulty,
                            coherence_snapshot, merkle_root, tx_count
                     FROM blocks WHERE height = %s LIMIT 1
-                """, (height,))
+                """,
+                    (height,),
+                )
                 row = cur.fetchone()
                 if row:
                     block = {
@@ -4009,7 +4024,9 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "timestamp": int(row[2]) if row[2] else 0,
                         "difficulty": int(float(row[6])) if row[6] else 5,
                         "nonce": int(row[5]) if row[5] else 0,
-                        "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                        "w_state_fidelity": float(row[7])
+                        if row[7] is not None
+                        else 0.0,
                         "w_entropy_hash": row[3] or "",
                         "pq_curr": height,
                         "pq_last": max(0, height - 1),
@@ -4018,49 +4035,63 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "finalized": True,
                         "transactions": [],
                     }
-                    
+
                     # CRITICAL: Fetch ALL transactions for this block
                     txs = []
                     try:
-                        cur.execute("""
+                        cur.execute(
+                            """
                             SELECT tx_hash, from_address, to_address, amount,
                                    tx_type, status, transaction_index
                             FROM transactions
                             WHERE height = %s
                             ORDER BY transaction_index ASC, created_at ASC
-                        """, (height,))
+                        """,
+                            (height,),
+                        )
                         tx_rows = cur.fetchall()
-                        logger.debug(f"[RPC-GETBLOCK] h={height} found {len(tx_rows)} transactions")
-                        
+                        logger.debug(
+                            f"[RPC-GETBLOCK] h={height} found {len(tx_rows)} transactions"
+                        )
+
                         for idx, tr in enumerate(tx_rows):
                             amount_val = float(tr[3]) if tr[3] is not None else 0.0
-                            txs.append({
-                                "tx_id": tr[0],
-                                "tx_hash": tr[0],
-                                "from_addr": tr[1] or "",
-                                "to_addr": tr[2] or "",
-                                "amount": amount_val,
-                                "block_height": height,
-                                "tx_index": int(tr[6]) if tr[6] is not None else idx,
-                                "tx_type": tr[4] or "transfer",
-                                "status": tr[5] or "confirmed",
-                                "timestamp": int(row[2]) if row[2] else 0,
-                                "fee": 0.0,
-                                "w_proof": "",
-                                "metadata": None,
-                            })
+                            txs.append(
+                                {
+                                    "tx_id": tr[0],
+                                    "tx_hash": tr[0],
+                                    "from_addr": tr[1] or "",
+                                    "to_addr": tr[2] or "",
+                                    "amount": amount_val,
+                                    "block_height": height,
+                                    "tx_index": int(tr[6])
+                                    if tr[6] is not None
+                                    else idx,
+                                    "tx_type": tr[4] or "transfer",
+                                    "status": tr[5] or "confirmed",
+                                    "timestamp": int(row[2]) if row[2] else 0,
+                                    "fee": 0.0,
+                                    "w_proof": "",
+                                    "metadata": None,
+                                }
+                            )
                     except Exception as _tx_sel_e:
-                        logger.warning(f"[RPC-GETBLOCK] tx SELECT FAILED h={height}: {_tx_sel_e}")
+                        logger.warning(
+                            f"[RPC-GETBLOCK] tx SELECT FAILED h={height}: {_tx_sel_e}"
+                        )
                         txs = []
-                    
+
                     block["transactions"] = txs
-                    
+
                     block["transactions"] = txs
                     block["tx_count"] = len(txs)
-                    
+
         elif block_hash:
             with get_db_cursor() as cur:
-                cur.execute("SELECT height FROM blocks WHERE block_hash = %s LIMIT 1", (block_hash,))
+                cur.execute(
+                    "SELECT height FROM blocks WHERE block_hash = %s LIMIT 1",
+                    (block_hash,),
+                )
                 row = cur.fetchone()
                 if row:
                     height = row[0]
@@ -4116,35 +4147,42 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
 
         blocks = []
         with get_db_cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT height, block_hash, timestamp, w_state_hash,
                        parent_hash, nonce, difficulty,
                        coherence_snapshot, merkle_root, tx_count
                 FROM blocks 
                 WHERE height >= %s AND height <= %s
                 ORDER BY height ASC
-            """, (from_h, to_h))
+            """,
+                (from_h, to_h),
+            )
             for row in cur.fetchall():
-                blocks.append({
-                    "height": row[0],
-                    "block_height": row[0],
-                    "block_hash": row[1],
-                    "hash": row[1],
-                    "parent_hash": row[4] or ("0" * 64),
-                    "previous_hash": row[4] or ("0" * 64),
-                    "merkle_root": row[8] or ("0" * 64),
-                    "timestamp_s": int(row[2]) if row[2] else 0,
-                    "timestamp": int(row[2]) if row[2] else 0,
-                    "difficulty": int(float(row[6])) if row[6] else 5,
-                    "nonce": int(row[5]) if row[5] else 0,
-                    "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
-                    "w_entropy_hash": row[3] or "",
-                    "pq_curr": row[0],
-                    "pq_last": max(0, row[0] - 1),
-                    "tx_count": int(row[9]) if row[9] else 0,
-                    "mined": True,
-                    "finalized": True,
-                })
+                blocks.append(
+                    {
+                        "height": row[0],
+                        "block_height": row[0],
+                        "block_hash": row[1],
+                        "hash": row[1],
+                        "parent_hash": row[4] or ("0" * 64),
+                        "previous_hash": row[4] or ("0" * 64),
+                        "merkle_root": row[8] or ("0" * 64),
+                        "timestamp_s": int(row[2]) if row[2] else 0,
+                        "timestamp": int(row[2]) if row[2] else 0,
+                        "difficulty": int(float(row[6])) if row[6] else 5,
+                        "nonce": int(row[5]) if row[5] else 0,
+                        "w_state_fidelity": float(row[7])
+                        if row[7] is not None
+                        else 0.0,
+                        "w_entropy_hash": row[3] or "",
+                        "pq_curr": row[0],
+                        "pq_last": max(0, row[0] - 1),
+                        "tx_count": int(row[9]) if row[9] else 0,
+                        "mined": True,
+                        "finalized": True,
+                    }
+                )
 
         return _rpc_ok(
             {
@@ -4163,54 +4201,61 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_getBlockTransactions(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockTransactions — Get all transactions for a specific block.
-    
+
     params: [height] or {height: int}
     Returns: {height: int, tx_count: int, transactions: [...]}
-    
+
     Displays both miner (7.2 QTCL) and treasury (0.8 QTCL) coinbase transactions.
     """
     try:
         height = None
-        
+
         if isinstance(params, list) and len(params) >= 1:
             height = int(params[0])
         elif isinstance(params, dict):
             height = params.get("height")
             if height is not None:
                 height = int(height)
-        
+
         if height is None:
             return _rpc_error(-32602, "height required (array or dict)", rpc_id)
-        
+
         txs = []
         try:
             with get_db_cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT tx_hash, from_address, to_address, amount,
                            tx_type, status, transaction_index
                     FROM transactions
                     WHERE height = %s
                     ORDER BY transaction_index ASC, created_at ASC
-                """, (height,))
+                """,
+                    (height,),
+                )
                 tx_rows = cur.fetchall()
-                logger.info(f"[RPC-GETBLOCKTXNS] h={height}: {len(tx_rows)} transactions found")
-                
+                logger.info(
+                    f"[RPC-GETBLOCKTXNS] h={height}: {len(tx_rows)} transactions found"
+                )
+
                 for idx, tr in enumerate(tx_rows):
                     amount_val = float(tr[3]) if tr[3] is not None else 0.0
-                    txs.append({
-                        "tx_id": tr[0],
-                        "tx_hash": tr[0],
-                        "from_addr": tr[1] or "",
-                        "to_addr": tr[2] or "",
-                        "amount": amount_val,
-                        "tx_index": int(tr[6]) if tr[6] is not None else idx,
-                        "tx_type": tr[4] or "transfer",
-                        "status": tr[5] or "confirmed",
-                    })
+                    txs.append(
+                        {
+                            "tx_id": tr[0],
+                            "tx_hash": tr[0],
+                            "from_addr": tr[1] or "",
+                            "to_addr": tr[2] or "",
+                            "amount": amount_val,
+                            "tx_index": int(tr[6]) if tr[6] is not None else idx,
+                            "tx_type": tr[4] or "transfer",
+                            "status": tr[5] or "confirmed",
+                        }
+                    )
         except Exception as _txn_e:
             logger.warning(f"[RPC-GETBLOCKTXNS] SELECT failed h={height}: {_txn_e}")
             txs = []
-        
+
         return _rpc_ok(
             {
                 "height": height,
@@ -4219,7 +4264,7 @@ def _rpc_getBlockTransactions(params: Any, rpc_id: Any) -> dict:
             },
             rpc_id,
         )
-    
+
     except Exception as e:
         logger.exception(f"[RPC] _rpc_getBlockTransactions exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
@@ -6036,9 +6081,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             return _rpc_error(-32602, "Missing miner_address", rpc_id)
         if not txs or not isinstance(txs, list):
             return _rpc_error(-32602, "Block must include transactions array", rpc_id)
-        tx_types = [tx.get("tx_type","") for tx in txs]
+        tx_types = [tx.get("tx_type", "") for tx in txs]
         if "miner_reward" not in tx_types or "treasury_reward" not in tx_types:
-            return _rpc_error(-32602, "Block must include miner_reward and treasury_reward transactions", rpc_id)
+            return _rpc_error(
+                -32602,
+                "Block must include miner_reward and treasury_reward transactions",
+                rpc_id,
+            )
 
         # ══════════════════════════════════════════════════════════════════════════
         # COHERENT TRANSACTION PIPELINE — Validate Client Coinbases, Then Persist
@@ -6086,7 +6135,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             try:
                 _r = TessellationRewardSchedule.get_rewards_for_height(height)
                 _scheduled_miner_reward = int(round(float(_r.get("miner", 7.2)) * 100))
-                _scheduled_treasury_reward = int(round(float(_r.get("treasury", 0.8)) * 100))
+                _scheduled_treasury_reward = int(
+                    round(float(_r.get("treasury", 0.8)) * 100)
+                )
             except Exception:
                 pass
         _miner_reward = _scheduled_miner_reward + (_total_fees // 2)
@@ -6111,8 +6162,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 cb_from = str(cb.get("from_addr", cb.get("from_address", "")))
                 cb_amount_raw = float(cb.get("amount", 0))
                 # Client may send in QTCL float — convert to base units
-                cb_amount_base = int(round(cb_amount_raw * 100)) if cb_amount_raw < 1000 else int(cb_amount_raw)
-                if cb.get("settled_from") is not None or "treasury" in str(cb.get("tx_id", "")).lower():
+                cb_amount_base = (
+                    int(round(cb_amount_raw * 100))
+                    if cb_amount_raw < 1000
+                    else int(cb_amount_raw)
+                )
+                if (
+                    cb.get("settled_from") is not None
+                    or "treasury" in str(cb.get("tx_id", "")).lower()
+                ):
                     _treasury_cb = cb
                 elif _miner_cb is None:
                     _miner_cb = cb
@@ -6120,7 +6178,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # Validate miner coinbase amount (±1 base unit tolerance for rounding)
             if _miner_cb:
                 _mcb_raw = float(_miner_cb.get("amount", 0))
-                _mcb_base = int(round(_mcb_raw * 100)) if _mcb_raw < 1000 else int(_mcb_raw)
+                _mcb_base = (
+                    int(round(_mcb_raw * 100)) if _mcb_raw < 1000 else int(_mcb_raw)
+                )
                 if abs(_mcb_base - _miner_reward) > 1:
                     logger.warning(
                         f"[SUBMIT-BLOCK] ⚠️ Miner coinbase amount mismatch h={height}: "
@@ -6130,25 +6190,31 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     _miner_cb["amount"] = _miner_reward / 100.0
                 _validated_coinbase_txs = list(_coinbase_txs)
             else:
-                logger.warning(f"[SUBMIT-BLOCK] Client sent coinbase txs but no miner coinbase found h={height}")
+                logger.warning(
+                    f"[SUBMIT-BLOCK] Client sent coinbase txs but no miner coinbase found h={height}"
+                )
                 _server_generated_coinbases = True
         else:
             # Legacy client — no coinbases sent, server generates them
-            logger.info(f"[SUBMIT-BLOCK] No client coinbases h={height} — server generating canonical set")
+            logger.info(
+                f"[SUBMIT-BLOCK] No client coinbases h={height} — server generating canonical set"
+            )
             _server_generated_coinbases = True
 
         if _server_generated_coinbases:
             # Generate canonical coinbase txs (same IDs the client SHOULD have used)
             _miner_cb_id = f"cb_miner_{height}_{miner_address[:16]}"
-            _validated_coinbase_txs = [{
-                "tx_id": _miner_cb_id,
-                "from_addr": "COINBASE",
-                "to_addr": miner_address,
-                "amount": _miner_reward / 100.0,
-                "tx_type": "coinbase",
-                "block_height": height,
-                "version": 1,
-            }]
+            _validated_coinbase_txs = [
+                {
+                    "tx_id": _miner_cb_id,
+                    "from_addr": "COINBASE",
+                    "to_addr": miner_address,
+                    "amount": _miner_reward / 100.0,
+                    "tx_type": "coinbase",
+                    "block_height": height,
+                    "version": 1,
+                }
+            ]
             # Treasury coinbase from prior block's pending_rewards — looked up during DB persist below
 
         # ── Full canonical tx list for persistence ────────────────────────
@@ -6257,18 +6323,24 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         )
                         _prior_pending = cur.fetchall() or []
                         for _pp in _prior_pending:
-                            _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
-                            _treasury_cb_id = f"cb_treasury_{height}_{height-1}_{_pp_recipient[:16]}"
-                            _validated_coinbase_txs.append({
-                                "tx_id": _treasury_cb_id,
-                                "from_addr": "TREASURY",
-                                "to_addr": _pp_recipient,
-                                "amount": _pp_amount / 100.0,
-                                "tx_type": "coinbase",
-                                "settled_from": height - 1,
-                                "block_height": height,
-                                "version": 1,
-                            })
+                            _pp_id, _pp_recipient, _pp_amount = (
+                                _pp[0],
+                                _pp[1],
+                                int(_pp[2]),
+                            )
+                            _treasury_cb_id = f"cb_treasury_{height}_{height - 1}_{_pp_recipient[:16]}"
+                            _validated_coinbase_txs.append(
+                                {
+                                    "tx_id": _treasury_cb_id,
+                                    "from_addr": "TREASURY",
+                                    "to_addr": _pp_recipient,
+                                    "amount": _pp_amount / 100.0,
+                                    "tx_type": "coinbase",
+                                    "settled_from": height - 1,
+                                    "block_height": height,
+                                    "version": 1,
+                                }
+                            )
                         # Rebuild _all_txs with treasury entries
                         _all_txs = _validated_coinbase_txs + _non_coinbase_txs
                     except Exception as _pp_e:
@@ -6289,7 +6361,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     # Amount: client sends QTCL float; DB stores integer base units
                     _amt_raw = float(tx.get("amount", 0))
                     # Heuristic: if < 100000, it's QTCL float → ×100; if >= 100000, already base units
-                    _amt_base = int(round(_amt_raw * 100)) if _amt_raw < 100000 else int(_amt_raw)
+                    _amt_base = (
+                        int(round(_amt_raw * 100))
+                        if _amt_raw < 100000
+                        else int(_amt_raw)
+                    )
 
                     cur.execute("SAVEPOINT sp_tx")
                     try:
@@ -6303,22 +6379,32 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 block_hash=EXCLUDED.block_hash,
                                 transaction_index=EXCLUDED.transaction_index,
                                 updated_at=NOW()""",
-                            (tx_id, _from, _to, _amt_base, _tx_type,
-                             height, block_hash, tx_idx),
+                            (
+                                tx_id,
+                                _from,
+                                _to,
+                                _amt_base,
+                                _tx_type,
+                                height,
+                                block_hash,
+                                tx_idx,
+                            ),
                         )
                         cur.execute("RELEASE SAVEPOINT sp_tx")
-                        _written_txs.append({
-                            "tx_id": tx_id,
-                            "tx_hash": tx_id,
-                            "from_addr": _from,
-                            "to_addr": _to,
-                            "amount": _amt_base,
-                            "tx_type": _tx_type,
-                            "tx_index": tx_idx,
-                            "status": "confirmed",
-                            "height": height,
-                            "block_hash": block_hash,
-                        })
+                        _written_txs.append(
+                            {
+                                "tx_id": tx_id,
+                                "tx_hash": tx_id,
+                                "from_addr": _from,
+                                "to_addr": _to,
+                                "amount": _amt_base,
+                                "tx_type": _tx_type,
+                                "tx_index": tx_idx,
+                                "status": "confirmed",
+                                "height": height,
+                                "block_hash": block_hash,
+                            }
+                        )
                         logger.info(
                             f"[SUBMIT-BLOCK] TX h={height} idx={tx_idx}: "
                             f"{tx_id[:24]}… ({_tx_type}) {_from[:12]}→{_to[:12]} "
@@ -6326,7 +6412,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         )
                     except Exception as _tx_e:
                         cur.execute("ROLLBACK TO SAVEPOINT sp_tx")
-                        logger.warning(f"[SUBMIT-BLOCK] TX insert {tx_id[:16]}…: {_tx_e}")
+                        logger.warning(
+                            f"[SUBMIT-BLOCK] TX insert {tx_id[:16]}…: {_tx_e}"
+                        )
 
                 # ════════════════════════════════════════════════════════════════
                 # WALLET SETTLEMENT — within same DB cursor for atomicity
@@ -6375,14 +6463,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         "WHERE height=%s AND status='pending'",
                         (height - 1,),
                     )
-                    for _pp in (cur.fetchall() or []):
+                    for _pp in cur.fetchall() or []:
                         _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
                         cur.execute(
                             """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
                             VALUES (%s,%s,%s,%s,1,'treasury',NOW()) ON CONFLICT (address) DO UPDATE SET
                             balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
-                            (_pp_recipient, hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64],
-                             hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64], _pp_amount),
+                            (
+                                _pp_recipient,
+                                hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64],
+                                hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64],
+                                _pp_amount,
+                            ),
                         )
                         cur.execute(
                             "UPDATE pending_rewards SET status='confirmed', confirmed_at_height=%s WHERE id=%s",
@@ -6401,11 +6493,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     )
                     logger.critical(
                         f"[SUBMIT-BLOCK] ⏳ TREASURY QUEUED h={height}: "
-                        f"{_treas_reward/100:.2f} QTCL → {_treasury_address[:16]}… "
-                        f"(coinbase at h={height+1})"
+                        f"{_treas_reward / 100:.2f} QTCL → {_treasury_address[:16]}… "
+                        f"(coinbase at h={height + 1})"
                     )
                 except Exception as _pre:
-                    logger.error(f"[SUBMIT-BLOCK] ❌ TREASURY QUEUEING FAILED h={height}: {_pre}")
+                    logger.error(
+                        f"[SUBMIT-BLOCK] ❌ TREASURY QUEUEING FAILED h={height}: {_pre}"
+                    )
 
                 # Update tx_count from actual written rows
                 cur.execute(
@@ -6971,7 +7065,9 @@ def _rpc_getCoinbaseTemplate(params: Any, rpc_id: Any) -> dict:
             return _rpc_error(-32602, "height must be int", rpc_id)
         miner_addr = str(params[1])
         if height < 1 or not miner_addr:
-            return _rpc_error(-32602, f"invalid height={height} or miner_address", rpc_id)
+            return _rpc_error(
+                -32602, f"invalid height={height} or miner_address", rpc_id
+            )
 
         miner_base = 720
         treasury_base = 80
@@ -7001,31 +7097,36 @@ def _rpc_getCoinbaseTemplate(params: Any, rpc_id: Any) -> dict:
                     "WHERE height=%s AND status='pending' ORDER BY id ASC",
                     (height - 1,),
                 )
-                for row in (cur.fetchall() or []):
+                for row in cur.fetchall() or []:
                     _recip = row[0]
                     _amt = int(row[1])
-                    _tid = f"cb_treasury_{height}_{height-1}_{_recip[:16]}"
-                    prior_pending.append({
-                        "recipient": _recip,
-                        "amount_base": _amt,
-                        "amount_qtcl": _amt / 100.0,
-                        "settled_from_height": height - 1,
-                        "tx_id": _tid,
-                    })
+                    _tid = f"cb_treasury_{height}_{height - 1}_{_recip[:16]}"
+                    prior_pending.append(
+                        {
+                            "recipient": _recip,
+                            "amount_base": _amt,
+                            "amount_qtcl": _amt / 100.0,
+                            "settled_from_height": height - 1,
+                            "tx_id": _tid,
+                        }
+                    )
         except Exception as _e:
             logger.debug(f"[RPC-COINBASE-TEMPLATE] prior pending lookup: {_e}")
 
-        return _rpc_ok({
-            "height": height,
-            "miner_address": miner_addr,
-            "miner_reward_base": miner_base,
-            "miner_reward_qtcl": miner_base / 100.0,
-            "treasury_reward_base": treasury_base,
-            "treasury_reward_qtcl": treasury_base / 100.0,
-            "treasury_address": treasury_address,
-            "miner_coinbase_id": miner_cb_id,
-            "prior_pending_treasury": prior_pending,
-        }, rpc_id)
+        return _rpc_ok(
+            {
+                "height": height,
+                "miner_address": miner_addr,
+                "miner_reward_base": miner_base,
+                "miner_reward_qtcl": miner_base / 100.0,
+                "treasury_reward_base": treasury_base,
+                "treasury_reward_qtcl": treasury_base / 100.0,
+                "treasury_address": treasury_address,
+                "miner_coinbase_id": miner_cb_id,
+                "prior_pending_treasury": prior_pending,
+            },
+            rpc_id,
+        )
     except Exception as e:
         logger.exception(f"[RPC] getCoinbaseTemplate exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
@@ -7036,11 +7137,15 @@ def _rpc_getCoinbaseTemplate(params: Any, rpc_id: Any) -> dict:
 # Server NEVER returns private keys. NEVER stores passwords.
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _server_wallet_path():
     import os as _os
+
     base = _os.environ.get("QTCL_WALLET_DIR", _os.path.expanduser("~/.qtcl"))
     from pathlib import Path as _P
+
     return _P(base) / "wallet.json"
+
 
 def _rpc_wallet_verify(params, rpc_id):
     """Verify wallet password WITHOUT returning private key."""
@@ -7052,6 +7157,7 @@ def _rpc_wallet_verify(params, rpc_id):
         if not wp.exists():
             return _rpc_ok({"valid": False, "reason": "no_wallet"}, rpc_id)
         import json as _j
+
         raw = _j.loads(wp.read_text())
         if "vault_version" not in raw:
             return _rpc_ok({"valid": False, "reason": "invalid_format"}, rpc_id)
@@ -7059,6 +7165,7 @@ def _rpc_wallet_verify(params, rpc_id):
         if not enc_pk:
             return _rpc_ok({"valid": False, "reason": "missing_encrypted_key"}, rpc_id)
         from hyp_lwe import verify_wallet_password
+
         is_valid = verify_wallet_password(enc_pk, password)
         result = {"valid": is_valid}
         if is_valid:
@@ -7068,6 +7175,7 @@ def _rpc_wallet_verify(params, rpc_id):
     except Exception as e:
         return _rpc_error(-32603, f"Verification failed: {str(e)}", rpc_id)
 
+
 def _rpc_wallet_info(params, rpc_id):
     """Get wallet info (address, public key) WITHOUT password. Never returns private key."""
     try:
@@ -7075,12 +7183,16 @@ def _rpc_wallet_info(params, rpc_id):
         if not wp.exists():
             return _rpc_ok({"exists": False}, rpc_id)
         import json as _j
+
         raw = _j.loads(wp.read_text())
-        result = {"exists": True, "address": raw.get("address", ""),
-                  "public_key": raw.get("public_key", ""),
-                  "vault_version": raw.get("vault_version", 0),
-                  "is_legacy": "vault_version" not in raw,
-                  "has_shamir": "shamir_config" in raw}
+        result = {
+            "exists": True,
+            "address": raw.get("address", ""),
+            "public_key": raw.get("public_key", ""),
+            "vault_version": raw.get("vault_version", 0),
+            "is_legacy": "vault_version" not in raw,
+            "has_shamir": "shamir_config" in raw,
+        }
         if "shamir_config" in raw:
             result["shamir_threshold"] = raw["shamir_config"].get("threshold", 0)
         return _rpc_ok(result, rpc_id)
@@ -7176,6 +7288,7 @@ _RPC_METHODS: Dict[str, Any] = {
 # ── Bridge Module ─────────────────────────────────────────────────────────────
 try:
     from bridge import BRIDGE_RPC_METHODS
+
     _RPC_METHODS.update(BRIDGE_RPC_METHODS)
     logger.info(f"[BRIDGE] ✅ {len(BRIDGE_RPC_METHODS)} bridge RPC methods registered")
 except ImportError as e:
@@ -7634,8 +7747,10 @@ def rpc_endpoint():
             response = Response(
                 json.dumps(discovery_response), status=200, mimetype="application/json"
             )
-            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-            response.headers['Pragma'] = 'no-cache'
+            response.headers["Cache-Control"] = (
+                "no-store, no-cache, must-revalidate, max-age=0"
+            )
+            response.headers["Pragma"] = "no-cache"
             return response
 
         # Parse params (JSON-encoded, URL-decoded, default to empty list)
@@ -7680,9 +7795,11 @@ def rpc_endpoint():
         # CRITICAL: Always HTTP 200, never status codes >= 400
         json_payload = json.dumps(result)
         response = Response(json_payload, status=200, mimetype="application/json")
-        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '0'
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
         return response
     except Exception as e:
         logger.exception(f"[RPC] GET endpoint error: {e}")
@@ -7691,8 +7808,10 @@ def rpc_endpoint():
         response = Response(
             json.dumps(error_response), status=200, mimetype="application/json"
         )
-        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        response.headers['Pragma'] = 'no-cache'
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
+        response.headers["Pragma"] = "no-cache"
         return response
 
 
@@ -7893,10 +8012,12 @@ def serve_favicon():
     """Serve favicon.png from the repo root for browser tab icon display."""
     import os
     from flask import send_file
+
     favicon_path = os.path.join(os.path.dirname(__file__), "favicon.png")
     if os.path.exists(favicon_path):
         return send_file(favicon_path, mimetype="image/png")
     return "", 404
+
 
 @app.route("/", methods=["GET"])
 def serve_root():
@@ -8678,10 +8799,13 @@ def _deferred_server_wallet_init():
 
         if os.path.exists(_wallet_file):
             import json as _wj
+
             try:
                 _wraw = _wj.loads(open(_wallet_file).read())
                 if "vault_version" in _wraw:
-                    logger.info(f"[HYP-WALLET-SERVER] ✅ Vault v{_wraw['vault_version']} wallet at {_wallet_file}")
+                    logger.info(
+                        f"[HYP-WALLET-SERVER] ✅ Vault v{_wraw['vault_version']} wallet at {_wallet_file}"
+                    )
                 else:
                     logger.warning(
                         "[HYP-WALLET-SERVER] ⚠️  Unrecognized wallet format — create a new wallet"
