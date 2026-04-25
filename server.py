@@ -707,8 +707,8 @@ _TREASURY_ADDRESS = os.environ.get(
     "TREASURY_ADDRESS", "qtcl1treasury0reward0dist0address00000000000000000000001"
 )
 _BLOCK_REWARD_TOTAL = 8.0
-_DEFAULT_MINER_REWARD = 7.2
-_DEFAULT_TREASURY_REWARD = 0.8
+_DEFAULT_MINER_REWARD = float(os.environ.get("MINER_REWARD", "7.2"))
+_DEFAULT_TREASURY_REWARD = float(os.environ.get("TREASURY_REWARD", "0.8"))
 _REWARD_SCHEDULE: dict = {}
 
 
@@ -6218,6 +6218,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # Treasury coinbase from prior block's pending_rewards — looked up during DB persist below
 
         # ── Full canonical tx list for persistence ────────────────────────
+        # Ensure all coinbase transactions are persisted with consistent 'coinbase' tx_type
+        for tx in _validated_coinbase_txs:
+            tx["tx_type"] = "coinbase"
+
         # Order: coinbases first (miner, treasury), then user txs
         _all_txs = _validated_coinbase_txs + _non_coinbase_txs
 
