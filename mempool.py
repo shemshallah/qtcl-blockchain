@@ -1783,7 +1783,7 @@ class Mempool:
                 return
             # Import the live LATTICE singleton from server context
             try:
-                from server import LATTICE
+                from globals import get_lattice as LATTICE
                 if LATTICE and getattr(LATTICE, 'block_manager', None):
                     LATTICE.block_manager.receive_transaction(qt)
             except (ImportError, AttributeError):

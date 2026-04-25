@@ -4084,7 +4084,7 @@ class RpcBroadcastController:
                     "status": "ok",
                     "oracle_running": True,
                 }
-                from server import _cache_snapshot as _srv_cache
+                from globals import get_blockchain as _srv_cache
 
                 _srv_cache(_server_snap)
             except ImportError:
@@ -4228,7 +4228,7 @@ class RpcBroadcastController:
     def _persist_snapshot_to_db(self, event: Dict[str, Any]) -> bool:
         """Write one snapshot event to quantum_snapshots table via _persist_chirp_snapshot."""
         try:
-            from server import _persist_chirp_snapshot
+             from globals import persist_chirp_snapshot
 
             snap = event.get("snapshot_data", {})
             snap["timestamp_ns"] = event.get("timestamp_ns", time.time_ns())
