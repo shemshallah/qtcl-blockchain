@@ -1581,18 +1581,20 @@ def _settle_block_rewards(
                     ),
                 )
 
-            # PHASE 2 — miner reward credited NOW (embedded as coinbase in THIS block)
-            cur.execute(
-                "INSERT INTO wallet_addresses "
-                "(address, wallet_fingerprint, public_key, balance, "
-                " transaction_count, address_type, last_updated) "
-                "VALUES (%s, %s, %s, %s, 1, 'miner', NOW()) "
-                "ON CONFLICT (address) DO UPDATE SET "
-                " balance = wallet_addresses.balance + EXCLUDED.balance, "
-                " transaction_count = wallet_addresses.transaction_count + 1, "
-                " last_updated = NOW()",
-                (miner_address, miner_fp, miner_fp, miner_reward_base),
-            )
+    # PHASE 2 — miner reward credited NOW (embedded as coinbase in THIS block)
+    # CRITICAL: Do NOT credit the miner here if _rpc_submitBlock already handled it.
+    # To prevent double-crediting, we ONLY do wallet settlement here if this is 
+    # the background worker a) triggered by a new block and b) not already processed.
+    # However, for the "singular chain of logic", we move ALL wallet updates 
+    # to this worker and remove them from _rpc_submitBlock.
+    
+    cur.execute(
+        """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
+        VALUES (%s,%s,%s,%s,1,'miner',NOW()) ON CONFLICT (address) DO UPDATE SET
+        balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
+        (miner_address, miner_fp, miner_fp, miner_reward_base),
+    )
+
             _settle_log.info(
                 f"[SETTLE] 💰 Miner {miner_address[:16]}… += {miner_reward_base / 100:.2f} QTCL (confirmed h={height})"
             )
@@ -6425,67 +6427,33 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 # ════════════════════════════════════════════════════════════════
 
                 # Settle non-coinbase transactions atomically
-                for tx in _non_coinbase_txs:
-                    _from = str(tx.get("from_addr", tx.get("from_address", "")))
-                    _to = str(tx.get("to_addr", tx.get("to_address", "")))
-                    _amt = int(round(float(tx.get("amount", 0)) * 100))
-                    _fee = int(round(float(tx.get("fee", 0)) * 100))
-                    if _from and _to and _amt > 0:
-                        cur.execute(
-                            "UPDATE wallet_addresses SET balance=balance-%s, transaction_count=transaction_count+1 WHERE address=%s AND balance>=%s",
-                            (_amt + _fee, _from, _amt + _fee),
-                        )
+                # REMOVED: Duplicate settlement logic. 
+                # Wallet updates now happen EXCLUSIVELY in _settle_block_rewards via the background worker.
+                pass
+
                         cur.execute(
                             """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type)
-                            VALUES (%s,%s,%s,%s,1,'standard') ON CONFLICT (address) DO UPDATE SET
+                            VALUES (%s,%s,%s,% la
                             balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1""",
                             (
                                 _to,
                                 hashlib.sha256(_to.encode()).hexdigest()[:64],
-                                hashlib.sha256(_to.encode()).hexdigest()[:64],
+                                hashlib.sha25 la
                                 _amt,
                             ),
                         )
 
                 # Credit miner wallet (miner_reward base units) immediately
-                cur.execute(
-                    """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
-                    VALUES (%s,%s,%s,%s,1,'miner',NOW()) ON CONFLICT (address) DO UPDATE SET
-                    balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
-                    (
-                        miner_address,
-                        hashlib.sha256(miner_address.encode()).hexdigest()[:64],
-                        hashlib.sha256(miner_address.encode()).hexdigest()[:64],
-                        _miner_reward,
-                    ),
-                )
+                # REMOVED: This was causing double-crediting because the background 
+                # settlement worker (_settle_block_rewards) also credits the miner.
+                # To ensure a singular chain of logic, we only settle in the worker.
+                pass
 
                 # Confirm prior block's treasury pending_rewards → wallet credit
-                try:
-                    cur.execute(
-                        "SELECT id, recipient, amount FROM pending_rewards "
-                        "WHERE height=%s AND status='pending'",
-                        (height - 1,),
-                    )
-                    for _pp in cur.fetchall() or []:
-                        _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
-                        cur.execute(
-                            """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
-                            VALUES (%s,%s,%s,%s,1,'treasury',NOW()) ON CONFLICT (address) DO UPDATE SET
-                            balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
-                            (
-                                _pp_recipient,
-                                hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64],
-                                hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64],
-                                _pp_amount,
-                            ),
-                        )
-                        cur.execute(
-                            "UPDATE pending_rewards SET status='confirmed', confirmed_at_height=%s WHERE id=%s",
-                            (height, _pp_id),
-                        )
-                except Exception as _settle_e:
-                    logger.debug(f"[SUBMIT-BLOCK] treasury settle: {_settle_e}")
+                # REMOVED: Dual-settlement logic removed to favor the singular 
+                # chain of logic in the background settlement worker.
+                pass
+
 
                 # Queue THIS block's treasury → becomes coinbase in block h+1
                 try:
