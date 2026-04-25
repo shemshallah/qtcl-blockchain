@@ -1581,88 +1581,116 @@ def _settle_block_rewards(
                     ),
                 )
 
-    # PHASE 2 — miner reward credited NOW (embedded as coinbase in THIS block)
-    # CRITICAL: Do NOT credit the miner here if _rpc_submitBlock already handled it.
-    # To prevent double-crediting, we ONLY do wallet settlement here if this is 
-    # the background worker a) triggered by a new block and b) not already processed.
-    # However, for the "singular chain of logic", we move ALL wallet updates 
-    # to this worker and remove them from _rpc_submitBlock.
-    
-    cur.execute(
-        """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
-        VALUES (%s,%s,%s,%s,1,'miner',NOW()) ON CONFLICT (address) DO UPDATE SET
-        balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
-        (miner_address, miner_fp, miner_fp, miner_reward_base),
-    )
+        # PHASE 2 — miner reward credited NOW (embedded as coinbase in THIS block)
+        # CRITICAL: Do NOT credit the miner here if _rpc_submitBlock already handled it.
+        # To prevent double-crediting, we ONLY do wallet settlement here if this is 
+        # the background worker a) triggered by a new block and b) not already processed.
+        # However, for the "singular chain of logic", we move ALL wallet updates 
+        # to this worker and remove them from _rpc_submitBlock.
+        
+        cur.execute(
+            """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
+            VALUES (%s,%s,%s,%s,1,'miner',NOW()) ON CONFLICT (address) DO UPDATE SET
+            balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
+            (miner_address, miner_fp, miner_fp, miner_reward_base),
+        )
 
+        _settle_log.info(
+            f"[SETTLE] 💰 Miner {miner_address[:16]}… += {miner_reward_base / 100:.2f} QTCL (confirmed h={height})"
+        )
+
+        # NOTE: Transaction rows are written by _rpc_submitBlock (sole authority).
+        # This worker only handles wallet credits and pending_rewards updates.
+
+        # PHASE 3 — treasury reward QUEUED (confirms at height+1)
+        cur.execute(
+            "INSERT INTO pending_rewards "
+            "(height, reward_type, recipient, amount, status) "
+            "VALUES (%s, 'treasury', %s, %s, 'pending') "
+            "ON CONFLICT (height, reward_type, recipient) DO NOTHING",
+            (height, treasury_address, treasury_reward_base),
+        )
+        _settle_log.info(
+            f"[SETTLE] ⏳ Treasury {treasury_address[:16]}… QUEUED {treasury_reward_base / 100:.2f} QTCL (confirms at h={height + 1})"
+        )
+
+        # PHASE 4 — Confirm PRIOR block's pending treasury reward (h-1)
+        cur.execute(
+            "SELECT id, recipient, amount FROM pending_rewards "
+            "WHERE height = %s AND status = 'pending'",
+            (height - 1,),
+        )
+        _prior = cur.fetchall() or []
+        for pr in _prior:
+            _pr_id = pr[0]
+            _pr_recipient = pr[1]
+            _pr_amount = int(pr[2])
+            cur.execute(
+                "INSERT INTO wallet_addresses "
+                "(address, wallet_fingerprint, public_key, balance, "
+                " transaction_count, address_type, last_updated) "
+                "VALUES (%s, %s, %s, %s, 1, 'treasury', NOW()) "
+                "ON CONFLICT (address) DO UPDATE SET "
+                " balance = wallet_addresses.balance + EXCLUDED.balance, "
+                " transaction_count = wallet_addresses.transaction_count + 1, "
+                " last_updated = NOW()",
+                (
+                    _pr_recipient,
+                    hashlib.sha256(_pr_recipient.encode()).hexdigest()[:64],
+                    hashlib.sha256(_pr_recipient.encode()).hexdigest()[:64],
+                    _pr_amount,
+                ),
+            )
+            cur.execute(
+                "UPDATE pending_rewards SET status = 'confirmed', "
+                "confirmed_at_height = %s WHERE id = %s",
+                (height, _pr_id),
+            )
+            # NOTE: Treasury tx rows written by _rpc_submitBlock. Worker handles wallet credits only.
             _settle_log.info(
-                f"[SETTLE] 💰 Miner {miner_address[:16]}… += {miner_reward_base / 100:.2f} QTCL (confirmed h={height})"
+                f"[SETTLE] ✅ CONFIRMED prior h={height - 1} treasury "
+                f"{_pr_recipient[:20]}… +{_pr_amount / 100:.2f} QTCL"
             )
 
-            # NOTE: Transaction rows are written by _rpc_submitBlock (sole authority).
-            # This worker only handles wallet credits and pending_rewards updates.
+        # PHASE 5 — chain state update
+        cur.execute(
+            "INSERT INTO chain_state (state_id, chain_height, head_block_hash, "
+            " latest_coherence, updated_at) "
+            "VALUES (1, %s, %s, 0.0, NOW()) "
+            "ON CONFLICT (state_id) DO UPDATE SET "
+            " chain_height = EXCLUDED.chain_height, "
+            " head_block_hash = EXCLUDED.head_block_hash, "
+            " updated_at = NOW()",
+            (height, block_hash),
+        )
 
-            # PHASE 3 — treasury reward QUEUED (confirms at height+1)
-            cur.execute(
-                "INSERT INTO pending_rewards "
-                "(height, reward_type, recipient, amount, status) "
-                "VALUES (%s, 'treasury', %s, %s, 'pending') "
-                "ON CONFLICT (height, reward_type, recipient) DO NOTHING",
-                (height, treasury_address, treasury_reward_base),
-            )
-            _settle_log.info(
-                f"[SETTLE] ⏳ Treasury {treasury_address[:16]}… QUEUED {treasury_reward_base / 100:.2f} QTCL (confirms at h={height + 1})"
-            )
+        _settle_log.warning(
+            f"[SETTLE] ✅ h={height}: miner=+{miner_reward_base / 100:.2f} QTCL (now), "
+            f"treasury={treasury_reward_base / 100:.2f} QTCL (confirms h={height + 1}), "
+            f"txs={len(non_coinbase_txs)}, fees={total_tx_fees_base / 100:.2f} QTCL"
+        )
 
-            # PHASE 4 — Confirm PRIOR block's pending treasury reward (h-1)
-            cur.execute(
-                "SELECT id, recipient, amount FROM pending_rewards "
-                "WHERE height = %s AND status = 'pending'",
-                (height - 1,),
+        # ── Cache block ──────────────────────────────────────────────────
+        try:
+            _cache_block(
+                {
+                    "height": height,
+                    "block_hash": block_hash,
+                    "timestamp": int(time.time()),
+                    "difficulty": 4,
+                    "miner": miner_address,
+                    "w_state_fidelity": 0.0,
+                }
             )
-            _prior = cur.fetchall() or []
-            for pr in _prior:
-                _pr_id = pr[0]
-                _pr_recipient = pr[1]
-                _pr_amount = int(pr[2])
-                cur.execute(
-                    "INSERT INTO wallet_addresses "
-                    "(address, wallet_fingerprint, public_key, balance, "
-                    " transaction_count, address_type, last_updated) "
-                    "VALUES (%s, %s, %s, %s, 1, 'treasury', NOW()) "
-                    "ON CONFLICT (address) DO UPDATE SET "
-                    " balance = wallet_addresses.balance + EXCLUDED.balance, "
-                    " transaction_count = wallet_addresses.transaction_count + 1, "
-                    " last_updated = NOW()",
-                    (
-                        _pr_recipient,
-                        hashlib.sha256(_pr_recipient.encode()).hexdigest()[:64],
-                        hashlib.sha256(_pr_recipient.encode()).hexdigest()[:64],
-                        _pr_amount,
-                    ),
-                )
-                cur.execute(
-                    "UPDATE pending_rewards SET status = 'confirmed', "
-                    "confirmed_at_height = %s WHERE id = %s",
-                    (height, _pr_id),
-                )
-                # NOTE: Treasury tx rows written by _rpc_submitBlock. Worker handles wallet credits only.
-                _settle_log.info(
-                    f"[SETTLE] ✅ CONFIRMED prior h={height - 1} treasury "
-                    f"{_pr_recipient[:20]}… +{_pr_amount / 100:.2f} QTCL"
-                )
+            _settle_log.debug(f"[SETTLE] ✅ Block cached: h={height}")
+        except Exception as cache_err:
+            _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
 
-            # PHASE 5 — chain state update
-            cur.execute(
-                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, "
-                " latest_coherence, updated_at) "
-                "VALUES (1, %s, %s, 0.0, NOW()) "
-                "ON CONFLICT (state_id) DO UPDATE SET "
-                " chain_height = EXCLUDED.chain_height, "
-                " head_block_hash = EXCLUDED.head_block_hash, "
-                " updated_at = NOW()",
-                (height, block_hash),
-            )
+        _settle_log.info(f"[SETTLE] ✅ Block h={height} settlement complete")
+
+    except Exception as e:
+        _settle_log.error(f"[SETTLE] ❌ Critical failure during settlement of h={height}: {e}")
+        # We do NOT raise here to avoid killing the worker loop, but we log it
 
         _settle_log.warning(
             f"[SETTLE] ✅ h={height}: miner=+{miner_reward_base / 100:.2f} QTCL (now), "
@@ -2027,8 +2055,10 @@ def _http_json_serial(o):
 
 
 def _http_post_json(url, headers, payload, timeout=30, retries=3):
-    """POST JSON; retry on 5xx/network with exponential backoff. Returns parsed body."""
+    """POST JSON and return parsed body."""
     import json as _json
+
+
 
     raw = _json.dumps(payload, default=_http_json_serial).encode()
     hdrs = {**headers, "Content-Type": "application/json"}
@@ -2112,7 +2142,7 @@ _COMMENT_STRIP = _re.compile(r"^(?:\s|--[^\n]*\n|/\*.*?\*/)*", _re.DOTALL)
 
 
 def _escape_sql_literal(v):
-    """Convert Python value → safe PostgreSQL literal (dollar-quoting / type-aware)."""
+    """Convert Python value to safe PostgreSQL literal."""
     if v is None:
         return "NULL"
     if isinstance(v, bool):
@@ -2311,7 +2341,7 @@ class _SupHTTPCursor:
 
 class _SupHTTPConn:
     """psycopg2-compatible connection backed by Supabase PostgREST HTTPS RPC.
-    commit()/rollback() are no-ops — PostgREST RPC is auto-committed per call.
+    commit()/rollback() are no-ops - PostgREST RPC is auto-committed per call.
     .closed mirrors psycopg2 int semantics: 0=open, 1=closed, 2=lost."""
 
     def __init__(self):
@@ -2435,9 +2465,10 @@ def _suphttp_test_connection() -> bool:
 
 class DatabasePool:
     """Thread-safe connection pool.  Transparently switches between:
-       • psycopg2 TCP pool (Koyeb / any server with direct Supabase TCP access)
-       • _SupHTTPPool  HTTP pool (PythonAnywhere where outbound TCP 5432/6543 is blocked)
-    Controlled by USE_HTTP_DB=1 environment variable."""
+       - psycopg2 TCP pool (Koyeb / any server with direct Supabase TCP access)
+       - _SupHTTPPool  HTTP pool (PythonAnywhere where outbound TCP 5432/6543 is blocked)
+     Controlled by USE_HTTP_DB=1 environment variable."""
+
 
     _instance = None
     _lock = threading.Lock()
@@ -2604,7 +2635,9 @@ class DatabasePool:
                 logger.info(
                     f"[STARTUP] ✅ DB ready (direct mode) at {time.time() - _STARTUP_TIME:.1f}s"
                 )
-            except psycopg2.OperationalError if psycopg2 else Exception as e:
+            except Exception as e:
+                if 'psycopg2' in globals() and hasattr(psycopg2, 'OperationalError') and isinstance(e, psycopg2.OperationalError):
+                    pass # Handle OperationalError specifically if needed
                 logger.error(f"[DB] ❌ Cannot connect to Neon: {e}")
                 self._initialized = False
                 self.use_pooling = False
@@ -6430,18 +6463,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 # REMOVED: Duplicate settlement logic. 
                 # Wallet updates now happen EXCLUSIVELY in _settle_block_rewards via the background worker.
                 pass
-
-                        cur.execute(
-                            """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type)
-                            VALUES (%s,%s,%s,% la
-                            balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1""",
-                            (
-                                _to,
-                                hashlib.sha256(_to.encode()).hexdigest()[:64],
-                                hashlib.sha25 la
-                                _amt,
-                            ),
-                        )
 
                 # Credit miner wallet (miner_reward base units) immediately
                 # REMOVED: This was causing double-crediting because the background 
