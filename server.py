@@ -116,6 +116,20 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_unregisterMeasurementSubscriber": 3.0,
     "qtcl_getDeviceChain": 4.0,
     "qtcl_getMerminTest": 20.0,
+    # Vault methods — PBKDF2 600K rounds + schema init + DB
+    "vault_createAccount": 15.0,
+    "vault_login": 15.0,
+    "vault_storeSecret": 10.0,
+    "vault_retrieveSecret": 10.0,
+    "vault_listSecrets": 8.0,
+    "vault_deleteSecret": 8.0,
+    "vault_anchorHash": 15.0,
+    "vault_verifyAnchor": 8.0,
+    "vault_depositCredit": 10.0,
+    "vault_getBalance": 8.0,
+    "vault_upgradeTier": 10.0,
+    "vault_setupInheritance": 10.0,
+    "vault_checkIn": 8.0,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -1733,6 +1747,15 @@ def _settle_block_rewards(
             )
 
         # PHASE 5 — chain state update
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS chain_state (
+                state_id INTEGER PRIMARY KEY,
+                chain_height BIGINT NOT NULL DEFAULT 0,
+                head_block_hash TEXT NOT NULL DEFAULT '',
+                latest_coherence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )"""
+        )
         cur.execute(
             "INSERT INTO chain_state (state_id, chain_height, head_block_hash, "
             " latest_coherence, updated_at) "
@@ -6230,7 +6253,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         for tx in txs or []:
             tx_type = str(tx.get("tx_type", "")).lower()
-            if tx_type == "coinbase":
+            if tx_type in ("coinbase", "miner_reward", "treasury_reward"):
                 _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
@@ -6274,6 +6297,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             _miner_cb = None
             _treasury_cb = None
             for cb in _coinbase_txs:
+                cb_type = str(cb.get("tx_type", "")).lower()
                 cb_from = str(cb.get("from_addr", cb.get("from_address", "")))
                 cb_amount_raw = float(cb.get("amount", 0))
                 # Client may send in QTCL float — convert to base units
@@ -6282,7 +6306,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     if cb_amount_raw < 1000
                     else int(cb_amount_raw)
                 )
-                if (
+                if cb_type == "treasury_reward" or (
                     cb.get("settled_from") is not None
                     or "treasury" in str(cb.get("tx_id", "")).lower()
                 ):
@@ -6333,9 +6357,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # Treasury coinbase from prior block's pending_rewards — looked up during DB persist below
 
         # ── Full canonical tx list for persistence ────────────────────────
-        # Ensure all coinbase transactions are persisted with consistent 'coinbase' tx_type
-        for tx in _validated_coinbase_txs:
-            tx["tx_type"] = "coinbase"
+        # Preserve client tx_types (miner_reward, treasury_reward) — don't overwrite
 
         # Order: coinbases first (miner, treasury), then user txs
         _all_txs = _validated_coinbase_txs + _non_coinbase_txs
