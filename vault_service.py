@@ -321,6 +321,21 @@ def _ensure_schema():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PARAMS NORMALIZER (JSON-RPC params come as list, vault handlers expect dict)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _normalize_params(params) -> dict:
+    """JSON-RPC 2.0 sends params as a list. Extract the first dict element."""
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, (list, tuple)):
+        if len(params) > 0 and isinstance(params[0], dict):
+            return params[0]
+        return {}
+    return {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ACCOUNT MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -359,6 +374,7 @@ def vault_create_account(params: dict, rpc_id: Any) -> dict:
         device_fp: str (optional, browser fingerprint)
         qtcl_address: str (optional, for billing)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -427,6 +443,7 @@ def vault_login(params: dict, rpc_id: Any) -> dict:
         account_id: str (required)
         passphrase: str (required)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -486,6 +503,7 @@ def vault_upgrade_tier(params: dict, rpc_id: Any) -> dict:
         passphrase: str
         qtcl_address: str (required for paid tier — billing address)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -551,6 +569,7 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
         encryption_meta: dict (client-side encryption params: salt, iv, kdf)
         size_bytes: int (original plaintext size)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -655,6 +674,7 @@ def vault_retrieve_secret(params: dict, rpc_id: Any) -> dict:
         passphrase: str
         secret_id: str
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -736,6 +756,7 @@ def vault_list_secrets(params: dict, rpc_id: Any) -> dict:
         passphrase: str
         category: str (optional filter)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -800,6 +821,7 @@ def vault_delete_secret(params: dict, rpc_id: Any) -> dict:
         passphrase: str
         secret_id: str
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -871,6 +893,7 @@ def vault_anchor_hash(params: dict, rpc_id: Any) -> dict:
         label: str (human-readable anchor description)
         obfuscate: bool (whether to blind the on-chain hash — costs 5 QTCL instead of 1)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -1030,6 +1053,7 @@ def vault_verify_anchor(params: dict, rpc_id: Any) -> dict:
     Params:
         hash: str (the hash to look up — either original or obfuscated)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -1092,6 +1116,7 @@ def vault_deposit_credit(params: dict, rpc_id: Any) -> dict:
         tx_hash: str (the QTCL transaction hash proving the deposit)
         amount: int (in base units — 100,000 = 1 QTCL)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -1164,6 +1189,7 @@ def vault_get_balance(params: dict, rpc_id: Any) -> dict:
         account_id: str
         passphrase: str
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -1230,6 +1256,7 @@ def vault_setup_inheritance(params: dict, rpc_id: Any) -> dict:
         check_in_days: int (days between required check-ins, default 365)
         shamir_config: dict (optional Shamir secret sharing config)
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
@@ -1287,6 +1314,7 @@ def vault_check_in(params: dict, rpc_id: Any) -> dict:
     RPC: vault_checkIn
     Reset the dead man's switch timer.
     """
+    params = _normalize_params(params)
     from server import _rpc_ok, _rpc_error
     try:
         _ensure_schema()
