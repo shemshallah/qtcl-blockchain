@@ -7358,14 +7358,14 @@ _RPC_METHODS: Dict[str, Any] = {
     ),
 }
 
-# ── Bridge Module ─────────────────────────────────────────────────────────────
+# ── Vault Module ─────────────────────────────────────────────────────────────
 try:
-    from bridge import BRIDGE_RPC_METHODS
+    from vault_service import VAULT_RPC_METHODS
 
-    _RPC_METHODS.update(BRIDGE_RPC_METHODS)
-    logger.info(f"[BRIDGE] ✅ {len(BRIDGE_RPC_METHODS)} bridge RPC methods registered")
+    _RPC_METHODS.update(VAULT_RPC_METHODS)
+    logger.info(f"[VAULT] ✅ {len(VAULT_RPC_METHODS)} vault RPC methods registered")
 except ImportError as e:
-    logger.warning(f"[BRIDGE] Bridge module not available: {e}")
+    logger.warning(f"[VAULT] Vault module not available: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTERPRISE P2P NETWORK — Inline Implementation (no external files)
@@ -8218,19 +8218,19 @@ def serve_hyp_doc():
         return f"Error: {e}", 500
 
 
-@app.route("/bridge", methods=["GET"])
-def serve_bridge_doc():
-    """GET /bridge — Serve bridge.html (cross-chain bridge dashboard)."""
+@app.route("/vault", methods=["GET"])
+def serve_vault_doc():
+    """GET /vault — Serve vault.html (post-quantum encrypted storage)."""
     try:
         import os
         from flask import send_file
 
-        bridge_path = os.path.join(os.path.dirname(__file__), "bridge.html")
-        if os.path.exists(bridge_path):
-            return send_file(bridge_path, mimetype="text/html")
-        return "bridge.html not found", 404
+        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
+        if os.path.exists(vault_path):
+            return send_file(vault_path, mimetype="text/html")
+        return "vault.html not found", 404
     except Exception as e:
-        logger.error(f"[BRIDGE] Failed to serve bridge.html: {e}")
+        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
         return f"Error: {e}", 500
 
 

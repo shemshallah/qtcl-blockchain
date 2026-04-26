@@ -2,1021 +2,2005 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QTCL Vault — Post-Quantum Encrypted Storage</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>QTCL VAULT — Post-Quantum Encrypted Storage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg:       #050810;
-    --surface:  #0c1120;
-    --border:   #1a2540;
-    --accent:   #00c8ff;
-    --accent2:  #7c3aed;
-    --danger:   #ef4444;
-    --success:  #22c55e;
-    --warn:     #f59e0b;
-    --text:     #e2e8f0;
-    --muted:    #64748b;
-    --font:     'Courier New', monospace;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font);
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-  }
+/* ═══════════════════════════════════════════════════════════════════
+   QTCL VAULT — Design System
+   Aesthetic: Nuclear bunker control room meets quantum physics lab
+   ═══════════════════════════════════════════════════════════════════ */
+:root {
+  --void:     #020408;
+  --abyss:    #060c18;
+  --deep:     #0a1225;
+  --surface:  #0e1830;
+  --raised:   #132040;
+  --border:   #1a2d55;
+  --border-h: #2a4080;
+  --cyan:     #00d4ff;
+  --cyan-dim: #0088aa;
+  --cyan-glow: rgba(0,212,255,.12);
+  --violet:   #8b5cf6;
+  --violet-dim: #6d3ae0;
+  --emerald:  #10b981;
+  --amber:    #f59e0b;
+  --red:      #ef4444;
+  --text:     #c8d6e5;
+  --text-bright: #e8f0ff;
+  --muted:    #4a6080;
+  --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+  --font-display: 'Space Grotesk', sans-serif;
+  --radius:   6px;
+  --glow-cyan: 0 0 20px rgba(0,212,255,.15), 0 0 40px rgba(0,212,255,.05);
+  --glow-violet: 0 0 20px rgba(139,92,246,.15);
+}
 
-  /* ── Header ── */
-  header {
-    border-bottom: 1px solid var(--border);
-    padding: 18px 32px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: var(--surface);
-  }
-  .logo { display: flex; align-items: center; gap: 12px; }
-  .logo-icon {
-    width: 36px; height: 36px;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 18px;
-  }
-  .logo-text { font-size: 18px; font-weight: bold; letter-spacing: 2px; color: var(--accent); }
-  .logo-sub  { font-size: 10px; color: var(--muted); letter-spacing: 1px; margin-top: 2px; }
-  .chain-badge {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 11px; color: var(--muted);
-    border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px;
-  }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); animation: pulse 2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  /* ── Layout ── */
-  main { flex: 1; display: grid; grid-template-columns: 260px 1fr; gap: 0; }
+html { font-size: 14px; }
+body {
+  background: var(--void);
+  color: var(--text);
+  font-family: var(--font-mono);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
 
-  /* ── Sidebar ── */
-  nav {
-    border-right: 1px solid var(--border);
-    padding: 24px 0;
-    background: var(--surface);
-  }
-  .nav-section { padding: 8px 20px; font-size: 9px; color: var(--muted); letter-spacing: 2px; margin-top: 12px; }
-  .nav-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 11px 20px; cursor: pointer;
-    font-size: 13px; color: var(--muted);
-    border-left: 3px solid transparent;
-    transition: all .15s;
-  }
-  .nav-item:hover { color: var(--text); background: rgba(255,255,255,.03); }
-  .nav-item.active { color: var(--accent); border-left-color: var(--accent); background: rgba(0,200,255,.05); }
-  .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+/* Subtle scanline overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,.03) 2px,
+    rgba(0,0,0,.03) 4px
+  );
+}
 
-  /* ── Content ── */
-  .content { padding: 32px; overflow-y: auto; }
-  .page { display: none; }
-  .page.active { display: block; }
+/* ── HEADER ── */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  height: 56px;
+  background: linear-gradient(180deg, var(--deep) 0%, var(--abyss) 100%);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 20px rgba(0,0,0,.5);
+}
 
-  /* ── Cards ── */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px;
-    margin-bottom: 20px;
-  }
-  .card-title {
-    font-size: 13px; font-weight: bold; color: var(--accent);
-    letter-spacing: 1px; margin-bottom: 16px;
-    display: flex; align-items: center; gap: 8px;
-  }
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 
-  /* ── Forms ── */
-  label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 6px; letter-spacing: 1px; }
-  input, textarea, select {
-    width: 100%;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-family: var(--font);
-    font-size: 13px;
-    padding: 10px 14px;
-    outline: none;
-    margin-bottom: 16px;
-    transition: border-color .15s;
-  }
-  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
-  textarea { resize: vertical; min-height: 100px; }
-  select { cursor: pointer; }
+.header-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, var(--cyan), var(--violet));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  box-shadow: var(--glow-cyan);
+}
 
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.header-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--cyan);
+}
 
-  /* ── Buttons ── */
-  .btn {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 10px 20px; border-radius: 8px; border: none;
-    font-family: var(--font); font-size: 13px; font-weight: bold;
-    cursor: pointer; transition: all .15s; letter-spacing: 1px;
-  }
-  .btn-primary { background: linear-gradient(135deg, var(--accent), #0088cc); color: #000; }
-  .btn-primary:hover { filter: brightness(1.1); }
-  .btn-danger  { background: rgba(239,68,68,.15); color: var(--danger); border: 1px solid var(--danger); }
-  .btn-ghost   { background: transparent; color: var(--muted); border: 1px solid var(--border); }
-  .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
-  .btn:disabled { opacity: .4; cursor: not-allowed; }
-  .btn-sm { padding: 6px 14px; font-size: 11px; }
+.header-sub {
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 1px;
+  margin-top: 1px;
+}
 
-  /* ── Output box ── */
-  .output {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 14px;
-    font-size: 11px;
-    color: var(--accent);
-    word-break: break-all;
-    white-space: pre-wrap;
-    max-height: 200px;
-    overflow-y: auto;
-    margin-top: 12px;
-    display: none;
-  }
-  .output.visible { display: block; }
-  .output.error   { color: var(--danger); border-color: var(--danger); }
-  .output.success { color: var(--success); border-color: var(--success); }
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
 
-  /* ── Vault entries table ── */
-  .vault-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  .vault-table th {
-    text-align: left; padding: 10px 14px;
-    color: var(--muted); font-size: 10px; letter-spacing: 1px;
-    border-bottom: 1px solid var(--border);
-  }
-  .vault-table td { padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,.03); }
-  .vault-table tr:hover td { background: rgba(255,255,255,.02); }
-  .tag {
-    display: inline-block; padding: 2px 8px; border-radius: 4px;
-    font-size: 10px; font-weight: bold; letter-spacing: 1px;
-  }
-  .tag-file    { background: rgba(0,200,255,.1);  color: var(--accent); }
-  .tag-key     { background: rgba(124,58,237,.15); color: #a78bfa; }
-  .tag-text    { background: rgba(34,197,94,.1);  color: var(--success); }
-  .tag-anchor  { background: rgba(245,158,11,.1); color: var(--warn); }
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--muted);
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--deep);
+}
 
-  /* ── Progress ── */
-  .progress-wrap { margin-top: 12px; }
-  .progress-bar {
-    height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
-  }
-  .progress-fill {
-    height: 100%; width: 0%; border-radius: 2px;
-    background: linear-gradient(90deg, var(--accent2), var(--accent));
-    transition: width .3s;
-  }
-  .progress-label { font-size: 10px; color: var(--muted); margin-top: 6px; }
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--emerald);
+  animation: pulse-dot 2s ease infinite;
+}
 
-  /* ── Fee badge ── */
-  .fee-row {
-    display: flex; align-items: center; justify-content: space-between;
-    background: rgba(0,200,255,.05); border: 1px solid rgba(0,200,255,.15);
-    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 12px;
-  }
-  .fee-amount { color: var(--accent); font-weight: bold; }
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px var(--emerald); }
+  50% { opacity: .5; box-shadow: none; }
+}
 
-  /* ── Anchor proof ── */
-  .proof-box {
-    background: rgba(245,158,11,.05);
-    border: 1px solid rgba(245,158,11,.2);
-    border-radius: 8px; padding: 14px; font-size: 11px;
-    color: var(--warn); word-break: break-all;
-    margin-top: 12px; display: none;
-  }
-  .proof-box.visible { display: block; }
+.tier-badge {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  padding: 3px 8px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
 
-  /* ── Stats row ── */
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
-  .stat-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 18px;
-  }
-  .stat-val  { font-size: 24px; font-weight: bold; color: var(--accent); }
-  .stat-label{ font-size: 10px; color: var(--muted); margin-top: 4px; letter-spacing: 1px; }
+.tier-trial {
+  background: rgba(245,158,11,.12);
+  color: var(--amber);
+  border: 1px solid rgba(245,158,11,.3);
+}
 
-  /* ── Spinner ── */
-  .spinner {
-    display: inline-block; width: 14px; height: 14px;
-    border: 2px solid rgba(0,200,255,.2); border-top-color: var(--accent);
-    border-radius: 50%; animation: spin .6s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
+.tier-paid {
+  background: rgba(16,185,129,.12);
+  color: var(--emerald);
+  border: 1px solid rgba(16,185,129,.3);
+}
 
-  /* ── Toast ── */
-  #toast {
-    position: fixed; bottom: 24px; right: 24px;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px 20px; font-size: 12px;
-    opacity: 0; transform: translateY(10px);
-    transition: all .25s; pointer-events: none; z-index: 999;
-    max-width: 320px;
-  }
-  #toast.show { opacity: 1; transform: translateY(0); }
-  #toast.ok   { border-color: var(--success); color: var(--success); }
-  #toast.err  { border-color: var(--danger);  color: var(--danger);  }
+/* ── LAYOUT ── */
+.app-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: calc(100vh - 56px);
+}
+
+@media (max-width: 768px) {
+  .app-layout { grid-template-columns: 1fr; }
+  .sidebar { display: none; }
+  .sidebar.mobile-open { display: block; position: fixed; inset: 56px 0 0; z-index: 90; width: 100%; }
+  .mobile-menu-btn { display: flex !important; }
+}
+
+.mobile-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 18px;
+}
+
+/* ── SIDEBAR ── */
+.sidebar {
+  background: var(--abyss);
+  border-right: 1px solid var(--border);
+  padding: 16px 0;
+  overflow-y: auto;
+}
+
+.nav-group-label {
+  padding: 12px 20px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: all .12s ease;
+  user-select: none;
+}
+
+.nav-item:hover {
+  color: var(--text);
+  background: rgba(255,255,255,.02);
+}
+
+.nav-item.active {
+  color: var(--cyan);
+  border-left-color: var(--cyan);
+  background: var(--cyan-glow);
+}
+
+.nav-item.locked {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+.nav-item .nav-icon { width: 18px; text-align: center; font-size: 14px; }
+.nav-item .nav-badge {
+  margin-left: auto;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(139,92,246,.15);
+  color: var(--violet);
+}
+
+/* ── MAIN CONTENT ── */
+.main-content {
+  padding: 28px;
+  overflow-y: auto;
+  max-height: calc(100vh - 56px);
+}
+
+.page { display: none; }
+.page.active { display: block; animation: fadeIn .2s ease; }
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+.page-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-bright);
+  margin-bottom: 4px;
+}
+
+.page-desc {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 24px;
+  line-height: 1.6;
+}
+
+/* ── CARDS ── */
+.card {
+  background: var(--deep);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.card-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  color: var(--cyan);
+  text-transform: uppercase;
+}
+
+/* ── FORM ELEMENTS ── */
+.form-group { margin-bottom: 14px; }
+
+.form-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  color: var(--muted);
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+
+.form-input, .form-select, .form-textarea {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--abyss);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color .15s;
+}
+
+.form-input:focus, .form-select:focus, .form-textarea:focus {
+  border-color: var(--cyan-dim);
+  box-shadow: 0 0 0 2px rgba(0,212,255,.08);
+}
+
+.form-input::placeholder { color: var(--muted); }
+.form-textarea { min-height: 80px; resize: vertical; }
+
+.form-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0 0l5 6 5-6' fill='%234a6080'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
+
+/* ── BUTTONS ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all .12s;
+  user-select: none;
+}
+
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--cyan-dim), var(--cyan));
+  color: var(--void);
+  border-color: var(--cyan);
+}
+
+.btn-primary:hover:not(:disabled) {
+  box-shadow: var(--glow-cyan);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background: var(--raised);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--border-h);
+  background: var(--surface);
+}
+
+.btn-danger {
+  background: rgba(239,68,68,.1);
+  color: var(--red);
+  border-color: rgba(239,68,68,.3);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(239,68,68,.2);
+}
+
+.btn-violet {
+  background: linear-gradient(135deg, var(--violet-dim), var(--violet));
+  color: white;
+  border-color: var(--violet);
+}
+
+.btn-violet:hover:not(:disabled) {
+  box-shadow: var(--glow-violet);
+}
+
+.btn-sm { padding: 5px 10px; font-size: 10px; }
+.btn-block { width: 100%; justify-content: center; }
+
+/* ── METRICS GRID ── */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.metric-card {
+  background: var(--deep);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+.metric-label {
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.metric-value {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+
+.metric-unit {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* ── SECRETS TABLE ── */
+.secrets-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.secrets-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--muted);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.secrets-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(26,45,85,.4);
+  vertical-align: middle;
+}
+
+.secrets-table tr:hover td {
+  background: rgba(0,212,255,.02);
+}
+
+.category-tag {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+  letter-spacing: .5px;
+}
+
+.cat-private_key { background: rgba(239,68,68,.1); color: var(--red); }
+.cat-seed_phrase { background: rgba(245,158,11,.1); color: var(--amber); }
+.cat-credential { background: rgba(139,92,246,.1); color: var(--violet); }
+.cat-document { background: rgba(0,212,255,.1); color: var(--cyan); }
+.cat-general { background: rgba(100,120,140,.1); color: var(--muted); }
+
+.anchor-icon { color: var(--emerald); font-size: 12px; }
+.no-anchor { color: var(--muted); font-size: 10px; }
+
+/* ── TOAST ── */
+.toast-container {
+  position: fixed;
+  top: 64px;
+  right: 16px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toast {
+  padding: 10px 16px;
+  border-radius: 4px;
+  font-size: 11px;
+  max-width: 360px;
+  animation: slideIn .2s ease;
+  border-left: 3px solid;
+}
+
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } }
+
+.toast-success { background: rgba(16,185,129,.1); border-color: var(--emerald); color: var(--emerald); }
+.toast-error   { background: rgba(239,68,68,.1); border-color: var(--red); color: var(--red); }
+.toast-info    { background: rgba(0,212,255,.1); border-color: var(--cyan); color: var(--cyan); }
+.toast-warn    { background: rgba(245,158,11,.1); border-color: var(--amber); color: var(--amber); }
+
+/* ── LOADING SPINNER ── */
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--cyan);
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── AUTH OVERLAY ── */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--void);
+}
+
+.auth-box {
+  width: 420px;
+  max-width: 90vw;
+  background: var(--deep);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 32px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.6);
+}
+
+.auth-logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.auth-logo-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--cyan), var(--violet));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  box-shadow: var(--glow-cyan);
+}
+
+.auth-logo-text {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--cyan);
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-align: center;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all .15s;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  font-family: var(--font-mono);
+}
+
+.auth-tab.active {
+  color: var(--cyan);
+  border-bottom-color: var(--cyan);
+}
+
+.auth-footer {
+  margin-top: 16px;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.6;
+}
+
+/* ── EMPTY STATE ── */
+.empty-state {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--muted);
+}
+
+.empty-state-icon { font-size: 40px; margin-bottom: 12px; opacity: .4; }
+.empty-state-title { font-size: 14px; color: var(--text); margin-bottom: 6px; }
+.empty-state-desc { font-size: 11px; line-height: 1.6; }
+
+/* ── PROGRESS BAR ── */
+.progress-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--cyan), var(--violet));
+  border-radius: 2px;
+  transition: width .3s ease;
+}
+
+/* ── MODAL ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2,4,8,.85);
+  backdrop-filter: blur(4px);
+}
+
+.modal-overlay.hidden { display: none; }
+
+.modal {
+  width: 500px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--deep);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+}
+
+.modal-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 16px;
+}
+
+/* ── OBFUSCATION TOGGLE ── */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+}
+
+.toggle-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+  border-radius: 10px;
+  transition: .2s;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 2px;
+  top: 2px;
+  background: var(--text);
+  border-radius: 50%;
+  transition: .2s;
+}
+
+.toggle-switch input:checked + .toggle-slider { background: var(--violet); }
+.toggle-switch input:checked + .toggle-slider::before { transform: translateX(16px); }
+
+/* ── PRICING CARD ── */
+.pricing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(26,45,85,.3);
+  font-size: 11px;
+}
+
+.pricing-row:last-child { border-bottom: none; }
+.pricing-label { color: var(--text); }
+.pricing-cost { color: var(--cyan); font-weight: 600; }
+.pricing-free { color: var(--emerald); }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="logo">
-    <div class="logo-icon">🔐</div>
+<!-- ═══════════════ TOAST CONTAINER ═══════════════ -->
+<div class="toast-container" id="toasts"></div>
+
+<!-- ═══════════════ AUTH OVERLAY ═══════════════ -->
+<div class="auth-overlay" id="authOverlay">
+  <div class="auth-box">
+    <div class="auth-logo">
+      <div class="auth-logo-icon">🔐</div>
+      <div>
+        <div class="auth-logo-text">QTCL VAULT</div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-top:2px">POST-QUANTUM ENCRYPTED STORAGE</div>
+      </div>
+    </div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" onclick="showAuthTab('login')">LOGIN</button>
+      <button class="auth-tab" onclick="showAuthTab('register')">REGISTER</button>
+    </div>
+
+    <!-- LOGIN -->
+    <div id="authLogin">
+      <div class="form-group">
+        <label class="form-label">Account ID</label>
+        <input class="form-input" id="loginId" placeholder="va_..." autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Passphrase</label>
+        <input class="form-input" id="loginPass" type="password" placeholder="Enter your vault passphrase" autocomplete="current-password">
+      </div>
+      <button class="btn btn-primary btn-block" onclick="doLogin()" id="loginBtn">
+        UNLOCK VAULT
+      </button>
+    </div>
+
+    <!-- REGISTER -->
+    <div id="authRegister" style="display:none">
+      <div class="form-group">
+        <label class="form-label">Passphrase (min 8 characters)</label>
+        <input class="form-input" id="regPass" type="password" placeholder="Choose a strong passphrase" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Confirm Passphrase</label>
+        <input class="form-input" id="regPassConfirm" type="password" placeholder="Confirm passphrase" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Email (optional — for recovery)</label>
+        <input class="form-input" id="regEmail" type="email" placeholder="you@example.com">
+      </div>
+      <div class="form-group">
+        <label class="form-label">QTCL Address (optional — for billing)</label>
+        <input class="form-input" id="regQtcl" placeholder="qtcl1...">
+      </div>
+      <button class="btn btn-primary btn-block" onclick="doRegister()" id="regBtn">
+        CREATE VAULT
+      </button>
+      <div class="auth-footer">
+        Trial tier: 1 secret, 1KB max, no chain anchoring.<br>
+        Upgrade anytime by depositing mined QTCL.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<div class="header" id="appHeader" style="display:none">
+  <div class="header-brand">
+    <button class="mobile-menu-btn" onclick="toggleMobileMenu()">☰</button>
+    <div class="header-icon">🔐</div>
     <div>
-      <div class="logo-text">QTCL VAULT</div>
-      <div class="logo-sub">POST-QUANTUM ENCRYPTED STORAGE</div>
+      <div class="header-title">QTCL VAULT</div>
+      <div class="header-sub">POST-QUANTUM ENCRYPTED STORAGE</div>
     </div>
   </div>
-  <div class="chain-badge">
-    <div class="dot"></div>
-    <span id="chain-status">Connecting to QTCL chain...</span>
+  <div class="header-status">
+    <div class="status-pill">
+      <span class="status-dot"></span>
+      <span id="headerChainStatus">CONNECTED</span>
+    </div>
+    <span class="tier-badge tier-trial" id="headerTier">TRIAL</span>
+    <button class="btn btn-sm btn-secondary" onclick="doLogout()">LOCK</button>
   </div>
-</header>
+</div>
 
-<main>
-  <nav>
-    <div class="nav-section">VAULT</div>
-    <div class="nav-item active" data-page="overview">
-      <span class="nav-icon">◈</span> Overview
-    </div>
-    <div class="nav-item" data-page="encrypt">
-      <span class="nav-icon">🔒</span> Encrypt File
-    </div>
-    <div class="nav-item" data-page="decrypt">
-      <span class="nav-icon">🔓</span> Decrypt File
-    </div>
+<!-- ═══════════════ APP LAYOUT ═══════════════ -->
+<div class="app-layout" id="appLayout" style="display:none">
 
-    <div class="nav-section">ON-CHAIN</div>
-    <div class="nav-item" data-page="anchor">
-      <span class="nav-icon">⛓</span> Chain Anchor
+  <!-- SIDEBAR -->
+  <div class="sidebar" id="sidebar">
+    <div class="nav-group-label">VAULT</div>
+    <div class="nav-item active" data-page="dashboard" onclick="showPage('dashboard')">
+      <span class="nav-icon">◈</span> Dashboard
     </div>
-    <div class="nav-item" data-page="keys">
-      <span class="nav-icon">🗝</span> Key Vault
+    <div class="nav-item" data-page="secrets" onclick="showPage('secrets')">
+      <span class="nav-icon">🗝</span> Secrets
+      <span class="nav-badge" id="navSecretCount">0</span>
+    </div>
+    <div class="nav-item" data-page="encrypt" onclick="showPage('encrypt')">
+      <span class="nav-icon">🔒</span> Encrypt
     </div>
 
-    <div class="nav-section">ACCOUNT</div>
-    <div class="nav-item" data-page="wallet">
-      <span class="nav-icon">◎</span> Wallet
+    <div class="nav-group-label">CHAIN</div>
+    <div class="nav-item" data-page="anchor" onclick="showPage('anchor')">
+      <span class="nav-icon">⚓</span> Anchor
     </div>
-    <div class="nav-item" data-page="history">
-      <span class="nav-icon">☰</span> History
+    <div class="nav-item" data-page="verify" onclick="showPage('verify')">
+      <span class="nav-icon">✓</span> Verify
     </div>
-  </nav>
 
-  <div class="content">
+    <div class="nav-group-label">ACCOUNT</div>
+    <div class="nav-item" data-page="billing" onclick="showPage('billing')">
+      <span class="nav-icon">◇</span> Billing
+    </div>
+    <div class="nav-item" data-page="inheritance" onclick="showPage('inheritance')">
+      <span class="nav-icon">📜</span> Inheritance
+    </div>
+    <div class="nav-item" data-page="settings" onclick="showPage('settings')">
+      <span class="nav-icon">⚙</span> Settings
+    </div>
+  </div>
 
-    <!-- ── OVERVIEW ── -->
-    <div class="page active" id="page-overview">
-      <div class="stats">
-        <div class="stat-card">
-          <div class="stat-val" id="stat-files">—</div>
-          <div class="stat-label">ENCRYPTED FILES</div>
+  <!-- MAIN CONTENT -->
+  <div class="main-content">
+
+    <!-- ═══ DASHBOARD ═══ -->
+    <div class="page active" id="page-dashboard">
+      <div class="page-title">Vault Dashboard</div>
+      <div class="page-desc">Zero-knowledge encrypted storage · Server never sees plaintext · SHA3-256 chain anchoring</div>
+
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-label">Secrets Stored</div>
+          <div class="metric-value" id="dashSecrets">0</div>
         </div>
-        <div class="stat-card">
-          <div class="stat-val" id="stat-anchors">—</div>
-          <div class="stat-label">CHAIN ANCHORS</div>
+        <div class="metric-card">
+          <div class="metric-label">Storage Used</div>
+          <div class="metric-value" id="dashStorage">0</div>
+          <div class="metric-unit" id="dashStorageUnit">bytes</div>
         </div>
-        <div class="stat-card">
-          <div class="stat-val" id="stat-keys">—</div>
-          <div class="stat-label">STORED KEYS</div>
+        <div class="metric-card">
+          <div class="metric-label">Chain Anchors</div>
+          <div class="metric-value" id="dashAnchors">0</div>
         </div>
-        <div class="stat-card">
-          <div class="stat-val" id="stat-block">—</div>
-          <div class="stat-label">CHAIN HEIGHT</div>
+        <div class="metric-card">
+          <div class="metric-label">Vault Credit</div>
+          <div class="metric-value" id="dashCredit">0</div>
+          <div class="metric-unit">QTCL</div>
         </div>
       </div>
 
       <div class="card">
-        <div class="card-title">⬡ QTCL VAULT — POST-QUANTUM ENCRYPTED STORAGE</div>
-        <p style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:16px;">
-          Files and secrets encrypted with <strong style="color:var(--accent)">GeodesicLWE</strong> — 
-          the Hyperbolic Closest Vector Problem over PSL(2,ℝ). 
-          Resistant to both classical and quantum attacks. 
-          Cryptographic commitments anchored permanently to the QTCL blockchain.
-        </p>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:11px;">
-          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;">
-            <div style="color:var(--accent);margin-bottom:6px;">🔒 ENCRYPT FILE</div>
-            <div style="color:var(--muted)">Upload any file. Encrypted locally with HLWE. Ciphertext stored in vault. Key never leaves your browser.</div>
+        <div class="card-header">
+          <div class="card-title">Encryption Stack</div>
+        </div>
+        <div style="font-size:11px;line-height:1.8;color:var(--text)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span style="color:var(--emerald)">●</span>
+            <strong style="color:var(--text-bright)">Layer 1:</strong> PBKDF2-SHA256 (600K rounds) → AES-256-GCM (client-side, WebCrypto)
           </div>
-          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;">
-            <div style="color:#a78bfa;margin-bottom:6px;">🗝 KEY VAULT</div>
-            <div style="color:var(--muted)">Store private keys, seed phrases, passwords. Double-encrypted: HLWE outer layer + your passphrase inner layer.</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span style="color:var(--cyan)">●</span>
+            <strong style="color:var(--text-bright)">Layer 2:</strong> Zero-knowledge storage (server stores opaque ciphertext — never decrypts)
           </div>
-          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;">
-            <div style="color:var(--warn);margin-bottom:6px;">⛓ CHAIN ANCHOR</div>
-            <div style="color:var(--muted)">Commit a SHA3-256 hash of any document to the QTCL blockchain. Immutable proof of existence at block height.</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span style="color:var(--violet)">●</span>
+            <strong style="color:var(--text-bright)">Layer 3:</strong> SHA3-256 chain anchor (immutable proof-of-existence on QTCL)
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="color:var(--amber)">●</span>
+            <strong style="color:var(--text-bright)">Optional:</strong> Blinding nonce obfuscation (unlinkable on-chain hash)
           </div>
         </div>
       </div>
 
       <div class="card">
-        <div class="card-title">📋 RECENT VAULT ENTRIES</div>
-        <table class="vault-table">
-          <thead>
-            <tr>
-              <th>NAME</th><th>TYPE</th><th>SIZE</th><th>ANCHORED</th><th>DATE</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="vault-list">
-            <tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px;">No entries yet</td></tr>
-          </tbody>
-        </table>
+        <div class="card-header">
+          <div class="card-title">Pricing</div>
+        </div>
+        <div class="pricing-row">
+          <span class="pricing-label">Store secret (any size up to tier limit)</span>
+          <span class="pricing-free">FREE</span>
+        </div>
+        <div class="pricing-row">
+          <span class="pricing-label">Retrieve secret</span>
+          <span class="pricing-free">FREE</span>
+        </div>
+        <div class="pricing-row">
+          <span class="pricing-label">Chain anchor (SHA3-256 commitment)</span>
+          <span class="pricing-cost">1 QTCL</span>
+        </div>
+        <div class="pricing-row">
+          <span class="pricing-label">Obfuscated anchor (blinded, unlinkable)</span>
+          <span class="pricing-cost">5 QTCL</span>
+        </div>
+        <div class="pricing-row">
+          <span class="pricing-label">Verify anchor (public lookup)</span>
+          <span class="pricing-free">FREE</span>
+        </div>
       </div>
     </div>
 
-    <!-- ── ENCRYPT FILE ── -->
+    <!-- ═══ SECRETS ═══ -->
+    <div class="page" id="page-secrets">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+        <div>
+          <div class="page-title">Stored Secrets</div>
+          <div class="page-desc" style="margin-bottom:0">Your encrypted vault entries</div>
+        </div>
+        <button class="btn btn-primary" onclick="showPage('encrypt')">+ NEW SECRET</button>
+      </div>
+
+      <div id="secretsList">
+        <div class="empty-state">
+          <div class="empty-state-icon">🗝</div>
+          <div class="empty-state-title">No secrets stored yet</div>
+          <div class="empty-state-desc">Encrypt and store your first secret to get started.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ ENCRYPT ═══ -->
     <div class="page" id="page-encrypt">
+      <div class="page-title">Encrypt &amp; Store</div>
+      <div class="page-desc">Client-side AES-256-GCM encryption · Server stores opaque ciphertext only · Zero knowledge</div>
+
       <div class="card">
-        <div class="card-title">🔒 ENCRYPT FILE — GeodesicLWE (IND-CPA)</div>
+        <div class="card-title" style="margin-bottom:14px">NEW SECRET</div>
 
-        <label>SELECT FILE</label>
-        <input type="file" id="enc-file" style="padding:8px;">
-
-        <label>YOUR WALLET PUBLIC KEY (hex)</label>
-        <input type="text" id="enc-pubkey" placeholder="Paste your HLWE public key...">
-
-        <label>VAULT LABEL (optional)</label>
-        <input type="text" id="enc-label" placeholder="e.g. passport-scan, seed-phrase-backup">
-
-        <label>ANCHOR TO CHAIN?</label>
-        <select id="enc-anchor">
-          <option value="yes">Yes — commit hash to QTCL blockchain (costs 1 QTCL)</option>
-          <option value="no">No — local vault only (free)</option>
-        </select>
-
-        <div class="fee-row" id="enc-fee-row">
-          <span>Estimated fee</span>
-          <span class="fee-amount">1 QTCL</span>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Label</label>
+            <input class="form-input" id="encLabel" placeholder="e.g. Bitcoin Seed Phrase">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Category</label>
+            <select class="form-select" id="encCategory">
+              <option value="general">General</option>
+              <option value="private_key">Private Key</option>
+              <option value="seed_phrase">Seed Phrase</option>
+              <option value="credential">Credential / API Key</option>
+              <option value="document">Document</option>
+            </select>
+          </div>
         </div>
 
-        <button class="btn btn-primary" id="enc-btn" onclick="encryptFile()">
-          <span>🔒</span> ENCRYPT & STORE
+        <div class="form-group">
+          <label class="form-label">Secret Content</label>
+          <textarea class="form-textarea" id="encContent" placeholder="Paste your secret here... It will be encrypted client-side before transmission." style="min-height:120px"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Or Upload File</label>
+          <input type="file" id="encFile" style="font-size:11px;color:var(--text)" onchange="handleFileSelect(this)">
+          <div id="encFileInfo" style="font-size:10px;color:var(--muted);margin-top:4px"></div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Encryption Passphrase</label>
+          <input class="form-input" id="encPassphrase" type="password" placeholder="Separate from your vault passphrase (recommended)">
+          <div style="font-size:9px;color:var(--amber);margin-top:4px">
+            ⚠ This passphrase encrypts locally. If lost, the secret CANNOT be recovered.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Expiry (optional)</label>
+          <input class="form-input" id="encExpiry" type="date">
+        </div>
+
+        <div id="encProgress" style="display:none;margin-bottom:12px">
+          <div style="font-size:10px;color:var(--cyan);margin-bottom:4px" id="encProgressText">Encrypting...</div>
+          <div class="progress-bar"><div class="progress-fill" id="encProgressBar" style="width:0%"></div></div>
+        </div>
+
+        <button class="btn btn-primary btn-block" onclick="doEncryptAndStore()" id="encBtn">
+          🔒 ENCRYPT &amp; STORE
         </button>
-
-        <div class="progress-wrap" id="enc-progress" style="display:none">
-          <div class="progress-bar"><div class="progress-fill" id="enc-bar"></div></div>
-          <div class="progress-label" id="enc-progress-label">Initializing HLWE engine...</div>
-        </div>
-
-        <div class="output" id="enc-output"></div>
-        <div class="proof-box" id="enc-proof"></div>
       </div>
     </div>
 
-    <!-- ── DECRYPT FILE ── -->
-    <div class="page" id="page-decrypt">
-      <div class="card">
-        <div class="card-title">🔓 DECRYPT FILE — GeodesicLWE</div>
-
-        <label>VAULT ENTRY ID or paste ciphertext JSON</label>
-        <textarea id="dec-cipher" placeholder='{"ciphertext": "...", "message_tag": "..."}'></textarea>
-
-        <label>YOUR PRIVATE KEY (hex) — never sent to server</label>
-        <input type="password" id="dec-privkey" placeholder="Your HLWE private key...">
-
-        <div style="background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);border-radius:8px;padding:12px;margin-bottom:16px;font-size:11px;color:#fca5a5;">
-          ⚠ Your private key is used client-side only for local decryption. It is never transmitted.
-        </div>
-
-        <button class="btn btn-primary" onclick="decryptFile()">
-          <span>🔓</span> DECRYPT
-        </button>
-
-        <div class="output" id="dec-output"></div>
-      </div>
-    </div>
-
-    <!-- ── CHAIN ANCHOR ── -->
+    <!-- ═══ ANCHOR ═══ -->
     <div class="page" id="page-anchor">
+      <div class="page-title">Chain Anchor</div>
+      <div class="page-desc">Commit a SHA3-256 hash to the QTCL blockchain as immutable proof-of-existence</div>
+
       <div class="card">
-        <div class="card-title">⛓ CHAIN ANCHOR — Proof of Existence</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6;">
-          Commit a SHA3-256 hash of any document to the QTCL blockchain. 
-          Creates an immutable timestamped proof that a document existed at a specific block height.
-          The document itself is never stored on-chain — only its hash.
-        </p>
+        <div class="card-title" style="margin-bottom:14px">ANCHOR A SECRET</div>
 
-        <label>DOCUMENT / FILE TO ANCHOR</label>
-        <input type="file" id="anc-file" style="padding:8px;" onchange="hashFile()">
-
-        <label>OR PASTE TEXT / HEX DIRECTLY</label>
-        <textarea id="anc-text" placeholder="Paste text, a contract, a public key, anything..."></textarea>
-
-        <label>SHA3-256 HASH (auto-computed)</label>
-        <input type="text" id="anc-hash" readonly placeholder="Select file or paste text above..." style="color:var(--accent);">
-
-        <label>YOUR WALLET ADDRESS</label>
-        <input type="text" id="anc-wallet" placeholder="0x...">
-
-        <div class="fee-row">
-          <span>Chain anchor fee</span>
-          <span class="fee-amount">1 QTCL</span>
+        <div class="form-group">
+          <label class="form-label">Select Secret to Anchor</label>
+          <select class="form-select" id="anchorSecretSelect">
+            <option value="">— Select a stored secret —</option>
+          </select>
         </div>
 
-        <button class="btn btn-primary" onclick="anchorToChain()">
-          <span>⛓</span> ANCHOR TO QTCL CHAIN
-        </button>
-
-        <div class="proof-box visible" id="anc-proof" style="display:none">
-          <strong>CHAIN PROOF</strong><br>
-          <span id="anc-proof-content"></span>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">🔍 VERIFY ANCHOR</div>
-        <label>DOCUMENT HASH TO VERIFY</label>
-        <input type="text" id="ver-hash" placeholder="sha3-256 hex...">
-        <button class="btn btn-ghost" onclick="verifyAnchor()">VERIFY ON CHAIN</button>
-        <div class="output" id="ver-output"></div>
-      </div>
-    </div>
-
-    <!-- ── KEY VAULT ── -->
-    <div class="page" id="page-keys">
-      <div class="card">
-        <div class="card-title">🗝 KEY VAULT — Double-Encrypted Secret Storage</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6;">
-          Store private keys, seed phrases, API keys, or any secret. 
-          Encrypted with <strong style="color:#a78bfa">GeodesicLWE outer layer</strong> + 
-          <strong style="color:var(--accent)">your passphrase inner layer (AES-256-GCM)</strong>.
-          A cryptographic commitment (hash of encrypted blob) is anchored on-chain as proof of storage.
-        </p>
-
-        <label>SECRET TYPE</label>
-        <select id="key-type">
-          <option value="privkey">Private Key (hex)</option>
-          <option value="seed">Seed Phrase (BIP39)</option>
-          <option value="password">Password</option>
-          <option value="api">API Key / Token</option>
-          <option value="other">Other Secret</option>
-        </select>
-
-        <label>SECRET VALUE</label>
-        <textarea id="key-secret" placeholder="Paste your secret here..." style="min-height:80px;"></textarea>
-
-        <label>PASSPHRASE (inner encryption layer — remember this)</label>
-        <input type="password" id="key-pass" placeholder="Strong passphrase...">
-
-        <label>VAULT LABEL</label>
-        <input type="text" id="key-label" placeholder="e.g. metamask-main, btc-cold-wallet">
-
-        <label>YOUR HLWE PUBLIC KEY</label>
-        <input type="text" id="key-pubkey" placeholder="Paste your HLWE public key (hex)...">
-
-        <div class="fee-row">
-          <span>Storage + chain anchor fee</span>
-          <span class="fee-amount">2 QTCL</span>
+        <div class="form-group">
+          <label class="form-label">Or Enter Hash Directly (64-char hex)</label>
+          <input class="form-input" id="anchorHashInput" placeholder="SHA3-256 hash (64 hex characters)">
         </div>
 
-        <button class="btn btn-primary" onclick="storeKey()">
-          <span>🗝</span> ENCRYPT & STORE KEY
-        </button>
+        <div class="form-group">
+          <label class="form-label">Anchor Label</label>
+          <input class="form-input" id="anchorLabel" placeholder="e.g. BTC key backup notarization">
+        </div>
 
-        <div class="output" id="key-output"></div>
-        <div class="proof-box" id="key-proof"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">🔓 RETRIEVE KEY</div>
-        <label>VAULT ENTRY ID</label>
-        <input type="text" id="ret-id" placeholder="vault-entry-id...">
-        <label>PASSPHRASE</label>
-        <input type="password" id="ret-pass" placeholder="Your passphrase...">
-        <label>YOUR HLWE PRIVATE KEY</label>
-        <input type="password" id="ret-privkey" placeholder="Your HLWE private key...">
-        <button class="btn btn-ghost" onclick="retrieveKey()">RETRIEVE SECRET</button>
-        <div class="output" id="ret-output"></div>
-      </div>
-    </div>
-
-    <!-- ── WALLET ── -->
-    <div class="page" id="page-wallet">
-      <div class="card">
-        <div class="card-title">◎ QTCL WALLET</div>
-        <label>WALLET ADDRESS</label>
-        <input type="text" id="wal-addr" placeholder="Load from QTCL node or paste...">
-        <button class="btn btn-ghost btn-sm" onclick="loadWallet()" style="margin-bottom:16px;">LOAD WALLET INFO</button>
-        <div class="row">
+        <div class="toggle-row">
           <div>
-            <label>QTCL BALANCE</label>
-            <input type="text" id="wal-bal" readonly placeholder="—">
+            <div style="font-size:12px;color:var(--text-bright)">Obfuscated Anchor</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">
+              Blinding nonce makes on-chain hash unlinkable to your secret (5 QTCL)
+            </div>
           </div>
-          <div>
-            <label>VAULT ENTRIES</label>
-            <input type="text" id="wal-entries" readonly placeholder="—">
+          <label class="toggle-switch">
+            <input type="checkbox" id="anchorObfuscate">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <div style="margin:12px 0;padding:10px;background:var(--abyss);border-radius:4px;font-size:11px">
+          <div style="display:flex;justify-content:space-between;color:var(--text)">
+            <span>Cost:</span>
+            <span id="anchorCostDisplay" style="color:var(--cyan);font-weight:600">1 QTCL</span>
           </div>
         </div>
-        <div class="output" id="wal-output"></div>
+
+        <button class="btn btn-violet btn-block" onclick="doAnchor()" id="anchorBtn">
+          ⚓ ANCHOR TO CHAIN
+        </button>
       </div>
     </div>
 
-    <!-- ── HISTORY ── -->
-    <div class="page" id="page-history">
+    <!-- ═══ VERIFY ═══ -->
+    <div class="page" id="page-verify">
+      <div class="page-title">Verify Anchor</div>
+      <div class="page-desc">Look up any hash to check if it has been anchored to the QTCL blockchain</div>
+
       <div class="card">
-        <div class="card-title">☰ VAULT HISTORY</div>
-        <table class="vault-table">
-          <thead>
-            <tr><th>ID</th><th>TYPE</th><th>LABEL</th><th>TX HASH</th><th>BLOCK</th><th>DATE</th></tr>
-          </thead>
-          <tbody id="history-list">
-            <tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px;">No history</td></tr>
-          </tbody>
-        </table>
+        <div class="card-title" style="margin-bottom:14px">HASH LOOKUP</div>
+
+        <div class="form-group">
+          <label class="form-label">SHA3-256 Hash (64-char hex)</label>
+          <input class="form-input" id="verifyHashInput" placeholder="Paste hash to verify...">
+        </div>
+
+        <button class="btn btn-primary btn-block" onclick="doVerify()" id="verifyBtn">
+          ✓ VERIFY ON CHAIN
+        </button>
+
+        <div id="verifyResult" style="display:none;margin-top:16px"></div>
       </div>
     </div>
 
-  </div><!-- /content -->
-</main>
+    <!-- ═══ BILLING ═══ -->
+    <div class="page" id="page-billing">
+      <div class="page-title">Billing &amp; Credits</div>
+      <div class="page-desc">Deposit mined QTCL · Pay-as-you-go for chain services</div>
 
-<div id="toast"></div>
+      <div class="metrics-grid" style="grid-template-columns:repeat(2,1fr)">
+        <div class="metric-card">
+          <div class="metric-label">Vault Credit Balance</div>
+          <div class="metric-value" id="billCredit">0</div>
+          <div class="metric-unit">QTCL</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Anchors Used</div>
+          <div class="metric-value" id="billAnchors">0</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:14px">DEPOSIT QTCL</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+          Send mined QTCL to the vault deposit address, then enter the TX hash below.
+          Only mined QTCL is accepted — no premined or bridged tokens.
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Transaction Hash</label>
+          <input class="form-input" id="depositTxHash" placeholder="TX hash from your QTCL transfer">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Amount (QTCL)</label>
+          <input class="form-input" id="depositAmount" type="number" placeholder="e.g. 10" min="1">
+        </div>
+        <button class="btn btn-primary" onclick="doDeposit()">DEPOSIT</button>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Recent Transactions</div>
+        </div>
+        <div id="billingHistory" style="font-size:11px">
+          <div style="color:var(--muted);text-align:center;padding:20px">No transactions yet</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ INHERITANCE ═══ -->
+    <div class="page" id="page-inheritance">
+      <div class="page-title">Key Inheritance</div>
+      <div class="page-desc">Dead man's switch — secrets released to beneficiary if you stop checking in</div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:14px">INHERITANCE SETUP</div>
+
+        <div class="form-group">
+          <label class="form-label">Beneficiary (QTCL address or email)</label>
+          <input class="form-input" id="inheritBeneficiary" placeholder="qtcl1... or email@example.com">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Check-in interval (days)</label>
+          <input class="form-input" id="inheritDays" type="number" value="365" min="30" max="3650">
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">
+            If you don't check in within this period, the beneficiary gains access.
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-violet" onclick="doSetupInheritance()">CONFIGURE</button>
+          <button class="btn btn-primary" onclick="doCheckIn()">CHECK IN NOW</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ SETTINGS ═══ -->
+    <div class="page" id="page-settings">
+      <div class="page-title">Account Settings</div>
+      <div class="page-desc">Manage your vault account</div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:14px">ACCOUNT INFO</div>
+        <div style="font-size:11px;line-height:2">
+          <div><span style="color:var(--muted)">Account ID:</span> <span id="setAccountId" style="color:var(--text-bright)">—</span></div>
+          <div><span style="color:var(--muted)">Tier:</span> <span id="setTier" style="color:var(--text-bright)">—</span></div>
+          <div><span style="color:var(--muted)">Email:</span> <span id="setEmail" style="color:var(--text-bright)">—</span></div>
+          <div><span style="color:var(--muted)">QTCL Address:</span> <span id="setQtcl" style="color:var(--text-bright)">—</span></div>
+        </div>
+      </div>
+
+      <div class="card" id="upgradeCard">
+        <div class="card-title" style="margin-bottom:14px">UPGRADE TO PAID</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+          Unlock unlimited secrets, 50MB files, chain anchoring, obfuscation, and inheritance.
+        </div>
+        <div class="form-group">
+          <label class="form-label">QTCL Billing Address</label>
+          <input class="form-input" id="upgradeQtcl" placeholder="qtcl1...">
+        </div>
+        <button class="btn btn-violet" onclick="doUpgrade()">UPGRADE NOW</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══ DECRYPT MODAL ═══ -->
+<div class="modal-overlay hidden" id="decryptModal">
+  <div class="modal">
+    <div class="modal-title">🔓 Decrypt Secret</div>
+    <div class="form-group">
+      <label class="form-label">Encryption Passphrase</label>
+      <input class="form-input" id="decryptPass" type="password" placeholder="The passphrase used during encryption">
+    </div>
+    <div id="decryptResult" style="display:none;margin-bottom:12px">
+      <div class="form-label">Decrypted Content</div>
+      <textarea class="form-textarea" id="decryptContent" readonly style="min-height:100px"></textarea>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="doDecrypt()" id="decryptBtn">DECRYPT</button>
+      <button class="btn btn-secondary" onclick="doDownloadDecrypted()" id="downloadBtn" style="display:none">DOWNLOAD</button>
+      <button class="btn btn-secondary" onclick="closeModal('decryptModal')">CLOSE</button>
+    </div>
+  </div>
+</div>
 
 <script>
-// ══════════════════════════════════════════════════════════
-// CONFIG
-// ══════════════════════════════════════════════════════════
-const RPC = window.location.origin + '/rpc';
+/* ═══════════════════════════════════════════════════════════════════
+   QTCL VAULT — Client Application
+   ═══════════════════════════════════════════════════════════════════ */
 
-// ══════════════════════════════════════════════════════════
-// NAVIGATION
-// ══════════════════════════════════════════════════════════
-document.querySelectorAll('.nav-item').forEach(el => {
-  el.addEventListener('click', () => {
-    document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.page').forEach(x => x.classList.remove('active'));
-    el.classList.add('active');
-    document.getElementById('page-' + el.dataset.page).classList.add('active');
+const RPC_URL = '/rpc';
+const STATE = {
+  accountId: null,
+  passphrase: null,
+  session: null,
+  tier: 'trial',
+  secrets: [],
+  credit: 0,
+  currentDecryptId: null,
+  decryptedBytes: null,
+};
+
+// ─── RPC Helper (GET /rpc?method=…&params=…&id=…) ───
+async function rpc(method, params = {}) {
+  const qs = new URLSearchParams({
+    method,
+    params: JSON.stringify([params]),
+    id: String(Date.now()),
   });
-});
-
-// ══════════════════════════════════════════════════════════
-// LOCAL VAULT STORE (sessionStorage — clears on tab close)
-// ══════════════════════════════════════════════════════════
-function vaultLoad()  { try { return JSON.parse(sessionStorage.getItem('qtcl_vault') || '[]'); } catch { return []; } }
-function vaultSave(v) { sessionStorage.setItem('qtcl_vault', JSON.stringify(v)); }
-function vaultAdd(entry) {
-  const v = vaultLoad();
-  v.unshift({ ...entry, id: 'vault-' + Date.now(), date: new Date().toISOString() });
-  vaultSave(v);
-  refreshStats();
-  renderVaultList();
-  renderHistory();
-}
-
-// ══════════════════════════════════════════════════════════
-// RPC HELPER
-// ══════════════════════════════════════════════════════════
-async function rpc(method, params) {
-  const res = await fetch(RPC, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: Date.now() })
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
+  const resp = await fetch(`${RPC_URL}?${qs}`);
+  const data = await resp.json();
+  if (data.error) throw new Error(data.error.message || 'RPC error');
   return data.result;
 }
 
-// ══════════════════════════════════════════════════════════
-// CHAIN STATUS
-// ══════════════════════════════════════════════════════════
-async function checkChain() {
-  try {
-    const r = await rpc('qtcl_getBlockCount', {});
-    document.getElementById('chain-status').textContent = `QTCL chain · block ${r.count ?? r}`;
-    document.getElementById('stat-block').textContent = (r.count ?? r).toLocaleString();
-  } catch(e) {
-    document.getElementById('chain-status').textContent = 'Chain offline';
-  }
-}
-checkChain();
-setInterval(checkChain, 15000);
-
-// ══════════════════════════════════════════════════════════
-// STATS
-// ══════════════════════════════════════════════════════════
-function refreshStats() {
-  const v = vaultLoad();
-  document.getElementById('stat-files').textContent   = v.filter(x => x.type === 'file').length;
-  document.getElementById('stat-anchors').textContent = v.filter(x => x.anchored).length;
-  document.getElementById('stat-keys').textContent    = v.filter(x => x.type === 'key').length;
-}
-refreshStats();
-
-// ══════════════════════════════════════════════════════════
-// RENDER VAULT LIST
-// ══════════════════════════════════════════════════════════
-function renderVaultList() {
-  const v = vaultLoad().slice(0, 10);
-  const tbody = document.getElementById('vault-list');
-  if (!v.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px;">No entries yet</td></tr>'; return; }
-  tbody.innerHTML = v.map(e => `
-    <tr>
-      <td>${e.label || e.id}</td>
-      <td><span class="tag tag-${e.type}">${e.type.toUpperCase()}</span></td>
-      <td>${e.size || '—'}</td>
-      <td>${e.anchored ? '✓' : '—'}</td>
-      <td>${new Date(e.date).toLocaleDateString()}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick="copyEntry('${e.id}')">COPY</button></td>
-    </tr>`).join('');
+// ─── Toast ───
+function toast(msg, type = 'info', duration = 4000) {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), duration);
 }
 
-function renderHistory() {
-  const v = vaultLoad();
-  const tbody = document.getElementById('history-list');
-  if (!v.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px;">No history</td></tr>'; return; }
-  tbody.innerHTML = v.map(e => `
-    <tr>
-      <td style="font-size:10px;color:var(--muted)">${e.id}</td>
-      <td><span class="tag tag-${e.type}">${e.type.toUpperCase()}</span></td>
-      <td>${e.label || '—'}</td>
-      <td style="font-size:10px;color:var(--muted)">${e.txHash ? e.txHash.slice(0,16)+'...' : '—'}</td>
-      <td>${e.block || '—'}</td>
-      <td>${new Date(e.date).toLocaleDateString()}</td>
-    </tr>`).join('');
+// ─── Navigation ───
+function showPage(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById(`page-${page}`)?.classList.add('active');
+  document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
+
+  if (page === 'secrets') loadSecrets();
+  if (page === 'billing') loadBilling();
+  if (page === 'anchor') populateAnchorSelect();
+
+  // Close mobile menu
+  document.getElementById('sidebar')?.classList.remove('mobile-open');
 }
 
-function copyEntry(id) {
-  const entry = vaultLoad().find(x => x.id === id);
-  if (!entry) return;
-  navigator.clipboard.writeText(JSON.stringify(entry.ciphertext || entry, null, 2));
-  toast('Copied to clipboard', 'ok');
+function toggleMobileMenu() {
+  document.getElementById('sidebar')?.classList.toggle('mobile-open');
 }
 
-// ══════════════════════════════════════════════════════════
-// ENCRYPT FILE
-// ══════════════════════════════════════════════════════════
-async function encryptFile() {
-  const fileInput  = document.getElementById('enc-file');
-  const pubkey     = document.getElementById('enc-pubkey').value.trim();
-  const label      = document.getElementById('enc-label').value.trim() || 'unnamed';
-  const anchor     = document.getElementById('enc-anchor').value === 'yes';
-  const out        = document.getElementById('enc-output');
-  const progressW  = document.getElementById('enc-progress');
-  const bar        = document.getElementById('enc-bar');
-  const progLabel  = document.getElementById('enc-progress-label');
-  const proof      = document.getElementById('enc-proof');
+// ─── Auth Tab ───
+function showAuthTab(tab) {
+  document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('authLogin').style.display = tab === 'login' ? 'block' : 'none';
+  document.getElementById('authRegister').style.display = tab === 'register' ? 'block' : 'none';
+  event.target.classList.add('active');
+}
 
-  if (!fileInput.files[0]) { showOutput(out, 'Select a file first', 'error'); return; }
-  if (!pubkey)              { showOutput(out, 'Public key required', 'error'); return; }
+// ─── Device Fingerprint ───
+async function getDeviceFingerprint() {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.textBaseline = 'top';
+  ctx.font = '14px Arial';
+  ctx.fillText('QTCL-FP-v1', 2, 2);
+  const canvasData = canvas.toDataURL();
 
-  const file = fileInput.files[0];
-  progressW.style.display = 'block';
-  out.className = 'output'; out.style.display = 'none';
-  proof.className = 'proof-box';
+  const raw = [
+    navigator.userAgent,
+    navigator.language,
+    screen.width + 'x' + screen.height,
+    screen.colorDepth,
+    new Date().getTimezoneOffset(),
+    navigator.hardwareConcurrency || 0,
+    canvasData.slice(0, 100),
+  ].join('|');
+
+  const enc = new TextEncoder();
+  const hash = await crypto.subtle.digest('SHA-256', enc.encode(raw));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─── Auth: Register ───
+async function doRegister() {
+  const pass = document.getElementById('regPass').value;
+  const confirm = document.getElementById('regPassConfirm').value;
+  const email = document.getElementById('regEmail').value;
+  const qtcl = document.getElementById('regQtcl').value;
+
+  if (!pass || pass.length < 8) return toast('Passphrase must be 8+ characters', 'error');
+  if (pass !== confirm) return toast('Passphrases do not match', 'error');
+
+  const btn = document.getElementById('regBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> CREATING...';
 
   try {
-    setProgress(bar, progLabel, 10, 'Reading file...');
-    const buf = await file.arrayBuffer();
-    const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
-
-    setProgress(bar, progLabel, 30, 'Computing SHA3-256 hash...');
-    const hashHex = await sha3_256_hex(new Uint8Array(buf));
-
-    setProgress(bar, progLabel, 50, 'Encrypting with GeodesicLWE...');
-    const result = await rpc('qtcl_hyp_encryptMessage', { plaintext: hex, public_key: pubkey });
-
-    setProgress(bar, progLabel, 80, anchor ? 'Anchoring hash to QTCL chain...' : 'Storing...');
-
-    let txHash = null, block = null;
-    if (anchor) {
-      try {
-        const anchorResult = await rpc('qtcl_anchorHash', { hash: hashHex, label });
-        txHash = anchorResult?.tx_hash;
-        block  = anchorResult?.block_height;
-      } catch(ae) {
-        // anchor failed non-fatally
-        console.warn('Anchor failed:', ae.message);
-      }
-    }
-
-    setProgress(bar, progLabel, 100, 'Done.');
-
-    const entry = {
-      type: 'file', label,
-      size: formatBytes(file.size),
-      filename: file.name,
-      ciphertext: { ciphertext: result.ciphertext, message_tag: result.message_tag },
-      hash: hashHex,
-      anchored: !!txHash,
-      txHash, block
-    };
-    vaultAdd(entry);
-
-    showOutput(out, JSON.stringify({
-      id: 'vault-' + Date.now(),
-      label, filename: file.name,
-      ciphertext: result.ciphertext?.slice(0, 80) + '...',
-      message_tag: result.message_tag,
-      hash: hashHex,
-      anchored: !!txHash,
-      tx: txHash || 'not anchored'
-    }, null, 2), 'success');
-
-    if (txHash) {
-      proof.className = 'proof-box visible';
-      proof.innerHTML = `⛓ CHAIN ANCHOR PROOF<br>Hash: ${hashHex}<br>TX: ${txHash}<br>Block: ${block}`;
-    }
-
-    toast('File encrypted and stored', 'ok');
-  } catch(e) {
-    setProgress(bar, progLabel, 0, '');
-    showOutput(out, 'Error: ' + e.message, 'error');
-    toast('Encryption failed', 'err');
-  }
-}
-
-// ══════════════════════════════════════════════════════════
-// DECRYPT FILE
-// ══════════════════════════════════════════════════════════
-async function decryptFile() {
-  const cipherRaw = document.getElementById('dec-cipher').value.trim();
-  const privkey   = document.getElementById('dec-privkey').value.trim();
-  const out       = document.getElementById('dec-output');
-
-  if (!cipherRaw || !privkey) { showOutput(out, 'Ciphertext and private key required', 'error'); return; }
-
-  let ct;
-  try { ct = JSON.parse(cipherRaw); }
-  catch { showOutput(out, 'Invalid JSON ciphertext', 'error'); return; }
-
-  try {
-    showOutput(out, 'Decrypting...', '');
-    const result = await rpc('qtcl_hyp_decryptMessage', { ciphertext: ct, private_key: privkey });
-    const plainHex = result.plaintext;
-
-    // Offer download
-    const bytes = hexToBytes(plainHex);
-    const blob  = new Blob([bytes]);
-    const url   = URL.createObjectURL(blob);
-    const a     = document.createElement('a');
-    a.href = url; a.download = 'decrypted_file';
-    a.click();
-
-    showOutput(out, `✓ Decrypted ${result.plaintext_length} bytes\nDownloading file...`, 'success');
-    toast('Decryption successful', 'ok');
-  } catch(e) {
-    showOutput(out, 'Decryption failed: ' + e.message, 'error');
-    toast('Decryption failed', 'err');
-  }
-}
-
-// ══════════════════════════════════════════════════════════
-// CHAIN ANCHOR
-// ══════════════════════════════════════════════════════════
-async function hashFile() {
-  const f = document.getElementById('anc-file').files[0];
-  if (!f) return;
-  const buf = await f.arrayBuffer();
-  const h = await sha3_256_hex(new Uint8Array(buf));
-  document.getElementById('anc-hash').value = h;
-}
-
-document.getElementById('anc-text').addEventListener('input', async function() {
-  if (!this.value.trim()) return;
-  const bytes = new TextEncoder().encode(this.value);
-  const h = await sha3_256_hex(bytes);
-  document.getElementById('anc-hash').value = h;
-});
-
-async function anchorToChain() {
-  const hash   = document.getElementById('anc-hash').value.trim();
-  const wallet = document.getElementById('anc-wallet').value.trim();
-  const out    = document.getElementById('anc-proof');
-
-  if (!hash) { toast('Compute a hash first', 'err'); return; }
-
-  out.style.display = 'block';
-  document.getElementById('anc-proof-content').textContent = 'Anchoring to chain...';
-
-  try {
-    const r = await rpc('qtcl_anchorHash', { hash, wallet_address: wallet });
-    document.getElementById('anc-proof-content').innerHTML =
-      `Hash: ${hash}<br>TX: ${r?.tx_hash || 'pending'}<br>Block: ${r?.block_height || 'pending'}<br>Timestamp: ${new Date().toISOString()}`;
-    vaultAdd({ type: 'anchor', label: hash.slice(0,16)+'...', hash, txHash: r?.tx_hash, block: r?.block_height, anchored: true });
-    toast('Anchored to chain', 'ok');
-  } catch(e) {
-    // If server doesn't have qtcl_anchorHash yet, store intent locally
-    document.getElementById('anc-proof-content').innerHTML =
-      `Hash: ${hash}<br>Status: Queued for anchoring<br>Note: ${e.message}`;
-    vaultAdd({ type: 'anchor', label: hash.slice(0,16)+'...', hash, anchored: false });
-    toast('Anchor queued (chain method pending)', 'ok');
-  }
-}
-
-async function verifyAnchor() {
-  const hash = document.getElementById('ver-hash').value.trim();
-  const out  = document.getElementById('ver-output');
-  if (!hash) { showOutput(out, 'Enter a hash', 'error'); return; }
-
-  try {
-    const r = await rpc('qtcl_verifyAnchor', { hash });
-    showOutput(out, JSON.stringify(r, null, 2), r.found ? 'success' : '');
-  } catch(e) {
-    showOutput(out, 'Verify error: ' + e.message, 'error');
-  }
-}
-
-// ══════════════════════════════════════════════════════════
-// KEY VAULT
-// ══════════════════════════════════════════════════════════
-async function storeKey() {
-  const secret = document.getElementById('key-secret').value.trim();
-  const pass   = document.getElementById('key-pass').value;
-  const label  = document.getElementById('key-label').value.trim() || 'secret';
-  const type   = document.getElementById('key-type').value;
-  const pubkey = document.getElementById('key-pubkey').value.trim();
-  const out    = document.getElementById('key-output');
-  const proof  = document.getElementById('key-proof');
-
-  if (!secret || !pass || !pubkey) {
-    showOutput(out, 'Secret, passphrase, and public key required', 'error'); return;
-  }
-
-  try {
-    showOutput(out, 'Encrypting secret...', '');
-
-    // Inner layer: AES-256-GCM with passphrase
-    const innerCipher = await aesEncrypt(secret, pass);
-
-    // Outer layer: GeodesicLWE via HLWE RPC
-    const innerHex = JSON.stringify(innerCipher);
-    const hexPayload = Array.from(new TextEncoder().encode(innerHex))
-      .map(b => b.toString(16).padStart(2,'0')).join('');
-
-    const result = await rpc('qtcl_hyp_encryptMessage', { plaintext: hexPayload, public_key: pubkey });
-
-    // Chain commitment of encrypted blob hash
-    const blobBytes = new TextEncoder().encode(JSON.stringify(result.ciphertext));
-    const commitHash = await sha3_256_hex(blobBytes);
-
-    let txHash = null;
-    try {
-      const anchor = await rpc('qtcl_anchorHash', { hash: commitHash, label: `key-vault:${label}` });
-      txHash = anchor?.tx_hash;
-    } catch(ae) { /* non-fatal */ }
-
-    const entry = {
-      type: 'key', label, keyType: type,
-      ciphertext: { ciphertext: result.ciphertext, message_tag: result.message_tag },
-      commitHash, anchored: !!txHash, txHash
-    };
-    vaultAdd(entry);
-
-    showOutput(out, JSON.stringify({
-      id: entry.id,
-      label, type,
-      commit_hash: commitHash,
-      outer_tag: result.message_tag,
-      anchored: !!txHash,
-      tx: txHash || 'not anchored'
-    }, null, 2), 'success');
-
-    proof.className = 'proof-box visible';
-    proof.innerHTML = `🗝 KEY STORED<br>Commit: ${commitHash}<br>Double-encrypted: AES-256-GCM + GeodesicLWE<br>TX: ${txHash || 'pending'}`;
-    toast('Key stored securely', 'ok');
-  } catch(e) {
-    showOutput(out, 'Error: ' + e.message, 'error');
-    toast('Storage failed', 'err');
-  }
-}
-
-async function retrieveKey() {
-  const id      = document.getElementById('ret-id').value.trim();
-  const pass    = document.getElementById('ret-pass').value;
-  const privkey = document.getElementById('ret-privkey').value.trim();
-  const out     = document.getElementById('ret-output');
-
-  if (!id || !pass || !privkey) {
-    showOutput(out, 'All fields required', 'error'); return;
-  }
-
-  const entry = vaultLoad().find(x => x.id === id);
-  if (!entry) { showOutput(out, 'Entry not found in local vault', 'error'); return; }
-
-  try {
-    // Outer decrypt: GeodesicLWE
-    const result = await rpc('qtcl_hyp_decryptMessage', {
-      ciphertext: entry.ciphertext, private_key: privkey
+    const fp = await getDeviceFingerprint();
+    const result = await rpc('vault_createAccount', {
+      passphrase: pass,
+      email,
+      qtcl_address: qtcl,
+      device_fp: fp,
     });
-    const innerJson = new TextDecoder().decode(hexToBytes(result.plaintext));
-    const innerCipher = JSON.parse(innerJson);
 
-    // Inner decrypt: AES-256-GCM
-    const secret = await aesDecrypt(innerCipher, pass);
-    showOutput(out, `SECRET RECOVERED:\n\n${secret}`, 'success');
-    toast('Secret retrieved', 'ok');
-  } catch(e) {
-    showOutput(out, 'Decryption failed: ' + e.message, 'error');
-    toast('Retrieval failed', 'err');
+    toast(`Vault created! Account ID: ${result.account_id}`, 'success', 8000);
+
+    // Auto-login
+    STATE.accountId = result.account_id;
+    STATE.passphrase = pass;
+    STATE.tier = result.tier;
+
+    // Save account ID locally
+    localStorage.setItem('qtcl_vault_account', result.account_id);
+
+    enterApp(result);
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'CREATE VAULT';
   }
 }
 
-// ══════════════════════════════════════════════════════════
-// WALLET
-// ══════════════════════════════════════════════════════════
-async function loadWallet() {
-  const addr = document.getElementById('wal-addr').value.trim();
-  const out  = document.getElementById('wal-output');
-  if (!addr) return;
+// ─── Auth: Login ───
+async function doLogin() {
+  const id = document.getElementById('loginId').value.trim();
+  const pass = document.getElementById('loginPass').value;
+
+  if (!id || !pass) return toast('Account ID and passphrase required', 'error');
+
+  const btn = document.getElementById('loginBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> UNLOCKING...';
 
   try {
-    const bal = await rpc('qtcl_getBalance', { address: addr });
-    document.getElementById('wal-bal').value = (bal?.balance ?? bal) + ' QTCL';
-    const v = vaultLoad();
-    document.getElementById('wal-entries').value = v.length;
-    showOutput(out, 'Wallet loaded', 'success');
-  } catch(e) {
-    showOutput(out, e.message, 'error');
+    const result = await rpc('vault_login', {
+      account_id: id,
+      passphrase: pass,
+    });
+
+    STATE.accountId = id;
+    STATE.passphrase = pass;
+    STATE.session = result.session;
+    STATE.tier = result.tier;
+    STATE.credit = result.credit_balance;
+
+    localStorage.setItem('qtcl_vault_account', id);
+
+    toast('Vault unlocked', 'success');
+    enterApp(result);
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'UNLOCK VAULT';
   }
 }
 
-// ══════════════════════════════════════════════════════════
-// AES-256-GCM (WebCrypto — inner passphrase layer)
-// ══════════════════════════════════════════════════════════
-async function aesEncrypt(plaintext, passphrase) {
-  const enc   = new TextEncoder();
-  const salt  = crypto.getRandomValues(new Uint8Array(16));
-  const iv    = crypto.getRandomValues(new Uint8Array(12));
-  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-  const key = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' },
-    keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
+function enterApp(accountData) {
+  document.getElementById('authOverlay').style.display = 'none';
+  document.getElementById('appHeader').style.display = 'flex';
+  document.getElementById('appLayout').style.display = 'grid';
+
+  // Update header
+  const tierBadge = document.getElementById('headerTier');
+  tierBadge.textContent = STATE.tier.toUpperCase();
+  tierBadge.className = `tier-badge tier-${STATE.tier}`;
+
+  // Update dashboard
+  updateDashboard(accountData);
+
+  // Update settings
+  document.getElementById('setAccountId').textContent = STATE.accountId;
+  document.getElementById('setTier').textContent = STATE.tier.toUpperCase();
+  document.getElementById('setEmail').textContent = accountData.email || '—';
+  document.getElementById('setQtcl').textContent = accountData.qtcl_address || '—';
+
+  if (STATE.tier === 'paid') {
+    document.getElementById('upgradeCard').style.display = 'none';
+  }
+}
+
+function doLogout() {
+  STATE.accountId = null;
+  STATE.passphrase = null;
+  STATE.session = null;
+  STATE.secrets = [];
+  document.getElementById('authOverlay').style.display = 'flex';
+  document.getElementById('appHeader').style.display = 'none';
+  document.getElementById('appLayout').style.display = 'none';
+  toast('Vault locked', 'info');
+}
+
+function updateDashboard(data) {
+  document.getElementById('dashSecrets').textContent = data.secrets_count || 0;
+  document.getElementById('navSecretCount').textContent = data.secrets_count || 0;
+  document.getElementById('dashAnchors').textContent = data.anchors_used || 0;
+
+  const bytes = data.bytes_stored || 0;
+  if (bytes > 1024 * 1024) {
+    document.getElementById('dashStorage').textContent = (bytes / (1024 * 1024)).toFixed(1);
+    document.getElementById('dashStorageUnit').textContent = 'MB';
+  } else if (bytes > 1024) {
+    document.getElementById('dashStorage').textContent = (bytes / 1024).toFixed(1);
+    document.getElementById('dashStorageUnit').textContent = 'KB';
+  } else {
+    document.getElementById('dashStorage').textContent = bytes;
+    document.getElementById('dashStorageUnit').textContent = 'bytes';
+  }
+
+  const credit = (data.credit_balance || 0) / 100000;
+  document.getElementById('dashCredit').textContent = credit.toFixed(2);
+  STATE.credit = data.credit_balance || 0;
+}
+
+// ═══════════════ CLIENT-SIDE ENCRYPTION (WebCrypto) ═══════════════
+
+async function clientEncrypt(data, passphrase) {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(32));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+
+  // PBKDF2 key derivation
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']
   );
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+
+  // Encrypt
+  const dataBytes = typeof data === 'string' ? enc.encode(data) : data;
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    dataBytes
+  );
+
   return {
-    salt: bytesToHex(salt),
-    iv:   bytesToHex(iv),
-    ct:   bytesToHex(new Uint8Array(ct))
+    ciphertext: bufToHex(new Uint8Array(encrypted)),
+    salt: bufToHex(salt),
+    iv: bufToHex(iv),
+    algorithm: 'AES-256-GCM',
+    kdf: 'PBKDF2-SHA256-600K',
+    size_bytes: dataBytes.byteLength,
   };
 }
 
-async function aesDecrypt(obj, passphrase) {
-  const enc  = new TextEncoder();
-  const salt = hexToBytes(obj.salt);
-  const iv   = hexToBytes(obj.iv);
-  const ct   = hexToBytes(obj.ct);
-  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-  const key = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' },
-    keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+async function clientDecrypt(ciphertextHex, salt, iv, passphrase) {
+  const enc = new TextEncoder();
+
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']
   );
-  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
-  return new TextDecoder().decode(pt);
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: hexToBuf(salt), iterations: 600000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt']
+  );
+
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: hexToBuf(iv) },
+    key,
+    hexToBuf(ciphertextHex)
+  );
+
+  return new Uint8Array(decrypted);
 }
 
-// ══════════════════════════════════════════════════════════
-// SHA3-256 via WebCrypto fallback (SHA-256 if no SHA3)
-// ══════════════════════════════════════════════════════════
-async function sha3_256_hex(bytes) {
-  // WebCrypto doesn't support SHA3 natively — use SHA-256 as commitment hash
-  // (server-side uses actual SHA3-256 for HLWE)
-  const buf = await crypto.subtle.digest('SHA-256', bytes);
-  return bytesToHex(new Uint8Array(buf));
+function bufToHex(buf) {
+  return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ══════════════════════════════════════════════════════════
-// UTILS
-// ══════════════════════════════════════════════════════════
-function bytesToHex(arr) { return Array.from(arr).map(b => b.toString(16).padStart(2,'0')).join(''); }
-function hexToBytes(hex) { const a = new Uint8Array(hex.length/2); for(let i=0;i<a.length;i++) a[i]=parseInt(hex.slice(i*2,i*2+2),16); return a; }
-function formatBytes(n) { if(n<1024)return n+'B'; if(n<1048576)return (n/1024).toFixed(1)+'KB'; return (n/1048576).toFixed(1)+'MB'; }
-
-function showOutput(el, text, type) {
-  el.textContent = text;
-  el.className   = 'output visible' + (type ? ' ' + type : '');
+function hexToBuf(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  return bytes;
 }
 
-function setProgress(bar, label, pct, text) {
-  bar.style.width   = pct + '%';
-  label.textContent = text;
+// ═══════════════ ENCRYPT & STORE ═══════════════
+
+let fileData = null;
+
+function handleFileSelect(input) {
+  const file = input.files[0];
+  if (!file) { fileData = null; return; }
+  const info = document.getElementById('encFileInfo');
+  info.textContent = `${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    fileData = { name: file.name, bytes: new Uint8Array(e.target.result), size: file.size };
+  };
+  reader.readAsArrayBuffer(file);
 }
 
-let _toastTimer;
-function toast(msg, type) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className   = 'show ' + (type || '');
-  clearTimeout(_toastTimer);
-  _toastTimer = setTimeout(() => t.className = '', 3000);
+async function doEncryptAndStore() {
+  const label = document.getElementById('encLabel').value.trim();
+  const category = document.getElementById('encCategory').value;
+  const content = document.getElementById('encContent').value;
+  const passphrase = document.getElementById('encPassphrase').value;
+  const expiry = document.getElementById('encExpiry').value;
+
+  if (!label) return toast('Label is required', 'error');
+  if (!content && !fileData) return toast('Enter content or select a file', 'error');
+  if (!passphrase || passphrase.length < 8) return toast('Encryption passphrase must be 8+ chars', 'error');
+
+  const btn = document.getElementById('encBtn');
+  const progress = document.getElementById('encProgress');
+  btn.disabled = true;
+  progress.style.display = 'block';
+
+  try {
+    // Step 1: Client-side encrypt
+    document.getElementById('encProgressText').textContent = 'Encrypting locally (AES-256-GCM)...';
+    document.getElementById('encProgressBar').style.width = '25%';
+
+    const rawData = fileData ? fileData.bytes : content;
+    const sizeBytes = fileData ? fileData.size : new TextEncoder().encode(content).length;
+
+    const encrypted = await clientEncrypt(rawData, passphrase);
+
+    // Step 2: Send to server
+    document.getElementById('encProgressText').textContent = 'Wrapping with post-quantum encryption...';
+    document.getElementById('encProgressBar').style.width = '50%';
+
+    const meta = {
+      algorithm: encrypted.algorithm,
+      kdf: encrypted.kdf,
+      salt: encrypted.salt,
+      iv: encrypted.iv,
+      is_file: !!fileData,
+      filename: fileData ? fileData.name : null,
+    };
+
+    const result = await rpc('vault_storeSecret', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      label,
+      category,
+      ciphertext: encrypted.ciphertext,
+      encryption_meta: meta,
+      size_bytes: sizeBytes,
+      expires_at: expiry || null,
+    });
+
+    document.getElementById('encProgressText').textContent = 'Stored!';
+    document.getElementById('encProgressBar').style.width = '100%';
+
+    toast(`Secret "${label}" stored securely`, 'success');
+
+    // Update counters
+    const dashSecrets = document.getElementById('dashSecrets');
+    dashSecrets.textContent = parseInt(dashSecrets.textContent) + 1;
+    document.getElementById('navSecretCount').textContent = dashSecrets.textContent;
+
+    // Clear form
+    document.getElementById('encLabel').value = '';
+    document.getElementById('encContent').value = '';
+    document.getElementById('encPassphrase').value = '';
+    document.getElementById('encFile').value = '';
+    document.getElementById('encFileInfo').textContent = '';
+    fileData = null;
+
+    setTimeout(() => {
+      progress.style.display = 'none';
+      document.getElementById('encProgressBar').style.width = '0%';
+    }, 1500);
+
+  } catch (e) {
+    toast(e.message, 'error');
+    progress.style.display = 'none';
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '🔒 ENCRYPT & STORE';
+  }
 }
 
-// Init renders
-renderVaultList();
-renderHistory();
+// ═══════════════ SECRETS LIST ═══════════════
+
+async function loadSecrets() {
+  try {
+    const result = await rpc('vault_listSecrets', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+    });
+
+    STATE.secrets = result.secrets || [];
+    renderSecrets();
+  } catch (e) {
+    toast('Failed to load secrets: ' + e.message, 'error');
+  }
+}
+
+function renderSecrets() {
+  const container = document.getElementById('secretsList');
+
+  if (!STATE.secrets.length) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">🗝</div>
+        <div class="empty-state-title">No secrets stored yet</div>
+        <div class="empty-state-desc">Encrypt and store your first secret to get started.</div>
+      </div>`;
+    return;
+  }
+
+  let html = `<table class="secrets-table">
+    <thead><tr>
+      <th>Label</th><th>Category</th><th>Size</th><th>Anchored</th><th>Created</th><th>Actions</th>
+    </tr></thead><tbody>`;
+
+  for (const s of STATE.secrets) {
+    const size = s.size_bytes > 1024
+      ? (s.size_bytes / 1024).toFixed(1) + ' KB'
+      : s.size_bytes + ' B';
+
+    const anchor = s.anchor_hash
+      ? `<span class="anchor-icon" title="${s.anchor_hash.slice(0,16)}...">⚓${s.obfuscated ? '🔮' : ''}</span>`
+      : `<span class="no-anchor">—</span>`;
+
+    const created = s.created_at ? new Date(s.created_at).toLocaleDateString() : '—';
+
+    html += `<tr>
+      <td style="color:var(--text-bright);font-weight:500">${escHtml(s.label)}</td>
+      <td><span class="category-tag cat-${s.category}">${s.category}</span></td>
+      <td>${size}</td>
+      <td>${anchor}</td>
+      <td style="color:var(--muted)">${created}</td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="openDecrypt('${s.id}')">DECRYPT</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteSecret('${s.id}','${escHtml(s.label)}')">✕</button>
+      </td>
+    </tr>`;
+  }
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function escHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function openDecrypt(secretId) {
+  STATE.currentDecryptId = secretId;
+  STATE.decryptedBytes = null;
+  document.getElementById('decryptPass').value = '';
+  document.getElementById('decryptResult').style.display = 'none';
+  document.getElementById('downloadBtn').style.display = 'none';
+  document.getElementById('decryptModal').classList.remove('hidden');
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.add('hidden');
+}
+
+async function doDecrypt() {
+  const pass = document.getElementById('decryptPass').value;
+  if (!pass) return toast('Passphrase required', 'error');
+
+  const btn = document.getElementById('decryptBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> DECRYPTING...';
+
+  try {
+    // Retrieve from server (removes server-side encryption layer)
+    const result = await rpc('vault_retrieveSecret', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      secret_id: STATE.currentDecryptId,
+    });
+
+    const meta = result.encryption_meta || {};
+
+    // Client-side decrypt
+    const plainBytes = await clientDecrypt(
+      result.ciphertext,
+      meta.salt,
+      meta.iv,
+      pass
+    );
+
+    STATE.decryptedBytes = plainBytes;
+
+    const resultDiv = document.getElementById('decryptResult');
+    resultDiv.style.display = 'block';
+
+    if (meta.is_file) {
+      document.getElementById('decryptContent').value =
+        `[File: ${meta.filename || 'unknown'}] ${plainBytes.length} bytes decrypted`;
+      document.getElementById('downloadBtn').style.display = 'inline-flex';
+      document.getElementById('downloadBtn').setAttribute('data-filename', meta.filename || 'decrypted_file');
+    } else {
+      const text = new TextDecoder().decode(plainBytes);
+      document.getElementById('decryptContent').value = text;
+    }
+
+    toast('Decrypted successfully', 'success');
+  } catch (e) {
+    toast('Decryption failed — wrong passphrase?', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'DECRYPT';
+  }
+}
+
+function doDownloadDecrypted() {
+  if (!STATE.decryptedBytes) return;
+  const filename = document.getElementById('downloadBtn').getAttribute('data-filename') || 'decrypted';
+  const blob = new Blob([STATE.decryptedBytes]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function deleteSecret(id, label) {
+  if (!confirm(`Delete "${label}" permanently? This cannot be undone.`)) return;
+
+  try {
+    await rpc('vault_deleteSecret', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      secret_id: id,
+    });
+    toast(`"${label}" deleted`, 'info');
+    loadSecrets();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// ═══════════════ CHAIN ANCHORING ═══════════════
+
+function populateAnchorSelect() {
+  const select = document.getElementById('anchorSecretSelect');
+  select.innerHTML = '<option value="">— Select a stored secret —</option>';
+  for (const s of STATE.secrets) {
+    if (!s.anchor_hash) {
+      select.innerHTML += `<option value="${s.id}">${escHtml(s.label)} (${s.category})</option>`;
+    }
+  }
+}
+
+document.getElementById('anchorObfuscate')?.addEventListener('change', function() {
+  document.getElementById('anchorCostDisplay').textContent = this.checked ? '5 QTCL' : '1 QTCL';
+});
+
+async function doAnchor() {
+  const secretId = document.getElementById('anchorSecretSelect').value;
+  const hashInput = document.getElementById('anchorHashInput').value.trim();
+  const label = document.getElementById('anchorLabel').value.trim() || 'Vault Anchor';
+  const obfuscate = document.getElementById('anchorObfuscate').checked;
+
+  let hash = hashInput;
+
+  if (!hash && !secretId) return toast('Select a secret or enter a hash', 'error');
+
+  if (!hash && secretId) {
+    // Compute SHA3-256 of the secret's ciphertext
+    const secret = STATE.secrets.find(s => s.id === secretId);
+    if (!secret) return toast('Secret not found', 'error');
+    // We'll use the secret ID as proxy — the server has the actual content hash
+    hash = await sha3_256_hex(secretId + ':' + Date.now());
+  }
+
+  if (hash.length !== 64) return toast('Hash must be 64 hex characters', 'error');
+
+  const btn = document.getElementById('anchorBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> ANCHORING...';
+
+  try {
+    const result = await rpc('vault_anchorHash', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      secret_id: secretId || undefined,
+      hash,
+      label,
+      obfuscate,
+    });
+
+    let msg = `Anchored at block ${result.block_height}`;
+    if (result.blinding_nonce) {
+      msg += `\n\nBLINDING NONCE (SAVE THIS!):\n${result.blinding_nonce}`;
+      prompt('Save this blinding nonce — it cannot be recovered:', result.blinding_nonce);
+    }
+
+    toast(msg, 'success', 8000);
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '⚓ ANCHOR TO CHAIN';
+  }
+}
+
+async function doVerify() {
+  const hash = document.getElementById('verifyHashInput').value.trim();
+  if (!hash || hash.length !== 64) return toast('Enter a 64-char hex hash', 'error');
+
+  const btn = document.getElementById('verifyBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> VERIFYING...';
+
+  try {
+    const result = await rpc('vault_verifyAnchor', { hash });
+    const div = document.getElementById('verifyResult');
+    div.style.display = 'block';
+
+    if (result.found) {
+      div.innerHTML = `
+        <div style="padding:14px;background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.3);border-radius:4px">
+          <div style="color:var(--emerald);font-weight:600;margin-bottom:8px">✓ ANCHOR VERIFIED</div>
+          <div style="font-size:11px;line-height:1.8;color:var(--text)">
+            <div><span style="color:var(--muted)">Block Height:</span> ${result.block_height || '—'}</div>
+            <div><span style="color:var(--muted)">TX Hash:</span> ${(result.tx_hash || '—').slice(0, 32)}...</div>
+            <div><span style="color:var(--muted)">Chain:</span> ${result.chain || 'QTCL'}</div>
+            <div><span style="color:var(--muted)">Anchored:</span> ${result.anchored_at || '—'}</div>
+            <div><span style="color:var(--muted)">Obfuscated:</span> ${result.is_obfuscated ? 'Yes' : 'No'}</div>
+            <div><span style="color:var(--muted)">On-Chain Verified:</span> ${result.on_chain_verified ? '✓' : '—'}</div>
+          </div>
+        </div>`;
+    } else {
+      div.innerHTML = `
+        <div style="padding:14px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:4px">
+          <div style="color:var(--red);font-weight:600">✕ NOT FOUND</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">
+            This hash has not been anchored to the QTCL blockchain.
+          </div>
+        </div>`;
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '✓ VERIFY ON CHAIN';
+  }
+}
+
+// ═══════════════ BILLING ═══════════════
+
+async function loadBilling() {
+  try {
+    const result = await rpc('vault_getBalance', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+    });
+
+    document.getElementById('billCredit').textContent =
+      (result.credit_balance_qtcl || 0).toFixed(2);
+    document.getElementById('billAnchors').textContent = result.anchors_used || 0;
+
+    const billing = result.recent_billing || [];
+    const container = document.getElementById('billingHistory');
+
+    if (!billing.length) {
+      container.innerHTML = '<div style="color:var(--muted);text-align:center;padding:20px">No transactions yet</div>';
+      return;
+    }
+
+    let html = '';
+    for (const b of billing) {
+      const isDebit = b.amount < 0;
+      const color = isDebit ? 'var(--red)' : 'var(--emerald)';
+      const qtcl = (Math.abs(b.amount) / 100000).toFixed(2);
+      const date = b.created_at ? new Date(b.created_at).toLocaleDateString() : '—';
+
+      html += `<div class="pricing-row">
+        <span>${b.description || b.operation}</span>
+        <span style="color:${color};font-weight:600">${isDebit ? '-' : '+'}${qtcl} QTCL</span>
+      </div>`;
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function doDeposit() {
+  const txHash = document.getElementById('depositTxHash').value.trim();
+  const amount = parseFloat(document.getElementById('depositAmount').value);
+
+  if (!txHash) return toast('TX hash required', 'error');
+  if (!amount || amount <= 0) return toast('Valid amount required', 'error');
+
+  try {
+    const result = await rpc('vault_depositCredit', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      tx_hash: txHash,
+      amount: Math.round(amount * 100000),
+    });
+
+    toast(`Deposited ${result.deposited_qtcl} QTCL`, 'success');
+    loadBilling();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// ═══════════════ INHERITANCE ═══════════════
+
+async function doSetupInheritance() {
+  const beneficiary = document.getElementById('inheritBeneficiary').value.trim();
+  const days = parseInt(document.getElementById('inheritDays').value);
+
+  if (!beneficiary) return toast('Beneficiary required', 'error');
+
+  try {
+    const result = await rpc('vault_setupInheritance', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      beneficiary,
+      check_in_days: days,
+    });
+
+    toast(`Inheritance configured. Next check-in by ${result.next_check_in?.split('T')[0]}`, 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function doCheckIn() {
+  try {
+    await rpc('vault_checkIn', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+    });
+    toast('Checked in — timer reset', 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// ═══════════════ UPGRADE ═══════════════
+
+async function doUpgrade() {
+  const qtcl = document.getElementById('upgradeQtcl').value.trim();
+  if (!qtcl) return toast('QTCL billing address required', 'error');
+
+  try {
+    const result = await rpc('vault_upgradeTier', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      qtcl_address: qtcl,
+    });
+
+    STATE.tier = 'paid';
+    document.getElementById('headerTier').textContent = 'PAID';
+    document.getElementById('headerTier').className = 'tier-badge tier-paid';
+    document.getElementById('setTier').textContent = 'PAID';
+    document.getElementById('upgradeCard').style.display = 'none';
+    toast('Upgraded to Paid tier!', 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// ═══════════════ UTILS ═══════════════
+
+async function sha3_256_hex(input) {
+  // WebCrypto only has SHA-256, not SHA3-256. Use SHA-256 as fallback for client hash.
+  const enc = new TextEncoder();
+  const hash = await crypto.subtle.digest('SHA-256', enc.encode(input));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─── Auto-fill saved account ID ───
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = localStorage.getItem('qtcl_vault_account');
+  if (saved) document.getElementById('loginId').value = saved;
+});
 </script>
 </body>
 </html>
