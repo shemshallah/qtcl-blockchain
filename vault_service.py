@@ -387,18 +387,42 @@ def vault_create_account(params: dict, rpc_id: Any) -> dict:
         device_fp = params.get("device_fp", "")
         qtcl_address = params.get("qtcl_address", "")
 
-        # Check device fingerprint — trial accounts limited to 1 per device
+        # Check device fingerprint — if trial account already exists for this device,
+        # return it (handles timeout-retry: first request may have created the account
+        # but the response never reached the client)
         if device_fp:
             existing = _vault_query(
-                "SELECT id, tier FROM vault_accounts WHERE device_fp = %s AND tier = 'trial'",
+                "SELECT id, tier, email, qtcl_address, secrets_count, bytes_stored, "
+                "anchors_used, credit_balance FROM vault_accounts "
+                "WHERE device_fp = %s AND tier = 'trial'",
                 (device_fp,), fetch="one"
             )
             if existing:
-                return _rpc_error(
-                    -32001,
-                    "Trial account already exists for this device. Upgrade to Paid to create additional accounts.",
-                    rpc_id
+                # Verify passphrase matches (if it does, this is a retry — return the account)
+                existing_full = _vault_query(
+                    "SELECT passphrase_hash FROM vault_accounts WHERE id = %s",
+                    (existing['id'],), fetch="one"
                 )
+                if existing_full and _verify_passphrase(passphrase, existing_full['passphrase_hash']):
+                    logger.info(f"[VAULT] Returning existing account on retry: {existing['id'][:12]}...")
+                    return _rpc_ok({
+                        "account_id": existing['id'],
+                        "tier": existing['tier'],
+                        "email": existing.get('email', ''),
+                        "qtcl_address": existing.get('qtcl_address', ''),
+                        "secrets_count": existing.get('secrets_count', 0),
+                        "bytes_stored": existing.get('bytes_stored', 0),
+                        "credit_balance": existing.get('credit_balance', 0),
+                        "limits": _get_tier_limits(existing['tier']),
+                        "recovered": True,
+                    }, rpc_id)
+                else:
+                    return _rpc_error(
+                        -32001,
+                        "Trial account already exists for this device. "
+                        "Log in with your existing account ID, or upgrade to Paid.",
+                        rpc_id
+                    )
 
         # Generate account ID
         account_id = f"va_{secrets.token_hex(16)}"
