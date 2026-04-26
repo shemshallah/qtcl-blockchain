@@ -1553,79 +1553,79 @@ def _settle_block_rewards(
             f"[SETTLE-START] h={height} miner={miner_address[:16]}… txs={len(non_coinbase_txs)}"
         )
 
-    # ── Reward Calculation Logic (Staged Minting) ───────────────────────
-    # 1. Calculate base rewards from TessellationRewardSchedule
-    miner_reward_base = 720  # 7.20 QTCL
-    treasury_reward_base = 80  # 0.80 QTCL
-    if TessellationRewardSchedule:
-        rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-        miner_reward_base = int(round(float(rewards.get("miner", 7.2)) * 100))
-        treasury_reward_base = int(round(float(rewards.get("treasury", 0.8)) * 100))
+        # ── Reward Calculation Logic (Staged Minting) ───────────────────────
+        # 1. Calculate base rewards from TessellationRewardSchedule
+        miner_reward_base = 720  # 7.20 QTCL
+        treasury_reward_base = 80  # 0.80 QTCL
+        if TessellationRewardSchedule:
+            rewards = TessellationRewardSchedule.get_rewards_for_height(height)
+            miner_reward_base = int(round(float(rewards.get("miner", 7.2)) * 100))
+            treasury_reward_base = int(round(float(rewards.get("treasury", 0.8)) * 100))
 
-    # 2. Sum transaction fees (split 50/50)
-    total_tx_fees_base = 0
-    for tx in txs:
-        f = tx.get("fee", tx.get("fee_base", 0))
-        if f:
-            try:
-                if isinstance(f, (float, str)):
-                    total_tx_fees_base += int(round(float(f) * 100))
-                else:
-                    total_tx_fees_base += int(f)
-            except (ValueError, TypeError):
-                pass
-    miner_fee_share = total_tx_fees_base // 2
-    treasury_fee_share = total_tx_fees_base - miner_fee_share
-    miner_reward_base += miner_fee_share
-    treasury_reward_base += treasury_fee_share
+        # 2. Sum transaction fees (split 50/50)
+        total_tx_fees_base = 0
+        for tx in txs:
+            f = tx.get("fee", tx.get("fee_base", 0))
+            if f:
+                try:
+                    if isinstance(f, (float, str)):
+                        total_tx_fees_base += int(round(float(f) * 100))
+                    else:
+                        total_tx_fees_base += int(f)
+                except (ValueError, TypeError):
+                    pass
+        miner_fee_share = total_tx_fees_base // 2
+        treasury_fee_share = total_tx_fees_base - miner_fee_share
+        miner_reward_base += miner_fee_share
+        treasury_reward_base += treasury_fee_share
 
-    miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-    treasury_address = (
-        TessellationRewardSchedule.TREASURY_ADDRESS
-        if TessellationRewardSchedule
-        else _TREASURY_ADDRESS
-    )
-    treasury_fp = hashlib.sha3_256(treasury_address.encode()).hexdigest()[:64]
+        miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+        treasury_address = (
+            TessellationRewardSchedule.TREASURY_ADDRESS
+            if TessellationRewardSchedule
+            else _TREASURY_ADDRESS
+        )
+        treasury_fp = hashlib.sha3_256(treasury_address.encode()).hexdigest()[:64]
 
-    # ── Bridge Integration: Trigger Lock-Box Verification ──────────────────
-    # Instead of just updating DB, we now trigger the Bridge Relayer
-    # to verify this block's reward as a 'Lock' event to be minted on Base.
-    try:
-        # Each node in the oracle cluster will be asked to verify the reward
-        # as a a valid 'native lock' to justify a wQTCL mint.
-        from oracle import ORACLE_W_STATE_MANAGER
-        if ORACLE_W_STATE_MANAGER:
-            for node in ORACLE_W_STATE_MANAGER.nodes:
-                # Simulate the "Lock" event: Miner earns reward -> it's locked in native
-                # and we propose a mint on Base.
-                proposal = node.propose_bridge_mint(
-                    tx_hash=block_hash,
-                    amount=miner_reward_base / 100.0,
-                    recipient=miner_address
+        # ── Bridge Integration: Trigger Lock-Box Verification ──────────────────
+        # Instead of just updating DB, we now trigger the Bridge Relayer
+        # to verify this block's reward as a 'Lock' event to be minted on Base.
+        try:
+            # Each node in the oracle cluster will be asked to verify the reward
+            # as a a valid 'native lock' to justify a wQTCL mint.
+            from oracle import ORACLE_W_STATE_MANAGER
+            if ORACLE_W_STATE_MANAGER:
+                for node in ORACLE_W_STATE_MANAGER.nodes:
+                    # Simulate the "Lock" event: Miner earns reward -> it's locked in native
+                    # and we propose a mint on Base.
+                    proposal = node.propose_bridge_mint(
+                        tx_hash=block_hash,
+                        amount=miner_reward_base / 100.0,
+                        recipient=miner_address
+                    )
+                    if proposal:
+                        bridge_relayer.submit_proposal(proposal)
+        except Exception as bridge_err:
+            _settle_log.warning(f"[BRIDGE-RELAY] Failed to submit reward proposal: {bridge_err}")
+
+        # Ensure pending_rewards table exists
+        try:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS pending_rewards (
+                    id BIGSERIAL PRIMARY KEY,
+                    height BIGINT NOT NULL,
+                    reward_type VARCHAR(32) NOT NULL,
+                    recipient VARCHAR(255) NOT NULL,
+                    amount BIGINT NOT NULL,
+                    confirmed_at_height BIGINT DEFAULT NULL,
+                    status VARCHAR(16) DEFAULT 'pending',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    UNIQUE(height, reward_type, recipient)
+                    )"""
                 )
-                if proposal:
-                    bridge_relayer.submit_proposal(proposal)
-    except Exception as bridge_err:
-        _settle_log.warning(f"[BRIDGE-RELAY] Failed to submit reward proposal: {bridge_err}")
-
-    # Ensure pending_rewards table exists
-    try:
-        with get_db_cursor() as cur:
-            cur.execute(
-                """CREATE TABLE IF NOT EXISTS pending_rewards (
-                id BIGSERIAL PRIMARY KEY,
-                height BIGINT NOT NULL,
-                reward_type VARCHAR(32) NOT NULL,
-                recipient VARCHAR(255) NOT NULL,
-                amount BIGINT NOT NULL,
-                confirmed_at_height BIGINT DEFAULT NULL,
-                status VARCHAR(16) DEFAULT 'pending',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                UNIQUE(height, reward_type, recipient)
-                )"""
-            )
-    except Exception as _pre:
-        _settle_log.debug(f"[SETTLE] pending_rewards DDL: {_pre}")
+        except Exception as _pre:
+            _settle_log.debug(f"[SETTLE] pending_rewards DDL: {_pre}")
 
 
         with get_db_cursor() as cur:
