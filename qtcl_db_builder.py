@@ -35,17 +35,48 @@ import sys  # needed early for logging
 _db_url = os.environ.get("DATABASE_URL", "")
 _pg_mode = _db_url.startswith("postgresql")
 
-_pkgs = ["mpmath", "tqdm"]
-if _pg_mode:
-    _pkgs.append("psycopg2-binary")
-_pkgs.append("argon2-cffi")
-_pkgs.append("cryptography")
+# Check what's already installed before pip install (avoid blocking)
+_missing_pkgs = []
 
-try:
-    subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages"] + _pkgs)
-except subprocess.CalledProcessError:
-    print("Installing packages without --break-system-packages...")
-    subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--user"] + _pkgs)
+# Quick import check — don't install if already present
+_check_pkgs = {
+    "mpmath": False,
+    "tqdm": False,
+    "argon2": False,
+    "cryptography": False,
+}
+if _pg_mode:
+    _check_pkgs["psycopg2"] = False
+
+for pkg_name in _check_pkgs:
+    try:
+        __import__(pkg_name)
+        _check_pkgs[pkg_name] = True
+    except ImportError:
+        pass
+
+# Only pip install missing packages
+_pkgs_to_install = []
+if not _check_pkgs.get("mpmath"):
+    _pkgs_to_install.append("mpmath")
+if not _check_pkgs.get("tqdm"):
+    _pkgs_to_install.append("tqdm")
+if _pg_mode and not _check_pkgs.get("psycopg2"):
+    _pkgs_to_install.append("psycopg2-binary")
+if not _check_pkgs.get("argon2"):
+    _pkgs_to_install.append("argon2-cffi")
+if not _check_pkgs.get("cryptography"):
+    _pkgs_to_install.append("cryptography")
+
+if _pkgs_to_install:
+    print(f"[STARTUP] Installing missing packages: {', '.join(_pkgs_to_install)}", flush=True)
+    try:
+        subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages"] + _pkgs_to_install)
+    except subprocess.CalledProcessError:
+        print("[STARTUP] Retrying without --break-system-packages...", flush=True)
+        subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--user"] + _pkgs_to_install)
+else:
+    print("[STARTUP] ✅ All dependencies already installed", flush=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2: IMPORTS & SETUP
@@ -92,7 +123,7 @@ try:
         atanh, atan2, fabs, re as mre, im as mim, conj, norm, phase,
         matrix, nstr, power, floor, ceil, asin, acos, hypot, fsum
     )
-    mp.dps = 150  # 150-bit precision
+    mp.dps = 50  # 50-digit precision (still ~165 bits, enough for Poincaré coords)
     MPMATH_AVAILABLE = True
 except ImportError:
     MPMATH_AVAILABLE = False
@@ -484,34 +515,68 @@ def hyperbolic_angle_at_vertex(a: HyperbolicPoint, b: HyperbolicPoint, c: Hyperb
 
 
 def hyperbolic_incenter(tri: HyperbolicTriangle) -> HyperbolicPoint:
-    a = hyperbolic_distance(tri.v1, tri.v2)
-    b = hyperbolic_distance(tri.v0, tri.v2)
-    c = hyperbolic_distance(tri.v0, tri.v1)
-    w0 = mpf(1) / sinh(a) if sinh(a) > mpf(10)**(-140) else mpf(1)
-    w1 = mpf(1) / sinh(b) if sinh(b) > mpf(10)**(-140) else mpf(1)
-    w2 = mpf(1) / sinh(c) if sinh(c) > mpf(10)**(-140) else mpf(1)
-    total = w0 + w1 + w2
-    if total < mpf(10)**(-140):
-        return tri.v0
-    x = (w0 * tri.v0.x + w1 * tri.v1.x + w2 * tri.v2.x) / total
-    y = (w0 * tri.v0.y + w1 * tri.v1.y + w2 * tri.v2.y) / total
-    return HyperbolicPoint(x, y, name=f"incenter_{tri.triangle_id}")
+    """Cached incenter with fallback to centroid."""
+    cache_key = (id(tri.v0), id(tri.v1), id(tri.v2), "incenter")
+    if hasattr(tri, '_geo_cache') and cache_key in tri._geo_cache:
+        return tri._geo_cache[cache_key]
+    
+    try:
+        a = hyperbolic_distance(tri.v1, tri.v2)
+        b = hyperbolic_distance(tri.v0, tri.v2)
+        c = hyperbolic_distance(tri.v0, tri.v1)
+        w0 = mpf(1) / sinh(a) if sinh(a) > mpf(10)**(-50) else mpf(1)
+        w1 = mpf(1) / sinh(b) if sinh(b) > mpf(10)**(-50) else mpf(1)
+        w2 = mpf(1) / sinh(c) if sinh(c) > mpf(10)**(-50) else mpf(1)
+        total = w0 + w1 + w2
+        if total < mpf(10)**(-50):
+            return tri.v0
+        x = (w0 * tri.v0.x + w1 * tri.v1.x + w2 * tri.v2.x) / total
+        y = (w0 * tri.v0.y + w1 * tri.v1.y + w2 * tri.v2.y) / total
+        result = HyperbolicPoint(x, y, name=f"incenter_{tri.triangle_id}")
+    except:
+        # Fallback to centroid (fast)
+        x = (tri.v0.x + tri.v1.x + tri.v2.x) / mpf(3)
+        y = (tri.v0.y + tri.v1.y + tri.v2.y) / mpf(3)
+        result = HyperbolicPoint(x, y, name=f"centroid_{tri.triangle_id}")
+    
+    if not hasattr(tri, '_geo_cache'):
+        tri._geo_cache = {}
+    tri._geo_cache[cache_key] = result
+    return result
 
 
 def hyperbolic_circumcenter(tri: HyperbolicTriangle) -> HyperbolicPoint:
-    ax, ay = tri.v0.x, tri.v0.y
-    bx, by = tri.v1.x, tri.v1.y
-    cx, cy = tri.v2.x, tri.v2.y
-    d = mpf(2) * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if fabs(d) < mpf(10)**(-140):
-        x = (ax + bx + cx) / mpf(3)
-        y = (ay + by + cy) / mpf(3)
-        return HyperbolicPoint(x, y, name=f"circumcenter_degen_{tri.triangle_id}")
-    ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / d
-    uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / d
-    if ux**2 + uy**2 >= mpf(1) - mpf(10)**(-140):
-        return hyperbolic_incenter(tri)
-    return HyperbolicPoint(ux, uy, name=f"circumcenter_{tri.triangle_id}")
+    """Fast circumcenter with centroid fallback."""
+    cache_key = (id(tri.v0), id(tri.v1), id(tri.v2), "circumcenter")
+    if hasattr(tri, '_geo_cache') and cache_key in tri._geo_cache:
+        return tri._geo_cache[cache_key]
+    
+    try:
+        ax, ay = tri.v0.x, tri.v0.y
+        bx, by = tri.v1.x, tri.v1.y
+        cx, cy = tri.v2.x, tri.v2.y
+        d = mpf(2) * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+        if fabs(d) < mpf(10)**(-50):
+            x = (ax + bx + cx) / mpf(3)
+            y = (ay + by + cy) / mpf(3)
+            result = HyperbolicPoint(x, y, name=f"circumcenter_degen_{tri.triangle_id}")
+        else:
+            ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / d
+            uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / d
+            if ux**2 + uy**2 >= mpf(1) - mpf(10)**(-50):
+                result = hyperbolic_incenter(tri)
+            else:
+                result = HyperbolicPoint(ux, uy, name=f"circumcenter_{tri.triangle_id}")
+    except:
+        # Fallback to centroid
+        x = (tri.v0.x + tri.v1.x + tri.v2.x) / mpf(3)
+        y = (tri.v0.y + tri.v1.y + tri.v2.y) / mpf(3)
+        result = HyperbolicPoint(x, y, name=f"circumcenter_fallback_{tri.triangle_id}")
+    
+    if not hasattr(tri, '_geo_cache'):
+        tri._geo_cache = {}
+    tri._geo_cache[cache_key] = result
+    return result
 
 
 def hyperbolic_orthocenter(tri: HyperbolicTriangle) -> HyperbolicPoint:
@@ -536,23 +601,32 @@ def hyperbolic_geodesic_interpolate(p1: HyperbolicPoint, p2: HyperbolicPoint, t:
 
 
 def generate_geodesic_grid(tri: HyperbolicTriangle, density: int = 5) -> List[HyperbolicPoint]:
+    """Fast grid via barycentric coordinates (no geodesic interpolation)."""
     points = []
-    for i in range(1, density):
-        for j in range(1, density - i):
-            lambda1 = mpf(i) / mpf(density)
-            lambda2 = mpf(j) / mpf(density)
-            lambda3 = mpf(1) - lambda1 - lambda2
-            if lambda1 + lambda2 > 0:
-                pt_01 = hyperbolic_geodesic_interpolate(tri.v0, tri.v1, lambda2 / (lambda1 + lambda2))
-            else:
-                pt_01 = tri.v0
-            pt = hyperbolic_geodesic_interpolate(tri.v2, pt_01, lambda3)
-            # Use simple indexed name to avoid length issues
-            points.append(HyperbolicPoint(pt.x, pt.y, name=f"g_{len(points)}"))
-    # Add center point (barycenter) as 7th point
-    center_x = (tri.v0.x + tri.v1.x + tri.v2.x) / mpf(3)
-    center_y = (tri.v0.y + tri.v1.y + tri.v2.y) / mpf(3)
+    v0_x, v0_y = tri.v0.x, tri.v0.y
+    v1_x, v1_y = tri.v1.x, tri.v1.y
+    v2_x, v2_y = tri.v2.x, tri.v2.y
+    
+    # Use 6 barycentric samples (fast) + 1 centroid
+    samples = [
+        (mpf(0.5), mpf(0.25), mpf(0.25)),  # near v0
+        (mpf(0.25), mpf(0.5), mpf(0.25)),  # near v1
+        (mpf(0.25), mpf(0.25), mpf(0.5)),  # near v2
+        (mpf(0.4), mpf(0.3), mpf(0.3)),    # interior 1
+        (mpf(0.3), mpf(0.4), mpf(0.3)),    # interior 2
+        (mpf(0.3), mpf(0.3), mpf(0.4)),    # interior 3
+    ]
+    
+    for i, (l0, l1, l2) in enumerate(samples):
+        x = l0 * v0_x + l1 * v1_x + l2 * v2_x
+        y = l0 * v0_y + l1 * v1_y + l2 * v2_y
+        points.append(HyperbolicPoint(x, y, name=f"g_{i}"))
+    
+    # Add centroid
+    center_x = (v0_x + v1_x + v2_x) / mpf(3)
+    center_y = (v0_y + v1_y + v2_y) / mpf(3)
     points.append(HyperbolicPoint(center_x, center_y, name="g_center"))
+    
     return points[:7]  # Ensure exactly 7 points
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1995,15 +2069,46 @@ class QuantumTemporalCoherenceLedgerServer:
             
             logger.info(f"[SCHEMA] Raw schema length: {len(schema)}")
             
-            # Execute statement by statement
+            # Execute statement by statement — respect $$ quoting for PL/pgSQL
             skipped = 0
             tables_created = 0
-            stmts = schema.split(";")
+            
+            # Smart split respecting $$ quoted strings
+            def split_sql_statements(sql_text):
+                statements = []
+                in_dollar_quote = False
+                current_stmt = []
+                i = 0
+                while i < len(sql_text):
+                    # Check for $$ delimiters
+                    if i < len(sql_text) - 1 and sql_text[i:i+2] == '$$':
+                        in_dollar_quote = not in_dollar_quote
+                        current_stmt.append(sql_text[i:i+2])
+                        i += 2
+                    elif sql_text[i] == ';' and not in_dollar_quote:
+                        # End of statement
+                        current_stmt.append(sql_text[i])
+                        stmt = ''.join(current_stmt).strip()
+                        if stmt:
+                            statements.append(stmt)
+                        current_stmt = []
+                        i += 1
+                    else:
+                        current_stmt.append(sql_text[i])
+                        i += 1
+                # Add any remaining statement
+                if current_stmt:
+                    stmt = ''.join(current_stmt).strip()
+                    if stmt:
+                        statements.append(stmt)
+                return statements
+            
+            stmts = split_sql_statements(schema)
             logger.info(f"[SCHEMA] Total statements: {len(stmts)}")
             
             for i, stmt in enumerate(stmts):
                 # Remove leading comment-only lines but keep the actual SQL
-                lines = stmt.strip().split('\n')
+                lines = stmt.split('\n')
                 sql_lines = [l for l in lines if not l.strip().startswith('--')]
                 s = '\n'.join(sql_lines).strip()
                 
@@ -2210,36 +2315,55 @@ class QuantumTemporalCoherenceLedgerServer:
             qubit_id = 0
             total_triangles = len(triangles)
             log_interval = max(1, total_triangles // 20)
+            last_log_time = time.time()
+            
             for idx, (tri_id, triangle) in enumerate(triangles.items()):
+                # 3 vertices
                 for i, vertex in enumerate([triangle.v0, triangle.v1, triangle.v2]):
                     qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=vertex.x, y=vertex.y, placement_type="vertex")
                     qubits[qubit_id] = qubit
                     qubit_id += 1
+                
+                # Incenter
                 inc = hyperbolic_incenter(triangle)
                 qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=inc.x, y=inc.y, placement_type="incenter")
                 qubits[qubit_id] = qubit
                 qubit_id += 1
+                
+                # Circumcenter
                 circ = hyperbolic_circumcenter(triangle)
                 qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=circ.x, y=circ.y, placement_type="circumcenter")
                 qubits[qubit_id] = qubit
                 qubit_id += 1
+                
+                # Orthocenter (fast — just centroid now)
                 orth = hyperbolic_orthocenter(triangle)
                 qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=orth.x, y=orth.y, placement_type="orthocenter")
                 qubits[qubit_id] = qubit
                 qubit_id += 1
+                
+                # Geodesic grid (6 points + centroid)
                 grid_points = generate_geodesic_grid(triangle)
                 for gp in grid_points[:7]:
                     qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=gp.x, y=gp.y, placement_type="geodesic")
                     qubits[qubit_id] = qubit
                     qubit_id += 1
+                
+                # Log progress periodically (every 5 seconds or at milestones)
                 if (idx + 1) % log_interval == 0 or idx == total_triangles - 1:
-                    pct = ((idx + 1) / total_triangles) * 100
-                    bar_len = 40
-                    filled = int(bar_len * (idx + 1) / total_triangles)
-                    bar = "█" * filled + "░" * (bar_len - filled)
-                    logger.info(f"{CLR.C}[Geometry IDs] [{bar}] {pct:5.1f}% | {idx+1:,}/{total_triangles:,} triangles | {qubit_id:,} IDs placed{CLR.E}")
-                if tri_id % 1000 == 0:
+                    elapsed = time.time() - last_log_time
+                    if elapsed > 5 or idx == total_triangles - 1:
+                        pct = ((idx + 1) / total_triangles) * 100
+                        bar_len = 40
+                        filled = int(bar_len * (idx + 1) / total_triangles)
+                        bar = "█" * filled + "░" * (bar_len - filled)
+                        logger.info(f"{CLR.C}[Geometry] [{bar}] {pct:5.1f}% | {idx+1:,}/{total_triangles:,} triangles | {qubit_id:,} qubits placed{CLR.E}")
+                        last_log_time = time.time()
+                
+                # Minimal GC only every 2000 triangles
+                if tri_id % 2000 == 0:
                     gc.collect()
+            
             logger.info(f"{CLR.OK}[QUBITS] ✅ All {qubit_id:,} pseudoqubits placed{CLR.E}")
         
         # ✅ ACTUALLY CALL THE FUNCTIONS
