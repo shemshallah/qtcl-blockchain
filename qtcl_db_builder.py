@@ -514,11 +514,17 @@ def hyperbolic_angle_at_vertex(a: HyperbolicPoint, b: HyperbolicPoint, c: Hyperb
     return acos(cos_angle)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GEOMETRY CACHING (module-level, works with slots=True dataclasses)
+# ─────────────────────────────────────────────────────────────────────────────
+_GEO_CACHE = {}  # {(tri_id, 'incenter'|'circumcenter'|...): HyperbolicPoint}
+
+
 def hyperbolic_incenter(tri: HyperbolicTriangle) -> HyperbolicPoint:
     """Cached incenter with fallback to centroid."""
-    cache_key = (id(tri.v0), id(tri.v1), id(tri.v2), "incenter")
-    if hasattr(tri, '_geo_cache') and cache_key in tri._geo_cache:
-        return tri._geo_cache[cache_key]
+    cache_key = (tri.triangle_id, "incenter")
+    if cache_key in _GEO_CACHE:
+        return _GEO_CACHE[cache_key]
     
     try:
         a = hyperbolic_distance(tri.v1, tri.v2)
@@ -529,27 +535,26 @@ def hyperbolic_incenter(tri: HyperbolicTriangle) -> HyperbolicPoint:
         w2 = mpf(1) / sinh(c) if sinh(c) > mpf(10)**(-50) else mpf(1)
         total = w0 + w1 + w2
         if total < mpf(10)**(-50):
-            return tri.v0
-        x = (w0 * tri.v0.x + w1 * tri.v1.x + w2 * tri.v2.x) / total
-        y = (w0 * tri.v0.y + w1 * tri.v1.y + w2 * tri.v2.y) / total
-        result = HyperbolicPoint(x, y, name=f"incenter_{tri.triangle_id}")
+            result = tri.v0
+        else:
+            x = (w0 * tri.v0.x + w1 * tri.v1.x + w2 * tri.v2.x) / total
+            y = (w0 * tri.v0.y + w1 * tri.v1.y + w2 * tri.v2.y) / total
+            result = HyperbolicPoint(x, y, name=f"incenter_{tri.triangle_id}")
     except:
         # Fallback to centroid (fast)
         x = (tri.v0.x + tri.v1.x + tri.v2.x) / mpf(3)
         y = (tri.v0.y + tri.v1.y + tri.v2.y) / mpf(3)
         result = HyperbolicPoint(x, y, name=f"centroid_{tri.triangle_id}")
     
-    if not hasattr(tri, '_geo_cache'):
-        tri._geo_cache = {}
-    tri._geo_cache[cache_key] = result
+    _GEO_CACHE[cache_key] = result
     return result
 
 
 def hyperbolic_circumcenter(tri: HyperbolicTriangle) -> HyperbolicPoint:
     """Fast circumcenter with centroid fallback."""
-    cache_key = (id(tri.v0), id(tri.v1), id(tri.v2), "circumcenter")
-    if hasattr(tri, '_geo_cache') and cache_key in tri._geo_cache:
-        return tri._geo_cache[cache_key]
+    cache_key = (tri.triangle_id, "circumcenter")
+    if cache_key in _GEO_CACHE:
+        return _GEO_CACHE[cache_key]
     
     try:
         ax, ay = tri.v0.x, tri.v0.y
@@ -573,9 +578,7 @@ def hyperbolic_circumcenter(tri: HyperbolicTriangle) -> HyperbolicPoint:
         y = (tri.v0.y + tri.v1.y + tri.v2.y) / mpf(3)
         result = HyperbolicPoint(x, y, name=f"circumcenter_fallback_{tri.triangle_id}")
     
-    if not hasattr(tri, '_geo_cache'):
-        tri._geo_cache = {}
-    tri._geo_cache[cache_key] = result
+    _GEO_CACHE[cache_key] = result
     return result
 
 
