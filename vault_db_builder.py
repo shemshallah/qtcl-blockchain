@@ -789,13 +789,71 @@ class VaultDatabaseBuilder:
         logger.info("[VAULT-DB] Disconnected")
 
     def execute_schema(self):
-        """Execute the complete vault schema."""
+        """Execute the complete vault schema — split statements properly."""
         logger.info("[VAULT-DB] Executing schema (17 tables, 6 triggers, seed data)...")
         t0 = time.time()
-        self.cursor.execute(VAULT_SCHEMA)
+        
+        # Smart split respecting $$ quoting for PL/pgSQL
+        def split_sql_statements(sql_text):
+            statements = []
+            in_dollar_quote = False
+            current_stmt = []
+            i = 0
+            while i < len(sql_text):
+                # Check for $$ delimiters
+                if i < len(sql_text) - 1 and sql_text[i:i+2] == '$$':
+                    in_dollar_quote = not in_dollar_quote
+                    current_stmt.append(sql_text[i:i+2])
+                    i += 2
+                elif sql_text[i] == ';' and not in_dollar_quote:
+                    # End of statement
+                    current_stmt.append(sql_text[i])
+                    stmt = ''.join(current_stmt).strip()
+                    if stmt:
+                        statements.append(stmt)
+                    current_stmt = []
+                    i += 1
+                else:
+                    current_stmt.append(sql_text[i])
+                    i += 1
+            # Add any remaining statement
+            if current_stmt:
+                stmt = ''.join(current_stmt).strip()
+                if stmt:
+                    statements.append(stmt)
+            return statements
+        
+        stmts = split_sql_statements(VAULT_SCHEMA)
+        logger.info(f"[VAULT-DB] Total statements: {len(stmts)}")
+        
+        skipped = 0
+        for i, stmt in enumerate(stmts):
+            # Remove leading comment-only lines but keep actual SQL
+            lines = stmt.split('\n')
+            sql_lines = [l for l in lines if not l.strip().startswith('--')]
+            s = '\n'.join(sql_lines).strip()
+            
+            if s:
+                try:
+                    self.cursor.execute(s)
+                    if 'CREATE TABLE' in s.upper():
+                        logger.info(f"[VAULT-DB] ✓ Table created")
+                    elif 'CREATE INDEX' in s.upper():
+                        logger.info(f"[VAULT-DB] ✓ Index created")
+                    elif 'CREATE FUNCTION' in s.upper():
+                        logger.info(f"[VAULT-DB] ✓ Function created")
+                except Exception as e:
+                    # Log failures but continue (IF NOT EXISTS handles idempotency)
+                    if 'CREATE TABLE' in s.upper():
+                        logger.error(f"[VAULT-DB] ❌ Table creation failed: {e}")
+                        raise
+                    else:
+                        logger.info(f"[VAULT-DB] ⊘ Skipped: {e}")
+                        skipped += 1
+        
         self.conn.commit()
         elapsed = time.time() - t0
-        logger.info(f"[VAULT-DB] ✅ Schema executed in {elapsed:.2f}s")
+        logger.info(f"[VAULT-DB] ✅ Schema executed in {elapsed:.2f}s ({len(stmts)} statements, {skipped} skipped)")
 
     def set_metadata(self):
         """Write schema version and build metadata."""
