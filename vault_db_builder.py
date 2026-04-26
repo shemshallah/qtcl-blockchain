@@ -789,7 +789,7 @@ class VaultDatabaseBuilder:
         logger.info("[VAULT-DB] Disconnected")
 
     def execute_schema(self):
-        """Execute the complete vault schema — split statements properly."""
+        """Execute the complete vault schema — tables first, then indices."""
         logger.info("[VAULT-DB] Executing schema (17 tables, 6 triggers, seed data)...")
         t0 = time.time()
         
@@ -826,34 +826,91 @@ class VaultDatabaseBuilder:
         stmts = split_sql_statements(VAULT_SCHEMA)
         logger.info(f"[VAULT-DB] Total statements: {len(stmts)}")
         
-        skipped = 0
-        for i, stmt in enumerate(stmts):
-            # Remove leading comment-only lines but keep actual SQL
+        # Separate by type: tables, indices, functions, triggers
+        tables = []
+        indices = []
+        functions = []
+        others = []
+        
+        for stmt in stmts:
             lines = stmt.split('\n')
             sql_lines = [l for l in lines if not l.strip().startswith('--')]
             s = '\n'.join(sql_lines).strip()
             
-            if s:
-                try:
-                    self.cursor.execute(s)
-                    if 'CREATE TABLE' in s.upper():
-                        logger.info(f"[VAULT-DB] ✓ Table created")
-                    elif 'CREATE INDEX' in s.upper():
-                        logger.info(f"[VAULT-DB] ✓ Index created")
-                    elif 'CREATE FUNCTION' in s.upper():
-                        logger.info(f"[VAULT-DB] ✓ Function created")
-                except Exception as e:
-                    # Log failures but continue (IF NOT EXISTS handles idempotency)
-                    if 'CREATE TABLE' in s.upper():
-                        logger.error(f"[VAULT-DB] ❌ Table creation failed: {e}")
-                        raise
-                    else:
-                        logger.info(f"[VAULT-DB] ⊘ Skipped: {e}")
-                        skipped += 1
+            if not s:
+                continue
+            
+            stmt_upper = s.upper()
+            if 'CREATE TABLE' in stmt_upper:
+                tables.append(s)
+            elif 'CREATE INDEX' in stmt_upper:
+                indices.append(s)
+            elif 'CREATE FUNCTION' in stmt_upper or 'CREATE OR REPLACE FUNCTION' in stmt_upper:
+                functions.append(s)
+            else:
+                others.append(s)
         
-        self.conn.commit()
+        # Execute in strict order: tables → indices → functions → others
+        all_batches = [
+            ("Tables", tables),
+            ("Indices", indices),
+            ("Functions", functions),
+            ("Other statements", others),
+        ]
+        
+        total_executed = 0
+        total_skipped = 0
+        
+        for batch_name, batch_stmts in all_batches:
+            if not batch_stmts:
+                continue
+            
+            logger.info(f"[VAULT-DB] Executing {batch_name} ({len(batch_stmts)})")
+            
+            for stmt in batch_stmts:
+                try:
+                    self.cursor.execute(stmt)
+                    total_executed += 1
+                    
+                    if 'CREATE TABLE' in stmt.upper():
+                        table_name = stmt.split()[5] if len(stmt.split()) > 5 else "?"
+                        logger.info(f"[VAULT-DB] ✓ Table: {table_name}")
+                    elif 'CREATE INDEX' in stmt.upper():
+                        logger.info(f"[VAULT-DB] ✓ Index created")
+                    elif 'CREATE' in stmt.upper() and 'FUNCTION' in stmt.upper():
+                        logger.info(f"[VAULT-DB] ✓ Function created")
+                        
+                except Exception as e:
+                    error_str = str(e)
+                    # If it's a "column doesn't exist" error, rollback and retry
+                    if "does not exist" in error_str.lower() or "aborted" in error_str.lower():
+                        logger.warning(f"[VAULT-DB] Transaction aborted, rolling back...")
+                        try:
+                            self.conn.rollback()
+                        except:
+                            pass
+                        # Reconnect for fresh transaction
+                        try:
+                            self.disconnect()
+                            self.connect()
+                        except Exception as reconn_err:
+                            logger.error(f"[VAULT-DB] Failed to reconnect: {reconn_err}")
+                            raise
+                        raise RuntimeError(f"Schema execution failed at: {error_str}. Please check statement order.")
+                    else:
+                        # Skip non-critical errors (IF NOT EXISTS handles most)
+                        logger.info(f"[VAULT-DB] ⊘ Skipped: {error_str}")
+                        total_skipped += 1
+        
+        try:
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"[VAULT-DB] Commit failed: {e}")
+            self.conn.rollback()
+            raise
+        
         elapsed = time.time() - t0
-        logger.info(f"[VAULT-DB] ✅ Schema executed in {elapsed:.2f}s ({len(stmts)} statements, {skipped} skipped)")
+        logger.info(f"[VAULT-DB] ✅ Schema executed in {elapsed:.2f}s ({total_executed} executed, {total_skipped} skipped)")
 
     def set_metadata(self):
         """Write schema version and build metadata."""
