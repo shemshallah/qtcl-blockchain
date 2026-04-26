@@ -175,9 +175,68 @@ _verbose_p2p_logging = False
 _last_snapshot_log_time = 0
 _snapshot_log_interval = 10
 
-# ═══ PURE SSE STREAMING ARCHITECTURE ═══
-# Oracle generates 16³ → queued directly to SSE → clients sample from stream
-# NO caching, NO RPC snapshot polling, NO ring buffers
+# ═══ BRIDGE CONFIGURATION ═══════════════════════════════════════════════════════════
+# Configuration for the Lock-Box Bridge to Base Mainnet
+BRIDGE_CONFIG = {
+    "SAFE_ADDRESS": os.getenv("BRIDGE_SAFE_ADDRESS", "0x0000000000000000000000000000000000000000"),
+    "WQTCL_ADDRESS": os.getenv("BRIDGE_WQTCL_ADDRESS", "0x0000000000000000000000000000000000000000"),
+    "REGISTRY_ADDRESS": os.getenv("BRIDGE_REGISTRY_ADDRESS", "0x0000000000000000000000000000000000000000"),
+    "BRIDGE_TAX_BPS": 10,  # 0.1% tax
+    "MIN_CONSENSUS_THRESHOLD": 3,  # 3/5 oracles must agree
+}
+
+class BridgeRelayer:
+    """
+    The authoritative coordinator between the Quantum Network and the Base Lock-Box.
+    
+    Role:
+    1. Collects 'Lock' proposals from the 5 independent QuantumOracleNodes.
+    2. Verifies HypΓ proofs for native chain Lock transactions.
+    3. Once threshold (3/5) is reached, triggers the Safe Transaction Service API.
+    """
+    def __init__(self):
+        self._proposals: Dict[str, List[dict]] = {} # tx_hash -> list of signed proposals
+        self._lock = threading.Lock()
+        logger.info("[BRIDGE] Relayer initialized — monitoring native chain for Locks")
+
+    def submit_proposal(self, proposal: dict):
+        """Submit an oracle's verification of a Lock transaction."""
+        tx_hash = proposal["params"]["source_tx"]
+        oracle_id = proposal["oracle_id"]
+        
+        with self._lock:
+            if tx_hash not in self._proposals:
+                self._proposals[tx_hash] = []
+            
+            # Prevent duplicate proposals from the same oracle
+            if any(p["oracle_id"] == oracle_id for p in self._proposals[tx_hash]):
+                return False
+            
+            self._proposals[tx_hash].append(proposal)
+            
+            # Check if threshold reached
+            if len(self._proposals[tx_hash]) >= BRIDGE_CONFIG["MIN_CONSENSUS_THRESHOLD"]:
+                self._trigger_safe_mint(tx_hash, proposal["params"])
+                
+        return True
+
+    def _trigger_safe_mint(self, tx_hash: str, params: dict):
+        """Call the Safe Transaction Service API to execute the mint on Base."""
+        logger.info(f"[BRIDGE] 🚀 Threshold reached for {tx_hash}! Triggering Lock-Box mint...")
+        # In a production environment, this would be a signed API call to the Safe.
+        # We use a simulated call here for the framework.
+        amount = params["amount"]
+        recipient = params["recipient"]
+        
+        # Calculation: Native Amount - 0.1% Bridge Tax
+        tax = amount * (BRIDGE_CONFIG["BRIDGE_TAX_BPS"] / 10000)
+        mint_amount = amount - tax
+        
+        logger.info(f"[BRIDGE] Minting {mint_amount} wQTCL to {recipient} (Tax: {tax} QTCL)")
+        # Actual API call to Safe Transaction Service would go here.
+
+# Initialize Global Bridge Relayer
+bridge_relayer = BridgeRelayer()
 
 # ═══ CLIENT TRIPARTITE ORACLE POOL ═══════════════════════════════════════════
 # Receives fused DMs pushed by trusted client oracle nodes (qtcl_pushOracleDM).
@@ -1227,13 +1286,16 @@ threading.Thread(
 
 
 def _ensure_wallet_addresses_table() -> None:
-    """Ensure wallet_addresses table exists at startup (run once, not per-request).
-
-    The _rpc_submitBlock handler previously called CREATE TABLE IF NOT EXISTS
-    on every block submission. This DDL is now run once at startup to keep
-    the critical path fast.
-    """
+    """Ensure wallet_addresses table exists at startup (run once, not per-request)."""
     try:
+        # We must ensure the pool and get_db_cursor are available before this runs.
+        # Since this is in a thread, we check if it's defined.
+        if 'get_db_cursor' not in globals():
+            logger.warning("[STARTUP] get_db_cursor not yet defined, retrying wallet table init...")
+            time.sleep(1)
+            _ensure_wallet_addresses_table()
+            return
+
         with get_db_cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS wallet_addresses (
@@ -1252,9 +1314,14 @@ def _ensure_wallet_addresses_table() -> None:
 
 
 def _ensure_pending_rewards_table() -> None:
-    """Ensure pending_rewards table exists at startup.
-    Treasury rewards are queued at block h and confirm at block h+1."""
+    """Ensure pending_rewards table exists at startup."""
     try:
+        if 'get_db_cursor' not in globals():
+            logger.warning("[STARTUP] get_db_cursor not yet defined, retrying pending rewards table init...")
+            time.sleep(1)
+            _ensure_pending_rewards_table()
+            return
+
         with get_db_cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS pending_rewards (
@@ -1497,57 +1564,80 @@ def _settle_block_rewards(
             f"[SETTLE-START] h={height} miner={miner_address[:16]}… txs={len(non_coinbase_txs)}"
         )
 
-        # Canonical reward schedule
-        miner_reward_base = 720  # 7.20 QTCL
-        treasury_reward_base = 80  # 0.80 QTCL
-        if TessellationRewardSchedule:
-            rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-            miner_reward_base = int(round(float(rewards.get("miner", 7.2)) * 100))
-            treasury_reward_base = int(round(float(rewards.get("treasury", 0.8)) * 100))
+    # ── Reward Calculation Logic (Staged Minting) ───────────────────────
+    # 1. Calculate base rewards from TessellationRewardSchedule
+    miner_reward_base = 720  # 7.20 QTCL
+    treasury_reward_base = 80  # 0.80 QTCL
+    if TessellationRewardSchedule:
+        rewards = TessellationRewardSchedule.get_rewards_for_height(height)
+        miner_reward_base = int(round(float(rewards.get("miner", 7.2)) * 100))
+        treasury_reward_base = int(round(float(rewards.get("treasury", 0.8)) * 100))
 
-        # Sum transaction fees (split 50/50 miner/treasury)
-        total_tx_fees_base = 0
-        for tx in txs:
-            f = tx.get("fee", tx.get("fee_base", 0))
-            if f:
-                try:
-                    if isinstance(f, (float, str)):
-                        total_tx_fees_base += int(round(float(f) * 100))
-                    else:
-                        total_tx_fees_base += int(f)
-                except (ValueError, TypeError):
-                    pass
-        miner_fee_share = total_tx_fees_base // 2
-        treasury_fee_share = total_tx_fees_base - miner_fee_share
-        miner_reward_base += miner_fee_share
-        treasury_reward_base += treasury_fee_share
+    # 2. Sum transaction fees (split 50/50)
+    total_tx_fees_base = 0
+    for tx in txs:
+        f = tx.get("fee", tx.get("fee_base", 0))
+        if f:
+            try:
+                if isinstance(f, (float, str)):
+                    total_tx_fees_base += int(round(float(f) * 100))
+                else:
+                    total_tx_fees_base += int(f)
+            except (ValueError, TypeError):
+                pass
+    miner_fee_share = total_tx_fees_base // 2
+    treasury_fee_share = total_tx_fees_base - miner_fee_share
+    miner_reward_base += miner_fee_share
+    treasury_reward_base += treasury_fee_share
 
-        miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-        treasury_address = (
-            TessellationRewardSchedule.TREASURY_ADDRESS
-            if TessellationRewardSchedule
-            else _TREASURY_ADDRESS
-        )
-        treasury_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
+    miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+    treasury_address = (
+        TessellationRewardSchedule.TREASURY_ADDRESS
+        if TessellationRewardSchedule
+        else _TREASURY_ADDRESS
+    )
+    treasury_fp = hashlib.sha3_256(treasury_address.encode()).hexdigest()[:64]
 
-        # Ensure pending_rewards table exists
-        try:
-            with get_db_cursor() as cur:
-                cur.execute(
-                    """CREATE TABLE IF NOT EXISTS pending_rewards (
-                        id BIGSERIAL PRIMARY KEY,
-                        height BIGINT NOT NULL,
-                        reward_type VARCHAR(32) NOT NULL,
-                        recipient VARCHAR(255) NOT NULL,
-                        amount BIGINT NOT NULL,
-                        confirmed_at_height BIGINT DEFAULT NULL,
-                        status VARCHAR(16) DEFAULT 'pending',
-                        created_at TIMESTAMPTZ DEFAULT NOW(),
-                        UNIQUE(height, reward_type, recipient)
-                    )"""
+    # ── Bridge Integration: Trigger Lock-Box Verification ──────────────────
+    # Instead of just updating DB, we now trigger the Bridge Relayer
+    # to verify this block's reward as a 'Lock' event to be minted on Base.
+    try:
+        # Each node in the oracle cluster will be asked to verify the reward
+        # as a a valid 'native lock' to justify a wQTCL mint.
+        from oracle import ORACLE_W_STATE_MANAGER
+        if ORACLE_W_STATE_MANAGER:
+            for node in ORACLE_W_STATE_MANAGER.nodes:
+                # Simulate the "Lock" event: Miner earns reward -> it's locked in native
+                # and we propose a mint on Base.
+                proposal = node.propose_bridge_mint(
+                    tx_hash=block_hash,
+                    amount=miner_reward_base / 100.0,
+                    recipient=miner_address
                 )
-        except Exception as _pre:
-            _settle_log.debug(f"[SETTLE] pending_rewards DDL: {_pre}")
+                if proposal:
+                    bridge_relayer.submit_proposal(proposal)
+    except Exception as bridge_err:
+        _settle_log.warning(f"[BRIDGE-RELAY] Failed to submit reward proposal: {bridge_err}")
+
+    # Ensure pending_rewards table exists
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS pending_rewards (
+                id BIGSERIAL PRIMARY KEY,
+                height BIGINT NOT NULL,
+                reward_type VARCHAR(32) NOT NULL,
+                recipient VARCHAR(255) NOT NULL,
+                amount BIGINT NOT NULL,
+                confirmed_at_height BIGINT DEFAULT NULL,
+                status VARCHAR(16) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                UNIQUE(height, reward_type, recipient)
+                )"""
+            )
+    except Exception as _pre:
+        _settle_log.debug(f"[SETTLE] pending_rewards DDL: {_pre}")
+
 
         with get_db_cursor() as cur:
             # PHASE 1 — non-coinbase transaction settlement
@@ -7878,6 +7968,12 @@ def rpc_oracle_snapshot_proxy():
 # ═══════════════════════════════════════════════════════════════════════════════════
 # SSE PROXY: /rpc/blocks/stream → localhost:8001 (SSE service)
 # ═══════════════════════════════════════════════════════════════════════════════════
+@app.route("/rpc/events/blocks", methods=["GET"])
+def rpc_events_blocks():
+    """Shorthand alias for the block event stream."""
+    return rpc_blocks_stream_proxy()
+
+
 @app.route("/rpc/blocks/stream", methods=["GET"])
 def rpc_blocks_stream_proxy():
     """Proxy SSE stream for block events from internal SSE server (port 8001)."""

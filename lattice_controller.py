@@ -219,7 +219,8 @@ def _generate_hyp_witness(block_data: str) -> str:
                 else hashlib.sha3_256(block_data.encode()).hexdigest()
             )
         except Exception as e:
-            logger.warning(f"HypΓ witness generation failed: {e}, falling back to SHA3")
+            logger.error(f"HypΓ witness generation failed: {e}. CRITICAL: Quantum witness is required for block validity.")
+            raise RuntimeError(f"HypΓ witness generation failed: {e}")
     return hashlib.sha3_256(block_data.encode()).hexdigest()
 
 
