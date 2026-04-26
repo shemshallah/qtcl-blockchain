@@ -337,18 +337,7 @@ def _dispatch_single(req: dict) -> Optional[dict]:
     if not isinstance(method, str):
         return _rpc_error(-32600, "Invalid Request: method not a string", rpc_id)
     if method not in _RPC_METHODS:
-        if method not in BRIDGE_RPC_METHODS:
-            return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
-
-    # ── BRIDGE RPCS ───────────────────────────────────────────────────────────
-    from bridge import BRIDGE_RPC_METHODS
-    if method in BRIDGE_RPC_METHODS:
-        handler = BRIDGE_RPC_METHODS[method]
-        try:
-            return handler(params, rpc_id)
-        except Exception as e:
-            logger.exception(f"[RPC-BRIDGE] {method} error: {e}")
-            return _rpc_error(-32603, f"Bridge error: {str(e)}", rpc_id)
+        return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
 
     handler = _RPC_METHODS[method]
 

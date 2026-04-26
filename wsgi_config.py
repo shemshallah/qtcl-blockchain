@@ -66,39 +66,22 @@ def application(environ, start_response):
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET")
 
-    # Health check always instant
+    # Health check always instant — never blocks
     if path in ("/health", "/health/"):
         return _health_app(environ, start_response)
 
-    # POST to /rpc - ACTUALLY PROCESS IT (was returning fake health for Checkly - breaking block submission!)
-    if method == "POST" and path == "/rpc":
-        # Pass through to real server to process the RPC call
-        # logger.warning(f"[WSGI] POST /rpc - forwarding to full app for processing")
-        if _full_app:
-            return _full_app(environ, start_response)
-
-    # GET /rpc - if server not ready, return 503 immediately (don't block client)
-    if method == "GET" and (path == "/rpc" or path.startswith("/rpc/")):
-        if _full_app:
-            return _full_app(environ, start_response)
-        # Server not ready - tell client to retry quickly
-        start_response(
-            "503 Service Unavailable",
-            [("Content-Type", "application/json"), ("Retry-After", "5")],
-        )
-        return [
-            b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server initializing, retry in 5s"},"id":null}'
-        ]
-
-    # Standard timeout for other endpoints
-    _load_done.wait(timeout=30)
+    # Everything else waits for the full server to be ready (max 30s)
+    if not _full_app:
+        _load_done.wait(timeout=30)
 
     if _full_app:
         return _full_app(environ, start_response)
 
-    # Not ready
-    start_response("503 Service Unavailable", [("Content-Type", "text/plain")])
-    return [b"Server starting, retry in a few seconds..."]
+    # Server failed to load within timeout
+    start_response("503 Service Unavailable", [("Content-Type", "application/json")])
+    return [
+        b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server failed to start"},"id":null}'
+    ]
 
 
 app = application
