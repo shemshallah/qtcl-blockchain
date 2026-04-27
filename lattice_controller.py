@@ -1290,59 +1290,103 @@ try:
 except ImportError:
     # Fallback stub if oracle.py is unavailable (should not happen in production)
     class QuantumInformationMetrics:  # type: ignore
+        """
+        16³ TENSOR-NATIVE quantum information metrics (fallback when oracle.py unavailable).
+        All operations work on ψ ∈ C^{16×16×16} amplitude fields — NO 2D matrix ops.
+        Memory: 32KB per state vs 2GB for explicit 4096×4096 density matrix.
+        """
+
         @staticmethod
-        def von_neumann_entropy(dm):
+        def von_neumann_entropy(psi):
+            """S = −Σ pₖ log₂(pₖ) where pₖ = |ψₖ|² (Shannon entropy of Born distribution)."""
             import numpy as np
-
-            ev = np.maximum(np.linalg.eigvalsh(dm), 1e-15)
-            return float(-np.sum(ev * np.log2(ev))) if dm is not None else 0.0
-
-        @staticmethod
-        def coherence_l1_norm(dm):
-            return (
-                float(
-                    sum(
-                        abs(dm[i, j])
-                        for i in range(dm.shape[0])
-                        for j in range(dm.shape[0])
-                        if i != j
-                    )
-                )
-                if dm is not None
-                else 0.0
-            )
-
-        @staticmethod
-        def purity(dm):
-            import numpy as np
-
-            return (
-                float(min(1.0, max(0.0, np.real(np.trace(dm @ dm)))))
-                if dm is not None
-                else 0.0
-            )
-
-        @staticmethod
-        def state_fidelity(r1, r2):
-            import numpy as np
-
+            if psi is None:
+                return 0.0
             try:
-                ev, ec = np.linalg.eigh(r1)
-                ev = np.maximum(ev, 0)
-                sr = ec @ np.diag(np.sqrt(ev)) @ ec.conj().T
-                p = sr @ r2 @ sr
-                ep = np.linalg.eigvalsh(p)
-                ep = np.maximum(ep, 0)
-                return float(min(1.0, max(0.0, float(np.sum(np.sqrt(ep))) ** 2)))
-            except:
+                p = np.abs(psi.ravel()) ** 2
+                p_sum = float(np.sum(p))
+                if p_sum > 1e-12:
+                    p = p / p_sum
+                p_nz = p[p > 1e-16]
+                return float(-np.sum(p_nz * np.log2(p_nz))) if p_nz.size > 0 else 0.0
+            except Exception:
                 return 0.0
 
         @staticmethod
-        def quantum_discord(dm):
-            return 0.0
+        def coherence_l1_norm(psi):
+            """L1 coherence = (Σ|ψᵢ|)² − Σ|ψᵢ|² (off-diagonal mass in position basis)."""
+            import numpy as np
+            if psi is None:
+                return 0.0
+            try:
+                a = np.abs(psi.ravel())
+                return float(np.sum(a) ** 2 - np.sum(a ** 2))
+            except Exception:
+                return 0.0
 
         @staticmethod
-        def mutual_information(dm):
+        def purity(psi):
+            """P = Σ pₖ² where pₖ = |ψₖ|² (1 for pure, 1/N for maximally mixed)."""
+            import numpy as np
+            if psi is None:
+                return 0.0
+            try:
+                p = np.abs(psi.ravel()) ** 2
+                p_sum = float(np.sum(p))
+                if p_sum > 1e-12:
+                    p = p / p_sum
+                return float(min(1.0, max(0.0, np.sum(p ** 2))))
+            except Exception:
+                return 0.0
+
+        @staticmethod
+        def state_fidelity(psi1, psi2):
+            """F = |⟨ψ₁|ψ₂⟩|² (Born overlap for pure-state amplitude fields)."""
+            import numpy as np
+            if psi1 is None or psi2 is None:
+                return 0.0
+            try:
+                v1 = psi1.ravel().astype(np.complex128)
+                v2 = psi2.ravel().astype(np.complex128)
+                n1 = float(np.sum(np.abs(v1) ** 2))
+                n2 = float(np.sum(np.abs(v2) ** 2))
+                if n1 < 1e-12 or n2 < 1e-12:
+                    return 0.0
+                v1 = v1 / np.sqrt(n1)
+                v2 = v2 / np.sqrt(n2)
+                inner = np.vdot(v2, v1)
+                return float(min(1.0, max(0.0, abs(inner) ** 2)))
+            except Exception:
+                return 0.0
+
+        @staticmethod
+        def quantum_discord(psi):
+            """Spatial marginal discord proxy: S_x + S_y + S_z − S_total."""
+            import numpy as np
+            if psi is None or psi.ndim != 3:
+                return 0.0
+            try:
+                p = np.abs(psi) ** 2
+                p_sum = float(np.sum(p))
+                if p_sum > 1e-12:
+                    p = p / p_sum
+
+                def _shannon(v):
+                    v = v[v > 1e-16]
+                    return float(-np.sum(v * np.log(v))) if v.size > 0 else 0.0
+
+                px = np.sum(p, axis=(1, 2))
+                py = np.sum(p, axis=(0, 2))
+                pz = np.sum(p, axis=(0, 1))
+                p_flat = p.ravel()
+                p_nz = p_flat[p_flat > 1e-16]
+                s_total = float(-np.sum(p_nz * np.log(p_nz))) if p_nz.size > 0 else 0.0
+                return max(0.0, _shannon(px) + _shannon(py) + _shannon(pz) - s_total)
+            except Exception:
+                return 0.0
+
+        @staticmethod
+        def mutual_information(psi):
             return 0.0
 
 
@@ -2413,12 +2457,12 @@ class QuantumLatticeController:
                 _raw_coh = QuantumInformationMetrics.coherence_l1_norm(
                     self.current_density_matrix
                 )
-                # W8-COHERENCE FIX: the W8 state lives in the 8-state single-excitation
-                # subspace {|1>,|2>,|4>,...,|128>}.  Its max L1 off-diagonal sum is
-                # k*(k-1)/k = k-1 = 7  (not 255, which is the max for a fully-coherent
-                # 256-dim state like |+>^8).  Dividing by 255 gives ~0.022 for a healthy
-                # W-state instead of the correct ~0.82; dividing by 7 gives C ≈ F.
-                _W8_COHERENCE_MAX = 7.0  # = n_excitation_states - 1 = 8 - 1
+                # W8-COHERENCE FIX: For 16³ amplitude tensor with 4096 elements,
+                # max L1 coherence = (Σ|ψᵢ|)² − Σ|ψᵢ|² for a uniform superposition
+                # of K modes.  For 4-mode Gaussian W-state init: K≈4, max ≈ K*(K-1) = 12.
+                # For N=4096 uniform: max = N-1 = 4095.  We normalize by the 4-mode
+                # W-state theoretical max to get meaningful [0,1] coherence.
+                _W8_COHERENCE_MAX = 12.0  # 4 modes → max L1 ≈ 12
                 self.coherence = float(np.clip(_raw_coh / _W8_COHERENCE_MAX, 0.0, 1.0))
 
                 # FIX: fidelity reference must be |W_8><W_8|, NOT the maximally-mixed
@@ -2496,21 +2540,18 @@ class QuantumLatticeController:
                         _rho_pumped = (
                             1.0 - _pump_alpha
                         ) * self.current_density_matrix + _pump_alpha * self._w8_target
-                        # Enforce valid DM after blend
-                        _rho_pumped = 0.5 * (_rho_pumped + _rho_pumped.conj().T)
-                        _ev, _ec = np.linalg.eigh(_rho_pumped)
-                        _ev = np.clip(_ev, 0.0, None)
-                        _tr = float(np.sum(_ev))
-                        if _tr > 1e-12:
-                            _ev /= _tr
-                        self.current_density_matrix = (
-                            _ec @ np.diag(_ev) @ _ec.conj().T
-                        ).astype(np.complex128)
+                        # Enforce valid amplitude field: Hermitian-like symmetry + normalize
+                        # For 3D tensor ψ(x,y,z): symmetrize axes 0↔1 and normalize ‖ψ‖²=1
+                        _rho_pumped = 0.5 * (_rho_pumped + np.conj(np.transpose(_rho_pumped, (1, 0, 2))))
+                        _norm = float(np.sum(np.abs(_rho_pumped) ** 2))
+                        if _norm > 1e-12:
+                            _rho_pumped = _rho_pumped / np.sqrt(_norm)
+                        self.current_density_matrix = _rho_pumped.astype(np.complex64)
                     # Recompute metrics after revival pulse + pump
                     _raw_coh_r = QuantumInformationMetrics.coherence_l1_norm(
                         self.current_density_matrix
                     )
-                    self.coherence = float(np.clip(_raw_coh_r / 7.0, 0.0, 1.0))
+                    self.coherence = float(np.clip(_raw_coh_r / 12.0, 0.0, 1.0))
                     self.fidelity = QuantumInformationMetrics.state_fidelity(
                         self.current_density_matrix, self._w8_target
                     )
@@ -2751,81 +2792,61 @@ class QuantumLatticeController:
 
     def _apply_sigma_revival_unitary(self, rho: np.ndarray) -> np.ndarray:
         """
-        Apply σ-revival pulse via target-aligned Hamiltonian drive on the W8 subspace.
+        Apply σ-revival pulse on 16³ amplitude tensor.
 
-        Physical mechanism (Floquet resonance, σ-language validated):
-          F(σ) = cos²(πσ/8) → F(σ=8k) = 1.0.  At period-8 resonance the drive
-          Hamiltonian H_drive = i[ρ_target, ρ] (restricted to W8 subspace) has zero
-          commutator with the target — this is the Riemannian gradient of fidelity on
-          the unitary manifold (Khaneja-Glaser optimal control).  On hardware this is
-          implemented as a shaped microwave pulse tuned to the qubit transition; here
-          it is the mathematically equivalent matrix-exponential gate.
+        For a 3D pure-state amplitude field ψ(x,y,z), the "unitary drive toward
+        target" reduces to a rotation in the Hilbert space spanned by ψ and ψ_target:
 
-        NOT state injection (rho ← α·ρ_target + (1-α)·ρ):
-          U is constructed from the current state and target — it is a valid unitary
-          transformation.  The QRNG seed adds controlled stochasticity to the pulse
-          angle (±5% jitter), matching real hardware pulse-amplitude noise.
+          ψ_new = cos(θ)·ψ + sin(θ)·ψ_⊥
 
-        Mechanism:
-          1. Extract W8 subspace (8×8 block at indices {1,2,4,8,16,32,64,128}).
-          2. Build generator G = i(ρ_t - ρ_c) on that subspace (antisymmetric → Hermitian G).
-          3. Apply U_8 = expm(-i·θ·G) with θ = REVIVAL_STRENGTH·(1 + 0.05·ξ), ξ~QRNG.
-          4. Embed U_8 into 256×256 (identity outside W8 subspace).
-          5. ρ' = U·ρ·U†, enforced valid DM.
+        where ψ_⊥ is the component of ψ_target orthogonal to ψ (Gram-Schmidt).
+        θ = REVIVAL_STRENGTH controls how far we rotate toward the target.
+        This is the geodesic on the projective Hilbert space (Fubini-Study metric),
+        equivalent to the unitary U = exp(-iθG) in the 2D formulation.
+
+        Memory: O(N³) — no matrix multiply, no eigendecomposition.
         """
-        _W8_IDX = [1 << k for k in range(8)]  # [1,2,4,8,16,32,64,128]
-        dim = rho.shape[0]
         try:
-            # ── 1. Extract 8×8 W8-subspace blocks from current rho and target ──
-            rho_sub = np.array(
-                [[rho[ii, jj] for jj in _W8_IDX] for ii in _W8_IDX], dtype=np.complex128
-            )
-            tgt_sub = np.array(
-                [[self._w8_target[ii, jj] for jj in _W8_IDX] for ii in _W8_IDX],
-                dtype=np.complex128,
-            )
+            psi = rho.ravel().astype(np.complex128)
+            tgt = self._w8_target.ravel().astype(np.complex128)
 
-            # ── 2. Build antisymmetric generator G = i(ρ_target - ρ_current) ──
-            # G is Hermitian: G† = -i(ρ_target† - ρ_current†) = i(ρ_target - ρ_current) = G ✓
-            # (ρ_target and ρ_current are both Hermitian DMs)
-            G = 1j * (tgt_sub - rho_sub)
-            G = 0.5 * (G + G.conj().T)  # numerical symmetrisation
+            # Normalize both
+            n_psi = float(np.sum(np.abs(psi) ** 2))
+            n_tgt = float(np.sum(np.abs(tgt) ** 2))
+            if n_psi < 1e-12 or n_tgt < 1e-12:
+                return rho
+            psi = psi / np.sqrt(n_psi)
+            tgt = tgt / np.sqrt(n_tgt)
 
-            # ── 3. QRNG-jittered pulse angle (±5% hardware-noise analogue) ──
+            # Compute overlap (inner product)
+            overlap = np.vdot(tgt, psi)  # ⟨target|current⟩
+            fid = float(np.abs(overlap) ** 2)
+
+            # If already very close, skip
+            if fid > 0.999:
+                return rho
+
+            # Gram-Schmidt: orthogonal component of target relative to current
+            tgt_perp = tgt - overlap * psi
+            n_perp = float(np.sum(np.abs(tgt_perp) ** 2))
+            if n_perp < 1e-14:
+                return rho  # states are parallel
+            tgt_perp = tgt_perp / np.sqrt(n_perp)
+
+            # QRNG-jittered rotation angle (±5% hardware noise analogue)
             raw = os.urandom(8)
-            xi = (int.from_bytes(raw, "big") / (2**64)) * 2.0 - 1.0  # ξ ∈ [-1, +1]
-            theta = REVIVAL_STRENGTH * (1.0 + 0.05 * xi)  # jittered angle
+            xi = (int.from_bytes(raw, "big") / (2 ** 64)) * 2.0 - 1.0
+            theta = REVIVAL_STRENGTH * (1.0 + 0.05 * xi)
 
-            # ── 4. U_8 = expm(-i·θ·G) on the 8×8 W8 subspace ──
-            # scipy.linalg.expm gives the exact matrix exponential; numpy fallback
-            # uses eigendecomposition (both are valid on 8×8).
-            try:
-                from scipy.linalg import expm as _expm
+            # Geodesic rotation: ψ_new = cos(θ)·ψ + sin(θ)·ψ_⊥
+            psi_new = np.cos(theta) * psi + np.sin(theta) * tgt_perp
 
-                U_8 = _expm(-1j * theta * G)
-            except Exception:
-                evals_g, evecs_g = np.linalg.eigh(G)
-                U_8 = (
-                    evecs_g @ np.diag(np.exp(-1j * theta * evals_g)) @ evecs_g.conj().T
-                )
+            # Renormalize (should be unit already, but defensive)
+            n_new = float(np.sum(np.abs(psi_new) ** 2))
+            if n_new > 1e-12:
+                psi_new = psi_new / np.sqrt(n_new)
 
-            # ── 5. Embed U_8 into 256×256 (identity on all other states) ──
-            U_full = np.eye(dim, dtype=np.complex128)
-            for i, ii in enumerate(_W8_IDX):
-                for j, jj in enumerate(_W8_IDX):
-                    U_full[ii, jj] = U_8[i, j]
-
-            # ── 6. Apply ρ' = U·ρ·U† ──
-            rho_new = U_full @ rho @ U_full.conj().T
-
-            # ── 7. Enforce valid DM: Hermitian + PSD clip + trace=1 ──
-            rho_new = 0.5 * (rho_new + rho_new.conj().T)
-            ev, ec = np.linalg.eigh(rho_new)
-            ev = np.clip(ev, 0.0, None)
-            tr = float(np.sum(ev))
-            if tr > 1e-12:
-                ev /= tr
-            return (ec @ np.diag(ev) @ ec.conj().T).astype(np.complex128)
+            return psi_new.reshape(rho.shape).astype(rho.dtype)
 
         except Exception as _exc:
             logger.debug(f"[LATTICE] σ-revival unitary failed: {_exc}")

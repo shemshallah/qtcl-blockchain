@@ -136,6 +136,7 @@ _RPC_TIMEOUT_MAP: dict = {
     "vault_getContacts": 10.0,
     "vault_addContact": 10.0,
     "vault_removeContact": 8.0,
+    "vault_changeAccountId": 10.0,
     # Transaction volume summary
     "qtcl_getTransactionVolume": 10.0,
 }
@@ -4160,7 +4161,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                     """
                     SELECT height, block_hash, timestamp, w_state_hash,
                            parent_hash, nonce, difficulty,
-                           coherence_snapshot, merkle_root, tx_count
+                           fidelity_snapshot, merkle_root, tx_count,
+                           coherence_snapshot
                     FROM blocks WHERE height = %s LIMIT 1
                 """,
                     (height,),
@@ -6435,12 +6437,33 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             data={"existing_hash": _ex_hash},
                         )
 
+                # ── Fetch live fidelity/coherence from lattice ──────────────
+                _live_fidelity = 0.0
+                _live_coherence = 0.0
+                try:
+                    from globals import LATTICE as _lat_ref
+                    if _lat_ref is not None:
+                        _live_fidelity = float(getattr(_lat_ref, 'fidelity', 0.0) or 0.0)
+                        _live_coherence = float(getattr(_lat_ref, 'coherence', 0.0) or 0.0)
+                        # If lattice fidelity is 0 (3D tensor eigh failure), compute
+                        # from the 16³ tensor directly using vector overlap
+                        if _live_fidelity < 0.001:
+                            _cdm = getattr(_lat_ref, 'current_density_matrix', None)
+                            _tgt = getattr(_lat_ref, '_w8_target', None)
+                            if (_cdm is not None and _tgt is not None
+                                    and hasattr(_cdm, 'shape') and _cdm.shape == _tgt.shape):
+                                _inner = np.vdot(_tgt.ravel(), _cdm.ravel())
+                                _live_fidelity = float(min(1.0, max(0.0, abs(_inner) ** 2)))
+                except Exception as _lat_err:
+                    logger.debug(f"[SUBMIT-BLOCK] Lattice metrics fetch: {_lat_err}")
+
                 cur.execute(
                     """INSERT INTO blocks
                     (height, block_hash, parent_hash, merkle_root, timestamp,
                      miner_address, nonce, difficulty,
-                     pq_curr, pq_last, oracle_w_state_hash, tx_count)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                     pq_curr, pq_last, oracle_w_state_hash, tx_count,
+                     coherence_snapshot, fidelity_snapshot)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         height,
                         block_hash,
@@ -6454,6 +6477,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         max(0, height - 1),
                         w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                         len(txs or []),
+                        round(_live_coherence, 4),
+                        round(_live_fidelity, 4),
                     ),
                 )
                 _block_is_new = True
@@ -8836,44 +8861,36 @@ def _get_w_state_hex() -> str:
 
 
 def _get_compact_lattice_tensor_hex() -> str:
-    """Build compact 4×4×4 density tensor from 256×256 DM.
+    """Build compact 4×4×4 density tensor from native 16³ amplitude field.
 
-    Returns tensor_hex (1024 hex chars) instead of massive 32³.
-    Cached for 50ms — fast for dial-up/slow connections.
+    Downsamples (16,16,16) → (4,4,4) by block-averaging 4×4×4 cells.
+    Returns tensor_hex (256 hex chars for float32) or '' on failure.
+    Cached for 50ms.
     """
     global _tensor_cache
     from globals import LATTICE
 
     now = time.time()
-    # Use existing cache for now
-    cache_key = ("compact", _tensor_cache[1])
     if now - _tensor_cache[1] < _TENSOR_CACHE_TTL and _tensor_cache[0]:
-        # Check if cached result looks like compact (< 2000 hex chars)
         if len(_tensor_cache[0]) < 2000:
             return _tensor_cache[0]
 
     try:
         lat = LATTICE
         if lat is not None and hasattr(lat, "current_density_matrix"):
-            dm = lat.current_density_matrix
-            if dm is not None and hasattr(dm, "shape") and dm.shape == (256, 256):
-                # Build 4×4×4 tensor from 256×256 DM
-                N = 4
-                dm_abs = np.abs(dm[: N * 4, : N * 4])  # Take top-left 16×16
-                # Slice into 4×4 blocks, take magnitude
-                tensor = np.zeros((N, N, N), dtype=np.float32)
-                for i in range(N):
-                    for j in range(N):
-                        block = dm_abs[i * 4 : (i + 1) * 4, j * 4 : (j + 1) * 4]
-                        tensor[i, j, :] = np.mean(block, axis=0)[:N]
-
-                # Normalize
-                tm = float(tensor.max())
-                if tm > 1e-12:
-                    tensor /= tm
-                tensor_hex = tensor.tobytes().hex()
-                _tensor_cache = (tensor_hex, now)
-                return tensor_hex
+            psi = lat.current_density_matrix
+            if psi is not None and hasattr(psi, "shape"):
+                # Native 16³ tensor — downsample to 4³
+                if psi.ndim == 3 and psi.shape[0] == 16:
+                    mag = np.abs(psi).astype(np.float32)
+                    # Block-average 4×4×4 cells → (4,4,4)
+                    tensor = mag.reshape(4, 4, 4, 4, 4, 4).mean(axis=(1, 3, 5))
+                    tm = float(tensor.max())
+                    if tm > 1e-12:
+                        tensor /= tm
+                    tensor_hex = tensor.tobytes().hex()
+                    _tensor_cache = (tensor_hex, now)
+                    return tensor_hex
     except Exception as e:
         logger.debug(f"[COMPACT-TENSOR] build failed: {e}")
 
@@ -8881,12 +8898,11 @@ def _get_compact_lattice_tensor_hex() -> str:
 
 
 def _get_lattice_tensor_hex() -> str:
-    """Pull current_density_matrix from LATTICE and build the 32³ tensor.
+    """Pull current_density_matrix (16³ native) from LATTICE.
 
-    Returns tensor_hex (262144 hex chars) or '' on failure.
-    Cached for 50ms — one computation shared across all SSE subscribers.
-    NOTE: Server-side cache only; oracle AER simulation is unaffected.
-    DEPRECATED: Use _get_compact_lattice_tensor_hex() for smaller payloads.
+    The DM is already a (16,16,16) complex64 tensor — no conversion needed.
+    Returns magnitude tensor as float32 hex, normalized to [0,1].
+    Cached for 50ms.
     """
     global _tensor_cache
     from globals import LATTICE
@@ -8898,46 +8914,37 @@ def _get_lattice_tensor_hex() -> str:
     try:
         lat = LATTICE
         if lat is not None and hasattr(lat, "current_density_matrix"):
-            dm = lat.current_density_matrix
-            if dm is not None and hasattr(dm, "shape") and dm.shape == (256, 256):
-                tensor_hex = _lattice_dm_to_32x32x32_tensor_hex(dm)
+            psi = lat.current_density_matrix
+            if psi is not None and hasattr(psi, "shape") and psi.ndim == 3:
+                # Direct 16³ magnitude tensor
+                tensor = np.abs(psi).astype(np.float32)
+                tm = float(tensor.max())
+                if tm > 1e-12:
+                    tensor /= tm
+                tensor_hex = tensor.tobytes().hex()
                 _tensor_cache = (tensor_hex, now)
                 return tensor_hex
     except Exception as e:
         logger.debug(f"[TENSOR] LATTICE access: {e}")
 
-    # Fallback: build tensor from oracle 8×8 snapshot via kron upsample
+    # Fallback: try oracle snapshot
     try:
         with _snapshot_lock:
             snap = _latest_snapshot
         if snap:
             h = snap.get("density_matrix_hex", "")
-            # Accept 8×8 complex128 (2048 hex) or 32×32 complex64 (16384 hex)
-            if h and len(h) == 2048:
-                dm8 = np.frombuffer(bytes.fromhex(h), dtype=np.complex128).reshape(8, 8)
-                dm32 = np.kron(
-                    dm8.astype(np.complex64), np.ones((4, 4), dtype=np.complex64)
-                )
-                tr = float(np.real(np.trace(dm32)))
-                if tr > 1e-12:
-                    dm32 /= tr
-                # Build tensor from upsampled 32×32
-                N = 32
-                idx = np.arange(N, dtype=np.float32)
-                dist = np.abs(idx[:, None] - idx[None, :])
-                lambdas = np.exp(np.linspace(np.log(1.0), np.log(float(N)), N))
-                mag = np.abs(dm32)
-                t = np.zeros((N, N, N), dtype=np.float32)
-                for z in range(N):
-                    W = np.exp(-dist / float(lambdas[z]))
-                    W /= W.sum()
-                    t[z] = (mag * W).astype(np.float32)
-                tm = float(t.max())
-                if tm > 1e-12:
-                    t /= tm
-                tensor_hex = t.tobytes().hex()
-                _tensor_cache = (tensor_hex, now)
-                return tensor_hex
+            if h:
+                # Try to decode as 16³ complex64 (32768 hex chars)
+                expected_len = 16 * 16 * 16 * 8  # complex64 = 8 bytes
+                if len(h) == expected_len * 2:
+                    psi = np.frombuffer(bytes.fromhex(h), dtype=np.complex64).reshape(16, 16, 16)
+                    tensor = np.abs(psi).astype(np.float32)
+                    tm = float(tensor.max())
+                    if tm > 1e-12:
+                        tensor /= tm
+                    tensor_hex = tensor.tobytes().hex()
+                    _tensor_cache = (tensor_hex, now)
+                    return tensor_hex
     except Exception:
         pass
     return ""

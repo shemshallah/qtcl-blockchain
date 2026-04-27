@@ -121,15 +121,19 @@ def calculate_vault_cost(encrypted_size_bytes: int, operation: str = "store") ->
     else:
         usd_cost = 0.0
 
-    # Convert USD to QTCL based on Sovereign Exchange rate (e.g., $0.01 = 1 QTCL)
-    # We assume a default rate here; in production, this pulls from sovereign_exchange.exchange_rate
-    rate = 0.01 
-    qtcl_cost = usd_cost / rate
+    # Convert USD to QTCL: 100 QTCL = $1.00 (i.e. $0.01 per QTCL)
+    # At this rate, vault operations cost meaningful amounts in QTCL
+    # but mining at elevated difficulty produces rewards slowly, making
+    # USD purchases the preferred path for vault users.
+    QTCL_PER_DOLLAR = 100.0  # $0.01 per QTCL
+    qtcl_cost = usd_cost * QTCL_PER_DOLLAR
     
     return {
         "usd_cost": usd_cost,
         "qtcl_cost": qtcl_cost,
         "base_units": int(qtcl_cost * 100_000),
+        "rate_qtcl_per_usd": QTCL_PER_DOLLAR,
+        "rate_usd_per_qtcl": 1.0 / QTCL_PER_DOLLAR,
         "tier": "Impulse" if usd_cost == 1.00 else "Decision" if usd_cost == 3.00 else "Sovereign"
     }
 
@@ -1659,6 +1663,53 @@ def _get_tier_limits(tier: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ACCOUNT SETTINGS — Change Account ID
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def vault_change_account_id(params: dict, rpc_id: Any) -> dict:
+    """RPC: vault_changeAccountId — Change the vault account ID (username)."""
+    try:
+        p = _normalize_params(params)
+        old_id = p.get("account_id", "")
+        passphrase = p.get("passphrase", "")
+        new_id = p.get("new_account_id", "").strip()
+        if not old_id or not passphrase or not new_id:
+            return _rpc_error(-32602, "account_id, passphrase, and new_account_id required", rpc_id)
+        if len(new_id) < 3 or len(new_id) > 64:
+            return _rpc_error(-32602, "new_account_id must be 3-64 characters", rpc_id)
+
+        _ensure_schema()
+        acct = _vault_query("SELECT passphrase_hash FROM vault_accounts WHERE id = %s", (old_id,), fetch="one")
+        if not acct:
+            return _rpc_error(-32004, "Account not found", rpc_id)
+        if not _verify_passphrase(passphrase, acct["passphrase_hash"]):
+            return _rpc_error(-32003, "Invalid passphrase", rpc_id)
+
+        # Check new ID isn't taken
+        existing = _vault_query("SELECT id FROM vault_accounts WHERE id = %s", (new_id,), fetch="one")
+        if existing:
+            return _rpc_error(-32009, "Account ID already taken", rpc_id)
+
+        # Update all references — CASCADE handles vault_secrets, vault_contacts, etc.
+        # But we need to update the PK itself, so we do it in order:
+        conn = _get_vault_conn()
+        try:
+            cur = conn.cursor()
+            # Temporarily disable FK checks, update referencing tables, then PK
+            for table in ['vault_contacts', 'vault_secrets', 'vault_anchors', 'vault_billing', 'vault_inheritance']:
+                cur.execute(f"UPDATE {table} SET account_id = %s WHERE account_id = %s", (new_id, old_id))
+            cur.execute("UPDATE vault_accounts SET id = %s, updated_at = NOW() WHERE id = %s", (new_id, old_id))
+            logger.info(f"[VAULT] Account ID changed: {old_id} → {new_id}")
+        finally:
+            _put_vault_conn(conn)
+
+        return _rpc_ok({"changed": True, "old_id": old_id, "new_id": new_id}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[VAULT] vault_changeAccountId error: {e}")
+        return _rpc_error(-32603, f"Failed: {str(e)}", rpc_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ADDRESS BOOK (vault-gated contacts)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1760,6 +1811,7 @@ VAULT_RPC_METHODS: Dict[str, Any] = {
     "vault_createAccount":      vault_create_account,
     "vault_login":              vault_login,
     "vault_upgradeTier":        vault_upgrade_tier,
+    "vault_changeAccountId":    vault_change_account_id,
     # Secrets
     "vault_storeSecret":        vault_store_secret,
     "vault_retrieveSecret":     vault_retrieve_secret,
