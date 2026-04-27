@@ -1632,7 +1632,7 @@ function renderSecrets() {
 
   let html = `<table class="secrets-table">
     <thead><tr>
-      <th>Label</th><th>Category</th><th>Size</th><th>Anchored</th><th>Created</th><th>Actions</th>
+      <th>Label</th><th>Category</th><th>Size</th><th>Content Hash</th><th>Anchored (Block)</th><th>Created</th><th>Actions</th>
     </tr></thead><tbody>`;
 
   for (const s of STATE.secrets) {
@@ -1640,8 +1640,16 @@ function renderSecrets() {
       ? (s.size_bytes / 1024).toFixed(1) + ' KB'
       : s.size_bytes + ' B';
 
-    const anchor = s.anchor_hash
-      ? `<span class="anchor-icon" title="${s.anchor_hash.slice(0,16)}...">⚓${s.obfuscated ? '🔮' : ''}</span>`
+    // Full content hash display (SHA3-256 of ciphertext)
+    const hashDisplay = s.content_hash
+      ? `<code style="font-size:10px;color:var(--muted);word-break:break-all" title="${s.content_hash}">
+          ${s.content_hash}
+        </code>`
+      : `<span class="no-anchor">—</span>`;
+
+    // Anchor status: block height if anchored
+    const anchorDisplay = s.anchor_block
+      ? `<span style="color:var(--emerald);font-weight:600" title="TX: ${s.anchor_tx || '?'}">✓ #${s.anchor_block}</span>`
       : `<span class="no-anchor">—</span>`;
 
     const created = s.created_at ? new Date(s.created_at).toLocaleDateString() : '—';
@@ -1650,7 +1658,8 @@ function renderSecrets() {
       <td style="color:var(--text-bright);font-weight:500">${escHtml(s.label)}</td>
       <td><span class="category-tag cat-${s.category}">${s.category}</span></td>
       <td>${size}</td>
-      <td>${anchor}</td>
+      <td>${hashDisplay}</td>
+      <td>${anchorDisplay}</td>
       <td style="color:var(--muted)">${created}</td>
       <td>
         <button class="btn btn-sm btn-secondary" onclick="openDecrypt('${s.id}')">DECRYPT</button>

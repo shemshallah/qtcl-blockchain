@@ -639,14 +639,35 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
         # ZERO-KNOWLEDGE: Store client ciphertext AS-IS. Server never decrypts.
         secret_id = f"vs_{secrets.token_hex(16)}"
 
-        # Content hash for potential anchoring (hash of the ciphertext, not plaintext)
+        # Content hash for anchoring (hash of the ciphertext, not plaintext)
         content_hash = hashlib.sha3_256(ciphertext.encode()).hexdigest()
+
+        anchor_hash = None
+        anchor_block = None
+        anchor_tx = None
+        anchor_result = None
+
+        # AUTO-ANCHOR for PAID tier (immediately link to blockchain)
+        if tier != 'trial':
+            try:
+                # Auto-anchor at store time (non-obfuscated for immutability)
+                anchor_result = _submit_chain_anchor(
+                    content_hash, f"Vault: {label}", account.get('qtcl_address', '')
+                )
+                anchor_hash = content_hash
+                anchor_block = anchor_result.get('block_height')
+                anchor_tx = anchor_result.get('tx_hash')
+                logger.info(f"[VAULT] Auto-anchored secret {secret_id} at block {anchor_block}")
+            except Exception as anchor_err:
+                logger.warning(f"[VAULT] Auto-anchor failed (non-critical): {anchor_err}")
+                # Don't fail the store operation — just log and continue
 
         _vault_query(
             """INSERT INTO vault_secrets
                (id, account_id, label, category, ciphertext, encryption_meta,
-                size_bytes, content_hash, created_at, updated_at, anchor_hash)
-               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, NOW(), NOW(), %s)""",
+                size_bytes, content_hash, anchor_hash, anchor_block, anchor_tx, 
+                created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, NOW(), NOW())""",
             (
                 secret_id, account_id, label, category,
                 ciphertext,  # Stored as-is — opaque client-encrypted blob
@@ -657,7 +678,9 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
                 }),
                 size_bytes,
                 content_hash,
-                content_hash,  # anchor_hash param (8th)
+                anchor_hash,
+                anchor_block,
+                anchor_tx,
             ),
             fetch="none"
         )
@@ -678,6 +701,9 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
             "category": category,
             "size_bytes": size_bytes,
             "content_hash": content_hash,
+            "anchor_hash": anchor_hash,
+            "anchor_block": anchor_block,
+            "anchor_tx": anchor_tx,
             "zero_knowledge": True,
             "stored_at": datetime.now(timezone.utc).isoformat(),
         }, rpc_id)
