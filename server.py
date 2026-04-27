@@ -7387,7 +7387,8 @@ def _rpc_walletAuth(params, rpc_id):
         return _rpc_error(-32603, f"Wallet auth failed: {str(e)}", rpc_id)
 
 
-
+# ═══ JSON-RPC DISPATCH TABLE ═══════════════════════════════════════════════
+_RPC_METHODS = {
     "qtcl_submitBlock": _rpc_submitBlock,
     "qtcl_getCoinbaseTemplate": _rpc_getCoinbaseTemplate,
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
