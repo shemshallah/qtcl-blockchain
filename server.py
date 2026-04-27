@@ -1131,10 +1131,13 @@ def _deferred_lattice_init() -> None:
     TIMEOUT: 30s max — if lattice hangs, mark as unavailable and continue
     """
     global LATTICE
-    _lat_init_deadline = time.time() + 30.0  # 30 second timeout
+    # 120s budget — lattice_controller import triggers DB pool connect (up to 10s)
+    # + HypGammaEngine init + oracle module import.  30s was too tight.
+    # The deadline is reset after the import so only the constructor + start() are timed.
+    _lat_init_deadline = time.time() + 120.0
     try:
         logger.debug(
-            "[LATTICE-INIT] 🔄 Starting lattice initialization (timeout=30s)..."
+            "[LATTICE-INIT] 🔄 Starting lattice initialization (timeout=120s)..."
         )
 
         # Import with timeout check
@@ -1147,6 +1150,9 @@ def _deferred_lattice_init() -> None:
                 f"[LATTICE-INIT] ⚠️  QuantumLatticeController import failed: {_ie} — using degraded mode"
             )
             raise
+
+        # Reset deadline after slow import — constructor + start() get a fresh 90s window
+        _lat_init_deadline = time.time() + 90.0
 
         # Check deadline before initialization
         if time.time() > _lat_init_deadline:

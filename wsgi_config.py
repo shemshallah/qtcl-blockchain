@@ -44,6 +44,9 @@ def _load_server():
     global _full_app
     try:
         print("[WSGI] Loading full server module...", flush=True)
+        # Signal to lattice_controller that it runs under server management —
+        # QuantumDatabaseConnector will skip its standalone pool connect (saves ~10s).
+        os.environ.setdefault("QTCL_SERVER_MANAGED", "1")
         from server import app as full_app
 
         _full_app = full_app

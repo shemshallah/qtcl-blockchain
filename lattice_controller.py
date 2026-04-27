@@ -963,7 +963,24 @@ class QuantumDatabaseConnector:
         Prefer injected cursor from server.py's get_db_cursor() over direct pool.
         Direct pool is kept as a fallback for standalone lattice operation only.
         In production (gunicorn workers), always inject get_db_cursor externally.
+
+        PERF: Skip standalone pool when running under gunicorn/wsgi — server.py
+        calls inject_db_pool() immediately after construction, so opening a second
+        TCP pool here only wastes the connect_timeout budget (up to 10s) at startup.
         """
+        import sys as _sys
+        _running_under_server = (
+            os.environ.get("QTCL_SERVER_MANAGED", "") == "1"
+            or any("gunicorn" in arg for arg in _sys.argv)
+            or any("wsgi" in arg.lower() for arg in _sys.argv)
+        )
+        if _running_under_server:
+            logger.info(
+                "[DB] QuantumDatabaseConnector: server-managed mode — "
+                "skipping standalone pool (inject_db_pool will be called by server.py)"
+            )
+            self.pool = None
+            return
         try:
             self.pool = ThreadedConnectionPool(
                 minconn=1,
