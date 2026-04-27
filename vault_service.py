@@ -1645,8 +1645,11 @@ VAULT_RPC_METHODS: Dict[str, Any] = {
     "vault_anchorHash":         vault_anchor_hash,
     "vault_verifyAnchor":       vault_verify_anchor,
     # Billing
+    "vault_getTreasuryAddress": lambda p, r: _rpc_ok({"address": os.environ.get("TREASURY_ADDRESS", "qt_treasury_default")}, r),
     "vault_depositCredit":      vault_deposit_credit,
     "vault_getBalance":         vault_get_balance,
+    # Transactions (stub)
+    "vault_getTransactions":    lambda p, r: _rpc_ok({"transactions": []}, r),
     # Inheritance
     "vault_setupInheritance":   vault_setup_inheritance,
     "vault_checkIn":            vault_check_in,

@@ -843,6 +843,9 @@ body::before {
     </div>
 
     <div class="nav-group-label">ACCOUNT</div>
+    <div class="nav-item" data-page="transactions" onclick="showPage('transactions')">
+      <span class="nav-icon">📊</span> Transactions
+    </div>
     <div class="nav-item" data-page="billing" onclick="showPage('billing')">
       <span class="nav-icon">◇</span> Billing
     </div>
@@ -1105,8 +1108,16 @@ body::before {
       <div class="card">
         <div class="card-title" style="margin-bottom:14px">DEPOSIT QTCL</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
-          Send mined QTCL to the vault deposit address, then enter the TX hash below.
+          Send mined QTCL to the vault deposit address below, then enter the TX hash.
           Only mined QTCL is accepted — no premined or bridged tokens.
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Vault Deposit Address</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input class="form-input" id="treasuryAddress" readonly style="background:var(--abyss);cursor:default">
+            <button class="btn btn-sm btn-secondary" onclick="copyToClipboard('treasuryAddress')">COPY</button>
+          </div>
         </div>
 
         <div class="form-group">
@@ -1126,6 +1137,21 @@ body::before {
         </div>
         <div id="billingHistory" style="font-size:11px">
           <div style="color:var(--muted);text-align:center;padding:20px">No transactions yet</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ TRANSACTIONS ═══ -->
+    <div class="page" id="page-transactions">
+      <div class="page-title">Transactions</div>
+      <div class="page-desc">View your vault transaction history</div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Recent Transactions</div>
+        </div>
+        <div id="transactionsContainer" style="font-size:11px">
+          <div style="color:var(--muted);text-align:center;padding:20px">Loading...</div>
         </div>
       </div>
     </div>
@@ -1257,6 +1283,7 @@ function showPage(page) {
   if (page === 'secrets') loadSecrets();
   if (page === 'billing') loadBilling();
   if (page === 'anchor') populateAnchorSelect();
+  if (page === 'transactions') loadTransactions();
 
   // Close mobile menu
   document.getElementById('sidebar')?.classList.remove('mobile-open');
@@ -1678,6 +1705,17 @@ function escHtml(s) {
   return div.innerHTML;
 }
 
+function copyToClipboard(elementId) {
+  const elem = document.getElementById(elementId);
+  if (!elem) return;
+  const text = elem.value || elem.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    toast('Copied to clipboard', 'success', 2000);
+  }).catch(err => {
+    toast('Copy failed', 'error');
+  });
+}
+
 function openDecrypt(secretId) {
   STATE.currentDecryptId = secretId;
   STATE.decryptedBytes = null;
@@ -1775,9 +1813,9 @@ function populateAnchorSelect() {
   const select = document.getElementById('anchorSecretSelect');
   select.innerHTML = '<option value="">— Select a stored secret —</option>';
   for (const s of STATE.secrets) {
-    if (!s.anchor_hash) {
-      select.innerHTML += `<option value="${s.id}">${escHtml(s.label)} (${s.category})</option>`;
-    }
+    // Show ALL secrets, but indicate if already anchored
+    const status = s.anchor_block ? ` ✓ (anchored at #${s.anchor_block})` : '';
+    select.innerHTML += `<option value="${s.id}">${escHtml(s.label)} (${s.category})${status}</option>`;
   }
 }
 
@@ -1881,6 +1919,10 @@ async function doVerify() {
 
 async function loadBilling() {
   try {
+    // Load treasury address from server (env var)
+    const treasAddr = await rpc('vault_getTreasuryAddress', {});
+    document.getElementById('treasuryAddress').value = treasAddr.address || 'Error loading address';
+    
     const result = await rpc('vault_getBalance', {
       account_id: STATE.accountId,
       passphrase: STATE.passphrase,
@@ -1993,6 +2035,39 @@ async function doUpgrade() {
     toast('Upgraded to Paid tier!', 'success');
   } catch (e) {
     toast(e.message, 'error');
+  }
+}
+
+async function loadTransactions() {
+  try {
+    const result = await rpc('vault_getTransactions', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+    });
+
+    const container = document.getElementById('transactionsContainer');
+    const txns = result.transactions || [];
+
+    if (!txns.length) {
+      container.innerHTML = '<div style="color:var(--muted);text-align:center;padding:20px">No transactions yet</div>';
+      return;
+    }
+
+    let html = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:1px solid var(--abyss)">';
+    html += '<th style="text-align:left;padding:8px">Date</th><th>Type</th><th>Amount</th><th style="text-align:right">Block</th></tr></thead><tbody>';
+
+    for (const tx of txns) {
+      const date = new Date(tx.created_at).toLocaleDateString();
+      const type = tx.operation || 'unknown';
+      const amount = (tx.amount / 100000).toFixed(5);
+      const block = tx.block_height || '—';
+      html += `<tr style="border-bottom:1px solid var(--abyss)"><td style="padding:8px">${date}</td><td>${type}</td><td>${amount} QTCL</td><td style="text-align:right">${block}</td></tr>`;
+    }
+
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  } catch (e) {
+    document.getElementById('transactionsContainer').innerHTML = `<div style="color:var(--red)">Error loading transactions: ${e.message}</div>`;
   }
 }
 
