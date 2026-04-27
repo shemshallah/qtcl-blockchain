@@ -65,6 +65,25 @@ from dataclasses import dataclass, field, asdict
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# VAULT-LOCAL RPC HELPERS (avoid circular import for module-level lambdas)
+# ═══════════════════════════════════════════════════════════════════════════════
+_JSONRPC_VERSION = "2.0"
+
+
+def _rpc_ok(result: Any, rpc_id: Any) -> dict:
+    """Standard JSON-RPC 2.0 success response (vault-local copy)."""
+    return {"jsonrpc": _JSONRPC_VERSION, "result": result, "id": rpc_id}
+
+
+def _rpc_error(code: int, message: str, rpc_id: Any, data: Optional[dict] = None) -> dict:
+    """Standard JSON-RPC 2.0 error response (vault-local copy)."""
+    resp = {"jsonrpc": _JSONRPC_VERSION, "error": {"code": code, "message": message}, "id": rpc_id}
+    if data:
+        resp["error"]["data"] = data
+    return resp
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # VAULT CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -295,6 +314,18 @@ CREATE TABLE IF NOT EXISTS vault_inheritance (
 
 CREATE INDEX IF NOT EXISTS idx_vault_inheritance_account ON vault_inheritance(account_id);
 CREATE INDEX IF NOT EXISTS idx_vault_inheritance_check ON vault_inheritance(last_check_in);
+
+-- Address book contacts (synced via vault auth)
+CREATE TABLE IF NOT EXISTS vault_contacts (
+    id              TEXT PRIMARY KEY,
+    account_id      TEXT NOT NULL REFERENCES vault_accounts(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    address         TEXT NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(account_id, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_contacts_account ON vault_contacts(account_id);
 """
 
 
@@ -375,7 +406,7 @@ def vault_create_account(params: dict, rpc_id: Any) -> dict:
         qtcl_address: str (optional, for billing)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -468,7 +499,7 @@ def vault_login(params: dict, rpc_id: Any) -> dict:
         passphrase: str (required)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -528,7 +559,7 @@ def vault_upgrade_tier(params: dict, rpc_id: Any) -> dict:
         qtcl_address: str (required for paid tier — billing address)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -594,7 +625,7 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
         size_bytes: int (original plaintext size)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -726,7 +757,7 @@ def vault_retrieve_secret(params: dict, rpc_id: Any) -> dict:
         secret_id: str
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -808,7 +839,7 @@ def vault_list_secrets(params: dict, rpc_id: Any) -> dict:
         category: str (optional filter)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -873,7 +904,7 @@ def vault_delete_secret(params: dict, rpc_id: Any) -> dict:
         secret_id: str
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -945,7 +976,7 @@ def vault_anchor_hash(params: dict, rpc_id: Any) -> dict:
         obfuscate: bool (whether to blind the on-chain hash — costs 5 QTCL instead of 1)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -1105,7 +1136,7 @@ def vault_verify_anchor(params: dict, rpc_id: Any) -> dict:
         hash: str (the hash to look up — either original or obfuscated)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -1168,7 +1199,7 @@ def vault_deposit_credit(params: dict, rpc_id: Any) -> dict:
         amount: int (in base units — 100,000 = 1 QTCL)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -1241,7 +1272,7 @@ def vault_get_balance(params: dict, rpc_id: Any) -> dict:
         passphrase: str
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -1308,7 +1339,7 @@ def vault_setup_inheritance(params: dict, rpc_id: Any) -> dict:
         shamir_config: dict (optional Shamir secret sharing config)
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -1366,7 +1397,7 @@ def vault_check_in(params: dict, rpc_id: Any) -> dict:
     Reset the dead man's switch timer.
     """
     params = _normalize_params(params)
-    from server import _rpc_ok, _rpc_error
+    # _rpc_ok, _rpc_error defined at module level — no import needed
     try:
         _ensure_schema()
 
@@ -1628,6 +1659,99 @@ def _get_tier_limits(tier: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ADDRESS BOOK (vault-gated contacts)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def vault_get_contacts(params: dict, rpc_id: Any) -> dict:
+    """RPC: vault_getContacts — list address book contacts for a vault account."""
+    try:
+        p = _normalize_params(params)
+        account_id = p.get("account_id", "")
+        passphrase = p.get("passphrase", "")
+        if not account_id or not passphrase:
+            return _rpc_error(-32602, "account_id and passphrase required", rpc_id)
+
+        _ensure_schema()
+        acct = _vault_query("SELECT passphrase_hash FROM vault_accounts WHERE id = %s", (account_id,), fetch="one")
+        if not acct:
+            return _rpc_error(-32004, "Account not found", rpc_id)
+        if not _verify_passphrase(passphrase, acct["passphrase_hash"]):
+            return _rpc_error(-32003, "Invalid passphrase", rpc_id)
+
+        rows = _vault_query(
+            "SELECT id, name, address, created_at FROM vault_contacts WHERE account_id = %s ORDER BY name ASC",
+            (account_id,)
+        )
+        contacts = [{"id": r["id"], "name": r["name"], "address": r["address"],
+                      "created_at": str(r.get("created_at", ""))} for r in (rows or [])]
+        return _rpc_ok({"contacts": contacts, "count": len(contacts)}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[VAULT] vault_getContacts error: {e}")
+        return _rpc_error(-32603, f"Failed: {str(e)}", rpc_id)
+
+
+def vault_add_contact(params: dict, rpc_id: Any) -> dict:
+    """RPC: vault_addContact — add a contact to the vault address book."""
+    try:
+        p = _normalize_params(params)
+        account_id = p.get("account_id", "")
+        passphrase = p.get("passphrase", "")
+        name = p.get("name", "").strip()
+        address = p.get("address", "").strip()
+        if not account_id or not passphrase:
+            return _rpc_error(-32602, "account_id and passphrase required", rpc_id)
+        if not name or not address:
+            return _rpc_error(-32602, "name and address required", rpc_id)
+
+        _ensure_schema()
+        acct = _vault_query("SELECT passphrase_hash FROM vault_accounts WHERE id = %s", (account_id,), fetch="one")
+        if not acct:
+            return _rpc_error(-32004, "Account not found", rpc_id)
+        if not _verify_passphrase(passphrase, acct["passphrase_hash"]):
+            return _rpc_error(-32003, "Invalid passphrase", rpc_id)
+
+        contact_id = secrets.token_hex(16)
+        _vault_query(
+            "INSERT INTO vault_contacts (id, account_id, name, address) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (account_id, address) DO UPDATE SET name = EXCLUDED.name",
+            (contact_id, account_id, name[:100], address[:128]),
+            fetch="none"
+        )
+        return _rpc_ok({"id": contact_id, "name": name, "address": address, "saved": True}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[VAULT] vault_addContact error: {e}")
+        return _rpc_error(-32603, f"Failed: {str(e)}", rpc_id)
+
+
+def vault_remove_contact(params: dict, rpc_id: Any) -> dict:
+    """RPC: vault_removeContact — remove a contact from vault address book."""
+    try:
+        p = _normalize_params(params)
+        account_id = p.get("account_id", "")
+        passphrase = p.get("passphrase", "")
+        contact_id = p.get("contact_id", "")
+        if not account_id or not passphrase or not contact_id:
+            return _rpc_error(-32602, "account_id, passphrase, and contact_id required", rpc_id)
+
+        _ensure_schema()
+        acct = _vault_query("SELECT passphrase_hash FROM vault_accounts WHERE id = %s", (account_id,), fetch="one")
+        if not acct:
+            return _rpc_error(-32004, "Account not found", rpc_id)
+        if not _verify_passphrase(passphrase, acct["passphrase_hash"]):
+            return _rpc_error(-32003, "Invalid passphrase", rpc_id)
+
+        _vault_query(
+            "DELETE FROM vault_contacts WHERE id = %s AND account_id = %s",
+            (contact_id, account_id),
+            fetch="none"
+        )
+        return _rpc_ok({"deleted": True, "contact_id": contact_id}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[VAULT] vault_removeContact error: {e}")
+        return _rpc_error(-32603, f"Failed: {str(e)}", rpc_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # VAULT RPC METHOD REGISTRY
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1653,6 +1777,10 @@ VAULT_RPC_METHODS: Dict[str, Any] = {
     # Inheritance
     "vault_setupInheritance":   vault_setup_inheritance,
     "vault_checkIn":            vault_check_in,
+    # Address Book (vault-gated contacts)
+    "vault_getContacts":        vault_get_contacts,
+    "vault_addContact":         vault_add_contact,
+    "vault_removeContact":      vault_remove_contact,
 }
 
 logger.info(f"[VAULT] ✅ {len(VAULT_RPC_METHODS)} vault RPC methods registered")

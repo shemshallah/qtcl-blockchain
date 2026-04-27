@@ -911,6 +911,7 @@ body::before {
         <div class="balance-amount"><span id="balanceDisplay">0.00</span><span class="balance-symbol">QTCL</span></div>
         <div class="balance-usd" id="balanceUsd">Connect wallet to view balance</div>
         <div class="balance-addr" id="walletAddr" style="display:none;"></div>
+        <button class="btn btn-sm btn-danger mt-12" id="disconnectBtn" style="display:none;" onclick="disconnectWallet()">🔒 Disconnect Wallet</button>
       </div>
 
       <!-- Quick Actions -->
@@ -1035,7 +1036,7 @@ body::before {
               <div class="form-group">
                 <label class="form-label">Fee (QTCL)</label>
                 <input type="number" class="form-input" id="sendFee" value="0.01" step="0.01" min="0.01">
-                <div class="form-hint">Network fee for priority processing</div>
+                <div class="form-hint">Fee split: 50% miner reward · 50% QTCL Treasury</div>
               </div>
             </div>
             <div class="form-group">
@@ -1205,33 +1206,55 @@ body::before {
       </div>
     </div>
 
-    <!-- ═══════ PAGE: CONTACTS ═══════ -->
+    <!-- ═══════ PAGE: CONTACTS (Vault-Gated Address Book) ═══════ -->
     <div class="page" id="page-contacts">
       <div class="page-title">Address Book</div>
-      <div class="page-desc">Save and manage frequently used QTCL addresses</div>
+      <div class="page-desc">Vault-secured address book — contacts are encrypted and stored in your QTCL Vault account</div>
 
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Add Contact</div>
-        </div>
+      <!-- Vault Login Gate -->
+      <div class="card" id="contactsVaultGate">
+        <div class="card-header"><div class="card-title">🔐 Vault Authentication Required</div></div>
         <div class="card-body">
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">Name / Label</label>
-              <input type="text" class="form-input" id="contactName" placeholder="Alice, Treasury, etc.">
-            </div>
-            <div class="form-group">
-              <label class="form-label">QTCL Address</label>
-              <input type="text" class="form-input" id="contactAddr" placeholder="qtcl1…">
-            </div>
+          <div class="form-hint mb-12" style="color:var(--amber);">Address Book is secured by your Vault account. Log in to access your contacts.</div>
+          <div class="form-group">
+            <label class="form-label">Vault Account ID</label>
+            <input type="text" class="form-input" id="contactsVaultId" placeholder="Your vault account ID">
           </div>
-          <button class="btn btn-primary btn-sm mt-12" onclick="addContact()">+ Add Contact</button>
+          <div class="form-group">
+            <label class="form-label">Vault Passphrase</label>
+            <input type="password" class="form-input" id="contactsVaultPass" placeholder="Your vault passphrase">
+          </div>
+          <button class="btn btn-primary btn-full" onclick="loginContactsVault()">🔓 Unlock Address Book</button>
+          <div class="form-hint mt-12">Don't have a vault account? <a href="/vault" style="color:var(--cyan);">Create one here →</a></div>
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-header"><div class="card-title">Saved Contacts</div></div>
-        <div id="contactsList"></div>
+      <!-- Contacts (hidden until vault auth) -->
+      <div id="contactsAuthed" class="hidden">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Add Contact</div>
+            <button class="btn btn-sm btn-danger" onclick="logoutContactsVault()">🔒 Lock</button>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Name / Label</label>
+                <input type="text" class="form-input" id="contactName" placeholder="Alice, Treasury, etc.">
+              </div>
+              <div class="form-group">
+                <label class="form-label">QTCL Address</label>
+                <input type="text" class="form-input" id="contactAddr" placeholder="qtcl1…">
+              </div>
+            </div>
+            <button class="btn btn-primary btn-sm mt-12" onclick="addContact()">+ Add Contact</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><div class="card-title">Saved Contacts</div></div>
+          <div id="contactsList"></div>
+        </div>
       </div>
     </div>
 
@@ -1357,8 +1380,12 @@ const S = {
   txTotal: 0,
   txPages: 1,
   blockRangeEnd: -1,
-  contacts: JSON.parse(localStorage.getItem('qtcl_contacts') || '[]'),
+  contacts: [],
   _contactPickTarget: null,
+  // Vault auth for address book
+  vaultAccountId: localStorage.getItem('qtcl_vault_account_id') || '',
+  vaultPassphrase: '', // never persisted — session only
+  vaultLoggedIn: false,
 };
 
 // ═══ RPC HELPER ═══
@@ -1399,7 +1426,46 @@ function showPage(page) {
   if (page === 'transactions') loadTransactions();
   if (page === 'blocks') loadBlocks();
   if (page === 'mempool') loadMempool();
-  if (page === 'contacts') renderContacts();
+  if (page === 'contacts') renderContactsPage();
+}
+
+// Clear wallet state on tab/page visibility change (navigating away)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearWalletSession();
+  }
+});
+
+// Listen for parent iframe navigation (index.html tab switches)
+window.addEventListener('message', (e) => {
+  if (e.data === 'qtcl_tab_changed') clearWalletSession();
+});
+
+function clearWalletSession() {
+  S.walletAddr = '';
+  S.walletMode = 'readonly';
+  S.walletPublicKey = '';
+  S.balance = 0;
+  S.vaultPassphrase = '';
+  S.vaultLoggedIn = false;
+  _walletFileData = null;
+  _walletEncryptedPK = null;
+  localStorage.removeItem('qtcl_tx_wallet');
+  localStorage.removeItem('qtcl_tx_mode');
+  // Reset UI
+  document.getElementById('balanceDisplay').textContent = '0.00';
+  document.getElementById('balanceUsd').textContent = 'Connect wallet to view balance';
+  const wa = document.getElementById('walletAddr');
+  if (wa) wa.style.display = 'none';
+  const wcc = document.getElementById('walletConnectCard');
+  if (wcc) wcc.style.display = '';
+  document.getElementById('sendFrom').value = '';
+  document.getElementById('sendBalance').textContent = '0.00';
+}
+
+function disconnectWallet() {
+  clearWalletSession();
+  toast('Wallet disconnected', 'info');
 }
 
 function toggleMobileMenu() { document.getElementById('sidebar')?.classList.toggle('mobile-open'); }
@@ -1545,6 +1611,7 @@ async function refreshBalance() {
     wa.textContent = S.walletAddr;
     wa.style.display = 'inline-block';
     document.getElementById('walletConnectCard').style.display = S.walletAddr ? 'none' : '';
+    document.getElementById('disconnectBtn').style.display = S.walletAddr ? '' : 'none';
     document.getElementById('sendFrom').value = S.walletAddr;
     document.getElementById('sendBalance').textContent = fmtQTCL(S.balance);
 
@@ -1646,16 +1713,25 @@ async function executeSend() {
   btn.disabled = true;
   btn.textContent = 'Submitting…';
   try {
+    const amount = parseFloat(document.getElementById('sendAmount').value);
+    const fee = parseFloat(document.getElementById('sendFee').value) || 0.01;
+    const to = document.getElementById('sendTo').value.trim();
+    const memo = document.getElementById('sendMemo').value.trim();
+
+    // Fee is included in the transaction object — the block sealer splits
+    // fees 50/50 between miner and TREASURY_ADDRESS during settlement.
+    // Amount sent to recipient is exactly `amount`; fee is deducted from
+    // sender's balance on top of amount (total debit = amount + fee).
     const tx = {
       from_address: S.walletAddr,
-      to_address: document.getElementById('sendTo').value.trim(),
-      amount: parseFloat(document.getElementById('sendAmount').value),
-      fee: parseFloat(document.getElementById('sendFee').value) || 0.01,
+      to_address: to,
+      amount: amount,
+      fee: fee,
       tx_type: 'transfer',
       nonce: Date.now(),
       timestamp_ns: Date.now() * 1000000,
       signature: {},  // Would be signed by wallet in production
-      metadata: { memo: document.getElementById('sendMemo').value.trim() },
+      metadata: { memo: memo },
     };
 
     const r = await rpc('qtcl_submitTransaction', [tx]);
@@ -1706,8 +1782,14 @@ async function loadTransactions() {
     document.getElementById('txPages').textContent = S.txPages;
     document.getElementById('txBadge').textContent = S.txTotal;
 
-    const vol = txs.reduce((s, t) => s + (Number(t.amount) || 0), 0);
-    document.getElementById('txVolume').textContent = fmtQTCL(vol / 100);
+    // Fetch true total chain volume (not just current page)
+    rpc('qtcl_getTransactionVolume').then(vol => {
+      document.getElementById('txVolume').textContent = fmtQTCL(vol.total_volume_qtcl || 0);
+    }).catch(() => {
+      // Fallback: sum current page
+      const vol = txs.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+      document.getElementById('txVolume').textContent = fmtQTCL(vol / 100);
+    });
 
     if (!txs.length) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">⛓</div>No transactions found</div>';
@@ -1924,8 +2006,11 @@ async function loadMempool() {
 
   try {
     const stats = await rpc('qtcl_getMempoolStats');
-    document.getElementById('mpDepth').textContent = stats.depth || stats.pending || 0;
-    document.getElementById('mpStatus').textContent = stats.note || 'Active';
+    document.getElementById('mpDepth').textContent = stats.depth || stats.pending || stats.size || 0;
+    const statusText = (stats.note === 'mempool initializing')
+      ? 'Syncing…'
+      : (stats.note || ((stats.size > 0 || stats.total_accepted > 0) ? 'Active' : 'Ready — Empty'));
+    document.getElementById('mpStatus').textContent = statusText;
 
     const txs = await rpc('qtcl_getMempool', [50]);
 
@@ -1955,7 +2040,62 @@ async function loadMempool() {
   }
 }
 
-// ═══ ADDRESS BOOK ═══
+// ═══ ADDRESS BOOK (Vault-Gated) ═══
+function renderContactsPage() {
+  if (S.vaultLoggedIn) {
+    document.getElementById('contactsVaultGate').classList.add('hidden');
+    document.getElementById('contactsAuthed').classList.remove('hidden');
+    loadVaultContacts();
+  } else {
+    document.getElementById('contactsVaultGate').classList.remove('hidden');
+    document.getElementById('contactsAuthed').classList.add('hidden');
+    // Pre-fill vault ID if saved
+    if (S.vaultAccountId) document.getElementById('contactsVaultId').value = S.vaultAccountId;
+  }
+}
+
+async function loginContactsVault() {
+  const id = document.getElementById('contactsVaultId').value.trim();
+  const pass = document.getElementById('contactsVaultPass').value;
+  if (!id || !pass) { toast('Account ID and passphrase required', 'error'); return; }
+  try {
+    const r = await rpc('vault_login', [{ account_id: id, passphrase: pass }]);
+    if (r.success || r.account_id) {
+      S.vaultAccountId = id;
+      S.vaultPassphrase = pass;
+      S.vaultLoggedIn = true;
+      localStorage.setItem('qtcl_vault_account_id', id);
+      toast('Vault unlocked', 'success');
+      renderContactsPage();
+    } else {
+      toast('Vault login failed', 'error');
+    }
+  } catch (e) {
+    toast(`Vault auth error: ${e.message}`, 'error');
+  }
+}
+
+function logoutContactsVault() {
+  S.vaultPassphrase = '';
+  S.vaultLoggedIn = false;
+  S.contacts = [];
+  document.getElementById('contactsVaultPass').value = '';
+  renderContactsPage();
+  toast('Address book locked', 'info');
+}
+
+async function loadVaultContacts() {
+  const el = document.getElementById('contactsList');
+  el.innerHTML = '<div class="loading"><span class="spinner"></span> Loading…</div>';
+  try {
+    const r = await rpc('vault_getContacts', [{ account_id: S.vaultAccountId, passphrase: S.vaultPassphrase }]);
+    S.contacts = r.contacts || [];
+    renderContacts();
+  } catch (e) {
+    el.innerHTML = `<div style="padding:16px;color:var(--red);font-size:11px;">Error loading contacts: ${escHtml(e.message)}</div>`;
+  }
+}
+
 function renderContacts() {
   const el = document.getElementById('contactsList');
   if (!S.contacts.length) {
@@ -1963,8 +2103,7 @@ function renderContacts() {
     return;
   }
   let html = '';
-  for (let i = 0; i < S.contacts.length; i++) {
-    const c = S.contacts[i];
+  for (const c of S.contacts) {
     html += `<div class="contact-row">
       <div class="contact-avatar">${(c.name || '?')[0].toUpperCase()}</div>
       <div class="contact-info">
@@ -1972,28 +2111,37 @@ function renderContacts() {
         <div class="contact-addr">${escHtml(c.address)}</div>
       </div>
       <button class="btn btn-sm" onclick="copyText('${escHtml(c.address)}')">📋</button>
-      <button class="btn btn-sm btn-danger" onclick="removeContact(${i})">✕</button>
+      <button class="btn btn-sm btn-danger" onclick="removeContact('${escHtml(c.id)}')">✕</button>
     </div>`;
   }
   el.innerHTML = html;
 }
 
-function addContact() {
+async function addContact() {
+  if (!S.vaultLoggedIn) { toast('Unlock vault first', 'error'); return; }
   const name = document.getElementById('contactName').value.trim();
   const addr = document.getElementById('contactAddr').value.trim();
   if (!name || !addr) { toast('Name and address required', 'error'); return; }
-  S.contacts.push({ name, address: addr });
-  localStorage.setItem('qtcl_contacts', JSON.stringify(S.contacts));
-  document.getElementById('contactName').value = '';
-  document.getElementById('contactAddr').value = '';
-  renderContacts();
-  toast('Contact saved', 'success');
+  try {
+    await rpc('vault_addContact', [{ account_id: S.vaultAccountId, passphrase: S.vaultPassphrase, name, address: addr }]);
+    document.getElementById('contactName').value = '';
+    document.getElementById('contactAddr').value = '';
+    toast('Contact saved to vault', 'success');
+    loadVaultContacts();
+  } catch (e) {
+    toast(`Save failed: ${e.message}`, 'error');
+  }
 }
 
-function removeContact(i) {
-  S.contacts.splice(i, 1);
-  localStorage.setItem('qtcl_contacts', JSON.stringify(S.contacts));
-  renderContacts();
+async function removeContact(contactId) {
+  if (!S.vaultLoggedIn) { toast('Unlock vault first', 'error'); return; }
+  try {
+    await rpc('vault_removeContact', [{ account_id: S.vaultAccountId, passphrase: S.vaultPassphrase, contact_id: contactId }]);
+    toast('Contact removed', 'success');
+    loadVaultContacts();
+  } catch (e) {
+    toast(`Delete failed: ${e.message}`, 'error');
+  }
 }
 
 function pickContact(targetInputId) {
@@ -2150,6 +2298,10 @@ async function refreshDashboard() {
       document.getElementById('dHeight').textContent = '#' + S.height.toLocaleString();
       document.getElementById('heightPill').textContent = `H: ${S.height}`;
       document.getElementById('dSupply').textContent = fmtQTCL(S.height * 8);
+      // Also fetch actual total volume for accuracy
+      rpc('qtcl_getTransactionVolume').then(v => {
+        document.getElementById('dSupply').textContent = fmtQTCL(v.total_volume_qtcl || S.height * 8);
+      }).catch(() => {});
       document.getElementById('networkDot').style.background = 'var(--emerald)';
       document.getElementById('networkStatus').textContent = 'Connected';
     }

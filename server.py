@@ -132,6 +132,12 @@ _RPC_TIMEOUT_MAP: dict = {
     "vault_checkIn": 8.0,
     # Wallet authentication — PBKDF2 600K rounds
     "qtcl_walletAuth": 15.0,
+    # Vault address book
+    "vault_getContacts": 10.0,
+    "vault_addContact": 10.0,
+    "vault_removeContact": 8.0,
+    # Transaction volume summary
+    "qtcl_getTransactionVolume": 10.0,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -4506,6 +4512,24 @@ def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
+def _rpc_getTransactionVolume(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getTransactionVolume — total on-chain transaction volume (sum of all amounts)."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT COALESCE(SUM(amount), 0) AS total_volume, COUNT(*) AS tx_count FROM transactions")
+            row = cur.fetchone()
+            total_volume = float(row[0]) if row else 0.0
+            tx_count = int(row[1]) if row else 0
+            return _rpc_ok({
+                "total_volume": total_volume,
+                "total_volume_qtcl": round(total_volume / 100, 2),
+                "tx_count": tx_count,
+            }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] _rpc_getTransactionVolume error: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
 # ═══ RPC TIMEOUT PROTECTION ═══
 _RPC_TIMEOUT_SEC = 5.0
 
@@ -7437,6 +7461,7 @@ _RPC_METHODS = {
     # ── NEW: Transaction Explorer ─────────────────────────────────────────────────
     "qtcl_getBlockTransactions": _rpc_getBlockTransactions,
     "qtcl_getTransactions": _rpc_getTransactions,
+    "qtcl_getTransactionVolume": _rpc_getTransactionVolume,
     # P2P DHT methods
     "qtcl_getDHTTable": _p2p_rpc_get_dht_table,
     "qtcl_receiveDHTTable": _p2p_rpc_receive_dht_table,
@@ -8980,8 +9005,11 @@ logger.info(
 
 
 # Defer mempool sync to background thread (avoids blocking on DB initialization)
+MEMPOOL = None  # Module-level reference for _rpc_getMempoolStats inline resolution
+
 def _deferred_mempool_sync():
-    """Background thread: Sync mempool DB pool without blocking Flask init."""
+    """Background thread: Sync mempool DB pool and initialise singleton without blocking Flask init."""
+    global MEMPOOL
     try:
         import mempool as _mp_sync
 
@@ -8991,6 +9019,15 @@ def _deferred_mempool_sync():
         logger.info(
             "[DB] Mempool database pool synchronized with server (museum-grade sync)"
         )
+
+        # ⚛️ CRITICAL: Eagerly initialise the Mempool singleton so
+        # qtcl_getMempoolStats never returns "mempool initializing"
+        try:
+            mp = _mp_sync.get_mempool()
+            MEMPOOL = mp
+            logger.info(f"[DB] ✅ Mempool singleton ready — size={mp.size()}")
+        except Exception as _mp_init_err:
+            logger.warning(f"[DB] Mempool singleton init deferred: {_mp_init_err}")
     except Exception as _sync_err:
         logger.warning(f"[DB] Mempool sync failed: {_sync_err}")
 

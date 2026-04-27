@@ -420,9 +420,34 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
         <div class="lp-card-body">W-state fidelity scores from distributed oracle nodes govern difficulty calibration and block validity. Non-Markovian bath physics governs oracle coherence globally.</div>
       </div>
       <div class="lp-card go">
-        <span class="lp-card-icon">⛏</span>
+        <span class="lp-card-icon">🔐</span>
         <div class="lp-card-title">Post-Quantum Vault</div>
-        <div class="lp-card-body">SHA-256 proof-of-work anchors quantum-derived entropy to classical compute, making the chain verifiable by any node without quantum hardware.</div>
+        <div class="lp-card-body">Encryption-as-a-Service: store secrets with GeodesicLWE (post-quantum), anchor immutable proofs on-chain, and set up dead man's switch inheritance — all from one vault account.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- QUICKLINKS — Vault & Transactions -->
+  <div class="lp-section">
+    <div class="lp-section-label">Services</div>
+    <div class="lp-section-title">NETWORK SERVICES</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:840px;margin:0 auto;">
+      <div style="background:linear-gradient(135deg,rgba(139,92,246,.08),rgba(0,212,255,.06));border:1px solid rgba(139,92,246,.25);border-radius:10px;padding:24px;cursor:pointer;" onclick="document.querySelector('[data-page=vault]').click();">
+        <div style="font-size:28px;margin-bottom:10px;">🔐</div>
+        <div style="font-family:var(--font-display);font-weight:700;font-size:16px;color:var(--tx);margin-bottom:6px;">QTCL Vault</div>
+        <div style="font-size:11px;color:var(--dim);line-height:1.5;">
+          Post-quantum encrypted secret storage. Store credentials, seed phrases, and documents with GeodesicLWE encryption.
+          Chain-anchor proofs. Dead man's switch inheritance.
+        </div>
+        <div style="margin-top:12px;font-size:10px;letter-spacing:1px;color:var(--vi);font-weight:600;">OPEN VAULT →</div>
+      </div>
+      <div style="background:linear-gradient(135deg,rgba(0,212,255,.08),rgba(16,185,129,.06));border:1px solid rgba(0,212,255,.25);border-radius:10px;padding:24px;cursor:pointer;" onclick="document.querySelector('[data-page=tx-page]').click();">
+        <div style="font-size:28px;margin-bottom:10px;">⚛</div>
+        <div style="font-family:var(--font-display);font-weight:700;font-size:16px;color:var(--tx);margin-bottom:6px;">QTCL Transact</div>
+        <div style="font-size:11px;color:var(--dim);line-height:1.5;">
+          Send and receive QTCL. Browse transactions, inspect blocks, monitor the mempool. Full wallet with HypΓ authentication.
+        </div>
+        <div style="margin-top:12px;font-size:10px;letter-spacing:1px;color:var(--cy);font-weight:600;">OPEN TRANSACTIONS →</div>
       </div>
     </div>
   </div>
@@ -822,6 +847,10 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     this.classList.add('active');
+    // Notify iframes of tab change (wallet clearing)
+    document.querySelectorAll('iframe').forEach(f => {
+      try { f.contentWindow.postMessage('qtcl_tab_changed', '*'); } catch(e) {}
+    });
   });
 });
 
