@@ -1251,14 +1251,19 @@ const STATE = {
   decryptedBytes: null,
 };
 
-// ─── RPC Helper (GET /rpc?method=…&params=…&id=…) ───
+// ─── RPC Helper (POST /rpc with JSON-RPC 2.0 body) ───
 async function rpc(method, params = {}) {
-  const qs = new URLSearchParams({
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
     method,
-    params: JSON.stringify([params]),
-    id: String(Date.now()),
+    params: [params],
+    id: Date.now(),
   });
-  const resp = await fetch(`${RPC_URL}?${qs}`);
+  const resp = await fetch(RPC_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
   const data = await resp.json();
   if (data.error) throw new Error(data.error.message || 'RPC error');
   return data.result;

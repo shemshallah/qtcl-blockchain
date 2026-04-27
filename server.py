@@ -1131,13 +1131,10 @@ def _deferred_lattice_init() -> None:
     TIMEOUT: 30s max — if lattice hangs, mark as unavailable and continue
     """
     global LATTICE
-    # 120s budget — lattice_controller import triggers DB pool connect (up to 10s)
-    # + HypGammaEngine init + oracle module import.  30s was too tight.
-    # The deadline is reset after the import so only the constructor + start() are timed.
-    _lat_init_deadline = time.time() + 120.0
+    _lat_init_deadline = time.time() + 30.0  # 30 second timeout
     try:
         logger.debug(
-            "[LATTICE-INIT] 🔄 Starting lattice initialization (timeout=120s)..."
+            "[LATTICE-INIT] 🔄 Starting lattice initialization (timeout=30s)..."
         )
 
         # Import with timeout check
@@ -1150,9 +1147,6 @@ def _deferred_lattice_init() -> None:
                 f"[LATTICE-INIT] ⚠️  QuantumLatticeController import failed: {_ie} — using degraded mode"
             )
             raise
-
-        # Reset deadline after slow import — constructor + start() get a fresh 90s window
-        _lat_init_deadline = time.time() + 90.0
 
         # Check deadline before initialization
         if time.time() > _lat_init_deadline:
@@ -5282,7 +5276,13 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
         logger.debug(
             f"[RPC-METHOD] qtcl_getHealth called with params={params}, id={rpc_id}"
         )
-        from oracle import PYTH_ORACLE as _po
+        # Use the already-imported oracle module (set by _deferred_oracle_init).
+        # A fresh `from oracle import PYTH_ORACLE` fails if the oracle module is
+        # still initialising (QRNG sources timing out) because the module-level
+        # PYTH_ORACLE assignment hasn't been reached yet.
+        import sys as _sys
+        _oracle_mod = _sys.modules.get("oracle")
+        _po = getattr(_oracle_mod, "PYTH_ORACLE", None) if _oracle_mod else None
 
         logger.debug(
             f"[RPC-METHOD] qtcl_getHealth: oracle_ready={ORACLE_AVAILABLE}, lattice_ready={LATTICE is not None}, pyth_ready={_po is not None}"
@@ -8171,7 +8171,9 @@ def _get_pyth():
 @app.route("/rpc/health", methods=["GET"])
 def rpc_health():
     """GET /rpc/health — JSON-RPC engine and Pyth oracle health."""
-    from oracle import PYTH_ORACLE as _po
+    import sys as _sys
+    _oracle_mod = _sys.modules.get("oracle")
+    _po = getattr(_oracle_mod, "PYTH_ORACLE", None) if _oracle_mod else None
 
     return jsonify(
         {
