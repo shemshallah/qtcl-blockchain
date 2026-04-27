@@ -793,6 +793,45 @@ class VaultDatabaseBuilder:
         logger.info("[VAULT-DB] Executing schema (17 tables, 6 triggers, seed data)...")
         t0 = time.time()
         
+        # SAFETY: Drop old vault tables first (cascade to indices/triggers)
+        logger.info("[VAULT-DB] Cleaning up old vault schema...")
+        try:
+            drop_stmts = [
+                "DROP TABLE IF EXISTS vault_shamir_shares CASCADE",
+                "DROP TABLE IF EXISTS vault_inheritance CASCADE",
+                "DROP TABLE IF EXISTS vault_breach_canaries CASCADE",
+                "DROP TABLE IF EXISTS vault_totp_secrets CASCADE",
+                "DROP TABLE IF EXISTS vault_failed_logins CASCADE",
+                "DROP TABLE IF EXISTS vault_rate_limits CASCADE",
+                "DROP TABLE IF EXISTS vault_audit_log CASCADE",
+                "DROP TABLE IF EXISTS vault_pricing_tiers CASCADE",
+                "DROP TABLE IF EXISTS vault_billing CASCADE",
+                "DROP TABLE IF EXISTS vault_anchor_proofs CASCADE",
+                "DROP TABLE IF EXISTS vault_anchors CASCADE",
+                "DROP TABLE IF EXISTS vault_secret_tags CASCADE",
+                "DROP TABLE IF EXISTS vault_secret_versions CASCADE",
+                "DROP TABLE IF EXISTS vault_secrets CASCADE",
+                "DROP TABLE IF EXISTS vault_sessions CASCADE",
+                "DROP TABLE IF EXISTS vault_accounts CASCADE",
+                "DROP TABLE IF EXISTS vault_metadata CASCADE",
+            ]
+            for drop_stmt in drop_stmts:
+                try:
+                    self.cursor.execute(drop_stmt)
+                    logger.info(f"[VAULT-DB] Dropped: {drop_stmt.split()[-2]}")
+                except Exception as e:
+                    logger.info(f"[VAULT-DB] (table not found, OK) {drop_stmt.split()[-2]}")
+            
+            self.conn.commit()
+            logger.info("[VAULT-DB] ✓ Old schema cleaned, committed")
+        except Exception as e:
+            logger.error(f"[VAULT-DB] ❌ Drop phase failed: {e}")
+            try:
+                self.conn.rollback()
+            except:
+                pass
+            raise
+        
         # Smart split respecting $$ quoting for PL/pgSQL
         def split_sql_statements(sql_text):
             statements = []
@@ -882,24 +921,17 @@ class VaultDatabaseBuilder:
                         
                 except Exception as e:
                     error_str = str(e)
-                    # If it's a "column doesn't exist" error, rollback and retry
-                    if "does not exist" in error_str.lower() or "aborted" in error_str.lower():
-                        logger.warning(f"[VAULT-DB] Transaction aborted, rolling back...")
-                        try:
-                            self.conn.rollback()
-                        except:
-                            pass
-                        # Reconnect for fresh transaction
-                        try:
-                            self.disconnect()
-                            self.connect()
-                        except Exception as reconn_err:
-                            logger.error(f"[VAULT-DB] Failed to reconnect: {reconn_err}")
-                            raise
-                        raise RuntimeError(f"Schema execution failed at: {error_str}. Please check statement order.")
+                    # CREATE TABLE failures are FATAL — don't skip
+                    if 'CREATE TABLE' in stmt.upper():
+                        logger.error(f"[VAULT-DB] ❌ TABLE CREATION FAILED: {error_str[:120]}")
+                        logger.error(f"[VAULT-DB] Statement: {stmt[:200]}")
+                        raise
+                    # Log non-critical errors (indices may fail on IF NOT EXISTS)
+                    elif 'CREATE INDEX' in stmt.upper():
+                        logger.warning(f"[VAULT-DB] ⊘ Index skipped: {error_str[:120]}")
+                        total_skipped += 1
                     else:
-                        # Skip non-critical errors (IF NOT EXISTS handles most)
-                        logger.info(f"[VAULT-DB] ⊘ Skipped: {error_str}")
+                        logger.info(f"[VAULT-DB] ⊘ Skipped: {error_str[:80]}")
                         total_skipped += 1
         
         try:
