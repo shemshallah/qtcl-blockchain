@@ -130,6 +130,8 @@ _RPC_TIMEOUT_MAP: dict = {
     "vault_upgradeTier": 10.0,
     "vault_setupInheritance": 10.0,
     "vault_checkIn": 8.0,
+    # Wallet authentication — PBKDF2 600K rounds
+    "qtcl_walletAuth": 15.0,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -310,6 +312,15 @@ def _recompute_client_consensus() -> None:
 
 # ═══ RPC INFRASTRUCTURE (JSON-RPC 2.0) ═══
 _JSONRPC_VERSION = "2.0"
+
+
+def _iso(val):
+    """Convert datetime/timestamp to ISO 8601 string. Returns '' for None."""
+    if val is None:
+        return ""
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    return str(val)
 
 
 def _rpc_ok(result: Any, rpc_id: Any) -> dict:
@@ -7295,7 +7306,88 @@ def _rpc_wallet_info(params, rpc_id):
         return _rpc_error(-32603, f"Wallet info failed: {str(e)}", rpc_id)
 
 
-_RPC_METHODS: Dict[str, Any] = {
+def _rpc_walletAuth(params, rpc_id):
+    """qtcl_walletAuth — Authenticate a wallet file with password.
+
+    Client uploads the wallet JSON (or just encrypted_private_key dict)
+    and a password. Server verifies the PBKDF2/SHAKE-256 verifier tag
+    WITHOUT decrypting the private key. Returns address + public key
+    if password is correct.
+
+    Params (dict):
+        wallet_data: dict — full wallet JSON or {encrypted_private_key: {...}}
+        password: str — wallet unlock password
+
+    Returns:
+        valid: bool
+        address: str (if valid)
+        public_key: str (if valid)
+        vault_version: int
+    """
+    try:
+        if isinstance(params, list):
+            params = params[0] if params else {}
+        if not isinstance(params, dict):
+            return _rpc_error(-32602, "params must be object", rpc_id)
+
+        wallet_data = params.get("wallet_data", {})
+        password = params.get("password", "")
+
+        if not wallet_data or not password:
+            return _rpc_error(-32602, "wallet_data and password required", rpc_id)
+
+        # Extract encrypted_private_key dict
+        enc_pk = wallet_data.get("encrypted_private_key", wallet_data)
+        if not enc_pk or not isinstance(enc_pk, dict):
+            return _rpc_error(-32602, "wallet_data must contain encrypted_private_key", rpc_id)
+
+        # Check required fields
+        required = ["salt_hex", "verifier_hex"]
+        for f in required:
+            if f not in enc_pk:
+                return _rpc_error(-32602, f"encrypted_private_key missing '{f}'", rpc_id)
+
+        # Use HypΓ verifier — PBKDF2 600K rounds + SHA3-256 verifier tag
+        try:
+            from hyp_lwe import verify_wallet_password
+            is_valid = verify_wallet_password(enc_pk, password)
+        except ImportError:
+            # Fallback: inline PBKDF2 verification
+            import hashlib as _hv, hmac as _hmac_v
+            _PBKDF2_ITER = 600_000
+            _PBKDF2_KLEN = 64
+            _VERIFIER_DOMAIN = b"QTCL_WALLET_VERIFIER_v2"
+            try:
+                salt = bytes.fromhex(enc_pk["salt_hex"])
+                stored_v = bytes.fromhex(enc_pk.get("verifier_hex", ""))
+                if not stored_v:
+                    return _rpc_ok({"valid": False, "reason": "no_verifier"}, rpc_id)
+                raw = _hv.pbkdf2_hmac('sha256', password.encode('utf-8'), salt,
+                                       _PBKDF2_ITER, dklen=_PBKDF2_KLEN)
+                vk = raw[32:]
+                computed_v = _hv.sha3_256(_VERIFIER_DOMAIN + vk).digest()
+                is_valid = _hmac_v.compare_digest(stored_v, computed_v)
+            except Exception as _ve:
+                logger.warning(f"[WALLET-AUTH] Fallback verify failed: {_ve}")
+                is_valid = False
+
+        result = {"valid": is_valid}
+        if is_valid:
+            result["address"] = wallet_data.get("address", "")
+            result["public_key"] = wallet_data.get("public_key", "")
+            result["vault_version"] = wallet_data.get("vault_version", 0)
+            result["has_shamir"] = "shamir_config" in wallet_data
+        else:
+            result["reason"] = "invalid_password"
+
+        return _rpc_ok(result, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[WALLET-AUTH] Exception: {e}")
+        return _rpc_error(-32603, f"Wallet auth failed: {str(e)}", rpc_id)
+
+
+
     "qtcl_submitBlock": _rpc_submitBlock,
     "qtcl_getCoinbaseTemplate": _rpc_getCoinbaseTemplate,
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
@@ -7354,6 +7446,7 @@ _RPC_METHODS: Dict[str, Any] = {
     # ── Wallet Vault v2 RPC (Cathedral-Grade) ─────────────────────────────────
     "qtcl_wallet_verify": _rpc_wallet_verify,
     "qtcl_wallet_info": _rpc_wallet_info,
+    "qtcl_walletAuth": _rpc_walletAuth,
     # ── Client-mesh compatibility aliases ─────────────────────────────────────
     "qtcl_getChainStatus": lambda p, rid: _rpc_getBlockHeight(p, rid),
     "qtcl_getSyncStatus": lambda p, rid: _rpc_getBlockHeight(p, rid),
@@ -8253,6 +8346,22 @@ def serve_vault_doc():
         return "vault.html not found", 404
     except Exception as e:
         logger.error(f"[VAULT] Failed to serve vault.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/tx", methods=["GET"])
+def serve_tx_doc():
+    """GET /tx — Serve tx.html (full transaction system)."""
+    try:
+        import os
+        from flask import send_file
+
+        tx_path = os.path.join(os.path.dirname(__file__), "tx.html")
+        if os.path.exists(tx_path):
+            return send_file(tx_path, mimetype="text/html")
+        return "tx.html not found", 404
+    except Exception as e:
+        logger.error(f"[TX] Failed to serve tx.html: {e}")
         return f"Error: {e}", 500
 
 
