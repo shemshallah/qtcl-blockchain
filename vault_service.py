@@ -645,8 +645,8 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
         _vault_query(
             """INSERT INTO vault_secrets
                (id, account_id, label, category, ciphertext, encryption_meta,
-                size_bytes, created_at, updated_at, anchor_hash)
-               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, NOW(), NOW(), %s)""",
+                size_bytes, content_hash, created_at, updated_at, anchor_hash)
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, NOW(), NOW(), %s)""",
             (
                 secret_id, account_id, label, category,
                 ciphertext,  # Stored as-is — opaque client-encrypted blob
@@ -657,6 +657,7 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
                 }),
                 size_bytes,
                 content_hash,
+                content_hash,  # anchor_hash param (8th)
             ),
             fetch="none"
         )
