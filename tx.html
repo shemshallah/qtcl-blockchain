@@ -1449,6 +1449,7 @@ function clearWalletSession() {
   S.vaultLoggedIn = false;
   _walletFileData = null;
   _walletEncryptedPK = null;
+  _signPassword = '';
   localStorage.removeItem('qtcl_tx_wallet');
   localStorage.removeItem('qtcl_tx_mode');
   // Reset UI
@@ -1519,6 +1520,7 @@ async function connectWallet() {
 // Wallet file state
 let _walletFileData = null;
 let _walletEncryptedPK = null;
+let _signPassword = '';  // session-only, never persisted — zeroed after each tx submit
 
 function handleWalletFile(event) {
   const file = event.target.files[0];
@@ -1571,6 +1573,7 @@ async function authenticateWallet() {
       S.walletMode = 'full';
       S.walletPublicKey = result.public_key;
       _walletEncryptedPK = _walletFileData.encrypted_private_key;
+      _signPassword = password;  // held session-only for sign-and-submit, zeroed after each tx
       localStorage.setItem('qtcl_tx_wallet', result.address);
       localStorage.setItem('qtcl_tx_mode', 'full');
 
@@ -1705,7 +1708,14 @@ async function prepareSend() {
   }
 
   if (amount + fee > S.balance) {
-    toast(`Insufficient balance — have ${fmtQTCL(S.balance)} QTCL, need ${fmtQTCL(amount + fee)} QTCL`, 'error');
+    // Show full diagnostic — address queried, raw response, to help debug address mismatch
+    let diagMsg = `Insufficient balance — address: ${S.walletAddr.slice(0,20)}… has ${fmtQTCL(S.balance)} QTCL, need ${fmtQTCL(amount + fee)} QTCL`;
+    toast(diagMsg, 'error', 6000);
+    // Also show inline diagnostic under sendBalance
+    const hint = document.querySelector('#sendStep1 .form-hint');
+    if (hint) {
+      hint.innerHTML = `⚠ Balance: <strong style="color:var(--red)">${fmtQTCL(S.balance)} QTCL</strong> · Queried address: <span style="color:var(--cyan);font-size:9px;">${S.walletAddr}</span><br>If this address is wrong, reconnect with your correct wallet file.`;
+    }
     return;
   }
 
@@ -1731,35 +1741,56 @@ function backToSendForm() {
 async function executeSend() {
   const btn = document.getElementById('sendExecBtn');
   btn.disabled = true;
-  btn.textContent = 'Submitting…';
+  btn.textContent = 'Signing & Submitting…';
   try {
     const amount = parseFloat(document.getElementById('sendAmount').value);
     const fee = parseFloat(document.getElementById('sendFee').value) || 0.01;
     const to = document.getElementById('sendTo').value.trim();
     const memo = document.getElementById('sendMemo').value.trim();
 
-    // Fee is included in the transaction object — the block sealer splits
-    // fees 50/50 between miner and TREASURY_ADDRESS during settlement.
-    // Amount sent to recipient is exactly `amount`; fee is deducted from
-    // sender's balance on top of amount (total debit = amount + fee).
-    const tx = {
-      from_address: S.walletAddr,
-      to_address: to,
-      amount: amount,
-      fee: fee,
-      tx_type: 'transfer',
-      nonce: Date.now(),
-      timestamp_ns: Date.now() * 1000000,
-      signature: {},  // Would be signed by wallet in production
-      metadata: { memo: memo },
-    };
+    // ── Use qtcl_signAndSubmitTx: server decrypts wallet, produces real HypΓ signature ──
+    // This fixes the INVALID_SIG rejection that was blocking all sends.
+    // The wallet file + password are already held in-browser from authenticateWallet().
+    // Server decrypts private key, signs canonical hash, submits to mempool, then zeros pk.
+    if (S.walletMode === 'full' && _walletFileData && _walletEncryptedPK) {
+      // Full auth path — sign via server-side decrypt
+      // If password was zeroed after a prior tx, prompt for it again
+      let pwd = _signPassword;
+      if (!pwd) {
+        pwd = window.prompt('Re-enter wallet password to sign this transaction:');
+        if (!pwd) { toast('Password required to sign', 'error'); btn.disabled = false; btn.textContent = 'Sign & Submit'; return; }
+      }
+      const r = await rpc('qtcl_signAndSubmitTx', [{
+        wallet_data: _walletFileData,
+        password: pwd,
+        tx: {
+          from_address: S.walletAddr,
+          to_address: to,
+          amount: amount,
+          fee: fee,
+          nonce: Date.now(),
+          memo: memo,
+        }
+      }]);
 
-    const r = await rpc('qtcl_submitTransaction', [tx]);
-    document.getElementById('sendTxHash').textContent = `TX: ${r.tx_hash || 'submitted'}`;
-    document.getElementById('sendStep2').classList.add('hidden');
-    document.getElementById('sendStep3').classList.remove('hidden');
-    toast('Transaction submitted!', 'success');
-    refreshBalance();
+      if (r.valid === false) {
+        toast('Wallet password incorrect — please re-authenticate', 'error');
+        btn.disabled = false; btn.textContent = 'Sign & Submit';
+        pwd = '';
+        return;
+      }
+
+      document.getElementById('sendTxHash').textContent = `TX: ${r.tx_hash || 'submitted'}`;
+      document.getElementById('sendStep2').classList.add('hidden');
+      document.getElementById('sendStep3').classList.remove('hidden');
+      toast('Transaction signed and submitted!', 'success');
+      _signPassword = '';  // zero from memory after use
+      pwd = '';
+      refreshBalance();
+    } else {
+      // Fallback for read-only mode — will be rejected by mempool but shows correct error
+      toast('Full wallet authentication required. Re-authenticate with wallet file.', 'error');
+    }
   } catch (e) {
     toast(`Submit failed: ${e.message}`, 'error');
   } finally {
