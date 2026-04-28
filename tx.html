@@ -1043,7 +1043,7 @@ body::before {
               <label class="form-label">Memo (Optional)</label>
               <input type="text" class="form-input" id="sendMemo" placeholder="Payment memo…">
             </div>
-            <button class="btn btn-primary btn-full mt-12" onclick="prepareSend()">Review Transaction →</button>
+            <button class="btn btn-primary btn-full mt-12" onclick="prepareSend().catch(e=>toast(e.message,'error'))">Review Transaction →</button>
           </div>
 
           <div id="sendStep2" class="hidden">
@@ -1429,16 +1429,15 @@ function showPage(page) {
   if (page === 'contacts') renderContactsPage();
 }
 
-// Clear wallet state on tab/page visibility change (navigating away)
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    clearWalletSession();
-  }
-});
-
-// Listen for parent iframe navigation (index.html tab switches)
+// NOTE: visibilitychange session wipe removed — it was zeroing S.balance causing false "Insufficient balance"
+// Session is now only cleared on explicit disconnect or page unload with full auth
+// Listen for parent iframe navigation (index.html tab switches) — only clear vault passphrase, NOT balance
 window.addEventListener('message', (e) => {
-  if (e.data === 'qtcl_tab_changed') clearWalletSession();
+  if (e.data === 'qtcl_tab_changed') {
+    // Only wipe the ephemeral vault passphrase, not the wallet session or balance
+    S.vaultPassphrase = '';
+    S.vaultLoggedIn = false;
+  }
 });
 
 function clearWalletSession() {
@@ -1674,7 +1673,7 @@ function shareAddr() {
 }
 
 // ═══ SEND TRANSACTION ═══
-function prepareSend() {
+async function prepareSend() {
   const to = document.getElementById('sendTo').value.trim();
   const amount = parseFloat(document.getElementById('sendAmount').value);
   const fee = parseFloat(document.getElementById('sendFee').value) || 0.01;
@@ -1687,7 +1686,28 @@ function prepareSend() {
   }
   if (!to) { toast('Recipient required', 'error'); return; }
   if (!amount || amount <= 0) { toast('Invalid amount', 'error'); return; }
-  if (amount + fee > S.balance) { toast('Insufficient balance', 'error'); return; }
+
+  // Always fetch live balance before checking — prevents false rejection from stale S.balance=0
+  const reviewBtn = document.querySelector('#sendStep1 .btn-primary');
+  const origBtnText = reviewBtn ? reviewBtn.textContent : '';
+  if (reviewBtn) { reviewBtn.disabled = true; reviewBtn.textContent = '⏳ Checking balance…'; }
+  try {
+    const r = await rpc('qtcl_getBalance', [S.walletAddr]);
+    S.balance = r.balance || 0;
+    document.getElementById('sendBalance').textContent = fmtQTCL(S.balance);
+    document.getElementById('balanceDisplay').textContent = fmtQTCL(S.balance);
+  } catch (e) {
+    if (reviewBtn) { reviewBtn.disabled = false; reviewBtn.textContent = origBtnText; }
+    toast(`Balance check failed: ${e.message}`, 'error');
+    return;
+  } finally {
+    if (reviewBtn) { reviewBtn.disabled = false; reviewBtn.textContent = origBtnText; }
+  }
+
+  if (amount + fee > S.balance) {
+    toast(`Insufficient balance — have ${fmtQTCL(S.balance)} QTCL, need ${fmtQTCL(amount + fee)} QTCL`, 'error');
+    return;
+  }
 
   const total = amount + fee;
   document.getElementById('sendConfirmBox').innerHTML = `
@@ -2343,6 +2363,7 @@ async function init() {
 
   if (S.walletAddr) {
     document.getElementById('connectAddr').value = S.walletAddr;
+    // Always refresh balance on load — S.balance initializes to 0 even when address is in localStorage
     await refreshBalance();
   }
 
