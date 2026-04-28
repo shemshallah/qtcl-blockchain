@@ -84,6 +84,12 @@ def _init_hyp_wallet() -> bool:
     """
     Initialize wallet directly from hyp_engine — no separate module needed.
     Uses existing HypGammaEngine for key generation and signing.
+
+    Address resolution priority:
+      1. ~/.qtcl/wallet.json — address field (no decryption needed)
+      2. WALLET_ADDRESS env var
+    
+    REQUIRED: One of these must be present. No ephemeral fallback.
     """
     global HYP_WALLET_AVAILABLE, HYP_ENGINE, HYP_KEYPAIR
 
@@ -91,34 +97,45 @@ def _init_hyp_wallet() -> bool:
         return True
 
     try:
-        # Import directly from existing hlwe module
         from hlwe.hyp_engine import HypEngine, HypKeyPair
 
-        # Initialize engine
         HYP_ENGINE = HypEngine()
-
-        # Generate or load keypair
-        # Check for existing wallet file at ~/.qtcl/wallet.json
-        import os
 
         _wallet_path = os.path.expanduser("~/.qtcl/wallet.json")
 
         if os.path.exists(_wallet_path):
-            logger.info(f"[HYP-WALLET] 📍 Found wallet at {_wallet_path}")
-            logger.info(
-                f"[HYP-WALLET]    Load with: from hlwe.hyp_engine import HypEngine; e=HypEngine(); kp=e.generate_keypair()"
-            )
-            # Generate temporary keypair for now - proper loading requires password
-            HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
-        else:
-            # Generate new keypair
-            HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
-            logger.info(
-                f"[HYP-WALLET] ✅ Generated new keypair: {HYP_KEYPAIR.address[:22]}..."
-            )
+            try:
+                import json as _json
+                with open(_wallet_path, "r") as _wf:
+                    _wallet_data = _json.load(_wf)
+                _address = _wallet_data.get("address", "")
+                _pub = _wallet_data.get("public_key", "")
+                if _address:
+                    HYP_KEYPAIR = HypKeyPair(
+                        private_key="",
+                        public_key=_pub,
+                        address=_address,
+                    )
+                    logger.info(
+                        f"[HYP-WALLET] ✅ Loaded address from wallet file: {_address[:22]}..."
+                    )
+                    HYP_WALLET_AVAILABLE = True
+                    return True
+            except Exception as _load_err:
+                logger.warning(f"[HYP-WALLET] ⚠️  Could not read wallet file: {_load_err}")
 
-        HYP_WALLET_AVAILABLE = True
-        return True
+        _env_addr = os.getenv("WALLET_ADDRESS", "")
+        if _env_addr:
+            HYP_KEYPAIR = HypKeyPair(private_key="", public_key="", address=_env_addr)
+            logger.info(f"[HYP-WALLET] ✅ Loaded address from WALLET_ADDRESS env: {_env_addr[:22]}...")
+            HYP_WALLET_AVAILABLE = True
+            return True
+
+        logger.error(
+            "[HYP-WALLET] ❌ WALLET REQUIRED: No wallet file at ~/.qtcl/wallet.json "
+            "and no WALLET_ADDRESS env var set. Miner identity not configured."
+        )
+        return False
 
     except ImportError as _e:
         logger.warning(f"[HYP-WALLET] ⚠️  hyp_engine not available: {_e}")
@@ -2175,10 +2192,22 @@ class QuantumLatticeController:
                 self.db_connector = None
 
         # Validator
+        _wallet = _get_miner_wallet()
+        _reward_address = (
+            _wallet.get_address() if _wallet and _wallet.is_initialized() else ""
+        ) or os.getenv("WALLET_ADDRESS", "")
+        
+        if not _reward_address:
+            logger.error(
+                "[BLOCKCHAIN] ❌ MINER ADDRESS REQUIRED: No wallet loaded and no WALLET_ADDRESS env var. "
+                "Cannot initialize blockchain validator."
+            )
+            self.validator = None
+            return
+        
         self.validator = IndividualValidator(
             validator_id=str(uuid.uuid4())[:16],
-            miner_address="miner_"
-            + hashlib.sha3_256(str(time.time()).encode()).hexdigest()[:16],
+            miner_address=_reward_address,
         )
         logger.info(f"[BLOCKCHAIN] Validator ready: {self.validator.miner_address}")
 
@@ -3962,8 +3991,22 @@ def initialize_lattice(miner_address: str = ""):
         quantum_lattice.start()
 
         # Initialize blockchain systems (ELITE)
+        if not miner_address:
+            _wallet = _get_miner_wallet()
+            miner_address = (
+                (_wallet.get_address() if _wallet and _wallet.is_initialized() else "")
+                or os.getenv("WALLET_ADDRESS", "")
+            )
+        
+        if not miner_address:
+            logger.error(
+                "[INIT] ❌ MINER ADDRESS REQUIRED: No wallet loaded and no WALLET_ADDRESS env var. "
+                "Cannot initialize validator."
+            )
+            return None
+        
         validator = IndividualValidator(
-            str(uuid.uuid4())[:16], miner_address or "miner_" + str(uuid.uuid4())[:8]
+            str(uuid.uuid4())[:16], miner_address
         )
         logger.info(f"✅ Validator initialized: {validator.miner_address}")
 
