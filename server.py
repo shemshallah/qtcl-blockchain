@@ -93,6 +93,8 @@ _RPC_INLINE_METHODS: frozenset = frozenset(
         "qtcl_listMeasurementSubscribers",
         "qtcl_getEvents",
         "qtcl_peerHeartbeat",
+        "qtcl_getOraclePeers",
+        "qtcl_getOracleSnapshot",
     }
 )
 
@@ -114,6 +116,8 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_receiveDHTTable": 3.0,
     "qtcl_registerMeasurementSubscriber": 3.0,
     "qtcl_unregisterMeasurementSubscriber": 3.0,
+    "qtcl_registerOraclePeer": 4.0,
+    "qtcl_relayGossip": 6.0,
     "qtcl_getDeviceChain": 4.0,
     "qtcl_getMerminTest": 20.0,
     # Vault methods — PBKDF2 600K rounds + schema init + DB
@@ -1711,6 +1715,56 @@ def _settle_block_rewards(
                     ),
                 )
 
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # PHASE 1.5 — RECORD ADDRESS TRANSACTION HISTORY (CRITICAL FIX)
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # For each transaction, create TWO address_transactions entries:
+            # 1. OUTGOING from sender
+            # 2. INCOMING to receiver
+            # This populates the address_transactions table so wallet history is available
+            _settle_log.debug(f"[SETTLE] Recording transaction history for {len(non_coinbase_txs)} txs")
+            
+            for tx in non_coinbase_txs:
+                tx_hash = tx.get("tx_hash") or tx.get("hash") or ""
+                tx_sender = tx.get("from_address") or ""
+                tx_receiver = tx.get("to_address") or ""
+                tx_amount = int(round(float(tx.get("amount", 0)) * 100))
+                
+                if not tx_hash or not tx_sender or not tx_receiver or tx_amount <= 0:
+                    continue
+                
+                try:
+                    # Record as OUTGOING from sender
+                    cur.execute("""
+                        INSERT INTO address_transactions
+                        (address, tx_hash, direction, from_address, to_address, amount,
+                         block_height, block_hash, block_timestamp, tx_status, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (address, tx_hash) DO NOTHING
+                    """, (
+                        tx_sender, tx_hash, 'outgoing',
+                        tx_sender, tx_receiver, tx_amount,
+                        height, block_hash, int(time.time()), 'confirmed'
+                    ))
+                    
+                    # Record as INCOMING to receiver
+                    cur.execute("""
+                        INSERT INTO address_transactions
+                        (address, tx_hash, direction, from_address, to_address, amount,
+                         block_height, block_hash, block_timestamp, tx_status, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (address, tx_hash) DO NOTHING
+                    """, (
+                        tx_receiver, tx_hash, 'incoming',
+                        tx_sender, tx_receiver, tx_amount,
+                        height, block_hash, int(time.time()), 'confirmed'
+                    ))
+                except Exception as addr_tx_err:
+                    _settle_log.warning(
+                        f"[SETTLE] Failed to record address_transaction for {tx_hash[:12]}…: {addr_tx_err}"
+                    )
+            # ═════════════════════════════════════════════════════════════════════════════════
+
             # PHASE 2 — miner reward credited NOW (single cursor, no double-credit risk)
             cur.execute(
                 """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
@@ -1825,7 +1879,7 @@ def _settle_block_rewards(
 # BLOCK SETTLEMENT WORKER — async settlement after block is persisted
 # ═════════════════════════════════════════════════════════════════════════════════
 
-_BLOCK_SETTLE_Q: "_queue_mod2.Queue" = _queue_mod2.Queue(maxsize=32)
+_BLOCK_SETTLE_Q: "_queue_mod2.Queue" = _queue_mod2.Queue(maxsize=128)  # Increased from 32 to prevent overflow
 
 
 def _block_settle_worker_thread():
@@ -1836,6 +1890,27 @@ def _block_settle_worker_thread():
     """
     _settle_log = logging.getLogger("SETTLE")
     _settle_log.critical("[SETTLE-WORKER] 🚀 Settlement worker thread STARTED")
+    
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # STARTUP VERIFICATION: Database connectivity check (CRITICAL)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    try:
+        _settle_log.debug("[SETTLE-WORKER] Verifying database connectivity...")
+        with get_db_cursor() as cur:
+            cur.execute("SELECT 1")
+        _settle_log.critical("[SETTLE-WORKER] ✅ Database connectivity verified at startup")
+    except Exception as db_startup_err:
+        _settle_log.critical(
+            f"[SETTLE-WORKER] ❌ FATAL: Database not accessible on startup!"
+        )
+        _settle_log.critical(f"[SETTLE-WORKER]    Error: {db_startup_err}")
+        _settle_log.critical(f"[SETTLE-WORKER]    DATABASE_URL configured: {bool(DATABASE_URL)}")
+        _settle_log.critical(
+            "[SETTLE-WORKER] Settlement worker cannot start without DB access"
+        )
+        raise
+    # ═════════════════════════════════════════════════════════════════════════════════
+    
     while True:
         try:
             job = _BLOCK_SETTLE_Q.get(timeout=1.0)
@@ -6794,7 +6869,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     f"[SUBMIT-BLOCK] 🔗 Enqueued settlement worker for h={height}"
                 )
             except Exception as _qe:
-                logger.debug(f"[SUBMIT-BLOCK] Settlement queue full: {_qe}")
+                # ❌ CRITICAL: Queue full = settlement jobs WILL BE LOST
+                logger.critical(
+                    f"[SUBMIT-BLOCK] 🚨 SETTLEMENT QUEUE FULL! Block {height} "
+                    f"rewards will NOT be persisted! Error: {_qe}"
+                )
 
         return _rpc_ok(
             {
@@ -7518,6 +7597,312 @@ def _rpc_walletAuth(params, rpc_id):
         return _rpc_error(-32603, f"Wallet auth failed: {str(e)}", rpc_id)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# P2P ORACLE MESH — Client-as-Oracle-Peer Registration & Relay
+# ═══════════════════════════════════════════════════════════════════════════════
+# Every mining client runs a local oracle (ClientOracleMesh) that produces
+# density matrix snapshots. These methods let clients:
+#   1. Register as oracle relay peers (qtcl_registerOraclePeer)
+#   2. Push oracle snapshots to the server for fan-out (qtcl_pushOracleDM)
+#   3. Pull the latest oracle snapshot from the server (qtcl_getOracleSnapshot)
+#   4. Pull the list of oracle-capable peers (qtcl_getOraclePeers)
+#   5. Relay gossip blocks/txs/height to all connected peers (qtcl_relayGossip)
+# Together these form a pulsating mesh where every node both consumes and
+# produces oracle data, relaying to its neighbors in constant fan-out.
+
+_ORACLE_PEERS: Dict[str, dict] = {}
+_ORACLE_PEERS_LOCK = threading.Lock()
+_ORACLE_PEERS_MAX = 128
+
+
+def _rpc_registerOraclePeer(params: Any, rpc_id: Any) -> dict:
+    """qtcl_registerOraclePeer — client registers as an oracle mesh relay node.
+
+    Params (dict):
+        node_id         str   SHA-256 of HLWE pubkey (64 hex, required)
+        external_addr   str   ip:port of client's mesh RPC server (required)
+        oracle_addr     str   client's oracle address (qtcl1...)
+        chain_height    int   current chain height
+        capabilities    list  ["mining", "oracle", "relay", "full_node"]
+        fidelity        float latest W-state fidelity from client oracle
+        mesh_port       int   port running NodeRPCMeshServer (default 9091)
+    """
+    try:
+        if isinstance(params, list):
+            params = params[0] if params else {}
+        if not isinstance(params, dict):
+            return _rpc_error(-32602, "params must be object", rpc_id)
+
+        node_id = str(params.get("node_id", "")).strip().lower()
+        external_addr = str(params.get("external_addr", "")).strip()
+        oracle_addr = str(params.get("oracle_addr", "")).strip()
+        chain_height = int(params.get("chain_height", 0))
+        capabilities = params.get("capabilities", ["mining", "oracle"])
+        fidelity = float(params.get("fidelity", 0.0))
+        mesh_port = int(params.get("mesh_port", 9091))
+
+        if not node_id or not external_addr:
+            return _rpc_error(-32602, "node_id and external_addr required", rpc_id)
+
+        # Derive caller IP
+        try:
+            cf_ip = request.headers.get("CF-Connecting-IP", "")
+            real_ip = request.headers.get("X-Real-IP", "")
+            forwarded = request.headers.get("X-Forwarded-For", "")
+            caller_ip = cf_ip or real_ip or (forwarded.split(",")[0].strip() if forwarded else "") or request.remote_addr or "127.0.0.1"
+        except Exception:
+            caller_ip = "127.0.0.1"
+
+        now = time.time()
+        peer_entry = {
+            "node_id": node_id,
+            "external_addr": external_addr,
+            "oracle_addr": oracle_addr,
+            "chain_height": chain_height,
+            "capabilities": capabilities if isinstance(capabilities, list) else ["mining"],
+            "fidelity": max(0.0, min(1.0, fidelity)),
+            "mesh_port": mesh_port,
+            "caller_ip": caller_ip,
+            "last_seen": now,
+            "first_seen": now,
+            "oracle_active": True,
+            "relay_count": 0,
+        }
+
+        with _ORACLE_PEERS_LOCK:
+            if node_id in _ORACLE_PEERS:
+                existing = _ORACLE_PEERS[node_id]
+                peer_entry["first_seen"] = existing.get("first_seen", now)
+                peer_entry["relay_count"] = existing.get("relay_count", 0)
+            _ORACLE_PEERS[node_id] = peer_entry
+            # Evict oldest if over cap
+            if len(_ORACLE_PEERS) > _ORACLE_PEERS_MAX:
+                oldest_id = min(_ORACLE_PEERS, key=lambda k: _ORACLE_PEERS[k]["last_seen"])
+                del _ORACLE_PEERS[oldest_id]
+
+        # Also register as regular peer (dual registration)
+        try:
+            _rpc_registerPeer([{
+                "node_id": node_id,
+                "external_addr": external_addr,
+                "chain_height": chain_height,
+                "pubkey": oracle_addr,
+            }], None)
+        except Exception:
+            pass
+
+        logger.info(
+            f"[P2P-ORACLE] ✅ Oracle peer registered: node={node_id[:16]}… "
+            f"addr={external_addr} oracle={oracle_addr[:20]}… fid={fidelity:.4f} "
+            f"caps={capabilities}"
+        )
+
+        return _rpc_ok({
+            "registered": True,
+            "node_id": node_id,
+            "oracle_addr": oracle_addr,
+            "caller_ip": caller_ip,
+            "oracle_peer_count": len(_ORACLE_PEERS),
+        }, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[P2P-ORACLE] registerOraclePeer exception: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+def _rpc_getOraclePeers(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getOraclePeers — return all oracle-capable mesh peers.
+
+    Returns peers that have registered via qtcl_registerOraclePeer with
+    oracle capabilities, sorted by fidelity (highest first).
+    """
+    try:
+        limit = 50
+        if isinstance(params, dict):
+            limit = min(int(params.get("limit", 50)), 200)
+        elif isinstance(params, list) and params:
+            try:
+                limit = min(int(params[0]), 200)
+            except (ValueError, TypeError):
+                pass
+
+        now = time.time()
+        stale_cutoff = 600  # 10 min
+
+        with _ORACLE_PEERS_LOCK:
+            peers = [
+                p for p in _ORACLE_PEERS.values()
+                if (now - p["last_seen"]) < stale_cutoff
+                and p.get("oracle_active", False)
+            ]
+
+        # Sort by fidelity descending, then by chain height
+        peers.sort(key=lambda p: (-p.get("fidelity", 0), -p.get("chain_height", 0)))
+        peers = peers[:limit]
+
+        return _rpc_ok({
+            "oracle_peers": peers,
+            "count": len(peers),
+            "total_registered": len(_ORACLE_PEERS),
+            "timestamp": now,
+        }, rpc_id)
+
+    except Exception as e:
+        logger.debug(f"[P2P-ORACLE] getOraclePeers: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+def _rpc_getOracleSnapshot(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getOracleSnapshot — return the latest oracle consensus snapshot.
+
+    This is the pull-based alternative to the SSE stream. Clients call this
+    to get the latest W-state fidelity, coherence, purity, density matrix hex,
+    and per-node oracle readings.
+    """
+    try:
+        # Try server's 5-oracle snapshot first
+        snap = None
+        with _snapshot_lock:
+            snap = dict(_latest_snapshot) if _latest_snapshot else None
+
+        if snap:
+            snap["source"] = "server_oracle"
+            snap["ready"] = True
+            return _rpc_ok(snap, rpc_id)
+
+        # Fallback: try oracle module directly
+        if ORACLE_AVAILABLE and ORACLE_W_STATE_MANAGER is not None:
+            try:
+                dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
+                if dm:
+                    dm["source"] = "oracle_direct"
+                    dm["ready"] = True
+                    return _rpc_ok(dm, rpc_id)
+            except Exception:
+                pass
+
+        # Fallback: client consensus pool
+        with _CLIENT_DM_POOL_LOCK:
+            if _client_pool_count > 0:
+                return _rpc_ok({
+                    "w_state_fidelity": _client_consensus_fid,
+                    "client_oracle_count": _client_pool_count,
+                    "source": "client_pool",
+                    "ready": _client_pool_count >= 1,
+                }, rpc_id)
+
+        return _rpc_ok({"ready": False, "source": "none", "note": "Oracle initializing"}, rpc_id)
+
+    except Exception as e:
+        logger.debug(f"[P2P-ORACLE] getOracleSnapshot: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+def _rpc_relayGossip(params: Any, rpc_id: Any) -> dict:
+    """qtcl_relayGossip — relay gossip messages (blocks, txs, height) through server.
+
+    Params (dict):
+        gossip_type   str   "block" | "tx" | "height" | "oracle_dm" | "peer"
+        payload       dict  the gossip payload to relay
+        origin_id     str   node_id of original sender (to prevent echo)
+        ttl           int   remaining hops (default 3, decremented each relay)
+
+    Server rebroadcasts to all connected oracle peers (excluding origin).
+    """
+    try:
+        if isinstance(params, list):
+            params = params[0] if params else {}
+        if not isinstance(params, dict):
+            return _rpc_error(-32602, "params must be object", rpc_id)
+
+        gossip_type = str(params.get("gossip_type", "")).lower()
+        payload = params.get("payload", {})
+        origin_id = str(params.get("origin_id", "")).strip()
+        ttl = int(params.get("ttl", 3))
+
+        if not gossip_type or not payload:
+            return _rpc_error(-32602, "gossip_type and payload required", rpc_id)
+        if ttl <= 0:
+            return _rpc_ok({"relayed": 0, "reason": "ttl_expired"}, rpc_id)
+
+        # Log the gossip event
+        _log_rpc_event(f"gossip_{gossip_type}", {
+            "origin": origin_id[:16] if origin_id else "unknown",
+            "ttl": ttl,
+            "type": gossip_type,
+        })
+
+        # Special handling: oracle DM pushes also feed into the client consensus pool
+        if gossip_type == "oracle_dm" and isinstance(payload, dict):
+            try:
+                _rpc_pushOracleDM(payload, None)
+            except Exception:
+                pass
+
+        # Special handling: block gossip updates height cache
+        if gossip_type == "block" and isinstance(payload, dict):
+            h = int(payload.get("height", 0))
+            bh = str(payload.get("block_hash", ""))
+            if h > 0 and bh:
+                _height_cache.update_height(h, bh)
+
+        # Fan-out to oracle peers (fire-and-forget, non-blocking)
+        relay_count = 0
+        relay_payload = {
+            "gossip_type": gossip_type,
+            "payload": payload,
+            "origin_id": origin_id,
+            "ttl": ttl - 1,
+        }
+
+        with _ORACLE_PEERS_LOCK:
+            targets = [
+                p for p in _ORACLE_PEERS.values()
+                if p["node_id"] != origin_id
+                and (time.time() - p["last_seen"]) < 600
+                and p.get("oracle_active", False)
+            ]
+
+        for peer in targets[:20]:  # cap fan-out to 20 peers
+            try:
+                addr = peer["external_addr"]
+                if ":" not in addr:
+                    addr = f"{addr}:{peer.get('mesh_port', 9091)}"
+                url = f"http://{addr}/rpc"
+                rpc_body = json.dumps({
+                    "jsonrpc": "2.0",
+                    "method": "qtcl_relayGossip",
+                    "params": [relay_payload],
+                    "id": 1,
+                }).encode()
+                req = __import__("urllib.request", fromlist=["Request"]).Request(
+                    url, data=rpc_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                __import__("urllib.request", fromlist=["urlopen"]).urlopen(req, timeout=2)
+                relay_count += 1
+            except Exception:
+                pass
+
+        # Update relay count for origin peer
+        if origin_id:
+            with _ORACLE_PEERS_LOCK:
+                if origin_id in _ORACLE_PEERS:
+                    _ORACLE_PEERS[origin_id]["relay_count"] = _ORACLE_PEERS[origin_id].get("relay_count", 0) + 1
+                    _ORACLE_PEERS[origin_id]["last_seen"] = time.time()
+
+        return _rpc_ok({
+            "relayed": relay_count,
+            "total_oracle_peers": len(targets),
+            "gossip_type": gossip_type,
+            "ttl_remaining": ttl - 1,
+        }, rpc_id)
+
+    except Exception as e:
+        logger.debug(f"[P2P-ORACLE] relayGossip: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
 # ═══ JSON-RPC DISPATCH TABLE ═══════════════════════════════════════════════
 _RPC_METHODS = {
     "qtcl_submitBlock": _rpc_submitBlock,
@@ -7531,13 +7916,13 @@ _RPC_METHODS = {
     "qtcl_getQuantumMetrics": _rpc_getQuantumMetrics,
     "qtcl_getPythPrice": _rpc_getPythPrice,
     "qtcl_getMempoolStats": _rpc_getMempoolStats,
-    "qtcl_getMempoolInfo": _rpc_getMempoolStats,  # alias for client mesh
+    "qtcl_getMempoolInfo": _rpc_getMempoolStats,
     "qtcl_getMempool": _rpc_getMempool,
     "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_getPeers": _rpc_getPeers,
     "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
-    "qtcl_registerPeer": _rpc_registerPeer,  # ← NEW: miner bootstrap registration
-    "qtcl_getMyAddr": _rpc_getMyAddr,  # ← NEW: STUN — return caller's observed IP
+    "qtcl_registerPeer": _rpc_registerPeer,
+    "qtcl_getMyAddr": _rpc_getMyAddr,
     "qtcl_getHealth": _rpc_getHealth,
     "qtcl_getTreasuryAddress": lambda p, rid: _rpc_ok(
         {
@@ -7557,8 +7942,12 @@ _RPC_METHODS = {
     "qtcl_registerMeasurementSubscriber": _rpc_registerMeasurementSubscriber,
     "qtcl_unregisterMeasurementSubscriber": _rpc_unregisterMeasurementSubscriber,
     "qtcl_listMeasurementSubscribers": _rpc_listMeasurementSubscribers,
-    # DEPRECATED: qtcl_pushOracleDM (replaced by SSE stream /rpc/oracle/snapshot for 16³ tensors)
-    # "qtcl_pushOracleDM": _rpc_pushOracleDM,
+    # ── P2P Oracle Mesh (client-as-oracle-peer) ───────────────────────────────
+    "qtcl_pushOracleDM": _rpc_pushOracleDM,  # Re-enabled: clients push DM frames
+    "qtcl_registerOraclePeer": _rpc_registerOraclePeer,
+    "qtcl_getOraclePeers": _rpc_getOraclePeers,
+    "qtcl_getOracleSnapshot": _rpc_getOracleSnapshot,
+    "qtcl_relayGossip": _rpc_relayGossip,
     # ── NEW: Transaction Explorer ─────────────────────────────────────────────────
     "qtcl_getBlockTransactions": _rpc_getBlockTransactions,
     "qtcl_getTransactions": _rpc_getTransactions,
