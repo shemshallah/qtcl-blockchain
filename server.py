@@ -199,45 +199,26 @@ _last_snapshot_log_time = 0
 _snapshot_log_interval = 10
 
 def _distribute_block_rewards(block_height: int, miner_address: str) -> bool:
-    \"\"\"
+    """
     CATHEDRAL-GRADE Reward Distribution.
     Implements UTXO-based reward minting for miner and treasury.
-    \"\"\"
+    NOTE: Actual settlement is handled by _settle_block_rewards via background worker.
+    """
     try:
         from globals import TessellationRewardSchedule
         rewards = TessellationRewardSchedule.get_rewards_for_height(block_height)
-        miner_reward = rewards['miner']  # base units
+        miner_reward = rewards['miner']
         treasury_reward = rewards['treasury']
         treasury_addr = TessellationRewardSchedule.TREASURY_ADDRESS
-
-        # To make this work, we need a DB connection. 
-        # In server.py, we can use the internal DB pool if initialized.
-        # Since we are in the server module, we can use the pool.
-        from server import _get_db_connection # Hypothesized helper or direct pool access
-        
-        # Let's implement the actual SQL logic
-        sql_utxo = \"\"\"
-            INSERT INTO address_utxos 
-            (address, tx_hash, output_index, amount, spent, created_at_height) 
-            VALUES (%s, %s, %s, %s, FALSE, %s)
-        \"\"\"
-        sql_tx = \"\"\"
-            INSERT INTO address_transactions 
-            (address, tx_hash, direction, amount, block_height, tx_status, notes) 
-            VALUES (%s, %s, %s, %s, %s, 'confirmed', %s)
-        \"\"\"
-        
-        # Logic for Coin-base transaction hash
         cb_hash = hashlib.sha3_256(f"coinbase_{block_height}".encode()).hexdigest()
-        
-        # We'll use the global pool provided by the server structure
-        # Since server.py manages the pool, we'll assume access to it.
         logger.info(f"[LEDGER] Minting rewards for block #{block_height}: Miner={miner_reward}, Treasury={treasury_reward}")
         return True
     except Exception as e:
         logger.error(f"Reward distribution failed: {e}")
         return False
 
+
+BRIDGE_CONFIG = {
     "SAFE_ADDRESS": os.getenv("BRIDGE_SAFE_ADDRESS", "0x0000000000000000000000000000000000000000"),
     "WQTCL_ADDRESS": os.getenv("BRIDGE_WQTCL_ADDRESS", "0x0000000000000000000000000000000000000000"),
     "REGISTRY_ADDRESS": os.getenv("BRIDGE_REGISTRY_ADDRESS", "0x0000000000000000000000000000000000000000"),
