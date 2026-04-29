@@ -1682,132 +1682,139 @@ def _settle_block_rewards(
             _settle_log.debug(f"[SETTLE] pending_rewards DDL: {_pre}")
 
 
+        # ══════════════════════════════════════════════════════════════════════════════
+        # PHASE 2 — MINER REWARD (ISOLATED CURSOR — immune to Phase 1/1.5 failures)
+        # ══════════════════════════════════════════════════════════════════════════════
+        # CRITICAL ARCHITECTURE: Miner credit runs in its OWN cursor context so that
+        # any psycopg2 "aborted transaction" state from Phase 1/1.5 errors cannot
+        # poison this write. On Neon psycopg2, a single SQL error in a cursor puts
+        # the entire connection into aborted state — all subsequent cur.execute() calls
+        # in the same transaction silently fail with InFailedSqlTransaction until
+        # an explicit rollback. Phase 1.5 used a bare try/except that swallowed errors
+        # WITHOUT rolling back, meaning Phase 2 would silently no-op.
+        # Solution: Phase 2 is now first and fully isolated.
         with get_db_cursor() as cur:
-            # PHASE 1 — non-coinbase transaction settlement
-            for tx in non_coinbase_txs:
-                tx_sender = tx.get("from_addr") or tx.get("from_address")
-                tx_receiver = tx.get("to_addr") or tx.get("to_address")
-                tx_amount = int(round(float(tx.get("amount", 0)) * 100))
-                tx_fee = int(round(float(tx.get("fee", 0)) * 100))
-                if not tx_sender or not tx_receiver or tx_amount <= 0:
-                    continue
-                total_deduction = tx_amount + tx_fee
-                cur.execute(
-                    "UPDATE wallet_addresses SET balance = balance - %s, "
-                    " transaction_count = transaction_count + 1, last_updated = NOW() "
-                    "WHERE address = %s AND balance >= %s",
-                    (total_deduction, tx_sender, total_deduction),
-                )
-                cur.execute(
-                    "INSERT INTO wallet_addresses "
-                    "(address, wallet_fingerprint, public_key, balance, "
-                    " transaction_count, address_type, last_updated) "
-                    "VALUES (%s, %s, %s, %s, 1, 'standard', NOW()) "
-                    "ON CONFLICT (address) DO UPDATE SET "
-                    " balance = wallet_addresses.balance + EXCLUDED.balance, "
-                    " transaction_count = wallet_addresses.transaction_count + 1, "
-                    " last_updated = NOW()",
-                    (
-                        tx_receiver,
-                        hashlib.sha256(tx_receiver.encode()).hexdigest()[:64],
-                        hashlib.sha256(tx_receiver.encode()).hexdigest()[:64],
-                        tx_amount,
-                    ),
-                )
-
-            # ═══════════════════════════════════════════════════════════════════════════════
-            # PHASE 1.5 — RECORD ADDRESS TRANSACTION HISTORY (CRITICAL FIX)
-            # ═══════════════════════════════════════════════════════════════════════════════
-            # For each transaction, create TWO address_transactions entries:
-            # 1. OUTGOING from sender
-            # 2. INCOMING to receiver
-            # This populates the address_transactions table so wallet history is available
-            _settle_log.debug(f"[SETTLE] Recording transaction history for {len(non_coinbase_txs)} txs")
-            
-            for tx in non_coinbase_txs:
-                tx_hash = tx.get("tx_hash") or tx.get("hash") or ""
-                tx_sender = tx.get("from_address") or ""
-                tx_receiver = tx.get("to_address") or ""
-                tx_amount = int(round(float(tx.get("amount", 0)) * 100))
-                
-                if not tx_hash or not tx_sender or not tx_receiver or tx_amount <= 0:
-                    continue
-                
-                try:
-                    # Record as OUTGOING from sender
-                    cur.execute("""
-                        INSERT INTO address_transactions
-                        (address, tx_hash, direction, from_address, to_address, amount,
-                         block_height, block_hash, block_timestamp, tx_status, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                        ON CONFLICT (address, tx_hash) DO NOTHING
-                    """, (
-                        tx_sender, tx_hash, 'outgoing',
-                        tx_sender, tx_receiver, tx_amount,
-                        height, block_hash, int(time.time()), 'confirmed'
-                    ))
-                    
-                    # Record as INCOMING to receiver
-                    cur.execute("""
-                        INSERT INTO address_transactions
-                        (address, tx_hash, direction, from_address, to_address, amount,
-                         block_height, block_hash, block_timestamp, tx_status, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                        ON CONFLICT (address, tx_hash) DO NOTHING
-                    """, (
-                        tx_receiver, tx_hash, 'incoming',
-                        tx_sender, tx_receiver, tx_amount,
-                        height, block_hash, int(time.time()), 'confirmed'
-                    ))
-                except Exception as addr_tx_err:
-                    _settle_log.warning(
-                        f"[SETTLE] Failed to record address_transaction for {tx_hash[:12]}…: {addr_tx_err}"
-                    )
-            # ═════════════════════════════════════════════════════════════════════════════════
-
-            # PHASE 2 — miner reward credited NOW (single cursor, no double-credit risk)
             cur.execute(
-                """INSERT INTO wallet_addresses (address,wallet_fingerprint,public_key,balance,transaction_count,address_type,last_updated)
-            VALUES (%s,%s,%s,%s,1,'miner',NOW()) ON CONFLICT (address) DO UPDATE SET
-            balance=wallet_addresses.balance+EXCLUDED.balance, transaction_count=wallet_addresses.transaction_count+1, last_updated=NOW()""",
+                """INSERT INTO wallet_addresses
+                    (address, wallet_fingerprint, public_key, balance,
+                     transaction_count, address_type, last_updated)
+                   VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
+                   ON CONFLICT (address) DO UPDATE SET
+                     balance = wallet_addresses.balance + EXCLUDED.balance,
+                     transaction_count = wallet_addresses.transaction_count + 1,
+                     last_updated = NOW()""",
                 (miner_address, miner_fp, miner_fp, miner_reward_base),
             )
-            _settle_log.info(
-                f"[SETTLE] 💰 Miner {miner_address[:16]}… += {miner_reward_base / 100:.2f} QTCL (confirmed h={height})"
-            )
+        _settle_log.critical(
+            f"[SETTLE] 💰 Miner {miner_address[:16]}… += {miner_reward_base / 100:.2f} QTCL "
+            f"(confirmed h={height}) ✅ COMMITTED"
+        )
 
+        # ══════════════════════════════════════════════════════════════════════════════
+        # PHASE 1 + 1.5 — NON-COINBASE TX SETTLEMENT (separate cursor, non-critical)
+        # ══════════════════════════════════════════════════════════════════════════════
+        if non_coinbase_txs:
+            try:
+                with get_db_cursor() as cur:
+                    for tx in non_coinbase_txs:
+                        tx_sender = tx.get("from_addr") or tx.get("from_address")
+                        tx_receiver = tx.get("to_addr") or tx.get("to_address")
+                        tx_amount = int(round(float(tx.get("amount", 0)) * 100))
+                        tx_fee = int(round(float(tx.get("fee", 0)) * 100))
+                        if not tx_sender or not tx_receiver or tx_amount <= 0:
+                            continue
+                        total_deduction = tx_amount + tx_fee
+                        cur.execute(
+                            "UPDATE wallet_addresses SET balance = balance - %s,"
+                            " transaction_count = transaction_count + 1, last_updated = NOW()"
+                            " WHERE address = %s AND balance >= %s",
+                            (total_deduction, tx_sender, total_deduction),
+                        )
+                        cur.execute(
+                            "INSERT INTO wallet_addresses"
+                            " (address, wallet_fingerprint, public_key, balance,"
+                            "  transaction_count, address_type, last_updated)"
+                            " VALUES (%s, %s, %s, %s, 1, 'standard', NOW())"
+                            " ON CONFLICT (address) DO UPDATE SET"
+                            "  balance = wallet_addresses.balance + EXCLUDED.balance,"
+                            "  transaction_count = wallet_addresses.transaction_count + 1,"
+                            "  last_updated = NOW()",
+                            (
+                                tx_receiver,
+                                hashlib.sha256(tx_receiver.encode()).hexdigest()[:64],
+                                hashlib.sha256(tx_receiver.encode()).hexdigest()[:64],
+                                tx_amount,
+                            ),
+                        )
+                    # Phase 1.5 — address_transactions history (best-effort via SAVEPOINT)
+                    _settle_log.debug(f"[SETTLE] Recording tx history for {len(non_coinbase_txs)} txs")
+                    for tx in non_coinbase_txs:
+                        _tx_hash = tx.get("tx_hash") or tx.get("hash") or ""
+                        _tx_sender = tx.get("from_addr") or tx.get("from_address") or ""
+                        _tx_receiver = tx.get("to_addr") or tx.get("to_address") or ""
+                        _tx_amt = int(round(float(tx.get("amount", 0)) * 100))
+                        if not _tx_hash or not _tx_sender or not _tx_receiver or _tx_amt <= 0:
+                            continue
+                        try:
+                            cur.execute("SAVEPOINT addr_tx_sp")
+                            cur.execute("""
+                                INSERT INTO address_transactions
+                                (address, tx_hash, direction, from_address, to_address, amount,
+                                 block_height, block_hash, block_timestamp, tx_status, created_at)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                                ON CONFLICT (address, tx_hash) DO NOTHING
+                            """, (_tx_sender, _tx_hash, 'outgoing', _tx_sender, _tx_receiver,
+                                  _tx_amt, height, block_hash, int(time.time()), 'confirmed'))
+                            cur.execute("""
+                                INSERT INTO address_transactions
+                                (address, tx_hash, direction, from_address, to_address, amount,
+                                 block_height, block_hash, block_timestamp, tx_status, created_at)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                                ON CONFLICT (address, tx_hash) DO NOTHING
+                            """, (_tx_receiver, _tx_hash, 'incoming', _tx_sender, _tx_receiver,
+                                  _tx_amt, height, block_hash, int(time.time()), 'confirmed'))
+                            cur.execute("RELEASE SAVEPOINT addr_tx_sp")
+                        except Exception as _aderr:
+                            cur.execute("ROLLBACK TO SAVEPOINT addr_tx_sp")
+                            _settle_log.warning(f"[SETTLE] addr_tx history skipped {_tx_hash[:12]}: {_aderr}")
+            except Exception as _phase1_err:
+                _settle_log.warning(f"[SETTLE] Phase 1 non-coinbase settlement error (miner already credited): {_phase1_err}")
+
+        # ══════════════════════════════════════════════════════════════════════════════
+        # PHASE 3 + 4 + 5 — TREASURY QUEUE + PRIOR CONFIRM + CHAIN STATE (own cursor)
+        # ══════════════════════════════════════════════════════════════════════════════
+        with get_db_cursor() as cur:
             # PHASE 3 — treasury reward QUEUED (confirms at height+1)
             cur.execute(
-                "INSERT INTO pending_rewards "
-                "(height, reward_type, recipient, amount, status) "
-                "VALUES (%s, 'treasury', %s, %s, 'pending') "
-                "ON CONFLICT (height, reward_type, recipient) DO NOTHING",
+                "INSERT INTO pending_rewards"
+                " (height, reward_type, recipient, amount, status)"
+                " VALUES (%s, 'treasury', %s, %s, 'pending')"
+                " ON CONFLICT (height, reward_type, recipient) DO NOTHING",
                 (height, treasury_address, treasury_reward_base),
             )
             _settle_log.info(
-                f"[SETTLE] ⏳ Treasury {treasury_address[:16]}… QUEUED {treasury_reward_base / 100:.2f} QTCL (confirms at h={height + 1})"
+                f"[SETTLE] ⏳ Treasury {treasury_address[:16]}… QUEUED "
+                f"{treasury_reward_base / 100:.2f} QTCL (confirms at h={height + 1})"
             )
 
             # PHASE 4 — Confirm PRIOR block's pending treasury reward (h-1)
             cur.execute(
-                "SELECT id, recipient, amount FROM pending_rewards "
-                "WHERE height = %s AND status = 'pending'",
+                "SELECT id, recipient, amount FROM pending_rewards"
+                " WHERE height = %s AND status = 'pending'",
                 (height - 1,),
             )
             _prior = cur.fetchall() or []
             for pr in _prior:
-                _pr_id = pr[0]
-                _pr_recipient = pr[1]
-                _pr_amount = int(pr[2])
+                _pr_id, _pr_recipient, _pr_amount = pr[0], pr[1], int(pr[2])
                 cur.execute(
-                    "INSERT INTO wallet_addresses "
-                    "(address, wallet_fingerprint, public_key, balance, "
-                    " transaction_count, address_type, last_updated) "
-                    "VALUES (%s, %s, %s, %s, 1, 'treasury', NOW()) "
-                    "ON CONFLICT (address) DO UPDATE SET "
-                    " balance = wallet_addresses.balance + EXCLUDED.balance, "
-                    " transaction_count = wallet_addresses.transaction_count + 1, "
-                    " last_updated = NOW()",
+                    "INSERT INTO wallet_addresses"
+                    " (address, wallet_fingerprint, public_key, balance,"
+                    "  transaction_count, address_type, last_updated)"
+                    " VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())"
+                    " ON CONFLICT (address) DO UPDATE SET"
+                    "  balance = wallet_addresses.balance + EXCLUDED.balance,"
+                    "  transaction_count = wallet_addresses.transaction_count + 1,"
+                    "  last_updated = NOW()",
                     (
                         _pr_recipient,
                         hashlib.sha256(_pr_recipient.encode()).hexdigest()[:64],
@@ -1816,8 +1823,8 @@ def _settle_block_rewards(
                     ),
                 )
                 cur.execute(
-                    "UPDATE pending_rewards SET status = 'confirmed', "
-                    "confirmed_at_height = %s WHERE id = %s",
+                    "UPDATE pending_rewards SET status = 'confirmed',"
+                    " confirmed_at_height = %s WHERE id = %s",
                     (height, _pr_id),
                 )
                 _settle_log.info(
@@ -1836,16 +1843,16 @@ def _settle_block_rewards(
                 )"""
             )
             cur.execute(
-                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, "
-                " latest_coherence, updated_at) "
-                "VALUES (1, %s, %s, 0.0, NOW()) "
-                "ON CONFLICT (state_id) DO UPDATE SET "
-                " chain_height = EXCLUDED.chain_height, "
-                " head_block_hash = EXCLUDED.head_block_hash, "
-                " updated_at = NOW()",
+                "INSERT INTO chain_state (state_id, chain_height, head_block_hash,"
+                " latest_coherence, updated_at)"
+                " VALUES (1, %s, %s, 0.0, NOW())"
+                " ON CONFLICT (state_id) DO UPDATE SET"
+                "  chain_height = EXCLUDED.chain_height,"
+                "  head_block_hash = EXCLUDED.head_block_hash,"
+                "  updated_at = NOW()",
                 (height, block_hash),
             )
-        # END with get_db_cursor() — all phases committed atomically
+        # END Phases 3-5 committed
 
         _settle_log.warning(
             f"[SETTLE] ✅ h={height}: miner=+{miner_reward_base / 100:.2f} QTCL (now), "
