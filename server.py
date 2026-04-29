@@ -1892,23 +1892,30 @@ def _block_settle_worker_thread():
     _settle_log.critical("[SETTLE-WORKER] 🚀 Settlement worker thread STARTED")
     
     # ═══════════════════════════════════════════════════════════════════════════════
-    # STARTUP VERIFICATION: Database connectivity check (CRITICAL)
+    # STARTUP VERIFICATION: DB connectivity check with retry (CRITICAL FIX)
+    # Previously `raise` here permanently killed thread on transient startup errors.
+    # Now retries 15x with 2s backoff (covers Koyeb cold-start + Neon wake delays).
     # ═══════════════════════════════════════════════════════════════════════════════
-    try:
-        _settle_log.debug("[SETTLE-WORKER] Verifying database connectivity...")
-        with get_db_cursor() as cur:
-            cur.execute("SELECT 1")
-        _settle_log.critical("[SETTLE-WORKER] ✅ Database connectivity verified at startup")
-    except Exception as db_startup_err:
+    _db_verified = False
+    for _attempt in range(15):
+        try:
+            _settle_log.debug(f"[SETTLE-WORKER] DB connectivity check {_attempt + 1}/15")
+            with get_db_cursor() as cur:
+                cur.execute("SELECT 1")
+            _settle_log.critical("[SETTLE-WORKER] ✅ Database connectivity verified at startup")
+            _db_verified = True
+            break
+        except Exception as _db_startup_err:
+            _settle_log.warning(
+                f"[SETTLE-WORKER] ⚠️  DB check {_attempt + 1}/15 failed: {_db_startup_err}"
+            )
+            time.sleep(2.0)
+    if not _db_verified:
         _settle_log.critical(
-            f"[SETTLE-WORKER] ❌ FATAL: Database not accessible on startup!"
+            f"[SETTLE-WORKER] ❌ DB not accessible after 15 attempts. "
+            f"DATABASE_URL configured: {bool(DATABASE_URL)}. Thread exiting."
         )
-        _settle_log.critical(f"[SETTLE-WORKER]    Error: {db_startup_err}")
-        _settle_log.critical(f"[SETTLE-WORKER]    DATABASE_URL configured: {bool(DATABASE_URL)}")
-        _settle_log.critical(
-            "[SETTLE-WORKER] Settlement worker cannot start without DB access"
-        )
-        raise
+        return  # graceful exit — process stays alive, no settlement until restart
     # ═════════════════════════════════════════════════════════════════════════════════
     
     while True:
@@ -1948,8 +1955,11 @@ def _block_settle_worker_thread():
 _block_settle_daemon = threading.Thread(
     target=_block_settle_worker_thread, daemon=True, name="BlockSettle"
 )
-_block_settle_daemon.start()
-logger.info("[TX-WORKER] Dedicated transaction query thread started (port 6543)")
+# ⚠️  CRITICAL FIX: Do NOT start here — get_db_cursor is not defined yet at this
+# point in module load (defined at line ~3319). Starting early causes NameError
+# in the startup DB connectivity check, killing the thread before it ever drains
+# the queue. _start_block_settle_daemon() is called after get_db_cursor() is defined.
+logger.info("[TX-WORKER] Settlement daemon created — will start after get_db_cursor ready")
 
 # ── Oracle identity — unique per deployed instance ────────────────────────────
 # Set ORACLE_ID in env to distinguish instances:
@@ -3355,6 +3365,23 @@ def get_db_cursor():
             except Exception as e:
                 logger.debug(f"[DB-CURSOR] putconn error: {e}")
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEFERRED SETTLEMENT DAEMON START — get_db_cursor now defined, safe to launch
+# ═══════════════════════════════════════════════════════════════════════════════
+def _start_block_settle_daemon() -> None:
+    """Start the block settlement worker daemon — called once after get_db_cursor is defined.
+    Guards against double-start; idempotent.
+    """
+    global _block_settle_daemon
+    if _block_settle_daemon.is_alive():
+        logger.info("[SETTLE] Settlement daemon already running — skipping start")
+        return
+    _block_settle_daemon.start()
+    logger.critical("[SETTLE] ✅ Block settlement daemon STARTED (post get_db_cursor)")
+
+# Fire immediately — we are now past the get_db_cursor definition
+_start_block_settle_daemon()
 
 # ── DATABASE SCHEMA ENSURE: Lazy creation of tables missing from migration ─────
 _SCHEMA_ENSURED_PEER_REGISTRY = False
