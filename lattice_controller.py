@@ -3628,7 +3628,7 @@ class BlockManager:
             if self.db is not None:
                 try:
                     self.db.execute(
-                        """
+                        \"\"\"
                         INSERT INTO blocks
                             (block_height, block_hash, parent_hash, oracle_w_state_hash,
                              timestamp, tx_count, merkle_root, hyp_witness)
@@ -3640,7 +3640,7 @@ class BlockManager:
                             tx_count          = EXCLUDED.tx_count,
                             merkle_root       = EXCLUDED.merkle_root,
                             hyp_witness      = EXCLUDED.hyp_witness
-                        """,
+                        \"\"\",
                         (
                             block.block_height,
                             block.block_hash,
@@ -3652,6 +3652,26 @@ class BlockManager:
                             block.hyp_witness,
                         ),
                     )
+                    if success:
+                        # ═══════════════════════════════════════════════════════════
+                        # 💎 UTXO REWARD DISTRIBUTION (CATHEDRAL-GRADE)
+                        # ═══════════════════════════════════════════════════════════
+                        try:
+                            import sys
+                            _srv = sys.modules.get("server")
+                            if _srv and hasattr(_srv, "_distribute_block_rewards"):
+                                _srv._distribute_block_rewards(block.block_height, block.miner_address)
+                        except Exception as reward_err:
+                            logger.warning(f"[SEAL] Reward distribution failed: {reward_err}")
+                    else:
+                        logger.warning(
+                            \"[SEAL] DB execute returned False — genesis may not be persisted\"
+                        )
+                except Exception as db_err:
+                    logger.warning(
+                        f\"[SEAL] DB persist failed for block #{block.block_height}: {db_err}\"
+                    )
+
                 except Exception as db_err:
                     logger.warning(
                         f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}"

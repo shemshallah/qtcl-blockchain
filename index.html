@@ -1309,20 +1309,28 @@ async function fetchNetwork() {
     const peers = res && res.peers ? res.peers : [];
     document.getElementById('net-count').textContent = `${peers.length} peers`;
     if (!peers.length) {
-      body.innerHTML = '<div style="padding:20px;text-align:center;font-family:var(--mono);font-size:9px;color:var(--dim2)">No peers found</div>';
+      body.innerHTML = '<div style="padding:20px;text-align:center;font-family:var(--mono);font-size:9px;color:var(--dim2)">No peers connected yet — start a miner client to join the network</div>';
       return;
     }
-    body.innerHTML = `<div class="peers-grid">${peers.map(p => `
+    body.innerHTML = `<div class="peers-grid">${peers.map(p => {
+      const addr = p.external_addr || p.address || 'unknown';
+      const nodeId = p.node_id || p.peer_id || 'unknown';
+      const height = p.chain_height || 0;
+      const lastSeen = p.last_seen ? new Date(p.last_seen * 1000).toLocaleString() : '—';
+      const callerIp = p.caller_ip || '';
+      return `
       <div class="peer-card">
-        <div class="peer-id">${p.peer_id || p.node_id || 'unknown'}</div>
-        <div class="peer-addr" style="color:var(--vi)">${p.address || p.external_addr || 'unknown'}</div>
-        <div style="display:flex;gap:12px;margin-top:4px">
-          <div class="peer-height">H: ${(p.chain_height || 0).toLocaleString()}</div>
-          ${p.version ? `<div style="font-family:var(--mono);font-size:8px;color:var(--dim2)">v${p.version}</div>` : ''}
+        <div class="peer-id" title="${nodeId}">${nodeId.slice(0,16)}…${nodeId.slice(-8)}</div>
+        <div class="peer-addr">${addr}</div>
+        ${callerIp ? `<div style="font-family:var(--mono);font-size:7.5px;color:var(--dim2);margin-top:2px">NAT: ${callerIp}</div>` : ''}
+        <div style="display:flex;gap:12px;margin-top:6px;flex-wrap:wrap">
+          <div class="peer-height">H: ${height.toLocaleString()}</div>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--am)">${lastSeen}</div>
+          ${p.version ? `<div style="font-family:var(--mono);font-size:8px;color:var(--dim2)">${p.version}</div>` : ''}
           ${p.latency_ms !== undefined ? `<div style="font-family:var(--mono);font-size:8px;color:var(--am)">${p.latency_ms}ms</div>` : ''}
         </div>
       </div>
-    `).join('')}</div>`;
+    `}).join('')}</div>`;
   } catch(e) {
     body.innerHTML = `<div class="error-msg" style="margin:10px">Network scan failed: ${e.message}</div>`;
   }
