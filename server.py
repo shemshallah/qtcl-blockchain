@@ -1349,7 +1349,7 @@ def _ensure_wallet_addresses_table() -> None:
                     balance NUMERIC(30,0) DEFAULT 0,
                     transaction_count INTEGER DEFAULT 0,
                     address_type VARCHAR(20) DEFAULT 'standard',
-                    last_updated TIMESTAMP DEFAULT NOW()
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
             """)
         logger.info("[STARTUP] ✅ wallet_addresses table ready")
@@ -1711,19 +1711,19 @@ def _settle_block_rewards(
                         total_deduction = tx_amount + tx_fee
                         cur.execute(
                             "UPDATE wallet_addresses SET balance = balance - %s,"
-                            " transaction_count = transaction_count + 1, last_updated = NOW()"
+                            " transaction_count = transaction_count + 1, updated_at = NOW()"
                             " WHERE address = %s AND balance >= %s",
                             (total_deduction, tx_sender, total_deduction),
                         )
                         cur.execute(
                             "INSERT INTO wallet_addresses"
                             " (address, wallet_fingerprint, public_key, balance,"
-                            "  transaction_count, address_type, last_updated)"
+                            "  transaction_count, address_type, updated_at)"
                             " VALUES (%s, %s, %s, %s, 1, 'standard', NOW())"
                             " ON CONFLICT (address) DO UPDATE SET"
                             "  balance = wallet_addresses.balance + EXCLUDED.balance,"
                             "  transaction_count = wallet_addresses.transaction_count + 1,"
-                            "  last_updated = NOW()",
+                            "  updated_at = NOW()",
                             (
                                 tx_receiver,
                                 hashlib.sha256(tx_receiver.encode()).hexdigest()[:64],
@@ -4101,7 +4101,7 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                     try:
                         cur.execute(
                             "SELECT address, balance, address_type FROM wallet_addresses"
-                            " ORDER BY last_updated DESC LIMIT 5"
+                            " ORDER BY updated_at DESC LIMIT 5"
                         )
                         _recent = cur.fetchall() or []
                         _diagnostic["most_recent_wallets"] = [
@@ -4171,7 +4171,7 @@ def _rpc_debugWallet(params: Any, rpc_id: Any) -> dict:
             with get_db_cursor() as cur:
                 cur.execute(
                     "SELECT address, wallet_fingerprint, balance, transaction_count,"
-                    " address_type, last_updated FROM wallet_addresses"
+                    " address_type, updated_at FROM wallet_addresses"
                     " ORDER BY balance DESC LIMIT %s",
                     (limit,),
                 )
@@ -4184,7 +4184,7 @@ def _rpc_debugWallet(params: Any, rpc_id: Any) -> dict:
                         "balance_base": int(r[2]) if r[2] else 0,
                         "tx_count": r[3],
                         "address_type": r[4],
-                        "last_updated": str(r[5]) if r[5] else None,
+                        "updated_at": str(r[5]) if r[5] else None,
                     })
                 # Also dump pending_rewards
                 cur.execute(
@@ -6856,12 +6856,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 cur.execute(
                     """INSERT INTO wallet_addresses
                         (address, wallet_fingerprint, public_key, balance,
-                         transaction_count, address_type, last_updated)
+                         transaction_count, address_type, updated_at)
                        VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
                        ON CONFLICT (address) DO UPDATE SET
                          balance = wallet_addresses.balance + EXCLUDED.balance,
                          transaction_count = wallet_addresses.transaction_count + 1,
-                         last_updated = NOW()""",
+                         updated_at = NOW()""",
                     (miner_address, _miner_fp, _miner_fp, _miner_reward),
                 )
                 logger.critical(
@@ -6882,7 +6882,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     _nc_deduct = _nc_amt + _nc_fee
                     cur.execute(
                         "UPDATE wallet_addresses SET balance = balance - %s,"
-                        " transaction_count = transaction_count + 1, last_updated = NOW()"
+                        " transaction_count = transaction_count + 1, updated_at = NOW()"
                         " WHERE address = %s AND balance >= %s",
                         (_nc_deduct, _nc_sender, _nc_deduct),
                     )
@@ -6890,12 +6890,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     cur.execute(
                         """INSERT INTO wallet_addresses
                            (address, wallet_fingerprint, public_key, balance,
-                            transaction_count, address_type, last_updated)
+                            transaction_count, address_type, updated_at)
                            VALUES (%s, %s, %s, %s, 1, 'standard', NOW())
                            ON CONFLICT (address) DO UPDATE SET
                              balance = wallet_addresses.balance + EXCLUDED.balance,
                              transaction_count = wallet_addresses.transaction_count + 1,
-                             last_updated = NOW()""",
+                             updated_at = NOW()""",
                         (_nc_receiver, _nc_rcvr_fp, _nc_rcvr_fp, _nc_amt),
                     )
 
@@ -6913,12 +6913,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         cur.execute(
                             """INSERT INTO wallet_addresses
                                (address, wallet_fingerprint, public_key, balance,
-                                transaction_count, address_type, last_updated)
+                                transaction_count, address_type, updated_at)
                                VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
                                ON CONFLICT (address) DO UPDATE SET
                                  balance = wallet_addresses.balance + EXCLUDED.balance,
                                  transaction_count = wallet_addresses.transaction_count + 1,
-                                 last_updated = NOW()""",
+                                 updated_at = NOW()""",
                             (_pp_recipient, _pp_fp, _pp_fp, _pp_amount),
                         )
                         cur.execute(
