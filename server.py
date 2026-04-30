@@ -108,6 +108,7 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_getTransaction": 4.0,
     "qtcl_submitBlock": 30.0,
     "qtcl_submitTransaction": 6.0,
+    "qtcl_signAndSubmitTx":   6.0,
     "qtcl_submitOracleReg": 6.0,
     "qtcl_getOracleRegistry": 5.0,
     "qtcl_getOracleRecord": 4.0,
@@ -6484,12 +6485,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         if not txs or not isinstance(txs, list):
             return _rpc_error(-32602, "Block must include transactions array", rpc_id)
         tx_types = [tx.get("tx_type", "") for tx in txs]
-        if "miner_reward" not in tx_types or "treasury_reward" not in tx_types:
+        if "miner_reward" not in tx_types:
             return _rpc_error(
                 -32602,
-                "Block must include miner_reward and treasury_reward transactions",
+                "Block must include miner_reward transaction",
                 rpc_id,
             )
+        # treasury_reward tx is optional: it carries the PRIOR block's pending 0.8 QTCL
+        # settlement. At h=1 there is no prior pending, so it may be absent.
+        # The CURRENT block's 0.8 QTCL is queued in pending_rewards and becomes
+        # the treasury_reward forming tx of block h+1.
 
         # ══════════════════════════════════════════════════════════════════════════
         # COHERENT TRANSACTION PIPELINE — Validate Client Coinbases, Then Persist
@@ -6846,12 +6851,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
                 # ════════════════════════════════════════════════════════════════
                 # WALLET SETTLEMENT — atomic in same cursor as block insert
+                #
+                # Treasury deferred flow:
+                #   Block h:   0.8 QTCL queued → pending_rewards(height=h, status='pending')
+                #   Block h+1: pending_rewards(height=h) confirmed → wallet_addresses credit
+                #              treasury_reward tx in block h+1 IS that settlement coinbase
                 # ════════════════════════════════════════════════════════════════
 
                 # ── MINER CREDIT (inline, same transaction as block insert) ──────
-                # This is the SINGULAR authoritative path for miner balance credit.
-                # The background worker (_settle_block_rewards) handles treasury
-                # confirmation and non-coinbase tx settlement ONLY.
+                # SINGULAR authoritative path. Block saved ↔ balance credited. Atomic.
                 _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
                 cur.execute(
                     """INSERT INTO wallet_addresses
@@ -6899,58 +6907,64 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         (_nc_receiver, _nc_rcvr_fp, _nc_rcvr_fp, _nc_amt),
                     )
 
-                # ── CONFIRM PRIOR TREASURY REWARD (h-1 pending → wallet credit) ──
-                try:
-                    cur.execute(
-                        "SELECT id, recipient, amount FROM pending_rewards"
-                        " WHERE height = %s AND status = 'pending'",
-                        (height - 1,),
-                    )
-                    _prior_pending = cur.fetchall() or []
-                    for _pp in _prior_pending:
-                        _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
-                        _pp_fp = hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64]
-                        cur.execute(
-                            """INSERT INTO wallet_addresses
-                               (address, wallet_fingerprint, public_key, balance,
-                                transaction_count, address_type, updated_at)
-                               VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
-                               ON CONFLICT (address) DO UPDATE SET
-                                 balance = wallet_addresses.balance + EXCLUDED.balance,
-                                 transaction_count = wallet_addresses.transaction_count + 1,
-                                 updated_at = NOW()""",
-                            (_pp_recipient, _pp_fp, _pp_fp, _pp_amount),
-                        )
-                        cur.execute(
-                            "UPDATE pending_rewards SET status = 'confirmed',"
-                            " confirmed_at_height = %s WHERE id = %s",
-                            (height, _pp_id),
-                        )
-                        logger.info(
-                            f"[SUBMIT-BLOCK] ✅ Treasury confirmed h={height - 1}: "
-                            f"{_pp_recipient[:20]}… +{_pp_amount / 100:.2f} QTCL"
-                        )
-                except Exception as _treas_confirm_err:
-                    logger.warning(f"[SUBMIT-BLOCK] Treasury confirm skipped: {_treas_confirm_err}")
+                # ── QUEUE THIS BLOCK'S TREASURY REWARD → deferred to h+1 ─────────
+                # The 0.8 QTCL earned at block h is NOT credited now.
+                # It is stored in pending_rewards and becomes the forming coinbase
+                # transaction of block h+1. When block h+1 is submitted, the
+                # CONFIRM step below reads this row and credits the treasury wallet.
+                cur.execute(
+                    """INSERT INTO pending_rewards
+                       (height, reward_type, recipient, amount, status)
+                       VALUES (%s, 'treasury', %s, %s, 'pending')
+                       ON CONFLICT (height, reward_type, recipient) DO NOTHING""",
+                    (height, _treasury_address, _treas_reward),
+                )
+                logger.critical(
+                    f"[SUBMIT-BLOCK] ⏳ TREASURY QUEUED h={height}: "
+                    f"+{_treas_reward / 100:.2f} QTCL → {_treasury_address[:20]}… "
+                    f"(forming coinbase of block h={height + 1})"
+                )
 
-
-                # Queue THIS block's treasury → becomes coinbase in block h+1
-                try:
-                    cur.execute(
-                        """INSERT INTO pending_rewards (height, reward_type, recipient, amount, status)
-                        VALUES (%s, 'treasury', %s, %s, 'pending')
-                        ON CONFLICT (height, reward_type, recipient) DO NOTHING""",
-                        (height, _treasury_address, _treas_reward),
-                    )
-                    logger.critical(
-                        f"[SUBMIT-BLOCK] ⏳ TREASURY QUEUED h={height}: "
-                        f"{_treas_reward / 100:.2f} QTCL → {_treasury_address[:16]}… "
-                        f"(coinbase at h={height + 1})"
-                    )
-                except Exception as _pre:
-                    logger.error(
-                        f"[SUBMIT-BLOCK] ❌ TREASURY QUEUEING FAILED h={height}: {_pre}"
-                    )
+                # ── CONFIRM PRIOR BLOCK'S TREASURY REWARD (h-1 pending → wallet) ──
+                # This block's treasury_reward coinbase tx IS the on-chain record of
+                # this settlement. Read authoritative amounts from pending_rewards,
+                # not from the client tx (client tx may differ in rounding or be absent
+                # at h=1). Mark each row 'confirmed' before crediting to prevent any
+                # retry double-credit if a future block re-runs this path.
+                if height > 1:
+                    try:
+                        cur.execute(
+                            "SELECT id, recipient, amount FROM pending_rewards"
+                            " WHERE height = %s AND status = 'pending'",
+                            (height - 1,),
+                        )
+                        _prior_pending = cur.fetchall() or []
+                        for _pp in _prior_pending:
+                            _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
+                            # Mark confirmed FIRST (prevent double-credit on retry)
+                            cur.execute(
+                                "UPDATE pending_rewards SET status = 'confirmed',"
+                                " confirmed_at_height = %s WHERE id = %s",
+                                (height, _pp_id),
+                            )
+                            _pp_fp = hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64]
+                            cur.execute(
+                                """INSERT INTO wallet_addresses
+                                   (address, wallet_fingerprint, public_key, balance,
+                                    transaction_count, address_type, updated_at)
+                                   VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
+                                   ON CONFLICT (address) DO UPDATE SET
+                                     balance = wallet_addresses.balance + EXCLUDED.balance,
+                                     transaction_count = wallet_addresses.transaction_count + 1,
+                                     updated_at = NOW()""",
+                                (_pp_recipient, _pp_fp, _pp_fp, _pp_amount),
+                            )
+                            logger.info(
+                                f"[SUBMIT-BLOCK] ✅ TREASURY SETTLED h={height - 1}→h={height}: "
+                                f"{_pp_recipient[:20]}… +{_pp_amount / 100:.2f} QTCL"
+                            )
+                    except Exception as _treas_confirm_err:
+                        logger.warning(f"[SUBMIT-BLOCK] Treasury confirm error h={height}: {_treas_confirm_err}")
 
                 # Update tx_count from actual written rows
                 cur.execute(
@@ -7498,6 +7512,13 @@ def _rpc_getCoinbaseTemplate(params: Any, rpc_id: Any) -> dict:
     data needed to build coinbase txs with deterministic IDs that the server
     will accept and persist unchanged.
 
+    Treasury deferred flow:
+      Block h:   miner_reward tx (7.2 QTCL) credited immediately.
+                 0.8 QTCL queued in pending_rewards for h+1.
+      Block h+1: treasury_reward tx IS the settlement of h's pending 0.8 QTCL.
+                 Client MUST include this as the forming tx of block h+1.
+                 Use prior_pending_treasury entries for tx_id, amount, recipient.
+
     Params: [height, miner_address]
       height (int)        — the block height being mined
       miner_address (str) — the miner's reward address
@@ -7505,11 +7526,12 @@ def _rpc_getCoinbaseTemplate(params: Any, rpc_id: Any) -> dict:
     Returns:
       miner_reward_base        — miner reward in base units (×100), excludes fees
       miner_reward_qtcl        — same in QTCL float
-      treasury_reward_base     — treasury reward in base units, excludes fees
+      treasury_reward_base     — THIS block's treasury amount queued for h+1
       treasury_reward_qtcl     — same in QTCL float
       treasury_address         — canonical treasury address
       miner_coinbase_id        — deterministic tx_id for miner coinbase
-      prior_pending_treasury   — list of {recipient, amount_base, tx_id} to settle from h-1
+      prior_pending_treasury   — list of {recipient, amount_base, tx_id} from h-1
+                                 → these form the treasury_reward coinbase(s) IN THIS block
     """
     try:
         if not params or not isinstance(params, (list, tuple)) or len(params) < 2:
@@ -7734,6 +7756,183 @@ def _rpc_walletAuth(params, rpc_id):
     except Exception as e:
         logger.exception(f"[WALLET-AUTH] Exception: {e}")
         return _rpc_error(-32603, f"Wallet auth failed: {str(e)}", rpc_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIGN AND SUBMIT TX — server-side decrypt + sign + mempool submit
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
+    """qtcl_signAndSubmitTx — server-side wallet decrypt, HypΓ sign, mempool submit.
+
+    Client sends wallet JSON + password + unsigned tx fields.
+    Server:
+      1. Decrypts encrypted_private_key using PBKDF2/SHAKE-256 (same as mining client)
+      2. Signs canonical tx hash using HypΓ Schnorr-Γ
+      3. Submits signed tx to mempool
+      4. Zeros private key from memory before returning
+
+    Private key NEVER leaves the server. Password NEVER stored.
+
+    Params (list[0] = dict):
+        wallet_data : dict  — full wallet JSON (must contain encrypted_private_key)
+        password    : str   — wallet unlock password
+        tx          : dict  — {from_address, to_address, amount, fee, nonce, memo}
+
+    Returns:
+        tx_hash     : str
+        status      : "accepted" | error
+        from        : str (address)
+        to          : str
+        amount      : float
+    """
+    _pk_bytes = None  # hold ref for guaranteed zeroing in finally
+    try:
+        if isinstance(params, list):
+            params = params[0] if params else {}
+        if not isinstance(params, dict):
+            return _rpc_error(-32602, "params must be object", rpc_id)
+
+        wallet_data = params.get("wallet_data", {})
+        password    = params.get("password", "")
+        tx_fields   = params.get("tx", {})
+
+        if not wallet_data:
+            return _rpc_error(-32602, "wallet_data required", rpc_id)
+        if not password:
+            return _rpc_error(-32602, "password required", rpc_id)
+        if not tx_fields:
+            return _rpc_error(-32602, "tx required", rpc_id)
+
+        from_address = str(tx_fields.get("from_address", "")).strip()
+        to_address   = str(tx_fields.get("to_address",   "")).strip()
+        try:
+            amount = float(tx_fields.get("amount", 0))
+            fee    = float(tx_fields.get("fee", 0.01))
+        except (ValueError, TypeError):
+            return _rpc_error(-32602, "amount and fee must be numeric", rpc_id)
+        nonce  = tx_fields.get("nonce", int(time.time() * 1000))
+        memo   = str(tx_fields.get("memo", ""))[:256]
+
+        if not from_address or not to_address:
+            return _rpc_error(-32602, "from_address and to_address required", rpc_id)
+        if amount <= 0:
+            return _rpc_error(-32602, "amount must be positive", rpc_id)
+        if fee < 0:
+            return _rpc_error(-32602, "fee must be non-negative", rpc_id)
+
+        # ── Step 1: verify password + decrypt private key ─────────────────────
+        enc_pk = wallet_data.get("encrypted_private_key", {})
+        if not enc_pk or not isinstance(enc_pk, dict):
+            return _rpc_error(-32602, "wallet_data must contain encrypted_private_key dict", rpc_id)
+
+        wallet_address = wallet_data.get("address", "")
+        public_key_hex = wallet_data.get("public_key", "")
+
+        if wallet_address and from_address != wallet_address:
+            return _rpc_error(
+                -32602,
+                f"from_address {from_address[:20]}… does not match wallet address {wallet_address[:20]}…",
+                rpc_id,
+            )
+
+        from hyp_lwe import decrypt_with_password as _dwp
+        try:
+            _pk_bytes = _dwp(enc_pk, password)
+        except Exception as _de:
+            _msg = str(_de).lower()
+            if "password" in _msg or "mac" in _msg or "verif" in _msg or "invalid" in _msg:
+                return _rpc_ok({"valid": False, "reason": "invalid_password"}, rpc_id)
+            return _rpc_error(-32603, f"Decrypt failed: {str(_de)}", rpc_id)
+
+        if isinstance(_pk_bytes, (bytes, bytearray)):
+            private_key_hex = _pk_bytes.hex()
+        else:
+            private_key_hex = str(_pk_bytes)
+
+        if not private_key_hex:
+            return _rpc_ok({"valid": False, "reason": "empty_private_key"}, rpc_id)
+
+        # ── Step 2: build canonical tx and compute signing hash ──────────────
+        import hashlib as _hs, json as _js
+
+        tx_body = {
+            "from_address": from_address,
+            "to_address":   to_address,
+            "amount":       amount,
+            "fee":          fee,
+            "nonce":        nonce,
+            "memo":         memo,
+            "timestamp":    time.time(),
+            "tx_type":      "transfer",
+        }
+
+        # Canonical hash — must match mempool.Transaction.get_signing_hash()
+        _canonical = _js.dumps(
+            {k: tx_body[k] for k in sorted(tx_body)},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        signing_hash = _hs.sha3_256(_canonical.encode()).digest()
+
+        # ── Step 3: HypΓ Schnorr-Γ sign ──────────────────────────────────────
+        from hyp_engine import HypEngine
+        _eng = HypEngine()
+        sig_dict = _eng.sign_hash(signing_hash, private_key_hex)
+
+        # ── Step 4: assemble final signed tx ─────────────────────────────────
+        tx_hash = _hs.sha3_256(
+            (_canonical + (sig_dict.get("signature", "") or "")).encode()
+        ).hexdigest()
+
+        signed_tx = {
+            **tx_body,
+            "tx_hash":    tx_hash,
+            "public_key": public_key_hex,
+            "signature":  _js.dumps(sig_dict) if isinstance(sig_dict, dict) else str(sig_dict),
+        }
+
+        # ── Step 5: submit to mempool ─────────────────────────────────────────
+        from mempool import get_mempool
+        result_code, message, accepted_tx = get_mempool().accept(signed_tx)
+
+        if accepted_tx:
+            logger.info(
+                f"[SIGN-TX] ✅ {from_address[:16]}… → {to_address[:16]}… "
+                f"{amount} QTCL fee={fee} hash={tx_hash[:16]}…"
+            )
+            return _rpc_ok({
+                "status":   "accepted",
+                "tx_hash":  tx_hash,
+                "from":     from_address,
+                "to":       to_address,
+                "amount":   amount,
+                "fee":      fee,
+                "message":  message,
+                "accepted": True,
+            }, rpc_id)
+        else:
+            logger.warning(f"[SIGN-TX] Mempool rejected: {message}")
+            return _rpc_error(
+                -32000,
+                f"Transaction rejected: {message}",
+                rpc_id,
+                {"code": result_code, "tx_hash": tx_hash},
+            )
+
+    except Exception as e:
+        logger.exception(f"[SIGN-TX] Unhandled error: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+    finally:
+        # Zero private key material from memory regardless of outcome
+        if _pk_bytes is not None:
+            try:
+                if isinstance(_pk_bytes, bytearray):
+                    for i in range(len(_pk_bytes)):
+                        _pk_bytes[i] = 0
+            except Exception:
+                pass
+        private_key_hex = None  # type: ignore[assignment]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -8059,6 +8258,7 @@ _RPC_METHODS = {
     "qtcl_getMempoolInfo": _rpc_getMempoolStats,
     "qtcl_getMempool": _rpc_getMempool,
     "qtcl_submitTransaction": _rpc_submitTransaction,
+    "qtcl_signAndSubmitTx":   _rpc_signAndSubmitTx,
     "qtcl_getPeers": _rpc_getPeers,
     "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
     "qtcl_registerPeer": _rpc_registerPeer,
