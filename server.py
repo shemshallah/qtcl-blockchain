@@ -104,6 +104,7 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_getTransactions": 10.0,
     "qtcl_getBlock": 5.0,
     "qtcl_getBalance": 4.0,
+    "qtcl_debugWallet": 4.0,
     "qtcl_getTransaction": 4.0,
     "qtcl_submitBlock": 30.0,
     "qtcl_submitTransaction": 6.0,
@@ -1683,31 +1684,15 @@ def _settle_block_rewards(
 
 
         # ══════════════════════════════════════════════════════════════════════════════
-        # PHASE 2 — MINER REWARD (ISOLATED CURSOR — immune to Phase 1/1.5 failures)
+        # PHASE 2 — MINER REWARD: NOW HANDLED INLINE IN _rpc_submitBlock
         # ══════════════════════════════════════════════════════════════════════════════
-        # CRITICAL ARCHITECTURE: Miner credit runs in its OWN cursor context so that
-        # any psycopg2 "aborted transaction" state from Phase 1/1.5 errors cannot
-        # poison this write. On Neon psycopg2, a single SQL error in a cursor puts
-        # the entire connection into aborted state — all subsequent cur.execute() calls
-        # in the same transaction silently fail with InFailedSqlTransaction until
-        # an explicit rollback. Phase 1.5 used a bare try/except that swallowed errors
-        # WITHOUT rolling back, meaning Phase 2 would silently no-op.
-        # Solution: Phase 2 is now first and fully isolated.
-        with get_db_cursor() as cur:
-            cur.execute(
-                """INSERT INTO wallet_addresses
-                    (address, wallet_fingerprint, public_key, balance,
-                     transaction_count, address_type, last_updated)
-                   VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
-                   ON CONFLICT (address) DO UPDATE SET
-                     balance = wallet_addresses.balance + EXCLUDED.balance,
-                     transaction_count = wallet_addresses.transaction_count + 1,
-                     last_updated = NOW()""",
-                (miner_address, miner_fp, miner_fp, miner_reward_base),
-            )
-        _settle_log.critical(
-            f"[SETTLE] 💰 Miner {miner_address[:16]}… += {miner_reward_base / 100:.2f} QTCL "
-            f"(confirmed h={height}) ✅ COMMITTED"
+        # Miner credit is written atomically in the same DB cursor that inserts the
+        # block row in _rpc_submitBlock. This eliminates the window between block
+        # acceptance and wallet credit that previously caused balance = 0.
+        # The worker (this thread) handles treasury + chain state ONLY.
+        _settle_log.info(
+            f"[SETTLE] h={height}: miner credit already committed inline — "
+            f"worker handling treasury + chain state only"
         )
 
         # ══════════════════════════════════════════════════════════════════════════════
@@ -1781,58 +1766,12 @@ def _settle_block_rewards(
                 _settle_log.warning(f"[SETTLE] Phase 1 non-coinbase settlement error (miner already credited): {_phase1_err}")
 
         # ══════════════════════════════════════════════════════════════════════════════
-        # PHASE 3 + 4 + 5 — TREASURY QUEUE + PRIOR CONFIRM + CHAIN STATE (own cursor)
+        # PHASE 5 — CHAIN STATE UPDATE (worker responsibility — inline path can't see fidelity)
         # ══════════════════════════════════════════════════════════════════════════════
+        # Phases 3 (treasury queue) and 4 (prior treasury confirm) are now handled
+        # INLINE in _rpc_submitBlock for atomicity. The worker only updates chain_state
+        # and caches the block — both idempotent, no balance implications.
         with get_db_cursor() as cur:
-            # PHASE 3 — treasury reward QUEUED (confirms at height+1)
-            cur.execute(
-                "INSERT INTO pending_rewards"
-                " (height, reward_type, recipient, amount, status)"
-                " VALUES (%s, 'treasury', %s, %s, 'pending')"
-                " ON CONFLICT (height, reward_type, recipient) DO NOTHING",
-                (height, treasury_address, treasury_reward_base),
-            )
-            _settle_log.info(
-                f"[SETTLE] ⏳ Treasury {treasury_address[:16]}… QUEUED "
-                f"{treasury_reward_base / 100:.2f} QTCL (confirms at h={height + 1})"
-            )
-
-            # PHASE 4 — Confirm PRIOR block's pending treasury reward (h-1)
-            cur.execute(
-                "SELECT id, recipient, amount FROM pending_rewards"
-                " WHERE height = %s AND status = 'pending'",
-                (height - 1,),
-            )
-            _prior = cur.fetchall() or []
-            for pr in _prior:
-                _pr_id, _pr_recipient, _pr_amount = pr[0], pr[1], int(pr[2])
-                cur.execute(
-                    "INSERT INTO wallet_addresses"
-                    " (address, wallet_fingerprint, public_key, balance,"
-                    "  transaction_count, address_type, last_updated)"
-                    " VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())"
-                    " ON CONFLICT (address) DO UPDATE SET"
-                    "  balance = wallet_addresses.balance + EXCLUDED.balance,"
-                    "  transaction_count = wallet_addresses.transaction_count + 1,"
-                    "  last_updated = NOW()",
-                    (
-                        _pr_recipient,
-                        hashlib.sha256(_pr_recipient.encode()).hexdigest()[:64],
-                        hashlib.sha256(_pr_recipient.encode()).hexdigest()[:64],
-                        _pr_amount,
-                    ),
-                )
-                cur.execute(
-                    "UPDATE pending_rewards SET status = 'confirmed',"
-                    " confirmed_at_height = %s WHERE id = %s",
-                    (height, _pr_id),
-                )
-                _settle_log.info(
-                    f"[SETTLE] ✅ CONFIRMED prior h={height - 1} treasury "
-                    f"{_pr_recipient[:20]}… +{_pr_amount / 100:.2f} QTCL"
-                )
-
-            # PHASE 5 — chain state update
             cur.execute(
                 """CREATE TABLE IF NOT EXISTS chain_state (
                     state_id INTEGER PRIMARY KEY,
@@ -1852,11 +1791,11 @@ def _settle_block_rewards(
                 "  updated_at = NOW()",
                 (height, block_hash),
             )
-        # END Phases 3-5 committed
+        # END Phase 5 committed
 
         _settle_log.warning(
-            f"[SETTLE] ✅ h={height}: miner=+{miner_reward_base / 100:.2f} QTCL (now), "
-            f"treasury={treasury_reward_base / 100:.2f} QTCL (confirms h={height + 1}), "
+            f"[SETTLE] ✅ h={height}: miner credit=inline (already committed), "
+            f"treasury={treasury_reward_base / 100:.2f} QTCL (queued h={height}→confirms h={height + 1}), "
             f"txs={len(non_coinbase_txs)}, fees={total_tx_fees_base / 100:.2f} QTCL"
         )
 
@@ -2330,7 +2269,10 @@ _PARAM_RE = _re.compile(r"%\((\w+)\)s|%s")
 _SELECT_FIRST = frozenset(
     {"select", "with", "explain", "show", "table", "values", "fetch"}
 )
-_WRITE_FIRST = frozenset({"insert", "update", "delete", "do", "call", "perform"})
+_WRITE_FIRST = frozenset({
+    "insert", "update", "delete", "do", "call", "perform",
+    "savepoint", "release", "rollback", "create", "alter", "drop", "truncate",
+})
 _COMMENT_STRIP = _re.compile(r"^(?:\s|--[^\n]*\n|/\*.*?\*/)*", _re.DOTALL)
 
 
@@ -3360,11 +3302,12 @@ def get_db_cursor():
     finally:
         if conn:
             try:
-                # FIX: Always rollback before returning to ensure clean state
-                try:
-                    conn.rollback()
-                except:
-                    pass
+                # Return connection to pool cleanly — do NOT rollback here.
+                # If we reach finally after conn.commit() succeeded, a rollback()
+                # would put the connection into a new idle transaction with no effect
+                # on already-committed data, but is wasteful and confusing in logs.
+                # If we reach finally after an exception, the except block above
+                # already called rollback() before re-raising.
                 if db_pool.use_pooling and db_pool.pool:
                     db_pool.pool.putconn(conn)
                 else:
@@ -4080,7 +4023,12 @@ def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBalance — address QTCL balance via direct DB query."""
+    """qtcl_getBalance — address QTCL balance via direct DB query.
+
+    Queries wallet_addresses by address (primary key). If not found,
+    falls back to wallet_fingerprint match so mining clients that send
+    a fingerprint-derived identifier can still resolve their balance.
+    """
     try:
         if not isinstance(params, (list, dict)):
             return _rpc_error(-32602, "params must be list or object", rpc_id)
@@ -4092,71 +4040,98 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         if not address:
             return _rpc_error(-32602, "address required", rpc_id)
 
+        # Normalize: strip whitespace
+        address = str(address).strip()
+
         _diagnostic = {
-            "address_queried": address[:24] + "…" if len(address) > 24 else address
+            "address_queried": address[:32] + ("…" if len(address) > 32 else ""),
+            "address_len": len(address),
         }
 
+        wallet = None
         try:
             with get_db_cursor() as cur:
-                # Check if wallet_addresses table exists
-                try:
-                    cur.execute("""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.tables 
-                            WHERE table_name = 'wallet_addresses'
-                        )
-                    """)
-                    _row = cur.fetchone()
-                    _table_exists = _row[0] if _row else False
-                    _diagnostic["table_exists"] = bool(_table_exists)
-                except Exception as _te:
-                    _diagnostic["table_check_error"] = str(_te)
-
-                # Query balance
+                # ── Primary lookup: by address (PK) ─────────────────────────
                 cur.execute(
-                    "SELECT balance, transaction_count, address_type FROM wallet_addresses WHERE address = %s",
+                    "SELECT address, balance, transaction_count, address_type"
+                    " FROM wallet_addresses WHERE address = %s",
                     (address,),
                 )
                 row = cur.fetchone()
                 if row:
                     wallet = {
-                        "address": address,
-                        "balance": row[0],
-                        "tx_count": row[1],
-                        "address_type": row[2] if len(row) > 2 else "unknown",
+                        "address": row[0],
+                        "balance": row[1],
+                        "tx_count": row[2],
+                        "address_type": row[3] if row[3] else "unknown",
                     }
-                    _diagnostic["found_in_db"] = True
-                    _diagnostic["raw_balance_base_units"] = int(row[0]) if row[0] else 0
-                else:
-                    wallet = None
+                    _diagnostic["found_by"] = "address"
+                    _diagnostic["raw_balance_base_units"] = int(row[1]) if row[1] else 0
+
+                # ── Fallback: by wallet_fingerprint (for clients sending fp hash) ──
+                if wallet is None:
+                    _fp = hashlib.sha256(address.encode()).hexdigest()[:64]
+                    cur.execute(
+                        "SELECT address, balance, transaction_count, address_type"
+                        " FROM wallet_addresses WHERE wallet_fingerprint = %s"
+                        " ORDER BY balance DESC LIMIT 1",
+                        (_fp,),
+                    )
+                    fp_row = cur.fetchone()
+                    if fp_row:
+                        wallet = {
+                            "address": fp_row[0],
+                            "balance": fp_row[1],
+                            "tx_count": fp_row[2],
+                            "address_type": fp_row[3] if fp_row[3] else "unknown",
+                        }
+                        _diagnostic["found_by"] = "wallet_fingerprint"
+                        _diagnostic["canonical_address"] = fp_row[0]
+                        _diagnostic["raw_balance_base_units"] = int(fp_row[1]) if fp_row[1] else 0
+
+                if wallet is None:
                     _diagnostic["found_in_db"] = False
-                    # Check how many total wallet addresses exist
+                    # Collect nearby rows for diagnostic
                     try:
                         cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                        _total_wallets = cur.fetchone()[0]
-                        _diagnostic["total_wallets_in_db"] = (
-                            int(_total_wallets) if _total_wallets else 0
-                        )
+                        _cnt = cur.fetchone()
+                        _diagnostic["total_wallets_in_db"] = int(_cnt[0]) if _cnt and _cnt[0] else 0
                     except Exception:
                         pass
+                    try:
+                        cur.execute(
+                            "SELECT address, balance, address_type FROM wallet_addresses"
+                            " ORDER BY last_updated DESC LIMIT 5"
+                        )
+                        _recent = cur.fetchall() or []
+                        _diagnostic["most_recent_wallets"] = [
+                            {"addr": r[0][:24] + "…" if len(r[0]) > 24 else r[0],
+                             "bal": float(r[1]) / 100.0 if r[1] else 0.0,
+                             "type": r[2]}
+                            for r in _recent
+                        ]
+                    except Exception:
+                        pass
+                else:
+                    _diagnostic["found_in_db"] = True
+
         except Exception as _wqe:
-            logger.debug(f"[RPC] query_wallet_info DB error: {_wqe}")
+            logger.warning(f"[RPC] getBalance DB error: {_wqe}")
             _diagnostic["db_error"] = str(_wqe)
             wallet = None
 
         if wallet is None:
-            # Address not yet in DB — return 0 balance with diagnostic info
             result = {
                 "address": address,
                 "balance": 0.0,
                 "symbol": "QTCL",
                 "diagnostic": _diagnostic,
-                "note": "Address not found in wallet_addresses table — no balance recorded",
+                "note": "Address not found in wallet_addresses — check diagnostic.most_recent_wallets for actual miner address stored",
             }
         else:
             raw_balance = int(wallet.get("balance") or 0)
             result = {
-                "address": address,
+                "address": wallet.get("address", address),
                 "balance": raw_balance / 100.0,
                 "symbol": "QTCL",
                 "raw_balance_base_units": raw_balance,
@@ -4164,13 +4139,74 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                 "address_type": wallet.get("address_type", "unknown"),
                 "diagnostic": _diagnostic,
             }
-        logger.debug(
-            f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}"
+        logger.info(
+            f"[RPC] qtcl_getBalance: addr={address[:20]}…"
+            f" bal={result['balance']} found={_diagnostic.get('found_in_db', False)}"
+            f" by={_diagnostic.get('found_by', 'none')}"
         )
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_debugWallet(params: Any, rpc_id: Any) -> dict:
+    """qtcl_debugWallet — dump raw wallet_addresses rows for diagnosis.
+
+    Returns all rows ordered by balance DESC. Use this to find the exact
+    address string stored for the miner and cross-reference with what
+    the mining client sends in block submissions.
+
+    Params: [] (no params) or ["limit"] int
+    """
+    try:
+        limit = 20
+        if params and isinstance(params, list) and len(params) > 0:
+            try:
+                limit = int(params[0])
+            except (ValueError, TypeError):
+                pass
+        rows_out = []
+        try:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    "SELECT address, wallet_fingerprint, balance, transaction_count,"
+                    " address_type, last_updated FROM wallet_addresses"
+                    " ORDER BY balance DESC LIMIT %s",
+                    (limit,),
+                )
+                rows = cur.fetchall() or []
+                for r in rows:
+                    rows_out.append({
+                        "address": r[0],
+                        "wallet_fingerprint": r[1][:24] + "…" if r[1] and len(r[1]) > 24 else r[1],
+                        "balance_qtcl": float(r[2]) / 100.0 if r[2] else 0.0,
+                        "balance_base": int(r[2]) if r[2] else 0,
+                        "tx_count": r[3],
+                        "address_type": r[4],
+                        "last_updated": str(r[5]) if r[5] else None,
+                    })
+                # Also dump pending_rewards
+                cur.execute(
+                    "SELECT height, reward_type, recipient, amount, status"
+                    " FROM pending_rewards ORDER BY height DESC LIMIT 10"
+                )
+                pending = cur.fetchall() or []
+                pending_out = [
+                    {"height": p[0], "type": p[1], "recipient": p[2][:32],
+                     "amount_qtcl": float(p[3]) / 100.0, "status": p[4]}
+                    for p in pending
+                ]
+        except Exception as _de:
+            return _rpc_error(-32603, f"DB error: {_de}", rpc_id)
+        return _rpc_ok({
+            "wallet_addresses": rows_out,
+            "wallet_count": len(rows_out),
+            "pending_rewards": pending_out,
+            "note": "Use address field to call qtcl_getBalance with exact stored address",
+        }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Internal error: {e}", rpc_id)
 
 
 def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
@@ -6809,24 +6845,93 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         )
 
                 # ════════════════════════════════════════════════════════════════
-                # WALLET SETTLEMENT — within same DB cursor for atomicity
+                # WALLET SETTLEMENT — atomic in same cursor as block insert
                 # ════════════════════════════════════════════════════════════════
 
-                # Settle non-coinbase transactions atomically
-                # REMOVED: Duplicate settlement logic. 
-                # Wallet updates now happen EXCLUSIVELY in _settle_block_rewards via the background worker.
-                pass
+                # ── MINER CREDIT (inline, same transaction as block insert) ──────
+                # This is the SINGULAR authoritative path for miner balance credit.
+                # The background worker (_settle_block_rewards) handles treasury
+                # confirmation and non-coinbase tx settlement ONLY.
+                _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+                cur.execute(
+                    """INSERT INTO wallet_addresses
+                        (address, wallet_fingerprint, public_key, balance,
+                         transaction_count, address_type, last_updated)
+                       VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
+                       ON CONFLICT (address) DO UPDATE SET
+                         balance = wallet_addresses.balance + EXCLUDED.balance,
+                         transaction_count = wallet_addresses.transaction_count + 1,
+                         last_updated = NOW()""",
+                    (miner_address, _miner_fp, _miner_fp, _miner_reward),
+                )
+                logger.critical(
+                    f"[SUBMIT-BLOCK] 💰 MINER CREDITED inline: {miner_address[:20]}… "
+                    f"+{_miner_reward / 100:.2f} QTCL h={height} ✅"
+                )
 
-                # Credit miner wallet (miner_reward base units) immediately
-                # REMOVED: This was causing double-crediting because the background 
-                # settlement worker (_settle_block_rewards) also credits the miner.
-                # To ensure a singular chain of logic, we only settle in the worker.
-                pass
+                # ── NON-COINBASE TX SETTLEMENT (inline) ──────────────────────────
+                for _nctx in _non_coinbase_txs:
+                    _nc_sender = _nctx.get("from_addr") or _nctx.get("from_address", "")
+                    _nc_receiver = _nctx.get("to_addr") or _nctx.get("to_address", "")
+                    _nc_amt_raw = float(_nctx.get("amount", 0))
+                    _nc_amt = int(round(_nc_amt_raw * 100)) if _nc_amt_raw < 100000 else int(_nc_amt_raw)
+                    _nc_fee_raw = float(_nctx.get("fee", 0))
+                    _nc_fee = int(round(_nc_fee_raw * 100)) if _nc_fee_raw < 100000 else int(_nc_fee_raw)
+                    if not _nc_sender or not _nc_receiver or _nc_amt <= 0:
+                        continue
+                    _nc_deduct = _nc_amt + _nc_fee
+                    cur.execute(
+                        "UPDATE wallet_addresses SET balance = balance - %s,"
+                        " transaction_count = transaction_count + 1, last_updated = NOW()"
+                        " WHERE address = %s AND balance >= %s",
+                        (_nc_deduct, _nc_sender, _nc_deduct),
+                    )
+                    _nc_rcvr_fp = hashlib.sha256(_nc_receiver.encode()).hexdigest()[:64]
+                    cur.execute(
+                        """INSERT INTO wallet_addresses
+                           (address, wallet_fingerprint, public_key, balance,
+                            transaction_count, address_type, last_updated)
+                           VALUES (%s, %s, %s, %s, 1, 'standard', NOW())
+                           ON CONFLICT (address) DO UPDATE SET
+                             balance = wallet_addresses.balance + EXCLUDED.balance,
+                             transaction_count = wallet_addresses.transaction_count + 1,
+                             last_updated = NOW()""",
+                        (_nc_receiver, _nc_rcvr_fp, _nc_rcvr_fp, _nc_amt),
+                    )
 
-                # Confirm prior block's treasury pending_rewards → wallet credit
-                # REMOVED: Dual-settlement logic removed to favor the singular 
-                # chain of logic in the background settlement worker.
-                pass
+                # ── CONFIRM PRIOR TREASURY REWARD (h-1 pending → wallet credit) ──
+                try:
+                    cur.execute(
+                        "SELECT id, recipient, amount FROM pending_rewards"
+                        " WHERE height = %s AND status = 'pending'",
+                        (height - 1,),
+                    )
+                    _prior_pending = cur.fetchall() or []
+                    for _pp in _prior_pending:
+                        _pp_id, _pp_recipient, _pp_amount = _pp[0], _pp[1], int(_pp[2])
+                        _pp_fp = hashlib.sha256(_pp_recipient.encode()).hexdigest()[:64]
+                        cur.execute(
+                            """INSERT INTO wallet_addresses
+                               (address, wallet_fingerprint, public_key, balance,
+                                transaction_count, address_type, last_updated)
+                               VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
+                               ON CONFLICT (address) DO UPDATE SET
+                                 balance = wallet_addresses.balance + EXCLUDED.balance,
+                                 transaction_count = wallet_addresses.transaction_count + 1,
+                                 last_updated = NOW()""",
+                            (_pp_recipient, _pp_fp, _pp_fp, _pp_amount),
+                        )
+                        cur.execute(
+                            "UPDATE pending_rewards SET status = 'confirmed',"
+                            " confirmed_at_height = %s WHERE id = %s",
+                            (height, _pp_id),
+                        )
+                        logger.info(
+                            f"[SUBMIT-BLOCK] ✅ Treasury confirmed h={height - 1}: "
+                            f"{_pp_recipient[:20]}… +{_pp_amount / 100:.2f} QTCL"
+                        )
+                except Exception as _treas_confirm_err:
+                    logger.warning(f"[SUBMIT-BLOCK] Treasury confirm skipped: {_treas_confirm_err}")
 
 
                 # Queue THIS block's treasury → becomes coinbase in block h+1
@@ -7944,6 +8049,7 @@ _RPC_METHODS = {
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,
+    "qtcl_debugWallet": _rpc_debugWallet,
     "qtcl_getTransaction": _rpc_getTransaction,
     "qtcl_getBlock": _rpc_getBlock,
     "qtcl_getBlockRange": _rpc_getBlockRange,
