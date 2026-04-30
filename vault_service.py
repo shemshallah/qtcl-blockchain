@@ -93,60 +93,118 @@ VAULT_DB_URL = os.environ.get("VAULT_URL", "")
 # SOVEREIGN PRICING ENGINE — Sized-based, Hyperbolic Costing
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-def calculate_vault_cost(encrypted_size_bytes: int, operation: str = "store") -> Dict[str, Any]:
+def calculate_vault_cost(encrypted_size_bytes: int = 0, operation: str = "anchor") -> Dict[str, Any]:
     """
-    Calculates the cost of a vault operation based on the size of the encrypted payload.
-    Pricing is geared towards a $0.10 / QTCL baseline.
-    
-    Tiers:
-    - Impulse Entry: < 5KB      -> $1.00
-    - Decision Tier: 5KB - 50KB  -> $3.00
-    - Sovereign Archive: > 50KB  -> $10.00+ (scaled)
-    """
-    # Cost in USD
-    if operation == "store":
-        if encrypted_size_bytes < 5120:
-            usd_cost = 1.00
-        elif encrypted_size_bytes < 51200:
-            usd_cost = 3.00
-        else:
-            # Base $10 + $0.10 per additional 10KB
-            extra = max(0, encrypted_size_bytes - 51200)
-            usd_cost = 10.00 + (extra // 10240) * 0.10
-    elif operation == "purge":
-        usd_cost = 0.50  # Small fee to maintain DB health
-    elif operation == "anchor":
-        # Anchoring is a per-event cost, but the anchor size is constant
-        usd_cost = 2.00
-    else:
-        usd_cost = 0.0
+    Return cost for a vault operation in base units and QTCL.
 
-    # Convert USD to QTCL: 100 QTCL = $1.00 (i.e. $0.01 per QTCL)
-    # At this rate, vault operations cost meaningful amounts in QTCL
-    # but mining at elevated difficulty produces rewards slowly, making
-    # USD purchases the preferred path for vault users.
-    QTCL_PER_DOLLAR = 100.0  # $0.01 per QTCL
-    qtcl_cost = usd_cost * QTCL_PER_DOLLAR
-    
+    All reads (retrieve, verify, audit) return cost=0 — always free.
+    Write operations consume QTCL; 90% is burned, 10% goes to coherence fund.
+    """
+    cost_map = {
+        "anchor":              PRICE_ANCHOR,
+        "chain_anchor":        PRICE_ANCHOR,
+        "obfuscated_anchor":   PRICE_OBFUSCATED_ANCHOR,
+        "account_create":      PRICE_ACCOUNT_CREATE,
+        "passphrase_change":   PRICE_PASSPHRASE_CHANGE,
+        "reanchor":            PRICE_REANCHOR,
+        "export_bundle":       PRICE_EXPORT_BUNDLE,
+        "add_collaborator":    PRICE_ADD_COLLABORATOR,
+        "revoke_anchor":       PRICE_REVOKE_ANCHOR,
+        "delete_anchor":       PRICE_REVOKE_ANCHOR,
+        "transfer":            PRICE_TRANSFER,
+        # Free operations
+        "retrieve":            0,
+        "read":                0,
+        "verify":              0,
+        "audit":               0,
+        "store":               0,
+        "delete_secret":       0,
+    }
+    cost = cost_map.get(operation, 0)
+    qtcl = cost / QTCL_BASE
+    usd  = qtcl * 0.01  # $0.01 per QTCL
+
     return {
-        "usd_cost": usd_cost,
-        "qtcl_cost": qtcl_cost,
-        "base_units": int(qtcl_cost * 100_000),
-        "rate_qtcl_per_usd": QTCL_PER_DOLLAR,
-        "rate_usd_per_qtcl": 1.0 / QTCL_PER_DOLLAR,
-        "tier": "Impulse" if usd_cost == 1.00 else "Decision" if usd_cost == 3.00 else "Sovereign"
+        "operation":    operation,
+        "cost_base":    cost,
+        "cost_qtcl":    qtcl,
+        "cost_usd":     usd,
+        "burn_qtcl":    round(qtcl * BURN_RATIO, 4),
+        "coherence_qtcl": round(qtcl * COHERENCE_RATIO, 4),
+        "free":         cost == 0,
+        "rate":         "1 QTCL = $0.01",
     }
 
-# Update Constants
-# We remove old static prices in favor of the dynamic engine
+# ═══════════════════════════════════════════════════════════════════════════════
+# TOKENOMICS — 90/10 BURN/COHERENCE SPLIT
+#
+# All vault operation fees are split:
+#   90% → BURN ADDRESS (deflationary — permanently removed from supply)
+#   10% → COHERENCE FUND (funds oracle/quantum infrastructure)
+#
+# Block rewards (miner) retain their own 70/20/10 split — this is vault-only.
+# Reads (retrieve, verify, audit) are always FREE.
+# ═══════════════════════════════════════════════════════════════════════════════
+
 TRIAL_MAX_SECRETS = 1
 TRIAL_MAX_SIZE_BYTES = 1024
 PAID_MAX_SIZE_BYTES = 100 * 1024 * 1024  # 100MB for Sovereign Archives
 
-# Pricing constants (in base units: 100,000 base = 1 QTCL)
-QTCL_BASE = 100_000
-PRICE_CHAIN_ANCHOR = 1 * QTCL_BASE       # 1 QTCL
-PRICE_OBFUSCATED_ANCHOR = 5 * QTCL_BASE  # 5 QTCL
+# Base unit: 1 QTCL = 100 base units (matches wallet_addresses.balance scale)
+QTCL_BASE = 100  # base units per QTCL
+
+# ── Burn / Coherence addresses ───────────────────────────────────────────────
+BURN_ADDRESS = os.environ.get(
+    "VAULT_BURN_ADDRESS",
+    "qtcl1burn000000000000000000000000000000000000000000000000000000000"
+)
+COHERENCE_FUND_ADDRESS = os.environ.get(
+    "COHERENCE_FUND_ADDRESS",
+    "qtcl1coherence0fund0address0000000000000000000000000000000000000001"
+)
+
+# Fee split ratios
+BURN_RATIO      = 0.90   # 90% permanently destroyed
+COHERENCE_RATIO = 0.10   # 10% to quantum infrastructure fund
+
+# ── Operation price ladder (in base units, 1 QTCL = 100 base) ───────────────
+#
+#   Operation                QTCL    USD (~$0.01/QTCL)
+#   ─────────────────────── ──────  ─────────────────
+#   Anchor a secret           100    $1.00  ← minimum commitment
+#   Obfuscated anchor         200    $2.00  ← blinded on-chain hash
+#   Vault account creation     50    $0.50  ← one-time
+#   Passphrase change          30    $0.30  ← security op
+#   Re-anchor / update         25    $0.25  ← mutation
+#   Export encrypted bundle    20    $0.20  ← portability
+#   Add collaborator           15    $0.15  ← per person
+#   Revoke / delete anchor     10    $0.10  ← cleanup
+#   Transfer QTCL               5    $0.05  ← network fee
+#   Read / decrypt own          0    FREE
+#   Audit log view              0    FREE
+#
+PRICE_ANCHOR              = 100 * QTCL_BASE   # 100 QTCL — anchor a secret
+PRICE_OBFUSCATED_ANCHOR   = 200 * QTCL_BASE   # 200 QTCL — blinded anchor
+PRICE_ACCOUNT_CREATE      =  50 * QTCL_BASE   #  50 QTCL — one-time account fee
+PRICE_PASSPHRASE_CHANGE   =  30 * QTCL_BASE   #  30 QTCL — passphrase rotation
+PRICE_REANCHOR            =  25 * QTCL_BASE   #  25 QTCL — update/re-anchor
+PRICE_EXPORT_BUNDLE       =  20 * QTCL_BASE   #  20 QTCL — export encrypted bundle
+PRICE_ADD_COLLABORATOR    =  15 * QTCL_BASE   #  15 QTCL — per collaborator
+PRICE_REVOKE_ANCHOR       =  10 * QTCL_BASE   #  10 QTCL — revoke/delete anchor
+PRICE_TRANSFER            =   5 * QTCL_BASE   #   5 QTCL — network transfer
+
+# Legacy aliases (kept for any external callers)
+PRICE_CHAIN_ANCHOR        = PRICE_ANCHOR
+PRICE_CHAIN_ANCHOR_OLD    = PRICE_ANCHOR  # was 1 QTCL, now 100 QTCL
+
+# ── Stripe purchase tiers (QTCL credited on purchase) ───────────────────────
+STRIPE_TIERS = [
+    {"price_usd": 0.99,  "qtcl":    150, "label": "Starter",      "anchors": 1},
+    {"price_usd": 4.99,  "qtcl":    600, "label": "Explorer",     "anchors": 6},
+    {"price_usd": 14.99, "qtcl":  2_000, "label": "Builder",      "anchors": 20},
+    {"price_usd": 49.99, "qtcl":  8_000, "label": "Professional", "anchors": 80},
+    {"price_usd": 149.99,"qtcl": 30_000, "label": "Enterprise",   "anchors": 300},
+]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATABASE CONNECTION (Separate pool for vault — VAULT_URL)
@@ -331,6 +389,138 @@ CREATE TABLE IF NOT EXISTS vault_contacts (
 
 CREATE INDEX IF NOT EXISTS idx_vault_contacts_account ON vault_contacts(account_id);
 """
+
+
+def _apply_vault_burn(cost: int, operation: str, account_id: str, tx_ref: str = "") -> dict:
+    """
+    90/10 burn/coherence split for every vault fee.
+
+    Submits two micro-transactions to the QTCL chain:
+      - 90% to BURN_ADDRESS  → permanently destroyed, supply decreases
+      - 10% to COHERENCE_FUND_ADDRESS → oracle infrastructure fund
+
+    Both are fire-and-forget (vault DB is source of truth for billing).
+    Returns split amounts for billing record.
+    """
+    burn_amount     = int(cost * BURN_RATIO)
+    coherence_amount = cost - burn_amount  # remainder goes to coherence (avoids rounding loss)
+
+    # Best-effort on-chain write — failure does NOT block vault operation
+    try:
+        from server import get_db_cursor
+        import hashlib as _hl
+
+        burn_fp = _hl.sha256(BURN_ADDRESS.encode()).hexdigest()[:64]
+        coh_fp  = _hl.sha256(COHERENCE_FUND_ADDRESS.encode()).hexdigest()[:64]
+
+        with get_db_cursor() as cur:
+            # Credit burn address (increases tracked burned supply)
+            cur.execute(
+                """INSERT INTO wallet_addresses
+                   (address, wallet_fingerprint, public_key, balance,
+                    transaction_count, address_type, updated_at)
+                   VALUES (%s, %s, %s, %s, 1, 'burn', NOW())
+                   ON CONFLICT (address) DO UPDATE SET
+                     balance = wallet_addresses.balance + EXCLUDED.balance,
+                     transaction_count = wallet_addresses.transaction_count + 1,
+                     updated_at = NOW()""",
+                (BURN_ADDRESS, burn_fp, burn_fp, burn_amount),
+            )
+            # Credit coherence fund
+            cur.execute(
+                """INSERT INTO wallet_addresses
+                   (address, wallet_fingerprint, public_key, balance,
+                    transaction_count, address_type, updated_at)
+                   VALUES (%s, %s, %s, %s, 1, 'coherence_fund', NOW())
+                   ON CONFLICT (address) DO UPDATE SET
+                     balance = wallet_addresses.balance + EXCLUDED.balance,
+                     transaction_count = wallet_addresses.transaction_count + 1,
+                     updated_at = NOW()""",
+                (COHERENCE_FUND_ADDRESS, coh_fp, coh_fp, coherence_amount),
+            )
+        logger.info(
+            f"[VAULT-BURN] op={operation} acct={account_id[:12]} "
+            f"total={cost} burn={burn_amount} coherence={coherence_amount}"
+        )
+    except Exception as _be:
+        logger.warning(f"[VAULT-BURN] on-chain split failed (billing still recorded): {_be}")
+
+    return {
+        "burn_amount":       burn_amount,
+        "burn_amount_qtcl":  burn_amount  / QTCL_BASE,
+        "coherence_amount":  coherence_amount,
+        "coherence_amount_qtcl": coherence_amount / QTCL_BASE,
+        "burn_address":      BURN_ADDRESS,
+        "coherence_address": COHERENCE_FUND_ADDRESS,
+    }
+
+
+def _charge_account(
+    account_id: str,
+    cost: int,
+    operation: str,
+    description: str,
+    tx_ref: str = "",
+    extra_fields: Optional[dict] = None,
+) -> dict:
+    """
+    Atomic vault account charge:
+      1. Deduct cost from credit_balance
+      2. Record vault_billing row
+      3. Apply 90/10 burn/coherence split on-chain (fire-and-forget)
+
+    Returns updated balance info dict.
+    Raises ValueError if insufficient balance.
+    """
+    account = _vault_query(
+        "SELECT credit_balance FROM vault_accounts WHERE id = %s",
+        (account_id,), fetch="one"
+    )
+    if not account:
+        raise ValueError(f"Account not found: {account_id}")
+
+    current = int(account["credit_balance"])
+    if current < cost:
+        raise ValueError(
+            f"Insufficient balance: need {cost / QTCL_BASE:.2f} QTCL, "
+            f"have {current / QTCL_BASE:.2f} QTCL"
+        )
+
+    new_balance = current - cost
+
+    # Deduct from vault account
+    _vault_query(
+        "UPDATE vault_accounts SET credit_balance = %s, updated_at = NOW() WHERE id = %s",
+        (new_balance, account_id), fetch="none"
+    )
+
+    # Billing record
+    billing_id = f"vb_{secrets.token_hex(16)}"
+    _vault_query(
+        """INSERT INTO vault_billing
+           (id, account_id, operation, amount, balance_after, tx_hash, description, created_at)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())""",
+        (billing_id, account_id, operation, -cost, new_balance, tx_ref or billing_id, description),
+        fetch="none"
+    )
+
+    # 90/10 burn/coherence split — fire-and-forget, non-blocking
+    split = _apply_vault_burn(cost, operation, account_id, tx_ref)
+
+    result = {
+        "charged":            cost,
+        "charged_qtcl":       cost / QTCL_BASE,
+        "new_balance":        new_balance,
+        "new_balance_qtcl":   new_balance / QTCL_BASE,
+        "billing_id":         billing_id,
+        "burn_qtcl":          split["burn_amount_qtcl"],
+        "coherence_qtcl":     split["coherence_amount_qtcl"],
+        "split":              f"90% burned ({split['burn_amount_qtcl']:.2f} QTCL) / "
+                              f"10% coherence ({split['coherence_amount_qtcl']:.2f} QTCL)",
+    }
+    if extra_fields:
+        result.update(extra_fields)
+    return result
 
 
 def _ensure_schema():
@@ -1014,16 +1204,17 @@ def vault_anchor_hash(params: dict, rpc_id: Any) -> dict:
         label = params.get("label", "Vault Anchor")
 
         # Calculate cost
-        cost = PRICE_OBFUSCATED_ANCHOR if obfuscate else PRICE_CHAIN_ANCHOR
+        cost = PRICE_OBFUSCATED_ANCHOR if obfuscate else PRICE_ANCHOR
 
-        # Check balance (QTCL must be mined, deposited to vault credit)
+        # Check balance
         if account['credit_balance'] < cost:
-            cost_qtcl = cost / QTCL_BASE
+            cost_qtcl    = cost / QTCL_BASE
             balance_qtcl = account['credit_balance'] / QTCL_BASE
             return _rpc_error(
                 -32020,
-                f"Insufficient vault credit. Need {cost_qtcl:.1f} QTCL, have {balance_qtcl:.1f} QTCL. "
-                f"Deposit mined QTCL to your vault credit balance first.",
+                f"Insufficient vault credit. Need {cost_qtcl:.0f} QTCL, "
+                f"have {balance_qtcl:.2f} QTCL. "
+                f"Deposit mined QTCL or purchase via Stripe.",
                 rpc_id
             )
 
@@ -1077,38 +1268,34 @@ def vault_anchor_hash(params: dict, rpc_id: Any) -> dict:
                 fetch="none"
             )
 
-        # Deduct cost
-        new_balance = account['credit_balance'] - cost
-        _vault_query(
-            "UPDATE vault_accounts SET credit_balance = %s, anchors_used = anchors_used + 1, updated_at = NOW() WHERE id = %s",
-            (new_balance, account_id), fetch="none"
-        )
+        # ── Charge: 90% burn / 10% coherence ────────────────────────────────
+        try:
+            charge = _charge_account(
+                account_id=account_id,
+                cost=cost,
+                operation='obfuscated_anchor' if obfuscate else 'chain_anchor',
+                description=f"{'Obfuscated ' if obfuscate else ''}Chain anchor: {label}",
+                tx_ref=anchor_result.get('tx_hash', ''),
+            )
+        except ValueError as _ce:
+            return _rpc_error(-32020, str(_ce), rpc_id)
 
-        # Record billing
-        billing_id = f"vb_{secrets.token_hex(16)}"
+        # Increment anchor count
         _vault_query(
-            """INSERT INTO vault_billing
-               (id, account_id, operation, amount, balance_after, tx_hash, description, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())""",
-            (
-                billing_id, account_id,
-                'obfuscated_anchor' if obfuscate else 'chain_anchor',
-                -cost, new_balance,
-                anchor_result.get('tx_hash'),
-                f"{'Obfuscated ' if obfuscate else ''}Chain anchor: {label}",
-            ),
-            fetch="none"
+            "UPDATE vault_accounts SET anchors_used = anchors_used + 1, updated_at = NOW() WHERE id = %s",
+            (account_id,), fetch="none"
         )
 
         result = {
-            "anchor_id": anchor_id,
-            "on_chain_hash": on_chain_hash,
-            "block_height": anchor_result.get('block_height'),
-            "tx_hash": anchor_result.get('tx_hash'),
-            "obfuscated": obfuscate,
-            "cost_qtcl": cost / QTCL_BASE,
-            "balance_remaining": new_balance / QTCL_BASE,
-            "anchored_at": datetime.now(timezone.utc).isoformat(),
+            "anchor_id":        anchor_id,
+            "on_chain_hash":    on_chain_hash,
+            "block_height":     anchor_result.get('block_height'),
+            "tx_hash":          anchor_result.get('tx_hash'),
+            "obfuscated":       obfuscate,
+            "cost_qtcl":        cost / QTCL_BASE,
+            "balance_remaining": charge["new_balance_qtcl"],
+            "fee_split":        charge["split"],
+            "anchored_at":      datetime.now(timezone.utc).isoformat(),
         }
 
         if obfuscate and blinding_nonce:
@@ -1306,19 +1493,27 @@ def vault_get_balance(params: dict, rpc_id: Any) -> dict:
                 b['created_at'] = str(b['created_at'])
 
         return _rpc_ok({
-            "credit_balance": account['credit_balance'],
+            "credit_balance":      account['credit_balance'],
             "credit_balance_qtcl": account['credit_balance'] / QTCL_BASE,
-            "secrets_count": account['secrets_count'],
-            "bytes_stored": account['bytes_stored'],
-            "anchors_used": account['anchors_used'],
-            "tier": account['tier'],
+            "secrets_count":  account['secrets_count'],
+            "bytes_stored":   account['bytes_stored'],
+            "anchors_used":   account['anchors_used'],
+            "tier":           account['tier'],
             "recent_billing": billing,
             "pricing": {
-                "chain_anchor_qtcl": PRICE_CHAIN_ANCHOR / QTCL_BASE,
+                "chain_anchor_qtcl":      PRICE_ANCHOR            / QTCL_BASE,
                 "obfuscated_anchor_qtcl": PRICE_OBFUSCATED_ANCHOR / QTCL_BASE,
-                "store_secret": "free",
-                "retrieve_secret": "free",
+                "passphrase_change_qtcl": PRICE_PASSPHRASE_CHANGE / QTCL_BASE,
+                "reanchor_qtcl":          PRICE_REANCHOR          / QTCL_BASE,
+                "export_bundle_qtcl":     PRICE_EXPORT_BUNDLE     / QTCL_BASE,
+                "add_collaborator_qtcl":  PRICE_ADD_COLLABORATOR  / QTCL_BASE,
+                "revoke_anchor_qtcl":     PRICE_REVOKE_ANCHOR     / QTCL_BASE,
+                "store_secret":           "free",
+                "retrieve_secret":        "free",
+                "audit_log":              "free",
             },
+            "fee_split": f"{int(BURN_RATIO*100)}% burn / {int(COHERENCE_RATIO*100)}% coherence fund",
+            "stripe_tiers": STRIPE_TIERS,
         }, rpc_id)
 
     except Exception as e:
@@ -1802,6 +1997,62 @@ def vault_remove_contact(params: dict, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Failed: {str(e)}", rpc_id)
 
 
+def vault_get_burn_stats(params: dict, rpc_id: Any) -> dict:
+    """
+    RPC: vault_getBurnStats — public endpoint.
+    Returns total QTCL burned by vault operations and coherence fund balance.
+    Useful for transparency dashboards and tokenomics tracking.
+    """
+    try:
+        stats = {
+            "burn_address":        BURN_ADDRESS,
+            "coherence_address":   COHERENCE_FUND_ADDRESS,
+            "burn_ratio":          BURN_RATIO,
+            "coherence_ratio":     COHERENCE_RATIO,
+            "burn_balance_qtcl":   0.0,
+            "coherence_balance_qtcl": 0.0,
+            "total_vault_ops":     0,
+            "total_charged_qtcl":  0.0,
+        }
+        # Query on-chain wallet balances for burn + coherence addresses
+        try:
+            from server import get_db_cursor
+            with get_db_cursor() as cur:
+                cur.execute(
+                    "SELECT address, balance FROM wallet_addresses"
+                    " WHERE address IN (%s, %s)",
+                    (BURN_ADDRESS, COHERENCE_FUND_ADDRESS),
+                )
+                for row in cur.fetchall() or []:
+                    addr, bal = row[0], int(row[1] or 0)
+                    if addr == BURN_ADDRESS:
+                        stats["burn_balance_qtcl"] = bal / QTCL_BASE
+                    elif addr == COHERENCE_FUND_ADDRESS:
+                        stats["coherence_balance_qtcl"] = bal / QTCL_BASE
+        except Exception as _ce:
+            logger.debug(f"[VAULT-BURN-STATS] chain query: {_ce}")
+
+        # Query vault billing totals
+        try:
+            billing_totals = _vault_query(
+                "SELECT COUNT(*), SUM(ABS(amount)) FROM vault_billing WHERE amount < 0",
+                fetch="one"
+            )
+            if billing_totals:
+                stats["total_vault_ops"]    = int(billing_totals.get("count", 0) or 0)
+                raw_sum = billing_totals.get("sum", 0) or 0
+                stats["total_charged_qtcl"] = float(raw_sum) / QTCL_BASE
+        except Exception as _be:
+            logger.debug(f"[VAULT-BURN-STATS] billing query: {_be}")
+
+        stats["total_burned_qtcl"]    = round(stats["total_charged_qtcl"] * BURN_RATIO, 4)
+        stats["total_coherence_qtcl"] = round(stats["total_charged_qtcl"] * COHERENCE_RATIO, 4)
+        return _rpc_ok(stats, rpc_id)
+    except Exception as e:
+        logger.error(f"[VAULT] getBurnStats failed: {e}", exc_info=True)
+        return _rpc_error(-32603, f"Failed: {str(e)}", rpc_id)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # VAULT RPC METHOD REGISTRY
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1821,9 +2072,15 @@ VAULT_RPC_METHODS: Dict[str, Any] = {
     "vault_anchorHash":         vault_anchor_hash,
     "vault_verifyAnchor":       vault_verify_anchor,
     # Billing
-    "vault_getTreasuryAddress": lambda p, r: _rpc_ok({"address": os.environ.get("TREASURY_ADDRESS", "qt_treasury_default")}, r),
+    "vault_getTreasuryAddress": lambda p, r: _rpc_ok({
+        "address": os.environ.get("TREASURY_ADDRESS", "qt_treasury_default"),
+        "burn_address": BURN_ADDRESS,
+        "coherence_address": COHERENCE_FUND_ADDRESS,
+        "fee_split": f"{int(BURN_RATIO*100)}% burn / {int(COHERENCE_RATIO*100)}% coherence",
+    }, r),
     "vault_depositCredit":      vault_deposit_credit,
     "vault_getBalance":         vault_get_balance,
+    "vault_getBurnStats":       vault_get_burn_stats,
     # Transactions (stub)
     "vault_getTransactions":    lambda p, r: _rpc_ok({"transactions": []}, r),
     # Inheritance
