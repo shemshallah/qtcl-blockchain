@@ -52,10 +52,33 @@ max_requests = 50000  # Recycle after 50k requests
 max_requests_jitter = 5000  # Spread recycling
 
 # ── Logging ────────────────────────────────────────────────────────────────────
-loglevel = "info"
-accesslog = "-"
+loglevel = "warning"           # suppress routine INFO noise; oracle/lattice logs appear at WARNING+
+accesslog = "-"                # stdout — filtered below to errors only
 errorlog = "-"
-access_log_format = '%(h)s %(l)s %(t)s "%(r)s" %(s)s %(b)s %(D)s "%(a)s"'  # Added %(D)s for request time
+access_log_format = '%(h)s %(l)s %(t)s "%(r)s" %(s)s %(b)s %(D)s "%(a)s"'
+
+
+import logging as _logging
+import os as _os
+
+
+class _ErrorOnlyAccessFilter(_logging.Filter):
+    """
+    Suppress 2xx/3xx access log lines — only 4xx/5xx reach stdout.
+    Oracle/quantum/lattice logs are unaffected (they use the error logger).
+    Set LOG_200=1 env var to disable this filter and see all requests.
+    """
+    def filter(self, record: _logging.LogRecord) -> bool:
+        if _os.environ.get("LOG_200"):
+            return True
+        msg = record.getMessage()
+        try:
+            # Access log format ends with: "GET /path HTTP/1.1" STATUS bytes latency
+            after_quote = msg.rsplit('"', 1)[-1].strip()
+            status = int(after_quote.split()[0])
+            return status >= 400
+        except (ValueError, IndexError):
+            return True  # unknown format — show it
 
 # ── Connection ─────────────────────────────────────────────────────────────────
 backlog = 4096  # 🚀 4k backlog for connection bursts
@@ -64,22 +87,41 @@ worker_connections = 2000  # 2k concurrent connections
 # ── Hooks ──────────────────────────────────────────────────────────────────────
 
 
+def on_starting(server):
+    """Wire access log filter in master process."""
+    _f = _ErrorOnlyAccessFilter()
+    _logging.getLogger("gunicorn.access").addFilter(_f)
+    _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
+    server.log.info(
+        "[GUNICORN] Access log: 2xx/3xx suppressed — only 4xx/5xx shown "
+        "(set LOG_200=1 to restore)"
+    )
+
+
 def post_fork(server, worker):
     """
     Called inside the new worker process after fork.
-    Each worker must re-open its own PG connections — psycopg2 connections
-    are NOT fork-safe and must never be shared across fork.
-
-    The Mempool singleton is lazy-initialised on first get_mempool() call,
-    which starts _PGListenerThread and _PGNotifier in the worker process.
-    The _SSEBroadcaster starts its own _listen_loop thread.
-    Nothing to do here explicitly — lazy init handles everything.
+    Re-applies access log filter (filters don't cross fork).
+    Also bumps oracle/lattice/quantum loggers to WARNING so their
+    measurement lines are visible without the 200 flood drowning them.
     """
     import logging
 
+    # Re-apply access filter in worker
+    access_logger = logging.getLogger("gunicorn.access")
+    already = any(isinstance(f, _ErrorOnlyAccessFilter) for f in access_logger.filters)
+    if not already:
+        access_logger.addFilter(_ErrorOnlyAccessFilter())
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+    # Oracle/lattice namespaces — WARNING+ so measurement lines appear
+    for ns in ("oracle", "lattice_controller", "globals", "qrng_ensemble"):
+        logging.getLogger(ns).setLevel(logging.WARNING)
+
     log = logging.getLogger("gunicorn.error")
     log.info(
-        f"[GUNICORN] Worker pid={worker.pid} forked — PG conns will init on first request"
+        f"[GUNICORN] Worker pid={worker.pid} forked — "
+        "PG conns will init on first request | access log: errors only"
     )
 
 
