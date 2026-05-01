@@ -7890,8 +7890,8 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         sig_dict['public_key'] = public_key_hex
 
         # ── Step 4: assemble final signed tx ─────────────────────────────────
-        tx_hash = _hs.sha3_256(
-            (_canonical + (sig_dict.get("signature", "") or "")).encode()
+        tx_hash = _hs.sha256(
+            (_js.dumps(_sign_data, sort_keys=True, default=str) + (sig_dict.get("signature", "") or "")).encode()
         ).hexdigest()
 
         signed_tx = {
