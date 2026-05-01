@@ -850,14 +850,16 @@ class PseudoqubitLocation:
 @dataclass
 class Block:
     """Block = quantum space object: triangle pq0 → pq_last → pq_curr → pq0
-    
+
     The Block is a 3-point quantum object in lattice space:
       • pq0      — tripartite W-state oracle (anchor, always at origin)
       • pq_last  — previous pseudoqubit (defines backward edge)
       • pq_curr  — current pseudoqubit  (defines forward edge)
-    
+
     All three are measured SEPARATELY; their median forms the consensus.
     Only the CONSENSUS value is signed and reported for the block.
+
+    STORAGE: 16³ amplitude tensor slice (4096 complex64 = 32KB) - NOT dense matrix.
     """
     
     block_id: str
@@ -2506,6 +2508,10 @@ class QuantumLatticeController:
         if _norm > 1e-12:
             psi /= np.sqrt(_norm)
 
+        # ── 16³ TENSOR STORAGE (NOT 4096×4096 DENSE MATRIX) ───────────────────────
+        # ψ ∈ C^{16×16×16} = 4096 complex64 elements = 32KB per snapshot
+        # This is the representative slice for the full lattice animation.
+        # The full lattice lives in globals but we only animate/stream this 16³ portion.
         self.current_density_matrix = psi.astype(np.complex64)
 
         # Store target for fidelity (clients measure against this)
