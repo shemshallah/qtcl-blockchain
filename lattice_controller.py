@@ -2589,7 +2589,7 @@ class QuantumLatticeController:
                     )
                     # Log only every 50 revival events to reduce spam
                     if self.cycle_count % 50 == 0:
-                        logger.info(
+                        logger.warning(
                             f"[σ-REVIVAL] ⚡ cycle={self.cycle_count} (×50) | "
                             f"F={fidelity_post_evolution:.4f}→{self.fidelity:.4f} | "
                             f"C={coherence_post_evolution:.4f}→{self.coherence:.4f} | "
@@ -2611,7 +2611,7 @@ class QuantumLatticeController:
                             if self.coherence > 0.15:  # Significant coherence
                                 # Log only every 50 entanglement revivals to reduce spam
                                 if self.cycle_count % 50 == 0:
-                                    logger.info(
+                                    logger.warning(
                                         f"✨ [REVIVAL] Entanglement revival (×50) | "
                                         f"C: {prev_coherence:.4f}→{self.coherence:.4f} "
                                         f"(Δ={self.coherence - prev_coherence:.4f}) | "
