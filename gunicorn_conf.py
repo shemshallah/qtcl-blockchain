@@ -64,9 +64,9 @@ import os as _os
 
 
 class _ErrorOnlyAccessFilter(_logging.Filter):
-    """Pass only 4xx/5xx. Drop 2xx/3xx. Disable with LOG_200=1."""
+    """Pass only 4xx/5xx. Drop 2xx/3xx. Enable with LOG_200=1."""
     def filter(self, record: _logging.LogRecord) -> bool:
-        if _os.environ.get("LOG_200"):
+        if _os.environ.get("LOG_200") == "1":
             return True
         try:
             status = int(record.getMessage().rsplit('"', 1)[-1].strip().split()[0])
@@ -76,19 +76,12 @@ class _ErrorOnlyAccessFilter(_logging.Filter):
 
 
 def _apply_filters():
-    """
-    Force gunicorn.access to WARNING + attach drop-200s filter.
-    Must set .setLevel() — without it Gunicorn leaves the logger at NOTSET
-    which inherits root DEBUG and every record reaches handlers regardless
-    of any filter attached.
-    """
-    if not _os.environ.get("LOG_200"):
+    if _os.environ.get("LOG_200") != "1":
         _al = _logging.getLogger("gunicorn.access")
         _al.setLevel(_logging.WARNING)
         if not any(isinstance(f, _ErrorOnlyAccessFilter) for f in _al.filters):
             _al.addFilter(_ErrorOnlyAccessFilter())
     _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
-    # Oracle/lattice/quantum: ensure WARNING+ is visible
     for _ns in ("oracle", "lattice_controller", "globals", "qrng_ensemble"):
         _lg = _logging.getLogger(_ns)
         if _lg.level == _logging.NOTSET or _lg.level > _logging.WARNING:

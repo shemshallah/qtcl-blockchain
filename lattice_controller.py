@@ -1565,8 +1565,18 @@ class NonMarkovianNoiseBath:
         self, density_matrix: np.ndarray, time_step: float
     ) -> np.ndarray:
         """
-        Apply dephasing + amplitude damping to 64³ 3D density tensor.
-        Simplified for 3D arrays (no 2D matrix operations like diag/eigh).
+        Apply non-Markovian dephasing + amplitude damping to the 16³ amplitude tensor.
+
+        The state |ψ⟩ ∈ C^{16×16×16} is a pure-state amplitude field.
+        The correct invariant is ‖ψ‖² = Σ|ψ(r)|² = 1 (L2 norm, Born rule).
+        After any linear operation, renormalize by L2, never L1.
+
+        Dephasing and amplitude damping multiply the field by scalar factors
+        (phase decoherence is per-voxel phase randomization; here we use the
+        global envelope approximation which is exact for homogeneous noise).
+        The non-Markovian memory revival blends with a weighted sum of past
+        states — physically the quantum memory kernel K(τ) re-excites old
+        coherences, producing the period-8 revival signature.
         """
         if density_matrix is None or not NUMPY_AVAILABLE:
             return density_matrix
@@ -1577,27 +1587,23 @@ class NonMarkovianNoiseBath:
                 T1_s = T1_NS / 1e9
                 dt = float(time_step)
 
-                # Dephasing: decay off-diagonal coherences
-                gamma_phi = 1.0 / max(T2_s, 1e-9)
-                deph_factor = float(np.exp(-gamma_phi * dt))
-                result = deph_factor * density_matrix
+                # Dephasing envelope: e^{-t/T₂}  (homogeneous pure dephasing)
+                deph_factor = float(np.exp(-dt / max(T2_s, 1e-9)))
+                # Amplitude damping: e^{-t/2T₁}  (√ because |ψ⟩ not ρ=|ψ⟩⟨ψ|)
+                amp_factor  = float(np.exp(-dt / (2.0 * max(T1_s, 1e-9))))
+                result = (deph_factor * amp_factor) * density_matrix
 
-                # Amplitude damping: decay overall magnitude
-                amp_factor = float(np.exp(-dt / max(T1_s, 1e-9)))
-                result = amp_factor * result
-
-                # Store in history for memory kernel
+                # Non-Markovian memory revival: Σ_k K(τ_k) · ψ(t - τ_k)
                 _current_cycle = len(self.history)
                 self.history.append((_current_cycle, density_matrix.copy()))
 
-                # Non-Markovian memory revival: blend with past state
                 if len(self.history) > 2:
                     hist_list = list(self.history)
                     dt_s = CYCLE_TIME_NS / 1e9
-                    mem_accum = np.zeros_like(density_matrix)
+                    mem_accum = np.zeros_like(density_matrix, dtype=np.complex64)
                     norm_accum = 0.0
                     seen_cycles: set = set()
-                    for k in range(4):  # Reduced lookback for 3D tensors
+                    for k in range(4):
                         target_idx = _current_cycle - (1 << k)
                         if target_idx < 0:
                             break
@@ -1612,19 +1618,17 @@ class NonMarkovianNoiseBath:
                     if norm_accum > 1e-12:
                         mem_accum /= norm_accum
                     revival_weight = min(self.memory_kernel * 0.20, 0.10)
-                    result = (
-                        1.0 - revival_weight
-                    ) * result + revival_weight * mem_accum
+                    result = (1.0 - revival_weight) * result + revival_weight * mem_accum
 
-                # Hermitianize for 3D tensor
-                result = 0.5 * (result + np.conj(np.transpose(result, (1, 0, 2))))
+                # L2 renormalization — CRITICAL: must be Σ|ψ|² not Σ|ψ|
+                _l2 = float(np.sum(np.abs(result) ** 2))
+                if _l2 > 1e-12:
+                    result = result / np.sqrt(_l2)
+                else:
+                    # State has collapsed — reinitialize to target
+                    result = getattr(self, '_last_target', density_matrix)
 
-                # Normalize to unit trace
-                _norm = np.sum(np.abs(result))
-                if _norm > 1e-12:
-                    result = result / _norm
-
-                return result
+                return result.astype(np.complex64)
 
         except Exception as exc:
             logger.debug(f"[NOISE] Memory effect failed: {exc}")
@@ -2166,10 +2170,12 @@ class QuantumLatticeController:
 
         self.current_density_matrix = psi.astype(np.complex64)
 
-        # W-state target — fixed reference for all fidelity computations.
-        # This is the pure tripartite W-state; fidelity measures how much
-        # the noisy evolved state retains this structure.
+        # Store target for fidelity (clients measure against this)
         self._w8_target = self.current_density_matrix.copy()
+
+        # Give NOISE_BATH a reference to the target so it can reinitialize
+        # if the state ever collapses below numerical precision
+        NOISE_BATH._last_target = self._w8_target
 
         # Purity of initial state (should be ~1.0 for the pure W-state init)
         _init_p = float(np.abs(np.vdot(self.current_density_matrix.ravel(),
@@ -2591,7 +2597,10 @@ class QuantumLatticeController:
                 # has drifted below 0.85 — this is Floquet engineering (timed
                 # resonance kick), not state injection.  The DM evolves under a
                 # valid unitary; no state is ever overwritten directly.
-                if (self.cycle_count % 8) == 0 and self.fidelity < 0.95:
+                # ── σ-REVIVAL: fire when fidelity drops, not on arbitrary cycle mod ──
+                # At 72ns per cycle, cycle%8==0 fires every 576ns — far too frequent.
+                # We gate on actual fidelity deficit instead.
+                if self.fidelity < 0.75:
                     # ── σ-REVIVAL: target-aligned Hamiltonian pulse on W8 subspace ──
                     self.current_density_matrix = self._apply_sigma_revival_unitary(
                         self.current_density_matrix

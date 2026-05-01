@@ -2328,6 +2328,8 @@ class QuantumOracleNode:
 
 
 # ─── Oracle W-State Manager (5-node cluster) ──────────────────────────────────
+# OracleNode is the canonical name used throughout — alias to QuantumOracleNode
+OracleNode = QuantumOracleNode
 
 
 class OracleWStateManager:
@@ -3111,16 +3113,18 @@ class OracleWStateManager:
                     cycles_ok += 1
 
                     # Status log every 100 steps
-                    if cycles_ok % 100 == 0:
+                    if cycles_ok % 20 == 0:
                         bf = snapshot.aer_noise_state.get("block_field", {})
                         pq0_o = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
-                        logger.info(
+                        pq0_iv = snapshot.aer_noise_state.get("pq0_IV_fidelity", 0)
+                        pq0_v  = snapshot.aer_noise_state.get("pq0_V_fidelity", 0)
+                        logger.warning(
                             f"[ORACLE-MULTIPLEX] step={cycles_ok} | "
                             f"cycle={snapshot.lattice_refresh_counter} | "
-                            f"fidelity={snapshot.w_state_fidelity:.6f} | "
-                            f"coherence={snapshot.coherence_l1:.6f} | "
-                            f"entropy={snapshot.von_neumann_entropy:.6f} | "
-                            f"pq0={pq0_o:.4f}"
+                            f"fid={snapshot.w_state_fidelity:.4f} | "
+                            f"coh={snapshot.coherence_l1:.4f} | "
+                            f"S={snapshot.von_neumann_entropy:.4f} | "
+                            f"pq0={pq0_o:.4f} IV={pq0_iv:.4f} V={pq0_v:.4f}"
                         )
 
                     if cycles_ok % CONSOLE_EVERY == 0:
