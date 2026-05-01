@@ -2111,8 +2111,8 @@ async function loadMempool() {
       html += `<td><span class="addr">${truncAddr(h, 14)}</span></td>`;
       html += `<td>${txTypeBadge(tx.tx_type)}</td>`;
       html += `<td><span class="addr">${truncAddr(tx.from_address || '', 8)} → ${truncAddr(tx.to_address || '', 8)}</span></td>`;
-      html += `<td>${fmtQTCL(Number(tx.amount || 0) / 100)}</td>`;
-      html += `<td style="color:var(--muted);font-size:10px;">${fmtQTCL(Number(tx.fee || 0) / 100)}</td>`;
+      html += `<td>${fmtQTCL((Number(tx.amount_base || tx.amount || 0)) / 100)}</td>`;
+      html += `<td style="color:var(--muted);font-size:10px;">${fmtQTCL((Number(tx.fee_base || tx.fee || 0)) / 100)}</td>`;
       html += '</tr>';
     }
     html += '</tbody></table></div>';
