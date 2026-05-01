@@ -1459,11 +1459,6 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// Window loses focus (switch to another app or browser window)
-window.addEventListener('blur', () => {
-  _zeroWalletKeyMaterial();
-});
-
 // Page unload / navigation
 window.addEventListener('pagehide', () => {
   _zeroWalletKeyMaterial();
