@@ -7846,7 +7846,10 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             return _rpc_error(-32603, f"Decrypt failed: {str(_de)}", rpc_id)
 
         if isinstance(_pk_bytes, (bytes, bytearray)):
-            private_key_hex = _pk_bytes.hex()
+            # decrypt_with_password returns the raw private key as UTF-8 bytes.
+            # The private key IS a string of walk indices ("0123…"), NOT binary —
+            # decode as UTF-8, do NOT call .hex() which would double the length.
+            private_key_hex = _pk_bytes.decode('utf-8')
         else:
             private_key_hex = str(_pk_bytes)
 
