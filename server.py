@@ -4140,11 +4140,12 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                 "address_type": wallet.get("address_type", "unknown"),
                 "diagnostic": _diagnostic,
             }
-        logger.info(
-            f"[RPC] qtcl_getBalance: addr={address[:20]}…"
-            f" bal={result['balance']} found={_diagnostic.get('found_in_db', False)}"
-            f" by={_diagnostic.get('found_by', 'none')}"
-        )
+        if os.environ.get("LOG_RPC_BALANCE"):
+            logger.info(
+                f"[RPC] qtcl_getBalance: addr={address[:20]}…"
+                f" bal={result['balance']} found={_diagnostic.get('found_in_db', False)}"
+                f" by={_diagnostic.get('found_by', 'none')}"
+            )
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
