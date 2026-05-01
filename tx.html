@@ -1645,7 +1645,7 @@ async function refreshBalance() {
     const wa = document.getElementById('walletAddr');
     wa.textContent = S.walletAddr;
     wa.style.display = 'inline-block';
-    document.getElementById('walletConnectCard').style.display = S.walletAddr ? 'none' : '';
+    document.getElementById('walletConnectCard').style.display = S.walletMode === 'full' ? 'none' : '';
     document.getElementById('disconnectBtn').style.display = S.walletAddr ? '' : 'none';
     document.getElementById('sendFrom').value = S.walletAddr;
     document.getElementById('sendBalance').textContent = fmtQTCL(S.balance);
