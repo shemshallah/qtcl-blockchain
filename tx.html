@@ -1429,8 +1429,6 @@ function showPage(page) {
   if (page === 'contacts') renderContactsPage();
 }
 
-}
-
 // ═══ SECURITY: WALLET FILE CLEAR ON FOCUS LOSS / TAB SWITCH ═══
 // _walletFileData and _walletEncryptedPK are the sensitive blobs.
 // They are zeroed immediately whenever the page loses visibility or focus.
@@ -1790,41 +1788,41 @@ async function executeSend() {
     }
 
     // ── qtcl_signAndSubmitTx: server-side HypΓ decrypt + sign + submit ──────
-    {
-      // Password may have been zeroed after prior tx or tab-switch — prompt if needed
-      let pwd = _signPassword;
-      if (!pwd) {
-        pwd = window.prompt('Re-enter wallet password to sign this transaction:');
-        if (!pwd) { toast('Password required to sign', 'error'); btn.disabled = false; btn.textContent = 'Sign & Submit'; return; }
+    // Password may have been zeroed after prior tx or tab-switch — prompt if needed
+    let pwd = _signPassword;
+    if (!pwd) {
+      pwd = window.prompt('Re-enter wallet password to sign this transaction:');
+      if (!pwd) { toast('Password required to sign', 'error'); btn.disabled = false; btn.textContent = 'Sign & Submit'; return; }
+    }
+    const r = await rpc('qtcl_signAndSubmitTx', [{
+      wallet_data: _walletFileData,
+      password: pwd,
+      tx: {
+        from_address: S.walletAddr,
+        to_address: to,
+        amount: amount,
+        fee: fee,
+        nonce: Date.now(),
+        memo: memo,
       }
-      const r = await rpc('qtcl_signAndSubmitTx', [{
-        wallet_data: _walletFileData,
-        password: pwd,
-        tx: {
-          from_address: S.walletAddr,
-          to_address: to,
-          amount: amount,
-          fee: fee,
-          nonce: Date.now(),
-          memo: memo,
-        }
-      }]);
+    }]);
 
-      if (r.valid === false) {
-        toast('Wallet password incorrect — please re-authenticate', 'error');
-        btn.disabled = false; btn.textContent = 'Sign & Submit';
-        pwd = '';
-        return;
-      }
-
-      document.getElementById('sendTxHash').textContent = `TX: ${r.tx_hash || 'submitted'}`;
-      document.getElementById('sendStep2').classList.add('hidden');
-      document.getElementById('sendStep3').classList.remove('hidden');
-      toast('Transaction signed and submitted!', 'success');
-      _signPassword = '';  // zero from memory after use
+    if (r.valid === false) {
+      toast('Wallet password incorrect — please re-authenticate', 'error');
+      btn.disabled = false; btn.textContent = 'Sign & Submit';
       pwd = '';
-      refreshBalance();
-    } catch (e) {
+      return;
+    }
+
+    document.getElementById('sendTxHash').textContent = `TX: ${r.tx_hash || 'submitted'}`;
+    document.getElementById('sendStep2').classList.add('hidden');
+    document.getElementById('sendStep3').classList.remove('hidden');
+    toast('Transaction signed and submitted!', 'success');
+    _signPassword = '';
+    pwd = '';
+    refreshBalance();
+
+  } catch (e) {
     toast(`Submit failed: ${e.message}`, 'error');
   } finally {
     btn.disabled = false;
