@@ -1630,15 +1630,35 @@ class Mempool:
             signing_hash_hex = signing_hash_bytes.hex()
             logger.debug(f"[MEMPOOL-SIG] Signing hash: {signing_hash_hex}")
 
-            # 2. Verify via Oracle
+            # 2. Verify signature
             if _ORACLE_AVAILABLE:
-                # Pass the ACTUAL signing hash to the oracle
                 ok, reason = ORACLE.verify_transaction(signing_hash_hex, sig_dict, from_address)
                 if ok:
                     return True, "valid"
-                return False, reason
-            
-            return False, "oracle_unavailable"
+                # Oracle rejected — fall through to direct HypΓ verification below
+                logger.warning(f"[MEMPOOL-SIG] Oracle rejected: {reason} — trying direct HypΓ")
+
+            # ── Direct HypΓ verification (no oracle dependency) ──────────────
+            # Works when oracle is unavailable OR as oracle fallback
+            try:
+                from hlwe.hyp_engine import HypGammaEngine as _HGE
+                _eng = _HGE()
+                _msg_bytes = signing_hash_bytes  # already bytes
+                _ok = _eng.verify_signature(_msg_bytes, sig_dict, pub_key_hex)
+                if _ok:
+                    return True, "valid_hyp_direct"
+                return False, "hyp_signature_invalid"
+            except ImportError:
+                try:
+                    from hyp_engine import HypGammaEngine as _HGE2
+                    _eng2 = _HGE2()
+                    _ok2 = _eng2.verify_signature(signing_hash_bytes, sig_dict, pub_key_hex)
+                    if _ok2:
+                        return True, "valid_hyp_direct"
+                    return False, "hyp_signature_invalid"
+                except ImportError:
+                    logger.error("[MEMPOOL-SIG] HypΓ engine unavailable — cannot verify")
+                    return False, "hyp_engine_unavailable"
 
         except Exception as e:
             logger.error(f"[MEMPOOL-SIG] Verification error: {e}")

@@ -7870,13 +7870,17 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             "tx_type":      "transfer",
         }
 
-        # Canonical hash — must match mempool.Transaction.get_signing_hash()
-        _canonical = _js.dumps(
-            {k: tx_body[k] for k in sorted(tx_body)},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        signing_hash = _hs.sha3_256(_canonical.encode()).digest()
+        # Signing hash MUST match mempool._verify_signature reconstruction exactly:
+        # sha256(json.dumps({'sender':…,'recipient':…,'amount':…,'nonce':…}, sort_keys=True))
+        _sign_data = {
+            'sender':    from_address,
+            'recipient': to_address,
+            'amount':    amount,
+            'nonce':     nonce,
+        }
+        signing_hash = _hs.sha256(
+            _js.dumps(_sign_data, sort_keys=True, default=str).encode('utf-8')
+        ).digest()
 
         # ── Step 3: HypΓ Schnorr-Γ sign ──────────────────────────────────────
         from hyp_engine import HypGammaEngine
