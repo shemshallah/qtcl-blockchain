@@ -1438,23 +1438,25 @@ function showPage(page) {
 // Re-authenticating requires uploading the wallet file again — by design.
 
 function _zeroWalletKeyMaterial() {
-  _walletFileData      = null;
+  // Zero the private key material and password — the sensitive parts
   _walletEncryptedPK   = null;
   _signPassword        = '';
-  // Downgrade to read-only — send form will require re-auth
+  // Only wipe wallet file data if user was fully authenticated
+  // (pre-auth file load is not sensitive — no key material decrypted yet)
   if (S.walletMode === 'full') {
+    _walletFileData = null;
     S.walletMode = 'readonly';
-    // Update mode badge without full disconnect
-    const badge = document.getElementById('walletModeBadge');
-    if (badge) badge.textContent = '👁 Read-Only (re-authenticate to send)';
     const authBtn = document.getElementById('walletAuthBtn');
     if (authBtn) authBtn.textContent = 'Re-authenticate';
+    toast('Session cleared — re-authenticate to send', 'info');
   }
 }
 
-// Tab switch / window minimise
+// Only zero when the page is actually hidden (tab switch, minimize, phone lock)
+// NOT on file picker open — the OS dialog does NOT trigger visibilitychange reliably
+// and we must not disrupt the wallet load flow
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') {
+  if (document.visibilityState === 'hidden' && S.walletMode === 'full') {
     _zeroWalletKeyMaterial();
   }
 });
