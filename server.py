@@ -4140,12 +4140,11 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                 "address_type": wallet.get("address_type", "unknown"),
                 "diagnostic": _diagnostic,
             }
-        if os.environ.get("LOG_RPC_BALANCE"):
-            logger.info(
-                f"[RPC] qtcl_getBalance: addr={address[:20]}…"
-                f" bal={result['balance']} found={_diagnostic.get('found_in_db', False)}"
-                f" by={_diagnostic.get('found_by', 'none')}"
-            )
+        logger.info(
+            f"[RPC] qtcl_getBalance: addr={address[:20]}…"
+            f" bal={result['balance']} found={_diagnostic.get('found_in_db', False)}"
+            f" by={_diagnostic.get('found_by', 'none')}"
+        )
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
@@ -6877,6 +6876,24 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     f"[SUBMIT-BLOCK] 💰 MINER CREDITED inline: {miner_address[:20]}… "
                     f"+{_miner_reward / 100:.2f} QTCL h={height} ✅"
                 )
+
+                # ── UPDATE TRIPARTITE PQ0 STATE (new block → new entangled object) ──
+                # Re-anchor the pq0 W-state with pq_curr=height, pq_last=height-1
+                # so all 5 oracles immediately begin measuring the NEW block's
+                # entangled object. Fire-and-forget — non-blocking.
+                try:
+                    if LATTICE is not None and hasattr(LATTICE, "update_pq0_state"):
+                        import threading as _tpq_th
+                        _tpq_th.Thread(
+                            target=LATTICE.update_pq0_state,
+                            args=(height, height - 1),
+                            daemon=True,
+                            name=f"pq0-update-h{height}",
+                        ).start()
+                    if ORACLE_W_STATE_MANAGER is not None and hasattr(ORACLE_W_STATE_MANAGER, "set_pq_state"):
+                        ORACLE_W_STATE_MANAGER.set_pq_state(height, height - 1)
+                except Exception as _pq_err:
+                    logger.debug(f"[SUBMIT-BLOCK] pq0 update non-critical: {_pq_err}")
 
                 # ── NON-COINBASE TX SETTLEMENT (inline) ──────────────────────────
                 for _nctx in _non_coinbase_txs:

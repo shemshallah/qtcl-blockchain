@@ -2109,48 +2109,74 @@ class QuantumLatticeController:
         self.w_state_constructor = WStateConstructor(self.field)
         self.noise_bath = NonMarkovianNoiseBath()
 
-        # Quantum state — NATIVE 16³ 3D DENSITY TENSOR (NOT 256×256)
-        # 16×16×16 spatial-temporal field representation of quantum coherence
-        # Initialized as coherent 3D W-state with Gaussian envelope
-        # 4 qubits × 4 qubits = 16³ tensor
-        _DIM = 16  # 16³ = 4,096 elements (native 3D quantum field)
+        # ═══════════════════════════════════════════════════════════════════════
+        # CANONICAL PQ0 TRIPARTITE W-STATE — GROUND TRUTH QUANTUM OBJECT
+        # ═══════════════════════════════════════════════════════════════════════
+        # The 16³ amplitude tensor ψ(x,y,z) represents the entangled object
+        # anchored at pq0 (origin). Three orthogonal legs:
+        #
+        #   pq0_oracle    — pseudoqubit 0 at origin (0,0,0)     axis z=0
+        #   pq0_V         — virtual qubit forward range pq_curr  axis z=+
+        #   pq0_IV        — inverse-virtual (conjugate) pq_last  axis z=−
+        #
+        # W-state: |W₃⟩ = (1/√3)(|100⟩ + |010⟩ + |001⟩)
+        # Each leg is a Gaussian mode localized on its axis.
+        # The tripartite entanglement is encoded in the equal-weight superposition.
+        # All 5 oracle nodes measure THIS same initial state with independent
+        # per-node noise realizations — their median forms the consensus.
+        # ═══════════════════════════════════════════════════════════════════════
 
-        # Initialize 16³ density tensor — SERVER LATTICE (GROUND TRUTH)
-        # Streamed to all clients via SSE /rpc/oracle/snapshot
-        # 4 qubits × 4 qubits → 16³ tensor measurement
-        self.current_density_matrix = np.zeros((_DIM, _DIM, _DIM), dtype=np.complex64)
+        _DIM = 16
+        _ORIGIN = _DIM // 2  # center of 16³ grid = voxel (8,8,8)
+        _SIGMA = 2.0         # Gaussian width in voxels
 
-        # Multi-mode coherent quantum state (superposition of spatial W-state modes)
-        # Centered within 16³ grid
-        _num_modes = 4
-        for _m in range(_num_modes):
-            _cx = 4 + _m * 3
-            _cy = 4 + _m * 3
-            _cz = 8
+        psi = np.zeros((_DIM, _DIM, _DIM), dtype=np.complex128)
 
-            for i in range(_DIM):
-                for j in range(_DIM):
-                    for k in range(_DIM):
-                        _dx = (i - _cx) / 4.0
-                        _dy = (j - _cy) / 4.0
-                        _dz = (k - _cz) / 4.0
-                        _r2 = _dx * _dx + _dy * _dy + _dz * _dz
-                        _envelope = np.exp(-_r2 / 2.0)
-                        _phase = 2 * np.pi * _m / _num_modes
-                        self.current_density_matrix[i, j, k] += (
-                            _envelope / _num_modes
-                        ) * np.exp(1j * _phase)
+        # ── Leg 1: pq0_oracle — oracle leg, localized at (8,8,8) origin ──────
+        # Symmetric Gaussian centred on origin, phase = 0
+        for i in range(_DIM):
+            for j in range(_DIM):
+                for k in range(_DIM):
+                    _r2 = ((i-_ORIGIN)/_SIGMA)**2 + ((j-_ORIGIN)/_SIGMA)**2 + ((k-_ORIGIN)/_SIGMA)**2
+                    psi[i,j,k] += np.exp(-_r2/2.0) * (1.0/np.sqrt(3.0))
 
-        # Normalize: trace = 1 (proper density matrix for quantum state)
-        _norm = np.sum(np.abs(self.current_density_matrix) ** 2)
+        # ── Leg 2: pq0_V — virtual (forward range pq_curr), localized at +z half ──
+        # Gaussian shifted +4 voxels along z-axis, phase = 2π/3
+        _SHIFT = 4
+        _PHASE_V = 2.0 * np.pi / 3.0
+        for i in range(_DIM):
+            for j in range(_DIM):
+                for k in range(_DIM):
+                    _r2 = ((i-_ORIGIN)/_SIGMA)**2 + ((j-_ORIGIN)/_SIGMA)**2 + ((k-(_ORIGIN+_SHIFT))/_SIGMA)**2
+                    psi[i,j,k] += np.exp(-_r2/2.0) * (1.0/np.sqrt(3.0)) * np.exp(1j * _PHASE_V)
+
+        # ── Leg 3: pq0_IV — inverse-virtual (conjugate pq_last), localized at −z half ──
+        # Gaussian shifted −4 voxels along z-axis, phase = 4π/3
+        _PHASE_IV = 4.0 * np.pi / 3.0
+        for i in range(_DIM):
+            for j in range(_DIM):
+                for k in range(_DIM):
+                    _r2 = ((i-_ORIGIN)/_SIGMA)**2 + ((j-_ORIGIN)/_SIGMA)**2 + ((k-(_ORIGIN-_SHIFT))/_SIGMA)**2
+                    psi[i,j,k] += np.exp(-_r2/2.0) * (1.0/np.sqrt(3.0)) * np.exp(1j * _PHASE_IV)
+
+        # Normalize: ‖ψ‖² = 1
+        _norm = float(np.sum(np.abs(psi)**2))
         if _norm > 1e-12:
-            self.current_density_matrix = self.current_density_matrix / np.sqrt(_norm)
+            psi /= np.sqrt(_norm)
 
-        # Store target for fidelity (clients measure against this)
+        self.current_density_matrix = psi.astype(np.complex64)
+
+        # W-state target — fixed reference for all fidelity computations.
+        # This is the pure tripartite W-state; fidelity measures how much
+        # the noisy evolved state retains this structure.
         self._w8_target = self.current_density_matrix.copy()
-        self.w_state_strength = 0.8
+
+        # Purity of initial state (should be ~1.0 for the pure W-state init)
+        _init_p = float(np.abs(np.vdot(self.current_density_matrix.ravel(),
+                                        self.current_density_matrix.ravel())))
+        self.w_state_strength = _init_p
         self.coherence = 0.9
-        self.fidelity = 0.99
+        self.fidelity = 1.0
         self.metrics_history = deque(maxlen=10000)
 
         self._lock = threading.RLock()
@@ -2165,17 +2191,18 @@ class QuantumLatticeController:
         self._init_blockchain()
 
         logger.info(
-            "✨ QUANTUM LATTICE CONTROLLER INITIALIZED (SPATIAL-TEMPORAL FIELD MODEL)"
+            "✨ QUANTUM LATTICE CONTROLLER INITIALIZED — Tripartite pq0 W-state"
         )
-        logger.info(f"   Coherence target: 0.900 | Fidelity target: 0.992")
+        logger.info(
+            f"   pq0_oracle@(8,8,8) | pq0_V@(8,8,12) | pq0_IV@(8,8,4) "
+            f"| ‖ψ‖²={_init_p:.6f}"
+        )
         logger.info(
             f"   Memory kernel: κ={KAPPA_MEMORY} | Revival gain: {REVIVAL_AMPLIFIER}x"
         )
         logger.info(
-            f"   Pseudoqubits: {TOTAL_PSEUDOQUBITS:,} in {NUM_BATCHES} batches × {TOTAL_PSEUDOQUBITS // NUM_BATCHES}"
+            f"   Pseudoqubits: {TOTAL_PSEUDOQUBITS:,} in {NUM_BATCHES} batches"
         )
-        logger.info(f"   W-state: tripartite oracle|IV|V implicit per pseudoqubit")
-        logger.info(f"   Routing: hyperbolic spatial-temporal field management")
 
     def _init_blockchain(self):
         """
@@ -2486,16 +2513,23 @@ class QuantumLatticeController:
                 # Compute quantum metrics
                 # FIX: normalise L1-coherence to [0,1] so LATTICE.coherence is always
                 # a physically meaningful [0,1] metric (max for 256-dim = 255).
+                # L1 coherence for the 16³ tripartite W-state field.
+                # For a 3-mode Gaussian W-state spread over N=4096 voxels,
+                # the maximum L1 coherence = (Σ|ψᵢ|)² − 1.
+                # With ‖ψ‖²=1, Σ|ψ|² = 1 always, so:
+                #   L1_max ≈ (√N · ‖ψ‖)² − 1 = N − 1 = 4095 for uniform spread
+                # For our Gaussian W-state ≈ 3 modes each with σ=2, effective
+                # support ≈ 3 × (2√(2π)σ)³ ≈ 3 × 126 ≈ 378 voxels:
+                #   L1_max ≈ √378 − 1 ≈ 19  (realistic max for this state)
+                # We normalize by (Σ|ψᵢ|)_max = √effective_support to get [0,1].
                 _raw_coh = QuantumInformationMetrics.coherence_l1_norm(
                     self.current_density_matrix
                 )
-                # W8-COHERENCE FIX: For 16³ amplitude tensor with 4096 elements,
-                # max L1 coherence = (Σ|ψᵢ|)² − Σ|ψᵢ|² for a uniform superposition
-                # of K modes.  For 4-mode Gaussian W-state init: K≈4, max ≈ K*(K-1) = 12.
-                # For N=4096 uniform: max = N-1 = 4095.  We normalize by the 4-mode
-                # W-state theoretical max to get meaningful [0,1] coherence.
-                _W8_COHERENCE_MAX = 12.0  # 4 modes → max L1 ≈ 12
-                self.coherence = float(np.clip(_raw_coh / _W8_COHERENCE_MAX, 0.0, 1.0))
+                # Dynamic normalization: (Σ|ψ|)² = L1 + 1  → Σ|ψ| = √(L1+1)
+                # C_normalized = L1 / (Σ|ψ|)² = L1 / (L1 + 1) ∈ [0,1)
+                # This is the correct normalization that saturates at 1 only for
+                # a maximally coherent state and stays in [0,1] by construction.
+                self.coherence = float(_raw_coh / (_raw_coh + 1.0)) if _raw_coh > 0 else 0.0
 
                 # FIX: fidelity reference must be |W_8><W_8|, NOT the maximally-mixed
                 # state I/256.  F(rho, I/256) measures how close we are to THERMAL
@@ -2529,7 +2563,9 @@ class QuantumLatticeController:
                         QuantumInformationMetrics.coherence_l1_norm(
                             self.current_density_matrix
                         )
-                        / 7.0,
+                        / (QuantumInformationMetrics.coherence_l1_norm(
+                            self.current_density_matrix
+                        ) + 1.0 + 1e-12),
                         0.0,
                         1.0,
                     )
@@ -2572,9 +2608,7 @@ class QuantumLatticeController:
                         _rho_pumped = (
                             1.0 - _pump_alpha
                         ) * self.current_density_matrix + _pump_alpha * self._w8_target
-                        # Enforce valid amplitude field: Hermitian-like symmetry + normalize
-                        # For 3D tensor ψ(x,y,z): symmetrize axes 0↔1 and normalize ‖ψ‖²=1
-                        _rho_pumped = 0.5 * (_rho_pumped + np.conj(np.transpose(_rho_pumped, (1, 0, 2))))
+                        # Normalize the 3D amplitude tensor: ‖ψ‖² = 1
                         _norm = float(np.sum(np.abs(_rho_pumped) ** 2))
                         if _norm > 1e-12:
                             _rho_pumped = _rho_pumped / np.sqrt(_norm)
@@ -2583,7 +2617,7 @@ class QuantumLatticeController:
                     _raw_coh_r = QuantumInformationMetrics.coherence_l1_norm(
                         self.current_density_matrix
                     )
-                    self.coherence = float(np.clip(_raw_coh_r / 12.0, 0.0, 1.0))
+                    self.coherence = float(_raw_coh_r / (_raw_coh_r + 1.0)) if _raw_coh_r > 0 else 0.0
                     self.fidelity = QuantumInformationMetrics.state_fidelity(
                         self.current_density_matrix, self._w8_target
                     )
@@ -2776,6 +2810,56 @@ class QuantumLatticeController:
             "measurement_type": "W_STATE_REVIVAL",  # ← Oracles must measure W-state, not pq block-field
             "is_revival_cycle": (self.cycle_count % 8) == 0,  # SIGMA-REVIVAL at mod 8
         }
+
+    def update_pq0_state(self, pq_curr: int, pq_last: int) -> None:
+        """
+        Re-anchor the tripartite pq0 W-state when the chain advances.
+
+        The 16³ entangled object has three Gaussian legs:
+          pq0_oracle  — origin (8,8,8), phase-locked reference, always fixed
+          pq0_V       — virtual forward-range leg, z = 8 + Δ(pq_curr)
+          pq0_IV      — inverse-virtual conjugate leg, z = 8 − Δ(pq_last)
+
+        This encodes the current block as a living tripartite quantum object.
+        All 5 oracle nodes independently measure THIS state with per-node noise;
+        their median fidelity is the consensus displayed on index.html.
+        """
+        _DIM = 16
+        _ORIGIN = _DIM // 2   # voxel 8 — the pq0 anchor
+        _SIGMA = 2.0
+
+        _shift_v  = max(1, min(_DIM//2 - 1, 1 + (int(pq_curr) % (_DIM//2 - 1))))
+        _shift_iv = max(1, min(_DIM//2 - 1, 1 + (int(pq_last) % (_DIM//2 - 1))))
+
+        import numpy as _np
+        psi = _np.zeros((_DIM, _DIM, _DIM), dtype=_np.complex128)
+
+        for i in range(_DIM):
+            for j in range(_DIM):
+                for k in range(_DIM):
+                    _o  = (i-_ORIGIN)**2 + (j-_ORIGIN)**2
+                    _r0 = (_o + (k-_ORIGIN)**2)    / _SIGMA**2
+                    _rv = (_o + (k-(_ORIGIN+_shift_v))**2)  / _SIGMA**2
+                    _ri = (_o + (k-(_ORIGIN-_shift_iv))**2) / _SIGMA**2
+                    psi[i,j,k] = (
+                        _np.exp(-_r0/2.0)
+                        + _np.exp(-_rv/2.0) * _np.exp(1j * 2*_np.pi/3)
+                        + _np.exp(-_ri/2.0) * _np.exp(1j * 4*_np.pi/3)
+                    ) / _np.sqrt(3.0)
+
+        _norm = float(_np.sum(_np.abs(psi)**2))
+        if _norm > 1e-12:
+            psi /= _np.sqrt(_norm)
+
+        with self._lock:
+            self.current_density_matrix = psi.astype(_np.complex64)
+            self._w8_target = self.current_density_matrix.copy()
+            self.fidelity = 1.0
+
+        logger.warning(
+            f"[PQ0] Tripartite re-anchored: pq_curr={pq_curr} pq_last={pq_last} | "
+            f"oracle@z=8 | V@z={_ORIGIN+_shift_v} | IV@z={_ORIGIN-_shift_iv}"
+        )
 
     def get_block_field_pq0(self) -> "np.ndarray":
         """

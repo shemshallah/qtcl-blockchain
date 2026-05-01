@@ -1827,10 +1827,137 @@ class QuantumOracleNode:
         # ... [Physics logic here] ...
         return None # (Simplified for a la brief summary)
 
-    def measure_block_field(self, pq_curr, pq_last, shared_pq0=None, lattice=None) -> Optional[BlockFieldReading]:
-        # Existing block-field measurement logic...
-        # ... [Tensor logic here] ...
-        return None # (Simplified for a la brief summary)
+    def measure_block_field(self, pq_curr, pq_last, shared_pq0=None, lattice=None) -> Optional["BlockFieldReading"]:
+        """
+        Measure the tripartite pq0 W-state through this oracle node's independent
+        noise channel and return a BlockFieldReading.
+
+        shared_pq0: 16³ complex64 amplitude tensor — the canonical tripartite
+                    W-state from LATTICE.current_density_matrix. All 5 nodes
+                    receive the SAME initial state but apply their own independent
+                    QRNG-seeded phase noise (σ_offset + role-specific amplitude),
+                    producing 5 divergent measurements whose median is consensus.
+
+        pq_curr / pq_last encode the current block's forward range and
+        backward reference — they seed per-oracle σ-noise so measurement
+        divergence is block-specific (not just node-specific).
+        """
+        try:
+            psi_16 = None
+            if shared_pq0 is not None and hasattr(shared_pq0, "shape"):
+                if shared_pq0.ndim == 3 and shared_pq0.shape == (16, 16, 16):
+                    psi_16 = np.ascontiguousarray(shared_pq0, dtype=np.complex64)
+
+            if psi_16 is None:
+                # Fallback: read directly from lattice
+                _lat = lattice
+                if _lat is None:
+                    try:
+                        from globals import get_lattice as _glf
+                        _lat = _glf()
+                    except Exception:
+                        pass
+                if _lat is not None:
+                    _cdm = getattr(_lat, "current_density_matrix", None)
+                    if _cdm is not None and hasattr(_cdm, "shape") and _cdm.ndim == 3:
+                        psi_16 = np.ascontiguousarray(_cdm, dtype=np.complex64)
+
+            if psi_16 is None:
+                # Last resort: use node's own DM (8×8 — reshape to 16³ slice)
+                psi_16 = np.zeros((16, 16, 16), dtype=np.complex64)
+                if self._dm is not None:
+                    _dm8 = self._dm
+                    for _ri in (1, 2, 4):
+                        psi_16[8, 8, 4 + _ri] = complex(_dm8[_ri, _ri].real)
+
+            # Normalize
+            _n = float(np.sum(np.abs(psi_16)**2))
+            if _n > 1e-12:
+                psi_16 = psi_16 / np.sqrt(_n)
+
+            # ── Per-node independent noise: QRNG-seeded phase jitter ─────────
+            # Block-specific seed: (pq_curr × prime) XOR (node_id × prime2) XOR qrng
+            try:
+                _qrng_raw = _oracle_qrng_bytes(8)
+                _qrng_int = int.from_bytes(_qrng_raw, "little") & 0x7FFFFFFF
+            except Exception:
+                _qrng_int = int(time.time_ns()) & 0x7FFFFFFF
+            _seed = (
+                int(pq_curr) * 0x9E3779B1
+                ^ int(self.oracle_id) * 0x517CC1B7
+                ^ _qrng_int
+            ) & 0x7FFFFFFF
+            _rng = np.random.default_rng(_seed)
+            # Role-specific noise amplitude: oracle0=±20mrad … oracle4=±60mrad
+            _noise_amp = 0.02 + self.oracle_id * 0.01
+            _phase_noise = _rng.uniform(-_noise_amp, _noise_amp, size=psi_16.shape)
+            _psi_node = psi_16 * np.exp(1j * _phase_noise.astype(np.float32))
+            _nn = float(np.sum(np.abs(_psi_node)**2))
+            if _nn > 1e-12:
+                _psi_node = _psi_node / np.sqrt(_nn)
+
+            # Born probabilities
+            _p = np.abs(_psi_node)**2
+            _psum = float(np.sum(_p))
+            if _psum > 1e-12:
+                _p = _p / _psum
+
+            # Metrics
+            _purity = float(np.sum(_p**2))
+            _pf = _p.ravel()
+            _pnz = _pf[_pf > 1e-16]
+            _entropy = float(-np.sum(_pnz * np.log(_pnz))) if _pnz.size > 0 else 0.0
+            _abs = np.abs(_psi_node).ravel()
+            _l1 = float(np.sum(_abs)**2 - np.sum(_abs**2))
+            _coherence = float(_l1 / (_l1 + 1.0)) if _l1 > 0 else 0.0
+
+            # Fidelity against tripartite target
+            _tgt = None
+            try:
+                from globals import get_lattice as _gf
+                _lx = _gf()
+                if _lx is not None:
+                    _tgt = getattr(_lx, "_w8_target", None)
+                    if _tgt is not None and _tgt.ndim == 3:
+                        _tgt = np.ascontiguousarray(_tgt, dtype=np.complex64)
+                        _tn = float(np.sum(np.abs(_tgt)**2))
+                        if _tn > 1e-12:
+                            _tgt = _tgt / np.sqrt(_tn)
+            except Exception:
+                pass
+
+            if _tgt is not None:
+                _fidelity = float(np.abs(np.vdot(_tgt.ravel(), _psi_node.ravel()))**2)
+                _fidelity = max(0.0, min(1.0, _fidelity))
+            else:
+                _fidelity = _purity  # self-fidelity proxy
+
+            # Tripartite leg fidelities: project onto each z-slice
+            # pq0_oracle: z slice at _ORIGIN=8; pq0_V: at +shift; pq0_IV: at -shift
+            _pq0_o  = float(np.sum(np.abs(_psi_node[:, :, 8])**2))
+            _pq0_v  = float(np.sum(np.abs(_psi_node[:, :, min(15, 8 + max(1, int(pq_curr) % 7))])**2))
+            _pq0_iv = float(np.sum(np.abs(_psi_node[:, :, max(0, 8 - max(1, int(pq_last) % 7))]))**2)
+
+            self.last_fidelity = _fidelity
+            self.measurement_count += 1
+
+            return BlockFieldReading(
+                oracle_id=self.oracle_id,
+                pq_curr=int(pq_curr),
+                pq_last=int(pq_last),
+                entropy=_entropy,
+                fidelity=_fidelity,
+                coherence=_coherence,
+                timestamp_ns=time.time_ns(),
+                oracle_dm=None,
+                pq0_oracle_fidelity=_pq0_o,
+                pq0_IV_fidelity=_pq0_iv,
+                pq0_V_fidelity=_pq0_v,
+                mermin_violation=0.0,
+            )
+        except Exception as exc:
+            logger.error(f"[ORACLE-NODE-{self.oracle_id + 1}] measure_block_field failed: {exc}")
+            return None
 
 
         self.aer: Optional[object] = None
@@ -2987,7 +3114,7 @@ class OracleWStateManager:
                     if cycles_ok % 100 == 0:
                         bf = snapshot.aer_noise_state.get("block_field", {})
                         pq0_o = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
-                        logger.warning(
+                        logger.info(
                             f"[ORACLE-MULTIPLEX] step={cycles_ok} | "
                             f"cycle={snapshot.lattice_refresh_counter} | "
                             f"fidelity={snapshot.w_state_fidelity:.6f} | "
