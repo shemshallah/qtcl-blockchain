@@ -3556,11 +3556,13 @@ def _lazy_ensure_blocks():
                     INSERT INTO blocks (
                         height, block_hash, parent_hash, merkle_root,
                         timestamp, tx_count, coherence_snapshot, fidelity_snapshot,
-                        difficulty, nonce, pq_curr, pq_last, finalized, finalized_at
+                        difficulty, nonce, pq_curr, pq_last, finalized, finalized_at,
+                        consensus_signature_json
                     ) VALUES (
                         0, %s, %s, %s,
                         %s, 0, 1.0, 1.0,
-                        6, 0, 1, 0, TRUE, %s
+                        6, 0, 1, 0, TRUE, %s,
+                        '{}'
                     )
                 """,
                     (genesis_hash, parent_hash, genesis_hash, genesis_ts, genesis_ts),
@@ -6684,12 +6686,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     logger.debug(f"[SUBMIT-BLOCK] Lattice metrics fetch: {_lat_err}")
 
                 cur.execute(
-                    """INSERT INTO blocks
-                    (height, block_hash, parent_hash, merkle_root, timestamp,
-                     miner_address, nonce, difficulty,
-                     pq_curr, pq_last, oracle_w_state_hash, tx_count,
-                     coherence_snapshot, fidelity_snapshot)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    """INSERT INTO blocks"""
+                        (height, block_hash, parent_hash, merkle_root, timestamp,
+                         miner_address, nonce, difficulty,
+                         pq_curr, pq_last, oracle_w_state_hash, tx_count,
+                         coherence_snapshot, fidelity_snapshot,
+                         consensus_signature_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         height,
                         block_hash,
@@ -6705,6 +6708,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         len(txs or []),
                         round(_live_coherence, 4),
                         round(_live_fidelity, 4),
+                        json.dumps(block.consensus_signature) if hasattr(block, 'consensus_signature') and block.consensus_signature else '{}',
                     ),
                 )
                 _block_is_new = True

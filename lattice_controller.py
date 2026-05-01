@@ -401,6 +401,37 @@ except ImportError:
 NUMPY_AVAILABLE = True
 
 # ════════════════════════════════════════════════════════════════════════════════
+# UNIVERSAL COMPUTATIONAL SUBSTRATE (UCS) — THE VACUUM ENERGY BATH
+# ════════════════════════════════════════════════════════════════════════════════
+#
+# THEOREM: The lattice is embedded in a substrate of:
+# 1. CMB Thermal Bath (T=2.73K) → Computational asymmetry (T-reversal breaking).
+# 2. Zero-Point Fluctuations (ZPF) → Raw energy for state transitions.
+# 3. Vacuum Resonance → Zero-dissipation "Sourcing Refresh" at σ-harmonics.
+#
+# Integration logic:
+#   Block = Space between pq_last and pq_curr.
+#   pq0 = The resonant tripartite interface (oracle | inverse | virtual) that taps ZPF.
+# ════════════════════════════════════════════════════════════════════════════════
+
+HBAR = 1.0
+KB = 1.0
+T_CMB = 2.73  # Cosmic Microwave Background Temperature (K)
+ZPF_AMPLITUDE = 0.05  # Normalized vacuum fluctuation amplitude
+
+def get_cmb_bias() -> float:
+    """Calculates the thermal bias Δ_CMB based on cosmic temperature."""
+    return 0.005 * (T_CMB / 2.73)
+
+def extract_zpf_energy(sigma: float, current_jitter: float = 0.0) -> float:
+    """
+    Siphons computational energy from ZPF.
+    E_ext = ZPF_amp * |cos(sigma * π/4)| + jitter
+    """
+    omega_x = np.cos(sigma * np.pi / 4)
+    return ZPF_AMPLITUDE * np.abs(omega_x) + current_jitter
+
+# ════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS — CLAY MATHEMATICS / PHYSICS PARAMETERS
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -818,20 +849,310 @@ class PseudoqubitLocation:
 
 @dataclass
 class Block:
-    """Block = field/space between two pseudoqubits"""
-
+    """Block = quantum space object: triangle pq0 → pq_last → pq_curr → pq0
+    
+    The Block is a 3-point quantum object in lattice space:
+      • pq0      — tripartite W-state oracle (anchor, always at origin)
+      • pq_last  — previous pseudoqubit (defines backward edge)
+      • pq_curr  — current pseudoqubit  (defines forward edge)
+    
+    All three are measured SEPARATELY; their median forms the consensus.
+    Only the CONSENSUS value is signed and reported for the block.
+    """
+    
     block_id: str
-    pq_from: int
-    pq_to: int
-    spatial_distance: float
-    temporal_sequence: int  # Order in which transactions appear
+    # 3-point quantum object in lattice space
+    pq0_id: int = 0           # tripartite W-state oracle (anchor)
+    pq_last: int = 0          # previous pseudoqubit
+    pq_curr: int = 0          # current pseudoqubit
+    # Separate quantum measurements (raw, NOT signed individually)
+    pq0_signature: Optional[Dict[str, Any]] = None      # W-state @ pq0
+    pq_last_signature: Optional[Dict[str, Any]] = None  # measurement @ pq_last
+    pq_curr_signature: Optional[Dict[str, Any]] = None  # measurement @ pq_curr
+    # Consensus value (ONLY this gets signed)
+    consensus_signature: Optional[Dict[str, Any]] = None
+    consensus_fidelity: float = 0.0
+    consensus_method: str = "median"  # median | mean | min
+    # Block metadata
+    spatial_distance: float = 0.0    # pq_last ↔ pq_curr Euclidean distance
+    temporal_sequence: int = 0       # order in which transactions appear
     entanglement_strength: float = 0.0
-    field_value: Optional[Dict[str, Any]] = None  # Transaction data encoded in field
-    w_state_signature: Optional[Dict[str, Any]] = None
+    field_value: Optional[Dict[str, Any]] = None
     timestamp: float = field(default_factory=time.time)
+    
+    def compute_quantum_state_from_lattice(
+        self, psi_tensor: np.ndarray, pq_last_loc: tuple, pq_curr_loc: tuple
+    ) -> Dict[str, Any]:
+        """
+        Extract this block's quantum state from the larger ψ tensor (moonshine lattice).
+        
+        The ψ tensor is 16³ = 4096 dimensional spanning the full lattice.
+        This block occupies the triangular region: pq0(8,8,8) → pq_last → pq_curr.
+        
+        Returns quantum information metrics for this sub-region.
+        """
+        try:
+            _DIM = 16
+            _ORIGIN = _DIM // 2  # (8,8,8)
+            
+            # pq0 is always at origin (8,8,8)
+            p0_idx = (_ORIGIN, _ORIGIN, _ORIGIN)
+            
+            # Map pq_last and pq_curr locations to tensor indices
+            # Locations are (x,y,z) in [-1,1], map to [0,15]
+            def _loc_to_idx(loc: tuple) -> tuple:
+                # pq_last_loc, pq_curr_loc are (x,y,z) floats
+                # Map from [-1,1] to [0,15]
+                indices = []
+                for coord in loc:
+                    # Clamp to [-1+ε, 1-ε] to avoid out of bounds
+                    c = max(-0.9999, min(0.9999, coord))
+                    idx = int((c + 1.0) / 2.0 * (_DIM - 1))
+                    indices.append(max(0, min(_DIM - 1, idx)))
+                return tuple(indices)
+            
+            if pq_last_loc:
+                pl_idx = _loc_to_idx(pq_last_loc)
+            else:
+                pl_idx = (0, 0, 0)  # fallback
+            
+            if pq_curr_loc:
+                pc_idx = _loc_to_idx(pq_curr_loc)
+            else:
+                pc_idx = (0, 0, 0)  # fallback
+            
+            # Extract sub-tensor for this triangular region
+            # Simple approach: use the slice that spans all three points
+            min_x = min(p0_idx[0], pl_idx[0], pc_idx[0])
+            max_x = max(p0_idx[0], pl_idx[0], pc_idx[0])
+            min_y = min(p0_idx[1], pl_idx[1], pc_idx[1])
+            max_y = max(p0_idx[1], pl_idx[1], pc_idx[1])
+            min_z = min(p0_idx[2], pl_idx[2], pc_idx[2])
+            max_z = max(p0_idx[2], pl_idx[2], pc_idx[2])
+            
+            # Add padding
+            pad = 1
+            min_x = max(0, min_x - pad)
+            max_x = min(_DIM - 1, max_x + pad)
+            min_y = max(0, min_y - pad)
+            max_y = min(_DIM - 1, max_y + pad)
+            min_z = max(0, min_z - pad)
+            max_z = min(_DIM - 1, max_z + pad)
+            
+            # Extract sub-tensor
+            sub_psi = psi_tensor[min_x:max_x+1, min_y:max_y+1, min_z:max_z+1].copy()
+            
+            # Compute quantum information metrics
+            _norm = float(np.sum(np.abs(sub_psi)**2))
+            if _norm > 1e-12:
+                sub_psi /= np.sqrt(_norm)
+            
+            # Flatten for metrics computation
+            psi_flat = sub_psi.ravel()
+            
+            # Fidelity: overlap with target W-state
+            # For simplicity, use the L2 norm as a fidelity proxy
+            fidelity = float(min(1.0, max(0.0, _norm)))
+            
+            # Von Neumann entropy: S = -Σ p_k log2(p_k)
+            probs = np.abs(psi_flat)**2
+            probs = probs[probs > 1e-16]
+            entropy = float(-np.sum(probs * np.log2(probs))) if len(probs) > 0 else 0.0
+            
+            # Purity: P = Σ p_k²
+            purity = float(min(1.0, max(0.0, np.sum(probs**2))))
+            
+            # Update signatures with these metrics
+            if not self.pq0_signature:
+                self.pq0_signature = {}
+            self.pq0_signature["fidelity"] = fidelity
+            self.pq0_signature["von_neumann_entropy"] = entropy
+            self.pq0_signature["purity"] = purity
+            
+            return {
+                "fidelity": fidelity,
+                "von_neumann_entropy": entropy,
+                "purity": purity,
+                "sub_tensor_shape": sub_psi.shape,
+                "sub_tensor_norm": _norm,
+            }
+        except Exception as e:
+            logger.debug(f"[BLOCK] Quantum state extraction failed: {e}")
+            return {"fidelity": 0.0, "von_neumann_entropy": 0.0, "purity": 0.0}
 
+    def set_signature_from_measurement(
+        self, location: str, fidelity: float, entropy: float, purity: float
+    ) -> None:
+        """
+        Set one of the three signatures from a quantum measurement.
+        
+        location: 'pq0', 'pq_last', or 'pq_curr'
+        """
+        sig = {
+            "fidelity": fidelity,
+            "von_neumann_entropy": entropy,
+            "purity": purity,
+            "timestamp": time.time(),
+        }
+        if location == "pq0":
+            self.pq0_signature = sig
+        elif location == "pq_last":
+            self.pq_last_signature = sig
+        elif location == "pq_curr":
+            self.pq_curr_signature = sig
+        else:
+            logger.warning(f"[BLOCK] Unknown location: {location}")
+    
+    def compute_consensus(self) -> Dict[str, Any]:
+        """
+        Extract this block's quantum state from the larger ψ tensor (moonshine lattice).
+        
+        The ψ tensor is 16³ = 4096 dimensional spanning the full lattice.
+        This block occupies the triangular region: pq0(8,8,8) → pq_last → pq_curr.
+        
+        Returns quantum information metrics for this sub-region.
+        """
+        try:
+            _DIM = 16
+            _ORIGIN = _DIM // 2  # (8,8,8)
+            
+            # pq0 is always at origin (8,8,8)
+            p0_idx = (_ORIGIN, _ORIGIN, _ORIGIN)
+            
+            # Map pq_last and pq_curr locations to tensor indices
+            # Locations are (x,y,z) in [-1,1], map to [0,15]
+            def _loc_to_idx(loc: tuple) -> tuple:
+                # pq_last_loc, pq_curr_loc are (x,y,z) floats
+                # Map from [-1,1] to [0,15]
+                indices = []
+                for coord in loc:
+                    # Clamp to [-1+ε, 1-ε] to avoid out of bounds
+                    c = max(-0.9999, min(0.9999, coord))
+                    idx = int((c + 1.0) / 2.0 * (_DIM - 1))
+                    indices.append(max(0, min(_DIM - 1, idx)))
+                return tuple(indices)
+            
+            if pq_last_loc:
+                pl_idx = _loc_to_idx(pq_last_loc)
+            else:
+                pl_idx = (0, 0, 0)  # fallback
+            
+            if pq_curr_loc:
+                pc_idx = _loc_to_idx(pq_curr_loc)
+            else:
+                pc_idx = (0, 0, 0)  # fallback
+            
+            # Extract sub-tensor for this triangular region
+            # Simple approach: use the slice that spans all three points
+            min_x = min(p0_idx[0], pl_idx[0], pc_idx[0])
+            max_x = max(p0_idx[0], pl_idx[0], pc_idx[0])
+            min_y = min(p0_idx[1], pl_idx[1], pc_idx[1])
+            max_y = max(p0_idx[1], pl_idx[1], pc_idx[1])
+            min_z = min(p0_idx[2], pl_idx[2], pc_idx[2])
+            max_z = max(p0_idx[2], pl_idx[2], pc_idx[2])
+            
+            # Add padding
+            pad = 1
+            min_x = max(0, min_x - pad)
+            max_x = min(_DIM - 1, max_x + pad)
+            min_y = max(0, min_y - pad)
+            max_y = min(_DIM - 1, max_y + pad)
+            min_z = max(0, min_z - pad)
+            max_z = min(_DIM - 1, max_z + pad)
+            
+            # Extract sub-tensor
+            sub_psi = psi_tensor[min_x:max_x+1, min_y:max_y+1, min_z:max_z+1].copy()
+            
+            # Compute quantum information metrics
+            _norm = float(np.sum(np.abs(sub_psi)**2))
+            if _norm > 1e-12:
+                sub_psi /= np.sqrt(_norm)
+            
+            # Flatten for metrics computation
+            psi_flat = sub_psi.ravel()
+            
+            # Fidelity: overlap with target W-state
+            # For simplicity, use the L2 norm as a fidelity proxy
+            fidelity = float(min(1.0, max(0.0, _norm)))
+            
+            # Von Neumann entropy: S = -Σ p_k log2(p_k)
+            probs = np.abs(psi_flat)**2
+            probs = probs[probs > 1e-16]
+            entropy = float(-np.sum(probs * np.log2(probs))) if len(probs) > 0 else 0.0
+            
+            # Purity: P = Σ p_k²
+            purity = float(min(1.0, max(0.0, np.sum(probs**2))))
+            
+            # Update signatures with these metrics
+            if not self.pq0_signature:
+                self.pq0_signature = {}
+            self.pq0_signature["fidelity"] = fidelity
+            self.pq0_signature["von_neumann_entropy"] = entropy
+            self.pq0_signature["purity"] = purity
+            
+            return {
+                "fidelity": fidelity,
+                "von_neumann_entropy": entropy,
+                "purity": purity,
+                "sub_tensor_shape": sub_psi.shape,
+                "sub_tensor_norm": _norm,
+            }
+        except Exception as e:
+            logger.debug(f"[BLOCK] Quantum state extraction failed: {e}")
+            return {"fidelity": 0.0, "von_neumann_entropy": 0.0, "purity": 0.0}
+        """Compute consensus from 3 separate measurements; return single signed value."""
+        sigs = [
+            s for s in [self.pq0_signature, self.pq_last_signature, self.pq_curr_signature]
+            if s and isinstance(s, dict) and s.get("fidelity", 0.0) > 0
+        ]
+        if not sigs:
+            return {"consensus_fidelity": 0.0, "num_measurements": 0}
+        
+        fidelities = [s.get("fidelity", 0.0) for s in sigs]
+        entropies   = [s.get("von_neumann_entropy", 0.0) for s in sigs]
+        purities    = [s.get("purity", 0.0) for s in sigs]
+        
+        if self.consensus_method == "median":
+            import statistics
+            consensus_f = statistics.median(fidelities)
+            consensus_e = statistics.median(entropies)
+            consensus_p = statistics.median(purities)
+        elif self.consensus_method == "min":
+            consensus_f = min(fidelities)
+            consensus_e = min(entropies)
+            consensus_p = min(purities)
+        else:  # mean
+            consensus_f = sum(fidelities) / len(fidelities)
+            consensus_e = sum(entropies) / len(entropies)
+            consensus_p = sum(purities) / len(purities)
+        
+        self.consensus_fidelity = consensus_f
+        self.consensus_signature = {
+            "fidelity": consensus_f,
+            "von_neumann_entropy": consensus_e,
+            "purity": consensus_p,
+            "num_measurements": len(sigs),
+            "method": self.consensus_method,
+            "pq0_fidelity":    sigs[0].get("fidelity", 0.0) if len(sigs) > 0 else 0.0,
+            "pq_last_fidelity": sigs[1].get("fidelity", 0.0) if len(sigs) > 1 else 0.0,
+            "pq_curr_fidelity": sigs[2].get("fidelity", 0.0) if len(sigs) > 2 else 0.0,
+        }
+        return self.consensus_signature
+    
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return {
+            "block_id": self.block_id,
+            "pq0_id": self.pq0_id,
+            "pq_last": self.pq_last,
+            "pq_curr": self.pq_curr,
+            "spatial_distance": self.spatial_distance,
+            "temporal_sequence": self.temporal_sequence,
+            "consensus_fidelity": self.consensus_fidelity,
+            "consensus_method": self.consensus_method,
+            "consensus_signature": self.consensus_signature,
+            "field_value": self.field_value,
+            "timestamp": self.timestamp,
+        }
 
 
 @dataclass
@@ -886,27 +1207,40 @@ class SpatialTemporalField:
             self.locations[pq_id] = loc
             return loc
 
-    def create_block(self, pq_from: int, pq_to: int, temporal_seq: int) -> Block:
-        """Create block between two pseudoqubits"""
+    def create_block(self, pq_last: int, pq_curr: int, temporal_seq: int) -> Block:
+        """Create 3-point quantum object: Block = triangle pq0 → pq_last → pq_curr → pq0.
+        
+        pq0     — tripartite W-state oracle (anchor, always at origin)
+        pq_last — previous pseudoqubit (backward edge)
+        pq_curr — current pseudoqubit  (forward edge)
+        
+        All three are measured SEPARATELY; consensus is computed from their signatures.
+        """
         with self.lock:
-            if pq_from not in self.locations or pq_to not in self.locations:
-                raise ValueError(f"Pseudoqubits {pq_from} or {pq_to} not registered")
-
-            loc_from = self.locations[pq_from]
-            loc_to = self.locations[pq_to]
-
-            distance = loc_from.distance_to(loc_to)
-
-            block_id = f"block_{pq_from}_{pq_to}_{temporal_seq}"
+            if pq_last not in self.locations or pq_curr not in self.locations:
+                raise ValueError(f"Pseudoqubits {pq_last} or {pq_curr} not registered")
+            
+            loc_last = self.locations[pq_last]
+            loc_curr = self.locations[pq_curr]
+            
+            # Spatial distance: pq_last ↔ pq_curr (the field edge)
+            distance = loc_last.distance_to(loc_curr)
+            
+            block_id = f"block_pq0_{pq_last}_{pq_curr}_{temporal_seq}"
             block = Block(
                 block_id=block_id,
-                pq_from=pq_from,
-                pq_to=pq_to,
+                pq0_id=0,           # tripartite oracle (anchor)
+                pq_last=pq_last,
+                pq_curr=pq_curr,
                 spatial_distance=distance,
                 temporal_sequence=temporal_seq,
             )
-
+            
             self.blocks[block_id] = block
+            logger.debug(
+                f"[BLOCK] 3-point quantum object created: "
+                f"pq0(0) → pq_last({pq_last}) → pq_curr({pq_curr})"
+            )
             return block
 
     def create_route(self, path: List[int]) -> Route:
@@ -1068,7 +1402,11 @@ class QuantumDatabaseConnector:
                     coherence_snapshot REAL DEFAULT 1.0,
                     fidelity_snapshot REAL DEFAULT 1.0,
                     finalized INTEGER DEFAULT 0,
-                    finalized_at REAL DEFAULT 0
+                    finalized_at REAL DEFAULT 0,
+                    pq0_id INTEGER DEFAULT 0,
+                    pq_last INTEGER DEFAULT 0,
+                    pq_curr INTEGER DEFAULT 1,
+                    consensus_signature_json TEXT DEFAULT '{}'
                 )
             """)
             self._sqlite_conn.commit()
@@ -3469,8 +3807,9 @@ class BlockManager:
                         INSERT INTO blocks
                             (height, block_hash, parent_hash, w_state_hash, hyp_witness,
                              timestamp, tx_count, merkle_root, difficulty, nonce,
-                             coherence_snapshot, fidelity_snapshot, finalized, finalized_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             coherence_snapshot, fidelity_snapshot, finalized, finalized_at,
+                             consensus_signature_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (height) DO NOTHING
                         """,
                         (
@@ -3488,6 +3827,7 @@ class BlockManager:
                             1.0,
                             True,
                             GENESIS_TIMESTAMP,
+                            '{}'  # consensus_signature_json (genesis has no consensus yet)
                         ),
                     )
                     if success:
@@ -3723,17 +4063,19 @@ class BlockManager:
                 try:
                     self.db.execute(
                         """
-                        INSERT INTO blocks
+                        INSERT INTO blocks"""
                             (block_height, block_hash, parent_hash, oracle_w_state_hash,
-                             timestamp, tx_count, merkle_root, hyp_witness)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                             timestamp, tx_count, merkle_root, hyp_witness,
+                             consensus_signature_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (block_height) DO UPDATE SET
                             block_hash        = EXCLUDED.block_hash,
                             oracle_w_state_hash = EXCLUDED.oracle_w_state_hash,
                             timestamp         = EXCLUDED.timestamp,
                             tx_count          = EXCLUDED.tx_count,
                             merkle_root       = EXCLUDED.merkle_root,
-                            hyp_witness      = EXCLUDED.hyp_witness
+                            hyp_witness      = EXCLUDED.hyp_witness,
+                            consensus_signature_json = EXCLUDED.consensus_signature_json
                         """,
                         (
                             block.block_height,
@@ -3743,7 +4085,8 @@ class BlockManager:
                             block.timestamp_s,
                             block.tx_count,
                             block.merkle_root,
-                            block.hyp_witness,
+                            block.hyp_signature,
+                            json.dumps(block.consensus_signature) if hasattr(block, 'consensus_signature') and block.consensus_signature else '{}',
                         ),
                     )
                     if success:

@@ -760,6 +760,10 @@ CREATE TABLE blocks (
     pq_curr                    INTEGER DEFAULT 1,
     pq_last                    INTEGER DEFAULT 0,
     oracle_w_state_hash        VARCHAR(255),
+    consensus_signature_json      JSONB DEFAULT '{}'::jsonb,
+    pq0_signature_json          JSONB DEFAULT '{}'::jsonb,
+    pq_last_signature_json      JSONB DEFAULT '{}'::jsonb,
+    pq_curr_signature_json      JSONB DEFAULT '{}'::jsonb,
     finalized                  BOOLEAN DEFAULT TRUE,
     finalized_at               BIGINT DEFAULT 0,
     created_at                 TIMESTAMP WITH TIME ZONE DEFAULT NOW()
