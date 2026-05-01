@@ -7882,6 +7882,8 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         from hyp_engine import HypGammaEngine
         _eng = HypGammaEngine()
         sig_dict = _eng.sign_hash(signing_hash, private_key_hex)
+        # sign_hash does not include public_key — add it so mempool verifier can validate
+        sig_dict['public_key'] = public_key_hex
 
         # ── Step 4: assemble final signed tx ─────────────────────────────────
         tx_hash = _hs.sha3_256(
