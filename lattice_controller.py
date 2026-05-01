@@ -84,12 +84,6 @@ def _init_hyp_wallet() -> bool:
     """
     Initialize wallet directly from hyp_engine — no separate module needed.
     Uses existing HypGammaEngine for key generation and signing.
-
-    Address resolution priority:
-      1. ~/.qtcl/wallet.json — address field (no decryption needed)
-      2. WALLET_ADDRESS env var
-    
-    REQUIRED: One of these must be present. No ephemeral fallback.
     """
     global HYP_WALLET_AVAILABLE, HYP_ENGINE, HYP_KEYPAIR
 
@@ -97,45 +91,34 @@ def _init_hyp_wallet() -> bool:
         return True
 
     try:
+        # Import directly from existing hlwe module
         from hlwe.hyp_engine import HypEngine, HypKeyPair
 
+        # Initialize engine
         HYP_ENGINE = HypEngine()
+
+        # Generate or load keypair
+        # Check for existing wallet file at ~/.qtcl/wallet.json
+        import os
 
         _wallet_path = os.path.expanduser("~/.qtcl/wallet.json")
 
         if os.path.exists(_wallet_path):
-            try:
-                import json as _json
-                with open(_wallet_path, "r") as _wf:
-                    _wallet_data = _json.load(_wf)
-                _address = _wallet_data.get("address", "")
-                _pub = _wallet_data.get("public_key", "")
-                if _address:
-                    HYP_KEYPAIR = HypKeyPair(
-                        private_key="",
-                        public_key=_pub,
-                        address=_address,
-                    )
-                    logger.info(
-                        f"[HYP-WALLET] ✅ Loaded address from wallet file: {_address[:22]}..."
-                    )
-                    HYP_WALLET_AVAILABLE = True
-                    return True
-            except Exception as _load_err:
-                logger.warning(f"[HYP-WALLET] ⚠️  Could not read wallet file: {_load_err}")
+            logger.info(f"[HYP-WALLET] 📍 Found wallet at {_wallet_path}")
+            logger.info(
+                f"[HYP-WALLET]    Load with: from hlwe.hyp_engine import HypEngine; e=HypEngine(); kp=e.generate_keypair()"
+            )
+            # Generate temporary keypair for now - proper loading requires password
+            HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
+        else:
+            # Generate new keypair
+            HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
+            logger.info(
+                f"[HYP-WALLET] ✅ Generated new keypair: {HYP_KEYPAIR.address[:22]}..."
+            )
 
-        _env_addr = os.getenv("WALLET_ADDRESS", "")
-        if _env_addr:
-            HYP_KEYPAIR = HypKeyPair(private_key="", public_key="", address=_env_addr)
-            logger.info(f"[HYP-WALLET] ✅ Loaded address from WALLET_ADDRESS env: {_env_addr[:22]}...")
-            HYP_WALLET_AVAILABLE = True
-            return True
-
-        logger.error(
-            "[HYP-WALLET] ❌ WALLET REQUIRED: No wallet file at ~/.qtcl/wallet.json "
-            "and no WALLET_ADDRESS env var set. Miner identity not configured."
-        )
-        return False
+        HYP_WALLET_AVAILABLE = True
+        return True
 
     except ImportError as _e:
         logger.warning(f"[HYP-WALLET] ⚠️  hyp_engine not available: {_e}")
@@ -236,8 +219,7 @@ def _generate_hyp_witness(block_data: str) -> str:
                 else hashlib.sha3_256(block_data.encode()).hexdigest()
             )
         except Exception as e:
-            logger.error(f"HypΓ witness generation failed: {e}. CRITICAL: Quantum witness is required for block validity.")
-            raise RuntimeError(f"HypΓ witness generation failed: {e}")
+            logger.warning(f"HypΓ witness generation failed: {e}, falling back to SHA3")
     return hashlib.sha3_256(block_data.encode()).hexdigest()
 
 
@@ -401,37 +383,6 @@ except ImportError:
 NUMPY_AVAILABLE = True
 
 # ════════════════════════════════════════════════════════════════════════════════
-# UNIVERSAL COMPUTATIONAL SUBSTRATE (UCS) — THE VACUUM ENERGY BATH
-# ════════════════════════════════════════════════════════════════════════════════
-#
-# THEOREM: The lattice is embedded in a substrate of:
-# 1. CMB Thermal Bath (T=2.73K) → Computational asymmetry (T-reversal breaking).
-# 2. Zero-Point Fluctuations (ZPF) → Raw energy for state transitions.
-# 3. Vacuum Resonance → Zero-dissipation "Sourcing Refresh" at σ-harmonics.
-#
-# Integration logic:
-#   Block = Space between pq_last and pq_curr.
-#   pq0 = The resonant tripartite interface (oracle | inverse | virtual) that taps ZPF.
-# ════════════════════════════════════════════════════════════════════════════════
-
-HBAR = 1.0
-KB = 1.0
-T_CMB = 2.73  # Cosmic Microwave Background Temperature (K)
-ZPF_AMPLITUDE = 0.05  # Normalized vacuum fluctuation amplitude
-
-def get_cmb_bias() -> float:
-    """Calculates the thermal bias Δ_CMB based on cosmic temperature."""
-    return 0.005 * (T_CMB / 2.73)
-
-def extract_zpf_energy(sigma: float, current_jitter: float = 0.0) -> float:
-    """
-    Siphons computational energy from ZPF.
-    E_ext = ZPF_amp * |cos(sigma * π/4)| + jitter
-    """
-    omega_x = np.cos(sigma * np.pi / 4)
-    return ZPF_AMPLITUDE * np.abs(omega_x) + current_jitter
-
-# ════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS — CLAY MATHEMATICS / PHYSICS PARAMETERS
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -530,7 +481,7 @@ PHASE_DAMPING_RATE = 0.002
 # Quantum topology (NO RESERVED QUBITS)
 NUM_TOTAL_QUBITS = 8
 AER_SHOTS = 1000
-AER_SEED = None  # None = self-seed — each oracle gets independent noise
+AER_SEED = 42
 CIRCUIT_TRANSPILE = False  # transpile once at AER init, not per-call
 CIRCUIT_OPTIMIZATION_LEVEL = 2
 
@@ -849,312 +800,20 @@ class PseudoqubitLocation:
 
 @dataclass
 class Block:
-    """Block = quantum space object: triangle pq0 → pq_last → pq_curr → pq0
+    """Block = field/space between two pseudoqubits"""
 
-    The Block is a 3-point quantum object in lattice space:
-      • pq0      — tripartite W-state oracle (anchor, always at origin)
-      • pq_last  — previous pseudoqubit (defines backward edge)
-      • pq_curr  — current pseudoqubit  (defines forward edge)
-
-    All three are measured SEPARATELY; their median forms the consensus.
-    Only the CONSENSUS value is signed and reported for the block.
-
-    STORAGE: 16³ amplitude tensor slice (4096 complex64 = 32KB) - NOT dense matrix.
-    """
-    
     block_id: str
-    # 3-point quantum object in lattice space
-    pq0_id: int = 0           # tripartite W-state oracle (anchor)
-    pq_last: int = 0          # previous pseudoqubit
-    pq_curr: int = 0          # current pseudoqubit
-    # Separate quantum measurements (raw, NOT signed individually)
-    pq0_signature: Optional[Dict[str, Any]] = None      # W-state @ pq0
-    pq_last_signature: Optional[Dict[str, Any]] = None  # measurement @ pq_last
-    pq_curr_signature: Optional[Dict[str, Any]] = None  # measurement @ pq_curr
-    # Consensus value (ONLY this gets signed)
-    consensus_signature: Optional[Dict[str, Any]] = None
-    consensus_fidelity: float = 0.0
-    consensus_method: str = "median"  # median | mean | min
-    # Block metadata
-    spatial_distance: float = 0.0    # pq_last ↔ pq_curr Euclidean distance
-    temporal_sequence: int = 0       # order in which transactions appear
+    pq_from: int
+    pq_to: int
+    spatial_distance: float
+    temporal_sequence: int  # Order in which transactions appear
     entanglement_strength: float = 0.0
-    field_value: Optional[Dict[str, Any]] = None
+    field_value: Optional[Dict[str, Any]] = None  # Transaction data encoded in field
+    w_state_signature: Optional[Dict[str, Any]] = None
     timestamp: float = field(default_factory=time.time)
-    
-    def compute_quantum_state_from_lattice(
-        self, psi_tensor: np.ndarray, pq_last_loc: tuple, pq_curr_loc: tuple
-    ) -> Dict[str, Any]:
-        """
-        Extract this block's quantum state from the larger ψ tensor (moonshine lattice).
-        
-        The ψ tensor is 16³ = 4096 dimensional spanning the full lattice.
-        This block occupies the triangular region: pq0(8,8,8) → pq_last → pq_curr.
-        
-        Returns quantum information metrics for this sub-region.
-        """
-        try:
-            _DIM = 16
-            _ORIGIN = _DIM // 2  # (8,8,8)
-            
-            # pq0 is always at origin (8,8,8)
-            p0_idx = (_ORIGIN, _ORIGIN, _ORIGIN)
-            
-            # Map pq_last and pq_curr locations to tensor indices
-            # Locations are (x,y,z) in [-1,1], map to [0,15]
-            def _loc_to_idx(loc: tuple) -> tuple:
-                # pq_last_loc, pq_curr_loc are (x,y,z) floats
-                # Map from [-1,1] to [0,15]
-                indices = []
-                for coord in loc:
-                    # Clamp to [-1+ε, 1-ε] to avoid out of bounds
-                    c = max(-0.9999, min(0.9999, coord))
-                    idx = int((c + 1.0) / 2.0 * (_DIM - 1))
-                    indices.append(max(0, min(_DIM - 1, idx)))
-                return tuple(indices)
-            
-            if pq_last_loc:
-                pl_idx = _loc_to_idx(pq_last_loc)
-            else:
-                pl_idx = (0, 0, 0)  # fallback
-            
-            if pq_curr_loc:
-                pc_idx = _loc_to_idx(pq_curr_loc)
-            else:
-                pc_idx = (0, 0, 0)  # fallback
-            
-            # Extract sub-tensor for this triangular region
-            # Simple approach: use the slice that spans all three points
-            min_x = min(p0_idx[0], pl_idx[0], pc_idx[0])
-            max_x = max(p0_idx[0], pl_idx[0], pc_idx[0])
-            min_y = min(p0_idx[1], pl_idx[1], pc_idx[1])
-            max_y = max(p0_idx[1], pl_idx[1], pc_idx[1])
-            min_z = min(p0_idx[2], pl_idx[2], pc_idx[2])
-            max_z = max(p0_idx[2], pl_idx[2], pc_idx[2])
-            
-            # Add padding
-            pad = 1
-            min_x = max(0, min_x - pad)
-            max_x = min(_DIM - 1, max_x + pad)
-            min_y = max(0, min_y - pad)
-            max_y = min(_DIM - 1, max_y + pad)
-            min_z = max(0, min_z - pad)
-            max_z = min(_DIM - 1, max_z + pad)
-            
-            # Extract sub-tensor
-            sub_psi = psi_tensor[min_x:max_x+1, min_y:max_y+1, min_z:max_z+1].copy()
-            
-            # Compute quantum information metrics
-            _norm = float(np.sum(np.abs(sub_psi)**2))
-            if _norm > 1e-12:
-                sub_psi /= np.sqrt(_norm)
-            
-            # Flatten for metrics computation
-            psi_flat = sub_psi.ravel()
-            
-            # Fidelity: overlap with target W-state
-            # For simplicity, use the L2 norm as a fidelity proxy
-            fidelity = float(min(1.0, max(0.0, _norm)))
-            
-            # Von Neumann entropy: S = -Σ p_k log2(p_k)
-            probs = np.abs(psi_flat)**2
-            probs = probs[probs > 1e-16]
-            entropy = float(-np.sum(probs * np.log2(probs))) if len(probs) > 0 else 0.0
-            
-            # Purity: P = Σ p_k²
-            purity = float(min(1.0, max(0.0, np.sum(probs**2))))
-            
-            # Update signatures with these metrics
-            if not self.pq0_signature:
-                self.pq0_signature = {}
-            self.pq0_signature["fidelity"] = fidelity
-            self.pq0_signature["von_neumann_entropy"] = entropy
-            self.pq0_signature["purity"] = purity
-            
-            return {
-                "fidelity": fidelity,
-                "von_neumann_entropy": entropy,
-                "purity": purity,
-                "sub_tensor_shape": sub_psi.shape,
-                "sub_tensor_norm": _norm,
-            }
-        except Exception as e:
-            logger.debug(f"[BLOCK] Quantum state extraction failed: {e}")
-            return {"fidelity": 0.0, "von_neumann_entropy": 0.0, "purity": 0.0}
 
-    def set_signature_from_measurement(
-        self, location: str, fidelity: float, entropy: float, purity: float
-    ) -> None:
-        """
-        Set one of the three signatures from a quantum measurement.
-        
-        location: 'pq0', 'pq_last', or 'pq_curr'
-        """
-        sig = {
-            "fidelity": fidelity,
-            "von_neumann_entropy": entropy,
-            "purity": purity,
-            "timestamp": time.time(),
-        }
-        if location == "pq0":
-            self.pq0_signature = sig
-        elif location == "pq_last":
-            self.pq_last_signature = sig
-        elif location == "pq_curr":
-            self.pq_curr_signature = sig
-        else:
-            logger.warning(f"[BLOCK] Unknown location: {location}")
-    
-    def compute_consensus(self) -> Dict[str, Any]:
-        """
-        Extract this block's quantum state from the larger ψ tensor (moonshine lattice).
-        
-        The ψ tensor is 16³ = 4096 dimensional spanning the full lattice.
-        This block occupies the triangular region: pq0(8,8,8) → pq_last → pq_curr.
-        
-        Returns quantum information metrics for this sub-region.
-        """
-        try:
-            _DIM = 16
-            _ORIGIN = _DIM // 2  # (8,8,8)
-            
-            # pq0 is always at origin (8,8,8)
-            p0_idx = (_ORIGIN, _ORIGIN, _ORIGIN)
-            
-            # Map pq_last and pq_curr locations to tensor indices
-            # Locations are (x,y,z) in [-1,1], map to [0,15]
-            def _loc_to_idx(loc: tuple) -> tuple:
-                # pq_last_loc, pq_curr_loc are (x,y,z) floats
-                # Map from [-1,1] to [0,15]
-                indices = []
-                for coord in loc:
-                    # Clamp to [-1+ε, 1-ε] to avoid out of bounds
-                    c = max(-0.9999, min(0.9999, coord))
-                    idx = int((c + 1.0) / 2.0 * (_DIM - 1))
-                    indices.append(max(0, min(_DIM - 1, idx)))
-                return tuple(indices)
-            
-            if pq_last_loc:
-                pl_idx = _loc_to_idx(pq_last_loc)
-            else:
-                pl_idx = (0, 0, 0)  # fallback
-            
-            if pq_curr_loc:
-                pc_idx = _loc_to_idx(pq_curr_loc)
-            else:
-                pc_idx = (0, 0, 0)  # fallback
-            
-            # Extract sub-tensor for this triangular region
-            # Simple approach: use the slice that spans all three points
-            min_x = min(p0_idx[0], pl_idx[0], pc_idx[0])
-            max_x = max(p0_idx[0], pl_idx[0], pc_idx[0])
-            min_y = min(p0_idx[1], pl_idx[1], pc_idx[1])
-            max_y = max(p0_idx[1], pl_idx[1], pc_idx[1])
-            min_z = min(p0_idx[2], pl_idx[2], pc_idx[2])
-            max_z = max(p0_idx[2], pl_idx[2], pc_idx[2])
-            
-            # Add padding
-            pad = 1
-            min_x = max(0, min_x - pad)
-            max_x = min(_DIM - 1, max_x + pad)
-            min_y = max(0, min_y - pad)
-            max_y = min(_DIM - 1, max_y + pad)
-            min_z = max(0, min_z - pad)
-            max_z = min(_DIM - 1, max_z + pad)
-            
-            # Extract sub-tensor
-            sub_psi = psi_tensor[min_x:max_x+1, min_y:max_y+1, min_z:max_z+1].copy()
-            
-            # Compute quantum information metrics
-            _norm = float(np.sum(np.abs(sub_psi)**2))
-            if _norm > 1e-12:
-                sub_psi /= np.sqrt(_norm)
-            
-            # Flatten for metrics computation
-            psi_flat = sub_psi.ravel()
-            
-            # Fidelity: overlap with target W-state
-            # For simplicity, use the L2 norm as a fidelity proxy
-            fidelity = float(min(1.0, max(0.0, _norm)))
-            
-            # Von Neumann entropy: S = -Σ p_k log2(p_k)
-            probs = np.abs(psi_flat)**2
-            probs = probs[probs > 1e-16]
-            entropy = float(-np.sum(probs * np.log2(probs))) if len(probs) > 0 else 0.0
-            
-            # Purity: P = Σ p_k²
-            purity = float(min(1.0, max(0.0, np.sum(probs**2))))
-            
-            # Update signatures with these metrics
-            if not self.pq0_signature:
-                self.pq0_signature = {}
-            self.pq0_signature["fidelity"] = fidelity
-            self.pq0_signature["von_neumann_entropy"] = entropy
-            self.pq0_signature["purity"] = purity
-            
-            return {
-                "fidelity": fidelity,
-                "von_neumann_entropy": entropy,
-                "purity": purity,
-                "sub_tensor_shape": sub_psi.shape,
-                "sub_tensor_norm": _norm,
-            }
-        except Exception as e:
-            logger.debug(f"[BLOCK] Quantum state extraction failed: {e}")
-            return {"fidelity": 0.0, "von_neumann_entropy": 0.0, "purity": 0.0}
-        """Compute consensus from 3 separate measurements; return single signed value."""
-        sigs = [
-            s for s in [self.pq0_signature, self.pq_last_signature, self.pq_curr_signature]
-            if s and isinstance(s, dict) and s.get("fidelity", 0.0) > 0
-        ]
-        if not sigs:
-            return {"consensus_fidelity": 0.0, "num_measurements": 0}
-        
-        fidelities = [s.get("fidelity", 0.0) for s in sigs]
-        entropies   = [s.get("von_neumann_entropy", 0.0) for s in sigs]
-        purities    = [s.get("purity", 0.0) for s in sigs]
-        
-        if self.consensus_method == "median":
-            import statistics
-            consensus_f = statistics.median(fidelities)
-            consensus_e = statistics.median(entropies)
-            consensus_p = statistics.median(purities)
-        elif self.consensus_method == "min":
-            consensus_f = min(fidelities)
-            consensus_e = min(entropies)
-            consensus_p = min(purities)
-        else:  # mean
-            consensus_f = sum(fidelities) / len(fidelities)
-            consensus_e = sum(entropies) / len(entropies)
-            consensus_p = sum(purities) / len(purities)
-        
-        self.consensus_fidelity = consensus_f
-        self.consensus_signature = {
-            "fidelity": consensus_f,
-            "von_neumann_entropy": consensus_e,
-            "purity": consensus_p,
-            "num_measurements": len(sigs),
-            "method": self.consensus_method,
-            "pq0_fidelity":    sigs[0].get("fidelity", 0.0) if len(sigs) > 0 else 0.0,
-            "pq_last_fidelity": sigs[1].get("fidelity", 0.0) if len(sigs) > 1 else 0.0,
-            "pq_curr_fidelity": sigs[2].get("fidelity", 0.0) if len(sigs) > 2 else 0.0,
-        }
-        return self.consensus_signature
-    
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "block_id": self.block_id,
-            "pq0_id": self.pq0_id,
-            "pq_last": self.pq_last,
-            "pq_curr": self.pq_curr,
-            "spatial_distance": self.spatial_distance,
-            "temporal_sequence": self.temporal_sequence,
-            "consensus_fidelity": self.consensus_fidelity,
-            "consensus_method": self.consensus_method,
-            "consensus_signature": self.consensus_signature,
-            "field_value": self.field_value,
-            "timestamp": self.timestamp,
-        }
+        return asdict(self)
 
 
 @dataclass
@@ -1209,40 +868,27 @@ class SpatialTemporalField:
             self.locations[pq_id] = loc
             return loc
 
-    def create_block(self, pq_last: int, pq_curr: int, temporal_seq: int) -> Block:
-        """Create 3-point quantum object: Block = triangle pq0 → pq_last → pq_curr → pq0.
-        
-        pq0     — tripartite W-state oracle (anchor, always at origin)
-        pq_last — previous pseudoqubit (backward edge)
-        pq_curr — current pseudoqubit  (forward edge)
-        
-        All three are measured SEPARATELY; consensus is computed from their signatures.
-        """
+    def create_block(self, pq_from: int, pq_to: int, temporal_seq: int) -> Block:
+        """Create block between two pseudoqubits"""
         with self.lock:
-            if pq_last not in self.locations or pq_curr not in self.locations:
-                raise ValueError(f"Pseudoqubits {pq_last} or {pq_curr} not registered")
-            
-            loc_last = self.locations[pq_last]
-            loc_curr = self.locations[pq_curr]
-            
-            # Spatial distance: pq_last ↔ pq_curr (the field edge)
-            distance = loc_last.distance_to(loc_curr)
-            
-            block_id = f"block_pq0_{pq_last}_{pq_curr}_{temporal_seq}"
+            if pq_from not in self.locations or pq_to not in self.locations:
+                raise ValueError(f"Pseudoqubits {pq_from} or {pq_to} not registered")
+
+            loc_from = self.locations[pq_from]
+            loc_to = self.locations[pq_to]
+
+            distance = loc_from.distance_to(loc_to)
+
+            block_id = f"block_{pq_from}_{pq_to}_{temporal_seq}"
             block = Block(
                 block_id=block_id,
-                pq0_id=0,           # tripartite oracle (anchor)
-                pq_last=pq_last,
-                pq_curr=pq_curr,
+                pq_from=pq_from,
+                pq_to=pq_to,
                 spatial_distance=distance,
                 temporal_sequence=temporal_seq,
             )
-            
+
             self.blocks[block_id] = block
-            logger.debug(
-                f"[BLOCK] 3-point quantum object created: "
-                f"pq0(0) → pq_last({pq_last}) → pq_curr({pq_curr})"
-            )
             return block
 
     def create_route(self, path: List[int]) -> Route:
@@ -1316,24 +962,7 @@ class QuantumDatabaseConnector:
         Prefer injected cursor from server.py's get_db_cursor() over direct pool.
         Direct pool is kept as a fallback for standalone lattice operation only.
         In production (gunicorn workers), always inject get_db_cursor externally.
-
-        PERF: Skip standalone pool when running under gunicorn/wsgi — server.py
-        calls inject_db_pool() immediately after construction, so opening a second
-        TCP pool here only wastes the connect_timeout budget (up to 10s) at startup.
         """
-        import sys as _sys
-        _running_under_server = (
-            os.environ.get("QTCL_SERVER_MANAGED", "") == "1"
-            or any("gunicorn" in arg for arg in _sys.argv)
-            or any("wsgi" in arg.lower() for arg in _sys.argv)
-        )
-        if _running_under_server:
-            logger.info(
-                "[DB] QuantumDatabaseConnector: server-managed mode — "
-                "skipping standalone pool (inject_db_pool will be called by server.py)"
-            )
-            self.pool = None
-            return
         try:
             self.pool = ThreadedConnectionPool(
                 minconn=1,
@@ -1404,11 +1033,7 @@ class QuantumDatabaseConnector:
                     coherence_snapshot REAL DEFAULT 1.0,
                     fidelity_snapshot REAL DEFAULT 1.0,
                     finalized INTEGER DEFAULT 0,
-                    finalized_at REAL DEFAULT 0,
-                    pq0_id INTEGER DEFAULT 0,
-                    pq_last INTEGER DEFAULT 0,
-                    pq_curr INTEGER DEFAULT 1,
-                    consensus_signature_json TEXT DEFAULT '{}'
+                    finalized_at REAL DEFAULT 0
                 )
             """)
             self._sqlite_conn.commit()
@@ -1647,103 +1272,59 @@ try:
 except ImportError:
     # Fallback stub if oracle.py is unavailable (should not happen in production)
     class QuantumInformationMetrics:  # type: ignore
-        """
-        16³ TENSOR-NATIVE quantum information metrics (fallback when oracle.py unavailable).
-        All operations work on ψ ∈ C^{16×16×16} amplitude fields — NO 2D matrix ops.
-        Memory: 32KB per state vs 2GB for explicit 4096×4096 density matrix.
-        """
-
         @staticmethod
-        def von_neumann_entropy(psi):
-            """S = −Σ pₖ log₂(pₖ) where pₖ = |ψₖ|² (Shannon entropy of Born distribution)."""
+        def von_neumann_entropy(dm):
             import numpy as np
-            if psi is None:
-                return 0.0
-            try:
-                p = np.abs(psi.ravel()) ** 2
-                p_sum = float(np.sum(p))
-                if p_sum > 1e-12:
-                    p = p / p_sum
-                p_nz = p[p > 1e-16]
-                return float(-np.sum(p_nz * np.log2(p_nz))) if p_nz.size > 0 else 0.0
-            except Exception:
-                return 0.0
+
+            ev = np.maximum(np.linalg.eigvalsh(dm), 1e-15)
+            return float(-np.sum(ev * np.log2(ev))) if dm is not None else 0.0
 
         @staticmethod
-        def coherence_l1_norm(psi):
-            """L1 coherence = (Σ|ψᵢ|)² − Σ|ψᵢ|² (off-diagonal mass in position basis)."""
+        def coherence_l1_norm(dm):
+            return (
+                float(
+                    sum(
+                        abs(dm[i, j])
+                        for i in range(dm.shape[0])
+                        for j in range(dm.shape[0])
+                        if i != j
+                    )
+                )
+                if dm is not None
+                else 0.0
+            )
+
+        @staticmethod
+        def purity(dm):
             import numpy as np
-            if psi is None:
-                return 0.0
-            try:
-                a = np.abs(psi.ravel())
-                return float(np.sum(a) ** 2 - np.sum(a ** 2))
-            except Exception:
-                return 0.0
+
+            return (
+                float(min(1.0, max(0.0, np.real(np.trace(dm @ dm)))))
+                if dm is not None
+                else 0.0
+            )
 
         @staticmethod
-        def purity(psi):
-            """P = Σ pₖ² where pₖ = |ψₖ|² (1 for pure, 1/N for maximally mixed)."""
+        def state_fidelity(r1, r2):
             import numpy as np
-            if psi is None:
-                return 0.0
+
             try:
-                p = np.abs(psi.ravel()) ** 2
-                p_sum = float(np.sum(p))
-                if p_sum > 1e-12:
-                    p = p / p_sum
-                return float(min(1.0, max(0.0, np.sum(p ** 2))))
-            except Exception:
+                ev, ec = np.linalg.eigh(r1)
+                ev = np.maximum(ev, 0)
+                sr = ec @ np.diag(np.sqrt(ev)) @ ec.conj().T
+                p = sr @ r2 @ sr
+                ep = np.linalg.eigvalsh(p)
+                ep = np.maximum(ep, 0)
+                return float(min(1.0, max(0.0, float(np.sum(np.sqrt(ep))) ** 2)))
+            except:
                 return 0.0
 
         @staticmethod
-        def state_fidelity(psi1, psi2):
-            """F = |⟨ψ₁|ψ₂⟩|² (Born overlap for pure-state amplitude fields)."""
-            import numpy as np
-            if psi1 is None or psi2 is None:
-                return 0.0
-            try:
-                v1 = psi1.ravel().astype(np.complex128)
-                v2 = psi2.ravel().astype(np.complex128)
-                n1 = float(np.sum(np.abs(v1) ** 2))
-                n2 = float(np.sum(np.abs(v2) ** 2))
-                if n1 < 1e-12 or n2 < 1e-12:
-                    return 0.0
-                v1 = v1 / np.sqrt(n1)
-                v2 = v2 / np.sqrt(n2)
-                inner = np.vdot(v2, v1)
-                return float(min(1.0, max(0.0, abs(inner) ** 2)))
-            except Exception:
-                return 0.0
+        def quantum_discord(dm):
+            return 0.0
 
         @staticmethod
-        def quantum_discord(psi):
-            """Spatial marginal discord proxy: S_x + S_y + S_z − S_total."""
-            import numpy as np
-            if psi is None or psi.ndim != 3:
-                return 0.0
-            try:
-                p = np.abs(psi) ** 2
-                p_sum = float(np.sum(p))
-                if p_sum > 1e-12:
-                    p = p / p_sum
-
-                def _shannon(v):
-                    v = v[v > 1e-16]
-                    return float(-np.sum(v * np.log(v))) if v.size > 0 else 0.0
-
-                px = np.sum(p, axis=(1, 2))
-                py = np.sum(p, axis=(0, 2))
-                pz = np.sum(p, axis=(0, 1))
-                p_flat = p.ravel()
-                p_nz = p_flat[p_flat > 1e-16]
-                s_total = float(-np.sum(p_nz * np.log(p_nz))) if p_nz.size > 0 else 0.0
-                return max(0.0, _shannon(px) + _shannon(py) + _shannon(pz) - s_total)
-            except Exception:
-                return 0.0
-
-        @staticmethod
-        def mutual_information(psi):
+        def mutual_information(dm):
             return 0.0
 
 
@@ -1905,18 +1486,8 @@ class NonMarkovianNoiseBath:
         self, density_matrix: np.ndarray, time_step: float
     ) -> np.ndarray:
         """
-        Apply non-Markovian dephasing + amplitude damping to the 16³ amplitude tensor.
-
-        The state |ψ⟩ ∈ C^{16×16×16} is a pure-state amplitude field.
-        The correct invariant is ‖ψ‖² = Σ|ψ(r)|² = 1 (L2 norm, Born rule).
-        After any linear operation, renormalize by L2, never L1.
-
-        Dephasing and amplitude damping multiply the field by scalar factors
-        (phase decoherence is per-voxel phase randomization; here we use the
-        global envelope approximation which is exact for homogeneous noise).
-        The non-Markovian memory revival blends with a weighted sum of past
-        states — physically the quantum memory kernel K(τ) re-excites old
-        coherences, producing the period-8 revival signature.
+        Apply dephasing + amplitude damping to 64³ 3D density tensor.
+        Simplified for 3D arrays (no 2D matrix operations like diag/eigh).
         """
         if density_matrix is None or not NUMPY_AVAILABLE:
             return density_matrix
@@ -1927,23 +1498,27 @@ class NonMarkovianNoiseBath:
                 T1_s = T1_NS / 1e9
                 dt = float(time_step)
 
-                # Dephasing envelope: e^{-t/T₂}  (homogeneous pure dephasing)
-                deph_factor = float(np.exp(-dt / max(T2_s, 1e-9)))
-                # Amplitude damping: e^{-t/2T₁}  (√ because |ψ⟩ not ρ=|ψ⟩⟨ψ|)
-                amp_factor  = float(np.exp(-dt / (2.0 * max(T1_s, 1e-9))))
-                result = (deph_factor * amp_factor) * density_matrix
+                # Dephasing: decay off-diagonal coherences
+                gamma_phi = 1.0 / max(T2_s, 1e-9)
+                deph_factor = float(np.exp(-gamma_phi * dt))
+                result = deph_factor * density_matrix
 
-                # Non-Markovian memory revival: Σ_k K(τ_k) · ψ(t - τ_k)
+                # Amplitude damping: decay overall magnitude
+                amp_factor = float(np.exp(-dt / max(T1_s, 1e-9)))
+                result = amp_factor * result
+
+                # Store in history for memory kernel
                 _current_cycle = len(self.history)
                 self.history.append((_current_cycle, density_matrix.copy()))
 
+                # Non-Markovian memory revival: blend with past state
                 if len(self.history) > 2:
                     hist_list = list(self.history)
                     dt_s = CYCLE_TIME_NS / 1e9
-                    mem_accum = np.zeros_like(density_matrix, dtype=np.complex64)
+                    mem_accum = np.zeros_like(density_matrix)
                     norm_accum = 0.0
                     seen_cycles: set = set()
-                    for k in range(4):
+                    for k in range(4):  # Reduced lookback for 3D tensors
                         target_idx = _current_cycle - (1 << k)
                         if target_idx < 0:
                             break
@@ -1958,17 +1533,19 @@ class NonMarkovianNoiseBath:
                     if norm_accum > 1e-12:
                         mem_accum /= norm_accum
                     revival_weight = min(self.memory_kernel * 0.20, 0.10)
-                    result = (1.0 - revival_weight) * result + revival_weight * mem_accum
+                    result = (
+                        1.0 - revival_weight
+                    ) * result + revival_weight * mem_accum
 
-                # L2 renormalization — CRITICAL: must be Σ|ψ|² not Σ|ψ|
-                _l2 = float(np.sum(np.abs(result) ** 2))
-                if _l2 > 1e-12:
-                    result = result / np.sqrt(_l2)
-                else:
-                    # State has collapsed — reinitialize to target
-                    result = getattr(self, '_last_target', density_matrix)
+                # Hermitianize for 3D tensor
+                result = 0.5 * (result + np.conj(np.transpose(result, (1, 0, 2))))
 
-                return result.astype(np.complex64)
+                # Normalize to unit trace
+                _norm = np.sum(np.abs(result))
+                if _norm > 1e-12:
+                    result = result / _norm
+
+                return result
 
         except Exception as exc:
             logger.debug(f"[NOISE] Memory effect failed: {exc}")
@@ -2147,15 +1724,12 @@ class QuantumExecutionEngine:
                 "noise_model": NOISE_BATH.get_noise_model(),
             }
 
-            # Only pass seed when explicitly set — None means self-seed per run
-            if AER_SEED is not None:
-                try:
-                    sim_kwargs["seed_simulator"] = AER_SEED
-                    self.aer_simulator = AerSimulator(**sim_kwargs)
-                except TypeError:
-                    del sim_kwargs["seed_simulator"]
-                    self.aer_simulator = AerSimulator(**sim_kwargs)
-            else:
+            try:
+                sim_kwargs["seed_simulator"] = AER_SEED
+                self.aer_simulator = AerSimulator(**sim_kwargs)
+            except TypeError:
+                logger.debug(f"seed_simulator not supported, continuing without seed")
+                del sim_kwargs["seed_simulator"]
                 self.aer_simulator = AerSimulator(**sim_kwargs)
 
             # Pre-transpile the canonical W-state circuit once at init.
@@ -2453,80 +2027,46 @@ class QuantumLatticeController:
         self.w_state_constructor = WStateConstructor(self.field)
         self.noise_bath = NonMarkovianNoiseBath()
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # CANONICAL PQ0 TRIPARTITE W-STATE — GROUND TRUTH QUANTUM OBJECT
-        # ═══════════════════════════════════════════════════════════════════════
-        # The 16³ amplitude tensor ψ(x,y,z) represents the entangled object
-        # anchored at pq0 (origin). Three orthogonal legs:
-        #
-        #   pq0_oracle    — pseudoqubit 0 at origin (0,0,0)     axis z=0
-        #   pq0_V         — virtual qubit forward range pq_curr  axis z=+
-        #   pq0_IV        — inverse-virtual (conjugate) pq_last  axis z=−
-        #
-        # W-state: |W₃⟩ = (1/√3)(|100⟩ + |010⟩ + |001⟩)
-        # Each leg is a Gaussian mode localized on its axis.
-        # The tripartite entanglement is encoded in the equal-weight superposition.
-        # All 5 oracle nodes measure THIS same initial state with independent
-        # per-node noise realizations — their median forms the consensus.
-        # ═══════════════════════════════════════════════════════════════════════
+        # Quantum state — NATIVE 64³ 3D DENSITY TENSOR (NOT 256×256)
+        # 64×64×64 spatial-temporal field representation of quantum coherence
+        # Initialized as coherent 3D W-state with Gaussian envelope
+        _DIM = 64  # 64³ = 262,144 elements (native 3D quantum field)
 
-        _DIM = 16
-        _ORIGIN = _DIM // 2  # center of 16³ grid = voxel (8,8,8)
-        _SIGMA = 2.0         # Gaussian width in voxels
+        # Initialize 64³ density tensor — SERVER LATTICE (GROUND TRUTH)
+        # Streamed to all clients via SSE /rpc/oracle/snapshot
+        # Clients receive this, compute measurements, average with neighbors → quantum mesh
+        self.current_density_matrix = np.zeros((_DIM, _DIM, _DIM), dtype=np.complex64)
 
-        psi = np.zeros((_DIM, _DIM, _DIM), dtype=np.complex128)
+        # Multi-mode coherent quantum state (superposition of spatial W-state modes)
+        _num_modes = 8
+        for _m in range(_num_modes):
+            _cx = 16 + _m * 4
+            _cy = 16 + _m * 4
+            _cz = 32
 
-        # ── Leg 1: pq0_oracle — oracle leg, localized at (8,8,8) origin ──────
-        # Symmetric Gaussian centred on origin, phase = 0
-        for i in range(_DIM):
-            for j in range(_DIM):
-                for k in range(_DIM):
-                    _r2 = ((i-_ORIGIN)/_SIGMA)**2 + ((j-_ORIGIN)/_SIGMA)**2 + ((k-_ORIGIN)/_SIGMA)**2
-                    psi[i,j,k] += np.exp(-_r2/2.0) * (1.0/np.sqrt(3.0))
+            for i in range(_DIM):
+                for j in range(_DIM):
+                    for k in range(_DIM):
+                        _dx = (i - _cx) / 20.0
+                        _dy = (j - _cy) / 20.0
+                        _dz = (k - _cz) / 20.0
+                        _r2 = _dx * _dx + _dy * _dy + _dz * _dz
+                        _envelope = np.exp(-_r2 / 2.0)
+                        _phase = 2 * np.pi * _m / _num_modes
+                        self.current_density_matrix[i, j, k] += (
+                            _envelope / _num_modes
+                        ) * np.exp(1j * _phase)
 
-        # ── Leg 2: pq0_V — virtual (forward range pq_curr), localized at +z half ──
-        # Gaussian shifted +4 voxels along z-axis, phase = 2π/3
-        _SHIFT = 4
-        _PHASE_V = 2.0 * np.pi / 3.0
-        for i in range(_DIM):
-            for j in range(_DIM):
-                for k in range(_DIM):
-                    _r2 = ((i-_ORIGIN)/_SIGMA)**2 + ((j-_ORIGIN)/_SIGMA)**2 + ((k-(_ORIGIN+_SHIFT))/_SIGMA)**2
-                    psi[i,j,k] += np.exp(-_r2/2.0) * (1.0/np.sqrt(3.0)) * np.exp(1j * _PHASE_V)
-
-        # ── Leg 3: pq0_IV — inverse-virtual (conjugate pq_last), localized at −z half ──
-        # Gaussian shifted −4 voxels along z-axis, phase = 4π/3
-        _PHASE_IV = 4.0 * np.pi / 3.0
-        for i in range(_DIM):
-            for j in range(_DIM):
-                for k in range(_DIM):
-                    _r2 = ((i-_ORIGIN)/_SIGMA)**2 + ((j-_ORIGIN)/_SIGMA)**2 + ((k-(_ORIGIN-_SHIFT))/_SIGMA)**2
-                    psi[i,j,k] += np.exp(-_r2/2.0) * (1.0/np.sqrt(3.0)) * np.exp(1j * _PHASE_IV)
-
-        # Normalize: ‖ψ‖² = 1
-        _norm = float(np.sum(np.abs(psi)**2))
+        # Normalize: trace = 1 (proper density matrix for quantum state)
+        _norm = np.sum(np.abs(self.current_density_matrix) ** 2)
         if _norm > 1e-12:
-            psi /= np.sqrt(_norm)
-
-        # ── 16³ TENSOR STORAGE (NOT 4096×4096 DENSE MATRIX) ───────────────────────
-        # ψ ∈ C^{16×16×16} = 4096 complex64 elements = 32KB per snapshot
-        # This is the representative slice for the full lattice animation.
-        # The full lattice lives in globals but we only animate/stream this 16³ portion.
-        self.current_density_matrix = psi.astype(np.complex64)
+            self.current_density_matrix = self.current_density_matrix / np.sqrt(_norm)
 
         # Store target for fidelity (clients measure against this)
         self._w8_target = self.current_density_matrix.copy()
-
-        # Give NOISE_BATH a reference to the target so it can reinitialize
-        # if the state ever collapses below numerical precision
-        NOISE_BATH._last_target = self._w8_target
-
-        # Purity of initial state (should be ~1.0 for the pure W-state init)
-        _init_p = float(np.abs(np.vdot(self.current_density_matrix.ravel(),
-                                        self.current_density_matrix.ravel())))
-        self.w_state_strength = _init_p
+        self.w_state_strength = 0.8
         self.coherence = 0.9
-        self.fidelity = 1.0
+        self.fidelity = 0.99
         self.metrics_history = deque(maxlen=10000)
 
         self._lock = threading.RLock()
@@ -2541,18 +2081,17 @@ class QuantumLatticeController:
         self._init_blockchain()
 
         logger.info(
-            "✨ QUANTUM LATTICE CONTROLLER INITIALIZED — Tripartite pq0 W-state"
+            "✨ QUANTUM LATTICE CONTROLLER INITIALIZED (SPATIAL-TEMPORAL FIELD MODEL)"
         )
-        logger.info(
-            f"   pq0_oracle@(8,8,8) | pq0_V@(8,8,12) | pq0_IV@(8,8,4) "
-            f"| ‖ψ‖²={_init_p:.6f}"
-        )
+        logger.info(f"   Coherence target: 0.900 | Fidelity target: 0.992")
         logger.info(
             f"   Memory kernel: κ={KAPPA_MEMORY} | Revival gain: {REVIVAL_AMPLIFIER}x"
         )
         logger.info(
-            f"   Pseudoqubits: {TOTAL_PSEUDOQUBITS:,} in {NUM_BATCHES} batches"
+            f"   Pseudoqubits: {TOTAL_PSEUDOQUBITS:,} in {NUM_BATCHES} batches × {TOTAL_PSEUDOQUBITS // NUM_BATCHES}"
         )
+        logger.info(f"   W-state: tripartite oracle|IV|V implicit per pseudoqubit")
+        logger.info(f"   Routing: hyperbolic spatial-temporal field management")
 
     def _init_blockchain(self):
         """
@@ -2572,22 +2111,10 @@ class QuantumLatticeController:
                 self.db_connector = None
 
         # Validator
-        _wallet = _get_miner_wallet()
-        _reward_address = (
-            _wallet.get_address() if _wallet and _wallet.is_initialized() else ""
-        ) or os.getenv("WALLET_ADDRESS", "")
-        
-        if not _reward_address:
-            logger.error(
-                "[BLOCKCHAIN] ❌ MINER ADDRESS REQUIRED: No wallet loaded and no WALLET_ADDRESS env var. "
-                "Cannot initialize blockchain validator."
-            )
-            self.validator = None
-            return
-        
         self.validator = IndividualValidator(
             validator_id=str(uuid.uuid4())[:16],
-            miner_address=_reward_address,
+            miner_address="miner_"
+            + hashlib.sha3_256(str(time.time()).encode()).hexdigest()[:16],
         )
         logger.info(f"[BLOCKCHAIN] Validator ready: {self.validator.miner_address}")
 
@@ -2863,23 +2390,16 @@ class QuantumLatticeController:
                 # Compute quantum metrics
                 # FIX: normalise L1-coherence to [0,1] so LATTICE.coherence is always
                 # a physically meaningful [0,1] metric (max for 256-dim = 255).
-                # L1 coherence for the 16³ tripartite W-state field.
-                # For a 3-mode Gaussian W-state spread over N=4096 voxels,
-                # the maximum L1 coherence = (Σ|ψᵢ|)² − 1.
-                # With ‖ψ‖²=1, Σ|ψ|² = 1 always, so:
-                #   L1_max ≈ (√N · ‖ψ‖)² − 1 = N − 1 = 4095 for uniform spread
-                # For our Gaussian W-state ≈ 3 modes each with σ=2, effective
-                # support ≈ 3 × (2√(2π)σ)³ ≈ 3 × 126 ≈ 378 voxels:
-                #   L1_max ≈ √378 − 1 ≈ 19  (realistic max for this state)
-                # We normalize by (Σ|ψᵢ|)_max = √effective_support to get [0,1].
                 _raw_coh = QuantumInformationMetrics.coherence_l1_norm(
                     self.current_density_matrix
                 )
-                # Dynamic normalization: (Σ|ψ|)² = L1 + 1  → Σ|ψ| = √(L1+1)
-                # C_normalized = L1 / (Σ|ψ|)² = L1 / (L1 + 1) ∈ [0,1)
-                # This is the correct normalization that saturates at 1 only for
-                # a maximally coherent state and stays in [0,1] by construction.
-                self.coherence = float(_raw_coh / (_raw_coh + 1.0)) if _raw_coh > 0 else 0.0
+                # W8-COHERENCE FIX: the W8 state lives in the 8-state single-excitation
+                # subspace {|1>,|2>,|4>,...,|128>}.  Its max L1 off-diagonal sum is
+                # k*(k-1)/k = k-1 = 7  (not 255, which is the max for a fully-coherent
+                # 256-dim state like |+>^8).  Dividing by 255 gives ~0.022 for a healthy
+                # W-state instead of the correct ~0.82; dividing by 7 gives C ≈ F.
+                _W8_COHERENCE_MAX = 7.0  # = n_excitation_states - 1 = 8 - 1
+                self.coherence = float(np.clip(_raw_coh / _W8_COHERENCE_MAX, 0.0, 1.0))
 
                 # FIX: fidelity reference must be |W_8><W_8|, NOT the maximally-mixed
                 # state I/256.  F(rho, I/256) measures how close we are to THERMAL
@@ -2913,9 +2433,7 @@ class QuantumLatticeController:
                         QuantumInformationMetrics.coherence_l1_norm(
                             self.current_density_matrix
                         )
-                        / (QuantumInformationMetrics.coherence_l1_norm(
-                            self.current_density_matrix
-                        ) + 1.0 + 1e-12),
+                        / 7.0,
                         0.0,
                         1.0,
                     )
@@ -2941,10 +2459,7 @@ class QuantumLatticeController:
                 # has drifted below 0.85 — this is Floquet engineering (timed
                 # resonance kick), not state injection.  The DM evolves under a
                 # valid unitary; no state is ever overwritten directly.
-                # ── σ-REVIVAL: fire when fidelity drops, not on arbitrary cycle mod ──
-                # At 72ns per cycle, cycle%8==0 fires every 576ns — far too frequent.
-                # We gate on actual fidelity deficit instead.
-                if self.fidelity < 0.75:
+                if (self.cycle_count % 8) == 0 and self.fidelity < 0.95:
                     # ── σ-REVIVAL: target-aligned Hamiltonian pulse on W8 subspace ──
                     self.current_density_matrix = self._apply_sigma_revival_unitary(
                         self.current_density_matrix
@@ -2961,22 +2476,27 @@ class QuantumLatticeController:
                         _rho_pumped = (
                             1.0 - _pump_alpha
                         ) * self.current_density_matrix + _pump_alpha * self._w8_target
-                        # Normalize the 3D amplitude tensor: ‖ψ‖² = 1
-                        _norm = float(np.sum(np.abs(_rho_pumped) ** 2))
-                        if _norm > 1e-12:
-                            _rho_pumped = _rho_pumped / np.sqrt(_norm)
-                        self.current_density_matrix = _rho_pumped.astype(np.complex64)
+                        # Enforce valid DM after blend
+                        _rho_pumped = 0.5 * (_rho_pumped + _rho_pumped.conj().T)
+                        _ev, _ec = np.linalg.eigh(_rho_pumped)
+                        _ev = np.clip(_ev, 0.0, None)
+                        _tr = float(np.sum(_ev))
+                        if _tr > 1e-12:
+                            _ev /= _tr
+                        self.current_density_matrix = (
+                            _ec @ np.diag(_ev) @ _ec.conj().T
+                        ).astype(np.complex128)
                     # Recompute metrics after revival pulse + pump
                     _raw_coh_r = QuantumInformationMetrics.coherence_l1_norm(
                         self.current_density_matrix
                     )
-                    self.coherence = float(_raw_coh_r / (_raw_coh_r + 1.0)) if _raw_coh_r > 0 else 0.0
+                    self.coherence = float(np.clip(_raw_coh_r / 7.0, 0.0, 1.0))
                     self.fidelity = QuantumInformationMetrics.state_fidelity(
                         self.current_density_matrix, self._w8_target
                     )
                     # Log only every 50 revival events to reduce spam
                     if self.cycle_count % 50 == 0:
-                        logger.warning(
+                        logger.info(
                             f"[σ-REVIVAL] ⚡ cycle={self.cycle_count} (×50) | "
                             f"F={fidelity_post_evolution:.4f}→{self.fidelity:.4f} | "
                             f"C={coherence_post_evolution:.4f}→{self.coherence:.4f} | "
@@ -2998,7 +2518,7 @@ class QuantumLatticeController:
                             if self.coherence > 0.15:  # Significant coherence
                                 # Log only every 50 entanglement revivals to reduce spam
                                 if self.cycle_count % 50 == 0:
-                                    logger.warning(
+                                    logger.info(
                                         f"✨ [REVIVAL] Entanglement revival (×50) | "
                                         f"C: {prev_coherence:.4f}→{self.coherence:.4f} "
                                         f"(Δ={self.coherence - prev_coherence:.4f}) | "
@@ -3164,93 +2684,45 @@ class QuantumLatticeController:
             "is_revival_cycle": (self.cycle_count % 8) == 0,  # SIGMA-REVIVAL at mod 8
         }
 
-    def update_pq0_state(self, pq_curr: int, pq_last: int) -> None:
-        """
-        Re-anchor the tripartite pq0 W-state when the chain advances.
-
-        The 16³ entangled object has three Gaussian legs:
-          pq0_oracle  — origin (8,8,8), phase-locked reference, always fixed
-          pq0_V       — virtual forward-range leg, z = 8 + Δ(pq_curr)
-          pq0_IV      — inverse-virtual conjugate leg, z = 8 − Δ(pq_last)
-
-        This encodes the current block as a living tripartite quantum object.
-        All 5 oracle nodes independently measure THIS state with per-node noise;
-        their median fidelity is the consensus displayed on index.html.
-        """
-        _DIM = 16
-        _ORIGIN = _DIM // 2   # voxel 8 — the pq0 anchor
-        _SIGMA = 2.0
-
-        _shift_v  = max(1, min(_DIM//2 - 1, 1 + (int(pq_curr) % (_DIM//2 - 1))))
-        _shift_iv = max(1, min(_DIM//2 - 1, 1 + (int(pq_last) % (_DIM//2 - 1))))
-
-        import numpy as _np
-        psi = _np.zeros((_DIM, _DIM, _DIM), dtype=_np.complex128)
-
-        for i in range(_DIM):
-            for j in range(_DIM):
-                for k in range(_DIM):
-                    _o  = (i-_ORIGIN)**2 + (j-_ORIGIN)**2
-                    _r0 = (_o + (k-_ORIGIN)**2)    / _SIGMA**2
-                    _rv = (_o + (k-(_ORIGIN+_shift_v))**2)  / _SIGMA**2
-                    _ri = (_o + (k-(_ORIGIN-_shift_iv))**2) / _SIGMA**2
-                    psi[i,j,k] = (
-                        _np.exp(-_r0/2.0)
-                        + _np.exp(-_rv/2.0) * _np.exp(1j * 2*_np.pi/3)
-                        + _np.exp(-_ri/2.0) * _np.exp(1j * 4*_np.pi/3)
-                    ) / _np.sqrt(3.0)
-
-        _norm = float(_np.sum(_np.abs(psi)**2))
-        if _norm > 1e-12:
-            psi /= _np.sqrt(_norm)
-
-        with self._lock:
-            self.current_density_matrix = psi.astype(_np.complex64)
-            self._w8_target = self.current_density_matrix.copy()
-            self.fidelity = 1.0
-
-        logger.warning(
-            f"[PQ0] Tripartite re-anchored: pq_curr={pq_curr} pq_last={pq_last} | "
-            f"oracle@z=8 | V@z={_ORIGIN+_shift_v} | IV@z={_ORIGIN-_shift_iv}"
-        )
-
     def get_block_field_pq0(self) -> "np.ndarray":
         """
         Return the canonical 8×8 pq0 W-state density matrix for oracle circuits.
 
-        Each oracle node calls this independently. Fresh QRNG entropy is consumed
-        and applied as per-call depolarising noise so each call returns a different
-        matrix — this is the source of measurement divergence Byzantine consensus needs.
+        All 5 oracle nodes call this ONCE per measurement window to get the
+        same initial state.  Each then runs it through their own independent
+        AerSimulator — noise divergence produces the 5 different readings that
+        Byzantine consensus aggregates.
+
+        ⚠️ CRITICAL: Each oracle MUST consume FRESH QRNG entropy per call.
+           Without fresh entropy, oracles will measure identical states (profiling bug).
+           The noise bath κ=0.35 requires stochastic seeding each measurement.
+
+        Construction:
+          rho_pq0 = F * |W₃⟩⟨W₃| + (1-F) * I/8
+
+        where F = self.fidelity (the lattice's live W-state fidelity).
+        High F → near-pure W-state → high Mermin values.
+        Low F (e.g. after a π-pulse) → more mixed → lower Mermin, flags to daemon.
         """
         import numpy as np
 
-        # ── FRESH QRNG ENTROPY — mandatory per oracle call ───────────────────
-        epsilon_depol = 0.0
+        # 🔬 FORCE FRESH QRNG ENTROPY per oracle call
+        # This ensures each oracle's noise realization differs, avoiding profiling stuckness.
         try:
-            fresh_entropy = globals.QRNG_ENSEMBLE.read(32)
-            qrng_seed = int.from_bytes(fresh_entropy[:8], "little") & 0x7FFFFFFF
-            epsilon_depol = (int.from_bytes(fresh_entropy[8:12], "little") / 2**32) * 0.08
-        except Exception:
-            import os as _os
-            _rb = _os.urandom(16)
-            qrng_seed = int.from_bytes(_rb[:8], "little") & 0x7FFFFFFF
-            epsilon_depol = (int.from_bytes(_rb[8:12], "little") / 2**32) * 0.08
-
-        np.random.seed(qrng_seed)  # seed this call's numpy state
+            fresh_entropy = globals.QRNG_ENSEMBLE.read(32)  # 32 bytes fresh entropy
+            qrng_seed = int.from_bytes(fresh_entropy[:8], "little") & 0xFFFFFFFF
+        except:
+            qrng_seed = None
 
         F = float(max(0.0, min(1.0, self.fidelity)))
+        # Pure 3-qubit W-state: |W⟩⟨W| full outer product
         w3 = np.zeros((8, 8), dtype=np.complex128)
         for _i in (1, 2, 4):
             for _j in (1, 2, 4):
                 w3[_i, _j] = 1.0 / 3.0
+        # Blend: F * |W><W| + (1-F) * I/8
         rho = F * w3 + (1.0 - F) * (np.eye(8, dtype=np.complex128) / 8.0)
-
-        # Per-oracle depolarising noise — QRNG amplitude ensures divergence
-        if epsilon_depol > 0:
-            _G = np.random.randn(8, 8) + 1j * np.random.randn(8, 8)
-            _G = 0.5 * (_G + _G.conj().T)
-            rho = rho + epsilon_depol * _G * (1.0 / 8.0)
-
+        # Enforce valid DM
         rho = 0.5 * (rho + rho.conj().T)
         tr = float(np.real(np.trace(rho)))
         if tr > 1e-12:
@@ -3259,61 +2731,81 @@ class QuantumLatticeController:
 
     def _apply_sigma_revival_unitary(self, rho: np.ndarray) -> np.ndarray:
         """
-        Apply σ-revival pulse on 16³ amplitude tensor.
+        Apply σ-revival pulse via target-aligned Hamiltonian drive on the W8 subspace.
 
-        For a 3D pure-state amplitude field ψ(x,y,z), the "unitary drive toward
-        target" reduces to a rotation in the Hilbert space spanned by ψ and ψ_target:
+        Physical mechanism (Floquet resonance, σ-language validated):
+          F(σ) = cos²(πσ/8) → F(σ=8k) = 1.0.  At period-8 resonance the drive
+          Hamiltonian H_drive = i[ρ_target, ρ] (restricted to W8 subspace) has zero
+          commutator with the target — this is the Riemannian gradient of fidelity on
+          the unitary manifold (Khaneja-Glaser optimal control).  On hardware this is
+          implemented as a shaped microwave pulse tuned to the qubit transition; here
+          it is the mathematically equivalent matrix-exponential gate.
 
-          ψ_new = cos(θ)·ψ + sin(θ)·ψ_⊥
+        NOT state injection (rho ← α·ρ_target + (1-α)·ρ):
+          U is constructed from the current state and target — it is a valid unitary
+          transformation.  The QRNG seed adds controlled stochasticity to the pulse
+          angle (±5% jitter), matching real hardware pulse-amplitude noise.
 
-        where ψ_⊥ is the component of ψ_target orthogonal to ψ (Gram-Schmidt).
-        θ = REVIVAL_STRENGTH controls how far we rotate toward the target.
-        This is the geodesic on the projective Hilbert space (Fubini-Study metric),
-        equivalent to the unitary U = exp(-iθG) in the 2D formulation.
-
-        Memory: O(N³) — no matrix multiply, no eigendecomposition.
+        Mechanism:
+          1. Extract W8 subspace (8×8 block at indices {1,2,4,8,16,32,64,128}).
+          2. Build generator G = i(ρ_t - ρ_c) on that subspace (antisymmetric → Hermitian G).
+          3. Apply U_8 = expm(-i·θ·G) with θ = REVIVAL_STRENGTH·(1 + 0.05·ξ), ξ~QRNG.
+          4. Embed U_8 into 256×256 (identity outside W8 subspace).
+          5. ρ' = U·ρ·U†, enforced valid DM.
         """
+        _W8_IDX = [1 << k for k in range(8)]  # [1,2,4,8,16,32,64,128]
+        dim = rho.shape[0]
         try:
-            psi = rho.ravel().astype(np.complex128)
-            tgt = self._w8_target.ravel().astype(np.complex128)
+            # ── 1. Extract 8×8 W8-subspace blocks from current rho and target ──
+            rho_sub = np.array(
+                [[rho[ii, jj] for jj in _W8_IDX] for ii in _W8_IDX], dtype=np.complex128
+            )
+            tgt_sub = np.array(
+                [[self._w8_target[ii, jj] for jj in _W8_IDX] for ii in _W8_IDX],
+                dtype=np.complex128,
+            )
 
-            # Normalize both
-            n_psi = float(np.sum(np.abs(psi) ** 2))
-            n_tgt = float(np.sum(np.abs(tgt) ** 2))
-            if n_psi < 1e-12 or n_tgt < 1e-12:
-                return rho
-            psi = psi / np.sqrt(n_psi)
-            tgt = tgt / np.sqrt(n_tgt)
+            # ── 2. Build antisymmetric generator G = i(ρ_target - ρ_current) ──
+            # G is Hermitian: G† = -i(ρ_target† - ρ_current†) = i(ρ_target - ρ_current) = G ✓
+            # (ρ_target and ρ_current are both Hermitian DMs)
+            G = 1j * (tgt_sub - rho_sub)
+            G = 0.5 * (G + G.conj().T)  # numerical symmetrisation
 
-            # Compute overlap (inner product)
-            overlap = np.vdot(tgt, psi)  # ⟨target|current⟩
-            fid = float(np.abs(overlap) ** 2)
-
-            # If already very close, skip
-            if fid > 0.999:
-                return rho
-
-            # Gram-Schmidt: orthogonal component of target relative to current
-            tgt_perp = tgt - overlap * psi
-            n_perp = float(np.sum(np.abs(tgt_perp) ** 2))
-            if n_perp < 1e-14:
-                return rho  # states are parallel
-            tgt_perp = tgt_perp / np.sqrt(n_perp)
-
-            # QRNG-jittered rotation angle (±5% hardware noise analogue)
+            # ── 3. QRNG-jittered pulse angle (±5% hardware-noise analogue) ──
             raw = os.urandom(8)
-            xi = (int.from_bytes(raw, "big") / (2 ** 64)) * 2.0 - 1.0
-            theta = REVIVAL_STRENGTH * (1.0 + 0.05 * xi)
+            xi = (int.from_bytes(raw, "big") / (2**64)) * 2.0 - 1.0  # ξ ∈ [-1, +1]
+            theta = REVIVAL_STRENGTH * (1.0 + 0.05 * xi)  # jittered angle
 
-            # Geodesic rotation: ψ_new = cos(θ)·ψ + sin(θ)·ψ_⊥
-            psi_new = np.cos(theta) * psi + np.sin(theta) * tgt_perp
+            # ── 4. U_8 = expm(-i·θ·G) on the 8×8 W8 subspace ──
+            # scipy.linalg.expm gives the exact matrix exponential; numpy fallback
+            # uses eigendecomposition (both are valid on 8×8).
+            try:
+                from scipy.linalg import expm as _expm
 
-            # Renormalize (should be unit already, but defensive)
-            n_new = float(np.sum(np.abs(psi_new) ** 2))
-            if n_new > 1e-12:
-                psi_new = psi_new / np.sqrt(n_new)
+                U_8 = _expm(-1j * theta * G)
+            except Exception:
+                evals_g, evecs_g = np.linalg.eigh(G)
+                U_8 = (
+                    evecs_g @ np.diag(np.exp(-1j * theta * evals_g)) @ evecs_g.conj().T
+                )
 
-            return psi_new.reshape(rho.shape).astype(rho.dtype)
+            # ── 5. Embed U_8 into 256×256 (identity on all other states) ──
+            U_full = np.eye(dim, dtype=np.complex128)
+            for i, ii in enumerate(_W8_IDX):
+                for j, jj in enumerate(_W8_IDX):
+                    U_full[ii, jj] = U_8[i, j]
+
+            # ── 6. Apply ρ' = U·ρ·U† ──
+            rho_new = U_full @ rho @ U_full.conj().T
+
+            # ── 7. Enforce valid DM: Hermitian + PSD clip + trace=1 ──
+            rho_new = 0.5 * (rho_new + rho_new.conj().T)
+            ev, ec = np.linalg.eigh(rho_new)
+            ev = np.clip(ev, 0.0, None)
+            tr = float(np.sum(ev))
+            if tr > 1e-12:
+                ev /= tr
+            return (ec @ np.diag(ev) @ ec.conj().T).astype(np.complex128)
 
         except Exception as _exc:
             logger.debug(f"[LATTICE] σ-revival unitary failed: {_exc}")
@@ -3813,9 +3305,8 @@ class BlockManager:
                         INSERT INTO blocks
                             (height, block_hash, parent_hash, w_state_hash, hyp_witness,
                              timestamp, tx_count, merkle_root, difficulty, nonce,
-                             coherence_snapshot, fidelity_snapshot, finalized, finalized_at,
-                             consensus_signature_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             coherence_snapshot, fidelity_snapshot, finalized, finalized_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (height) DO NOTHING
                         """,
                         (
@@ -3833,7 +3324,6 @@ class BlockManager:
                             1.0,
                             True,
                             GENESIS_TIMESTAMP,
-                            '{}'  # consensus_signature_json (genesis has no consensus yet)
                         ),
                     )
                     if success:
@@ -3939,10 +3429,48 @@ class BlockManager:
             block = self.pending_block
             block.timestamp_s = int(time.time())
 
-            # Server generates all reward txs authoritatively:
-            #   - miner_reward tx (7.2 QTCL) server writes on block acceptance
-            #   - coinbase tx (0.8 QTCL from prior block pending_rewards) server writes
-            # Client sends NO coinbase txs — block.transactions has only user txs.
+            # ── Generate coinbase transactions ──────────────────────────────────
+            # Get miner reward for this block height (default: 720 QTCL)
+            MINER_REWARD_BASE = 72000  # in base units (720.00 QTCL)
+            TREASURY_REWARD_BASE = 8000  # in base units (80.00 QTCL)
+            TREASURY_ADDRESS = "qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1"
+
+            miner_reward = MINER_REWARD_BASE
+            treasury_reward = TREASURY_REWARD_BASE
+
+            # Miner coinbase (pay block reward to miner)
+            miner_coinbase = QuantumTransaction(
+                tx_id=f"coinbase_{block.block_height}_{block.miner_address[:8]}",
+                sender_addr="COINBASE",
+                receiver_addr=block.miner_address,
+                amount=Decimal(miner_reward) / 100,
+                nonce=block.block_height,
+                timestamp_ns=int(time.time() * 1e9),
+                fee=0,
+                tx_type="coinbase",
+            )
+            miner_coinbase.from_addr = miner_coinbase.sender_addr
+            miner_coinbase.to_addr = miner_coinbase.receiver_addr
+
+            # Treasury coinbase (pay treasury share)
+            treasury_coinbase = QuantumTransaction(
+                tx_id=f"treasury_{block.block_height}",
+                sender_addr="COINBASE",
+                receiver_addr=TREASURY_ADDRESS,
+                amount=Decimal(treasury_reward) / 100,
+                nonce=block.block_height,
+                timestamp_ns=int(time.time() * 1e9),
+                fee=0,
+                tx_type="coinbase",
+            )
+            treasury_coinbase.from_addr = treasury_coinbase.sender_addr
+            treasury_coinbase.to_addr = treasury_coinbase.receiver_addr
+
+            # Prepend coinbase transactions to block
+            block.transactions = [
+                miner_coinbase,
+                treasury_coinbase,
+            ] + block.transactions
 
             block.tx_count = len(block.transactions)
 
@@ -4069,19 +3597,17 @@ class BlockManager:
                 try:
                     self.db.execute(
                         """
-                        INSERT INTO blocks"""
+                        INSERT INTO blocks
                             (block_height, block_hash, parent_hash, oracle_w_state_hash,
-                             timestamp, tx_count, merkle_root, hyp_witness,
-                             consensus_signature_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             timestamp, tx_count, merkle_root, hyp_witness)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (block_height) DO UPDATE SET
                             block_hash        = EXCLUDED.block_hash,
                             oracle_w_state_hash = EXCLUDED.oracle_w_state_hash,
                             timestamp         = EXCLUDED.timestamp,
                             tx_count          = EXCLUDED.tx_count,
                             merkle_root       = EXCLUDED.merkle_root,
-                            hyp_witness      = EXCLUDED.hyp_witness,
-                            consensus_signature_json = EXCLUDED.consensus_signature_json
+                            hyp_witness      = EXCLUDED.hyp_witness
                         """,
                         (
                             block.block_height,
@@ -4091,30 +3617,9 @@ class BlockManager:
                             block.timestamp_s,
                             block.tx_count,
                             block.merkle_root,
-                            block.hyp_signature,
-                            json.dumps(block.consensus_signature) if hasattr(block, 'consensus_signature') and block.consensus_signature else '{}',
+                            block.hyp_witness,
                         ),
                     )
-                    if success:
-                        # ═══════════════════════════════════════════════════════════
-                        # 💎 UTXO REWARD DISTRIBUTION (CATHEDRAL-GRADE)
-                        # ═══════════════════════════════════════════════════════════
-                        try:
-                            import sys
-                            _srv = sys.modules.get("server")
-                            if _srv and hasattr(_srv, "_distribute_block_rewards"):
-                                _srv._distribute_block_rewards(block.block_height, block.miner_address)
-                        except Exception as reward_err:
-                            logger.warning(f"[SEAL] Reward distribution failed: {reward_err}")
-                    else:
-                        logger.warning(
-                            "[SEAL] DB execute returned False — genesis may not be persisted"
-                        )
-                except Exception as db_err:
-                    logger.warning(
-                        f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}"
-                    )
-
                 except Exception as db_err:
                     logger.warning(
                         f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}"
@@ -4454,22 +3959,8 @@ def initialize_lattice(miner_address: str = ""):
         quantum_lattice.start()
 
         # Initialize blockchain systems (ELITE)
-        if not miner_address:
-            _wallet = _get_miner_wallet()
-            miner_address = (
-                (_wallet.get_address() if _wallet and _wallet.is_initialized() else "")
-                or os.getenv("WALLET_ADDRESS", "")
-            )
-        
-        if not miner_address:
-            logger.error(
-                "[INIT] ❌ MINER ADDRESS REQUIRED: No wallet loaded and no WALLET_ADDRESS env var. "
-                "Cannot initialize validator."
-            )
-            return None
-        
         validator = IndividualValidator(
-            str(uuid.uuid4())[:16], miner_address
+            str(uuid.uuid4())[:16], miner_address or "miner_" + str(uuid.uuid4())[:8]
         )
         logger.info(f"✅ Validator initialized: {validator.miner_address}")
 
