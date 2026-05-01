@@ -499,7 +499,7 @@ PHASE_DAMPING_RATE = 0.002
 # Quantum topology (NO RESERVED QUBITS)
 NUM_TOTAL_QUBITS = 8
 AER_SHOTS = 1000
-AER_SEED = 42
+AER_SEED = None  # None = self-seed — each oracle gets independent noise
 CIRCUIT_TRANSPILE = False  # transpile once at AER init, not per-call
 CIRCUIT_OPTIMIZATION_LEVEL = 2
 
@@ -1803,12 +1803,15 @@ class QuantumExecutionEngine:
                 "noise_model": NOISE_BATH.get_noise_model(),
             }
 
-            try:
-                sim_kwargs["seed_simulator"] = AER_SEED
-                self.aer_simulator = AerSimulator(**sim_kwargs)
-            except TypeError:
-                logger.debug(f"seed_simulator not supported, continuing without seed")
-                del sim_kwargs["seed_simulator"]
+            # Only pass seed when explicitly set — None means self-seed per run
+            if AER_SEED is not None:
+                try:
+                    sim_kwargs["seed_simulator"] = AER_SEED
+                    self.aer_simulator = AerSimulator(**sim_kwargs)
+                except TypeError:
+                    del sim_kwargs["seed_simulator"]
+                    self.aer_simulator = AerSimulator(**sim_kwargs)
+            else:
                 self.aer_simulator = AerSimulator(**sim_kwargs)
 
             # Pre-transpile the canonical W-state circuit once at init.
@@ -2778,41 +2781,39 @@ class QuantumLatticeController:
         """
         Return the canonical 8×8 pq0 W-state density matrix for oracle circuits.
 
-        All 5 oracle nodes call this ONCE per measurement window to get the
-        same initial state.  Each then runs it through their own independent
-        AerSimulator — noise divergence produces the 5 different readings that
-        Byzantine consensus aggregates.
-
-        ⚠️ CRITICAL: Each oracle MUST consume FRESH QRNG entropy per call.
-           Without fresh entropy, oracles will measure identical states (profiling bug).
-           The noise bath κ=0.35 requires stochastic seeding each measurement.
-
-        Construction:
-          rho_pq0 = F * |W₃⟩⟨W₃| + (1-F) * I/8
-
-        where F = self.fidelity (the lattice's live W-state fidelity).
-        High F → near-pure W-state → high Mermin values.
-        Low F (e.g. after a π-pulse) → more mixed → lower Mermin, flags to daemon.
+        Each oracle node calls this independently. Fresh QRNG entropy is consumed
+        and applied as per-call depolarising noise so each call returns a different
+        matrix — this is the source of measurement divergence Byzantine consensus needs.
         """
         import numpy as np
 
-        # 🔬 FORCE FRESH QRNG ENTROPY per oracle call
-        # This ensures each oracle's noise realization differs, avoiding profiling stuckness.
+        # ── FRESH QRNG ENTROPY — mandatory per oracle call ───────────────────
+        epsilon_depol = 0.0
         try:
-            fresh_entropy = globals.QRNG_ENSEMBLE.read(32)  # 32 bytes fresh entropy
-            qrng_seed = int.from_bytes(fresh_entropy[:8], "little") & 0xFFFFFFFF
-        except:
-            qrng_seed = None
+            fresh_entropy = globals.QRNG_ENSEMBLE.read(32)
+            qrng_seed = int.from_bytes(fresh_entropy[:8], "little") & 0x7FFFFFFF
+            epsilon_depol = (int.from_bytes(fresh_entropy[8:12], "little") / 2**32) * 0.08
+        except Exception:
+            import os as _os
+            _rb = _os.urandom(16)
+            qrng_seed = int.from_bytes(_rb[:8], "little") & 0x7FFFFFFF
+            epsilon_depol = (int.from_bytes(_rb[8:12], "little") / 2**32) * 0.08
+
+        np.random.seed(qrng_seed)  # seed this call's numpy state
 
         F = float(max(0.0, min(1.0, self.fidelity)))
-        # Pure 3-qubit W-state: |W⟩⟨W| full outer product
         w3 = np.zeros((8, 8), dtype=np.complex128)
         for _i in (1, 2, 4):
             for _j in (1, 2, 4):
                 w3[_i, _j] = 1.0 / 3.0
-        # Blend: F * |W><W| + (1-F) * I/8
         rho = F * w3 + (1.0 - F) * (np.eye(8, dtype=np.complex128) / 8.0)
-        # Enforce valid DM
+
+        # Per-oracle depolarising noise — QRNG amplitude ensures divergence
+        if epsilon_depol > 0:
+            _G = np.random.randn(8, 8) + 1j * np.random.randn(8, 8)
+            _G = 0.5 * (_G + _G.conj().T)
+            rho = rho + epsilon_depol * _G * (1.0 / 8.0)
+
         rho = 0.5 * (rho + rho.conj().T)
         tr = float(np.real(np.trace(rho)))
         if tr > 1e-12:
@@ -3628,7 +3629,7 @@ class BlockManager:
             if self.db is not None:
                 try:
                     self.db.execute(
-                        \"\"\"
+                        """
                         INSERT INTO blocks
                             (block_height, block_hash, parent_hash, oracle_w_state_hash,
                              timestamp, tx_count, merkle_root, hyp_witness)
@@ -3640,7 +3641,7 @@ class BlockManager:
                             tx_count          = EXCLUDED.tx_count,
                             merkle_root       = EXCLUDED.merkle_root,
                             hyp_witness      = EXCLUDED.hyp_witness
-                        \"\"\",
+                        """,
                         (
                             block.block_height,
                             block.block_hash,
@@ -3665,11 +3666,11 @@ class BlockManager:
                             logger.warning(f"[SEAL] Reward distribution failed: {reward_err}")
                     else:
                         logger.warning(
-                            \"[SEAL] DB execute returned False — genesis may not be persisted\"
+                            "[SEAL] DB execute returned False — genesis may not be persisted"
                         )
                 except Exception as db_err:
                     logger.warning(
-                        f\"[SEAL] DB persist failed for block #{block.block_height}: {db_err}\"
+                        f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}"
                     )
 
                 except Exception as db_err:

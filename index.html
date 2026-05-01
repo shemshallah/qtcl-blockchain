@@ -1305,32 +1305,41 @@ async function selectBlockFromExplorer(height) {
 async function fetchNetwork() {
   const body = document.getElementById('net-body');
   try {
-    const res = await rpc('qtcl_getPeers', [100]);
-    const peers = res && res.peers ? res.peers : [];
-    document.getElementById('net-count').textContent = `${peers.length} peers`;
-    if (!peers.length) {
-      body.innerHTML = '<div style="padding:20px;text-align:center;font-family:var(--mono);font-size:9px;color:var(--dim2)">No peers connected yet — start a miner client to join the network</div>';
+    const [peersRes, oraclePeersRes] = await Promise.all([
+      rpc('qtcl_getPeers', [100]).catch(() => ({peers:[]})),
+      rpc('qtcl_getOraclePeers', {limit: 50}).catch(() => ({oracle_peers:[]})),
+    ]);
+    const peers = peersRes && peersRes.peers ? peersRes.peers : [];
+    const oraclePeers = oraclePeersRes && oraclePeersRes.oracle_peers ? oraclePeersRes.oracle_peers : [];
+    const seen = new Set();
+    const allPeers = [];
+    for (const op of oraclePeers) {
+      const nid = op.node_id || '';
+      if (nid && !seen.has(nid)) { seen.add(nid); allPeers.push({...op, _isOracle: true}); }
+    }
+    for (const p of peers) {
+      const nid = p.node_id || p.peer_id || '';
+      if (nid && !seen.has(nid)) { seen.add(nid); allPeers.push({...p, _isOracle: false}); }
+    }
+    const total = allPeers.length;
+    const oCount = allPeers.filter(p => p._isOracle).length;
+    document.getElementById('net-count').textContent = `${total} peers${oCount ? ` · ${oCount} oracle` : ''}`;
+    if (!total) {
+      body.innerHTML = `<div style="padding:24px;text-align:center;font-family:var(--mono);font-size:9px;color:var(--dim2)">No peers connected yet<br><br><a href="https://github.com/shemshallah/qtcl-miner" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none">⛏ Start a miner client to join the mesh →</a></div>`;
       return;
     }
-    body.innerHTML = `<div class="peers-grid">${peers.map(p => {
+    body.innerHTML = `<div class="peers-grid">${allPeers.map(p => {
       const addr = p.external_addr || p.address || 'unknown';
       const nodeId = p.node_id || p.peer_id || 'unknown';
       const height = p.chain_height || 0;
       const lastSeen = p.last_seen ? new Date(p.last_seen * 1000).toLocaleString() : '—';
       const callerIp = p.caller_ip || '';
-      return `
-      <div class="peer-card">
-        <div class="peer-id" title="${nodeId}">${nodeId.slice(0,16)}…${nodeId.slice(-8)}</div>
-        <div class="peer-addr">${addr}</div>
-        ${callerIp ? `<div style="font-family:var(--mono);font-size:7.5px;color:var(--dim2);margin-top:2px">NAT: ${callerIp}</div>` : ''}
-        <div style="display:flex;gap:12px;margin-top:6px;flex-wrap:wrap">
-          <div class="peer-height">H: ${height.toLocaleString()}</div>
-          <div style="font-family:var(--mono);font-size:8px;color:var(--am)">${lastSeen}</div>
-          ${p.version ? `<div style="font-family:var(--mono);font-size:8px;color:var(--dim2)">${p.version}</div>` : ''}
-          ${p.latency_ms !== undefined ? `<div style="font-family:var(--mono);font-size:8px;color:var(--am)">${p.latency_ms}ms</div>` : ''}
-        </div>
-      </div>
-    `}).join('')}</div>`;
+      const fid = p.fidelity ? (p.fidelity * 100).toFixed(1) + '%' : '';
+      const caps = (p.capabilities || []).join(', ');
+      const oB = p._isOracle ? '<span style="background:rgba(0,220,255,.15);color:var(--tx);padding:1px 5px;border-radius:3px;font-size:7px;letter-spacing:.5px;margin-left:6px">ORACLE</span>' : '';
+      const rB = (p.capabilities||[]).includes('relay') ? '<span style="background:rgba(0,255,157,.12);color:var(--gr);padding:1px 5px;border-radius:3px;font-size:7px;letter-spacing:.5px;margin-left:4px">RELAY</span>' : '';
+      return `<div class="peer-card" style="${p._isOracle?'border-color:rgba(0,220,255,.25)':''}"><div style="display:flex;align-items:center;gap:4px"><div class="peer-id" title="${nodeId}" style="flex:1">${nodeId.slice(0,12)}…${nodeId.slice(-6)}</div>${oB}${rB}</div><div class="peer-addr">${addr}</div>${callerIp?`<div style="font-family:var(--mono);font-size:7.5px;color:var(--dim2);margin-top:2px">NAT: ${callerIp}</div>`:''}<div style="display:flex;gap:10px;margin-top:5px;flex-wrap:wrap;align-items:center"><div class="peer-height">H: ${height.toLocaleString()}</div>${fid?`<div style="font-family:var(--mono);font-size:8px;color:var(--vi)">F: ${fid}</div>`:''}<div style="font-family:var(--mono);font-size:7.5px;color:var(--dim2)">${lastSeen}</div></div>${caps?`<div style="font-family:var(--mono);font-size:7px;color:var(--dim2);margin-top:3px;opacity:.7">${caps}</div>`:''}</div>`;
+    }).join('')}</div>`;
   } catch(e) {
     body.innerHTML = `<div class="error-msg" style="margin:10px">Network scan failed: ${e.message}</div>`;
   }
