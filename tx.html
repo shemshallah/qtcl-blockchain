@@ -1429,27 +1429,63 @@ function showPage(page) {
   if (page === 'contacts') renderContactsPage();
 }
 
-// NOTE: visibilitychange session wipe removed — it was zeroing S.balance causing false "Insufficient balance"
-// Session is now only cleared on explicit disconnect or page unload with full auth
-// Listen for parent iframe navigation (index.html tab switches) — only clear vault passphrase, NOT balance
+}
+
+// ═══ SECURITY: WALLET FILE CLEAR ON FOCUS LOSS / TAB SWITCH ═══
+// _walletFileData and _walletEncryptedPK are the sensitive blobs.
+// They are zeroed immediately whenever the page loses visibility or focus.
+// Balance + address are retained (non-sensitive) so the UI doesn't flicker.
+// Re-authenticating requires uploading the wallet file again — by design.
+
+function _zeroWalletKeyMaterial() {
+  _walletFileData      = null;
+  _walletEncryptedPK   = null;
+  _signPassword        = '';
+  // Downgrade to read-only — send form will require re-auth
+  if (S.walletMode === 'full') {
+    S.walletMode = 'readonly';
+    // Update mode badge without full disconnect
+    const badge = document.getElementById('walletModeBadge');
+    if (badge) badge.textContent = '👁 Read-Only (re-authenticate to send)';
+    const authBtn = document.getElementById('walletAuthBtn');
+    if (authBtn) authBtn.textContent = 'Re-authenticate';
+  }
+}
+
+// Tab switch / window minimise
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    _zeroWalletKeyMaterial();
+  }
+});
+
+// Window loses focus (switch to another app or browser window)
+window.addEventListener('blur', () => {
+  _zeroWalletKeyMaterial();
+});
+
+// Page unload / navigation
+window.addEventListener('pagehide', () => {
+  _zeroWalletKeyMaterial();
+});
+
+// Parent iframe tab switch message (from index.html)
 window.addEventListener('message', (e) => {
   if (e.data === 'qtcl_tab_changed') {
-    // Only wipe the ephemeral vault passphrase, not the wallet session or balance
+    _zeroWalletKeyMaterial();
     S.vaultPassphrase = '';
     S.vaultLoggedIn = false;
   }
 });
 
 function clearWalletSession() {
+  _zeroWalletKeyMaterial();
   S.walletAddr = '';
   S.walletMode = 'readonly';
   S.walletPublicKey = '';
   S.balance = 0;
   S.vaultPassphrase = '';
   S.vaultLoggedIn = false;
-  _walletFileData = null;
-  _walletEncryptedPK = null;
-  _signPassword = '';
   localStorage.removeItem('qtcl_tx_wallet');
   localStorage.removeItem('qtcl_tx_mode');
   // Reset UI
@@ -1748,13 +1784,17 @@ async function executeSend() {
     const to = document.getElementById('sendTo').value.trim();
     const memo = document.getElementById('sendMemo').value.trim();
 
-    // ── Use qtcl_signAndSubmitTx: server decrypts wallet, produces real HypΓ signature ──
-    // This fixes the INVALID_SIG rejection that was blocking all sends.
-    // The wallet file + password are already held in-browser from authenticateWallet().
-    // Server decrypts private key, signs canonical hash, submits to mempool, then zeros pk.
-    if (S.walletMode === 'full' && _walletFileData && _walletEncryptedPK) {
-      // Full auth path — sign via server-side decrypt
-      // If password was zeroed after a prior tx, prompt for it again
+    // ── Re-auth guard: wallet file cleared by tab-switch security wipe ──────
+    if (S.walletMode !== 'full' || !_walletFileData) {
+      toast('Wallet cleared for security — re-authenticate with your wallet file to send', 'error');
+      btn.disabled = false; btn.textContent = 'Sign & Submit';
+      document.getElementById('walletConnectCard')?.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+
+    // ── qtcl_signAndSubmitTx: server-side HypΓ decrypt + sign + submit ──────
+    {
+      // Password may have been zeroed after prior tx or tab-switch — prompt if needed
       let pwd = _signPassword;
       if (!pwd) {
         pwd = window.prompt('Re-enter wallet password to sign this transaction:');
@@ -1787,11 +1827,7 @@ async function executeSend() {
       _signPassword = '';  // zero from memory after use
       pwd = '';
       refreshBalance();
-    } else {
-      // Fallback for read-only mode — will be rejected by mempool but shows correct error
-      toast('Full wallet authentication required. Re-authenticate with wallet file.', 'error');
-    }
-  } catch (e) {
+    } catch (e) {
     toast(`Submit failed: ${e.message}`, 'error');
   } finally {
     btn.disabled = false;

@@ -7876,8 +7876,8 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         signing_hash = _hs.sha3_256(_canonical.encode()).digest()
 
         # ── Step 3: HypΓ Schnorr-Γ sign ──────────────────────────────────────
-        from hyp_engine import HypEngine
-        _eng = HypEngine()
+        from hyp_engine import HypGammaEngine
+        _eng = HypGammaEngine()
         sig_dict = _eng.sign_hash(signing_hash, private_key_hex)
 
         # ── Step 4: assemble final signed tx ─────────────────────────────────
