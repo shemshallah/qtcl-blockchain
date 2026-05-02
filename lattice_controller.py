@@ -719,14 +719,38 @@ class DatabaseConfig:
 
     # ── DATABASE_URL ───────────────────────────────────────────────────────────
     DATABASE_URL = os.getenv("DATABASE_URL", "")
+    # ── Parse DATABASE_URL if available ────────────────────────────────────────
+    if DATABASE_URL:
+        # Parse Neon-style URL: postgresql://user:pass@host:port/dbname
+        import urllib.parse
+        try:
+            parsed = urllib.parse.urlparse(DATABASE_URL)
+            _pooler_host = parsed.hostname or "localhost"
+            _pooler_port = parsed.port or 5432
+            _pooler_user = parsed.username or "postgres"
+            _pooler_password = parsed.password or ""
+            _pooler_db = parsed.path.lstrip("/") or "postgres"
+        except:
+            _pooler_host = "localhost"
+            _pooler_port = 5432
+            _pooler_user = "postgres"
+            _pooler_password = ""
+            _pooler_db = "postgres"
+    else:
+        _pooler_host = ""
+        _pooler_port = 5432
+        _pooler_user = "postgres"
+        _pooler_password = ""
+        _pooler_db = "postgres"
+    
     # ── Host ──────────────────────────────────────────────────────────────────
-    HOST = os.getenv("POOLER_HOST") or os.getenv("DB_HOST", "localhost")
+    HOST = os.getenv("POOLER_HOST") or os.getenv("DB_HOST", _pooler_host)
     # ── Port ──────────────────────────────────────────────────────────────────
-    PORT = int(os.getenv("POOLER_PORT") or os.getenv("DB_PORT", "5432"))
+    PORT = int(os.getenv("POOLER_PORT") or os.getenv("DB_PORT", str(_pooler_port)))
     # ── Credentials ───────────────────────────────────────────────────────────
-    USER = os.getenv("POOLER_USER") or os.getenv("DB_USER", "postgres")
-    PASSWORD = os.getenv("POOLER_PASSWORD") or os.getenv("DB_PASSWORD", "")
-    DATABASE = os.getenv("POOLER_DB") or os.getenv("DB_NAME", "postgres")
+    USER = os.getenv("POOLER_USER") or os.getenv("DB_USER", _pooler_user)
+    PASSWORD = os.getenv("POOLER_PASSWORD") or os.getenv("DB_PASSWORD", _pooler_password)
+    DATABASE = os.getenv("POOLER_DB") or os.getenv("DB_NAME", _pooler_db)
     # ── Pool & misc ───────────────────────────────────────────────────────────
     POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
     TIMEOUT = int(os.getenv("DB_TIMEOUT", "10"))
@@ -1086,11 +1110,17 @@ class QuantumDatabaseConnector:
             except Exception as e:
                 logger.error(f"[DB-EXEC] Failed: {query[:80]}... Error: {e}")
                 if conn:
-                    conn.rollback()
+                    try:
+                        conn.rollback()
+                    except:
+                        pass
                 return False
             finally:
                 if conn:
-                    self._db_pool.put_connection(conn)
+                    try:
+                        self._db_pool.put_connection(conn)
+                    except:
+                        pass
         elif self.pool:  # Fallback to old pool
             conn = None
             try:

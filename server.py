@@ -4138,6 +4138,10 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
             for db_block in db_blocks:
                 if db_block.get("height") not in cached_heights:
                     blocks.append(db_block)
+                    # Also cache these blocks for next request
+                    h = db_block.get("height")
+                    if h is not None:
+                        _BLOCK_CACHE[h] = db_block
 
         # Sort by height descending
         blocks.sort(key=lambda b: b.get("height", 0), reverse=True)
