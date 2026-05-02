@@ -2692,17 +2692,44 @@ def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
             cur.execute(
                 "SELECT * FROM blocks WHERE block_hash = %s LIMIT 1", (block_hash,)
             )
+            cols = [desc[0] for desc in cur.description]
             row = cur.fetchone()
             if row:
-                cols = [desc[0] for desc in cur.description]
                 result = dict(zip(cols, row))
                 # Cache with longer TTL for immutable blocks
                 _blockchain_cache.set(cache_key, result, ttl=300.0)  # 5 min
                 return result
     except Exception as e:
         logger.debug(f"[QUERY-BLOCK-HASH] PG error: {e}")
-        _db_circuit_breaker.record_failure()
     return None
+
+
+def query_block_range_db(from_height: int, to_height: int) -> list:
+    """Get block range from Supabase PostgreSQL (batch query for performance)."""
+    blocks = []
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT height, block_hash, timestamp, difficulty, reward,
+                       merkle_root, previous_hash, tx_count, transactions,
+                       w_state_fidelity, pq_curr, pq_last
+                FROM blocks 
+                WHERE height >= %s AND height <= %s
+                ORDER BY height ASC
+            """, (from_height, to_height))
+            cols = [desc[0] for desc in cur.description]
+            for row in cur.fetchall():
+                block_dict = dict(zip(cols, row))
+                if block_dict.get("transactions"):
+                    import json
+                    try:
+                        block_dict["transactions"] = json.loads(block_dict["transactions"])
+                    except:
+                        block_dict["transactions"] = []
+                blocks.append(block_dict)
+    except Exception as e:
+        logger.debug(f"[QUERY-BLOCK-RANGE] PG error: {e}")
+    return blocks
 
 
 @contextmanager
@@ -3740,7 +3767,7 @@ def _cache_block(block_dict):
 
 
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)
+    """qtcl_getBlockRange — query from DB first, cache fallback
 
     params: [from_height, to_height]
     Negative to_height means "from end" (e.g., [-20, -1] = last 20 blocks)
@@ -3751,28 +3778,33 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         from_h = int(params[0])
         to_h = int(params[1])
 
-        blocks = []
-        with _BLOCK_CACHE_LOCK:
-            logger.debug(
-                f"[RPC] getBlockRange cache debug: keys={list(_BLOCK_CACHE.keys())[:5]}"
-            )
-
-            # Handle negative to_height: "from end"
-            if to_h < 0:
+        # Handle negative to_height: "from end" — first get max height from DB
+        if to_h < 0:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("SELECT COALESCE(MAX(height), 0) FROM blocks")
+                    row = cur.fetchone()
+                    max_height = row[0] if row else 0
+            except Exception:
                 max_height = max(_BLOCK_CACHE.keys()) if _BLOCK_CACHE else 0
-                to_h = max_height
-                from_h = max(
-                    0, to_h + from_h + 1
-                )  # from_h was negative (e.g., -20 means 20 blocks before end)
+            to_h = max_height
+            from_h = max(0, to_h + from_h + 1)
 
-            if to_h - from_h > 99:
-                to_h = from_h + 99
-            if from_h < 0:
-                from_h = 0
+        # Cap request to prevent timeouts
+        if to_h - from_h > 99:
+            to_h = from_h + 99
+        if from_h < 0:
+            from_h = 0
 
-            for h in range(from_h, to_h + 1):
-                if h in _BLOCK_CACHE:
-                    blocks.append(_BLOCK_CACHE[h])
+        # Query from PostgreSQL (source of truth)
+        blocks = query_block_range_db(from_h, to_h)
+
+        # Populate cache
+        with _BLOCK_CACHE_LOCK:
+            for b in blocks:
+                h = b.get("height")
+                if h is not None:
+                    _BLOCK_CACHE[h] = b
 
         logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
         return _rpc_ok(
@@ -5667,7 +5699,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 if _existing_row:
                     _existing_block_hash = _existing_row[0]
                     if _existing_block_hash == block_hash:
-                        # TRUE DUPLICATE: Same hash, already accepted
                         logger.critical(
                             f"[RPC-submitBlock] 🔁 DUPLICATE DETECTED: h={height} hash matches={block_hash[:16]}…"
                         )
@@ -5675,11 +5706,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     else:
                         logger.critical(
                             f"[RPC-submitBlock] ⚠️  DIFFERENT HASH AT HEIGHT: h={height} new={block_hash[:16]}… db={_existing_block_hash[:16]}…"
-                        )
-                    else:
-                        # FORK ATTEMPT: Different hash at same height
-                        logger.warning(
-                            f"[RPC-submitBlock] ⚠️  FORK DETECTED: h={height} new={block_hash[:16]}… existing={_existing_block_hash[:16]}…"
                         )
                         _block_insert_result = "fork"
                 else:
