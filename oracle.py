@@ -2144,7 +2144,6 @@ class OracleNode:
 
 
 # ─── Oracle W-State Manager (5-node cluster) ──────────────────────────────────
-# OracleNode is defined above at line 1709
 
 
 class OracleWStateManager:
@@ -2248,93 +2247,6 @@ class OracleWStateManager:
             )
         logger.info("[ORACLE CLUSTER] ✅ All 5 nodes have AER simulators")
         return True
-
-    # ── Simple measurement interface for all 5 oracles ───────────────────────
-
-    def measure_network(self) -> Dict[str, Any]:
-        """
-        Measure all 5 oracle nodes and return network readings.
-        Each node returns its own fidelity/coherence measurement.
-        Returns dict with per-node readings and network stats.
-        """
-        readings = []
-        for node in self.nodes:
-            try:
-                result = node.measure_self()
-                if result:
-                    readings.append({
-                        "oracle_id": node.oracle_id + 1,
-                        "role": node.role,
-                        "fidelity": result.fidelity,
-                        "coherence": result.coherence,
-                        "purity": result.purity,
-                        "entropy": result.von_neumann_entropy,
-                    })
-            except Exception as e:
-                logger.debug(f"[ORACLE] Node {node.oracle_id} measure failed: {e}")
-
-        if not readings:
-            return {"error": "No readings", "network_median_fidelity": 0.0}
-
-        # Calculate network stats
-        fidelities = [r["fidelity"] for r in readings]
-        coherences = [r["coherence"] for r in readings]
-
-        def _median(vals):
-            s = sorted(vals)
-            m = len(s)
-            return s[m // 2] if m % 2 else (s[m // 2 - 1] + s[m // 2]) * 0.5
-
-        network_median_fidelity = _median(fidelities)
-        network_median_coherence = _median(coherences)
-        network_mean_fidelity = sum(fidelities) / len(fidelities)
-        network_mean_coherence = sum(coherences) / len(coherences)
-
-        return {
-            "readings": readings,
-            "network_median_fidelity": round(network_median_fidelity, 6),
-            "network_median_coherence": round(network_median_coherence, 6),
-            "network_mean_fidelity": round(network_mean_fidelity, 6),
-            "network_mean_coherence": round(network_mean_coherence, 6),
-            "node_count": len(readings),
-        }
-
-    def sign_block(self, block_height: int, block_hash: str, pq_curr: int, pq_last: int) -> Optional[Dict]:
-        """
-        Sign a block using oracle consensus.
-        Each of the 5 oracles signs, then median consensus is computed.
-        Returns dict with signature info.
-        """
-        if not self.oracle_signer:
-            logger.warning("[ORACLE] No signer configured")
-            return None
-
-        try:
-            # Get measurement for this block
-            meas = self.measure_network()
-            w_fidelity = meas.get("network_median_fidelity", 0.0)
-            w_coherence = meas.get("network_median_coherence", 0.0)
-
-            # Create signed attestation
-            att = {
-                "block_height": block_height,
-                "block_hash": block_hash,
-                "pq_curr": pq_curr,
-                "pq_last": pq_last,
-                "w_state_fidelity": w_fidelity,
-                "w_state_coherence": w_coherence,
-                "timestamp": time.time(),
-            }
-
-            # Sign with oracle (this is a placeholder - actual signing uses HypΓ)
-            sig = self.oracle_signer.sign(json.dumps(att, sort_keys=True))
-            if sig:
-                att["oracle_signature"] = sig.hex() if hasattr(sig, 'hex') else str(sig)
-
-            return att
-        except Exception as e:
-            logger.error(f"[ORACLE] Block signing failed: {e}")
-            return None
 
     # ── Mermin inequality (optimized angle) ───────────────────────────────────
 
@@ -2582,34 +2494,19 @@ class OracleWStateManager:
             return None
 
         cdm = getattr(LATTICE, "current_density_matrix", None)
-        # Accept 13³ tripartite batch-slice tensor (2,197 elements = 1 {8,3} batch)
-        # OR legacy 256×256 2D density matrix — handle both shapes.
-        _cdm_is_3d = (cdm is not None and hasattr(cdm, "shape")
-                      and cdm.ndim == 3 and cdm.shape == (13, 13, 13))
-        _cdm_is_2d = (cdm is not None and hasattr(cdm, "shape")
-                      and cdm.ndim == 2 and cdm.shape == (256, 256))
-
-        if not _cdm_is_3d and not _cdm_is_2d:
-            logger.debug(
-                f"[ORACLE CLUSTER] Lattice DM not ready — shape={getattr(cdm,'shape','?')} "
-                f"(expected (13,13,13) or (256,256))"
-            )
+        if cdm is None or not hasattr(cdm, "shape") or cdm.shape != (256, 256):
+            logger.debug("[ORACLE CLUSTER] Lattice DM not ready (shape check failed)")
             return None
 
-        # ── Step 1B: Normalize shared_pq0 ────────────────────────────────────
-        if _cdm_is_3d:
-            # 3D amplitude tensor: L2 normalize (‖ψ‖² = 1)
-            cdm_copy = cdm.copy().astype(np.complex64)
-            _l2 = float(np.sum(np.abs(cdm_copy) ** 2))
-            if _l2 > 1e-12:
-                cdm_copy /= np.sqrt(_l2)
-        else:
-            # Legacy 2D density matrix: trace-normalize
-            cdm_copy = cdm.copy()
-            cdm_copy = 0.5 * (cdm_copy + cdm_copy.conj().T)
-            _tr = float(np.real(np.trace(cdm_copy)))
-            if _tr > 1e-12:
-                cdm_copy /= _tr
+        # ── Step 1B: Lightweight normalize shared_pq0 ────────────────────────
+        # The lattice already enforces a valid DM in apply_memory_effect.
+        # Full eigh on 256×256 (O(n³)=16M ops) was the 18s bottleneck.
+        # Just hermitianize + trace-normalize — fast, sufficient.
+        cdm_copy = cdm.copy()
+        cdm_copy = 0.5 * (cdm_copy + cdm_copy.conj().T)
+        _tr = float(np.real(np.trace(cdm_copy)))
+        if _tr > 1e-12:
+            cdm_copy /= _tr
         shared_pq0 = cdm_copy
 
         # ── Step 2: Block-field state ─────────────────────────────────────────
@@ -3099,18 +2996,16 @@ class OracleWStateManager:
                     cycles_ok += 1
 
                     # Status log every 100 steps
-                    if cycles_ok % 20 == 0:
+                    if cycles_ok % 100 == 0:
                         bf = snapshot.aer_noise_state.get("block_field", {})
-                        pq0_o  = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
-                        pq0_iv = snapshot.aer_noise_state.get("pq0_IV_fidelity", 0)
-                        pq0_v  = snapshot.aer_noise_state.get("pq0_V_fidelity", 0)
-                        logger.warning(
+                        pq0_o = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
+                        logger.info(
                             f"[ORACLE-MULTIPLEX] step={cycles_ok} | "
                             f"cycle={snapshot.lattice_refresh_counter} | "
-                            f"fid={snapshot.w_state_fidelity:.4f} | "
-                            f"coh={snapshot.coherence_l1:.4f} | "
-                            f"S={snapshot.von_neumann_entropy:.4f} | "
-                            f"pq0={pq0_o:.4f} IV={pq0_iv:.4f} V={pq0_v:.4f}"
+                            f"fidelity={snapshot.w_state_fidelity:.6f} | "
+                            f"coherence={snapshot.coherence_l1:.6f} | "
+                            f"entropy={snapshot.von_neumann_entropy:.6f} | "
+                            f"pq0={pq0_o:.4f}"
                         )
 
                     if cycles_ok % CONSOLE_EVERY == 0:

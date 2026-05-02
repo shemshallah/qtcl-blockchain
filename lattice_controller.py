@@ -719,38 +719,14 @@ class DatabaseConfig:
 
     # ── DATABASE_URL ───────────────────────────────────────────────────────────
     DATABASE_URL = os.getenv("DATABASE_URL", "")
-    # ── Parse DATABASE_URL if available ────────────────────────────────────────
-    if DATABASE_URL:
-        # Parse Neon-style URL: postgresql://user:pass@host:port/dbname
-        import urllib.parse
-        try:
-            parsed = urllib.parse.urlparse(DATABASE_URL)
-            _pooler_host = parsed.hostname or "localhost"
-            _pooler_port = parsed.port or 5432
-            _pooler_user = parsed.username or "postgres"
-            _pooler_password = parsed.password or ""
-            _pooler_db = parsed.path.lstrip("/") or "postgres"
-        except:
-            _pooler_host = "localhost"
-            _pooler_port = 5432
-            _pooler_user = "postgres"
-            _pooler_password = ""
-            _pooler_db = "postgres"
-    else:
-        _pooler_host = ""
-        _pooler_port = 5432
-        _pooler_user = "postgres"
-        _pooler_password = ""
-        _pooler_db = "postgres"
-    
     # ── Host ──────────────────────────────────────────────────────────────────
-    HOST = os.getenv("POOLER_HOST") or os.getenv("DB_HOST", _pooler_host)
+    HOST = os.getenv("POOLER_HOST") or os.getenv("DB_HOST", "localhost")
     # ── Port ──────────────────────────────────────────────────────────────────
-    PORT = int(os.getenv("POOLER_PORT") or os.getenv("DB_PORT", str(_pooler_port)))
+    PORT = int(os.getenv("POOLER_PORT") or os.getenv("DB_PORT", "5432"))
     # ── Credentials ───────────────────────────────────────────────────────────
-    USER = os.getenv("POOLER_USER") or os.getenv("DB_USER", _pooler_user)
-    PASSWORD = os.getenv("POOLER_PASSWORD") or os.getenv("DB_PASSWORD", _pooler_password)
-    DATABASE = os.getenv("POOLER_DB") or os.getenv("DB_NAME", _pooler_db)
+    USER = os.getenv("POOLER_USER") or os.getenv("DB_USER", "postgres")
+    PASSWORD = os.getenv("POOLER_PASSWORD") or os.getenv("DB_PASSWORD", "")
+    DATABASE = os.getenv("POOLER_DB") or os.getenv("DB_NAME", "postgres")
     # ── Pool & misc ───────────────────────────────────────────────────────────
     POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
     TIMEOUT = int(os.getenv("DB_TIMEOUT", "10"))
@@ -1110,17 +1086,11 @@ class QuantumDatabaseConnector:
             except Exception as e:
                 logger.error(f"[DB-EXEC] Failed: {query[:80]}... Error: {e}")
                 if conn:
-                    try:
-                        conn.rollback()
-                    except:
-                        pass
+                    conn.rollback()
                 return False
             finally:
                 if conn:
-                    try:
-                        self._db_pool.put_connection(conn)
-                    except:
-                        pass
+                    self._db_pool.put_connection(conn)
         elif self.pool:  # Fallback to old pool
             conn = None
             try:
@@ -1567,14 +1537,15 @@ class NonMarkovianNoiseBath:
                         1.0 - revival_weight
                     ) * result + revival_weight * mem_accum
 
-                # L2 renormalize — ‖ψ‖² = 1 (Born rule invariant)
-                _l2 = float(np.sum(np.abs(result) ** 2))
-                if _l2 > 1e-12:
-                    result = result / np.sqrt(_l2)
-                else:
-                    result = getattr(NOISE_BATH, '_last_target', density_matrix)
+                # Hermitianize for 3D tensor
+                result = 0.5 * (result + np.conj(np.transpose(result, (1, 0, 2))))
 
-                return result.astype(np.complex64)
+                # Normalize to unit trace
+                _norm = np.sum(np.abs(result))
+                if _norm > 1e-12:
+                    result = result / _norm
+
+                return result
 
         except Exception as exc:
             logger.debug(f"[NOISE] Memory effect failed: {exc}")
@@ -2056,49 +2027,46 @@ class QuantumLatticeController:
         self.w_state_constructor = WStateConstructor(self.field)
         self.noise_bath = NonMarkovianNoiseBath()
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # CANONICAL PQ0 TRIPARTITE W-STATE — vectorized, zero Python loops
-        # ═══════════════════════════════════════════════════════════════════════
-        # Dimension: 13³ = 2,197 elements ≈ one batch slice of the {8,3}
-        # tessellation (2,048 pqs per batch across 52 batches = 106,496 total).
-        # One z-face (13×13=169 voxels) covers one block's tx space (≤102 txs).
-        # Three tripartite legs encode the current block object:
-        #   pq0_oracle  — origin anchor        z=6  (pq0, always fixed)
-        #   pq0_V       — virtual forward      z=9  (pq_curr range)
-        #   pq0_IV      — inverse conjugate    z=3  (pq_last reference)
-        # W₃: equal-weight, 120° phase separation — genuine tripartite entanglement.
-        # ═══════════════════════════════════════════════════════════════════════
-        _DIM    = 13          # 13³ = 2,197 ≈ one {8,3} tessellation batch
-        _ORIGIN = _DIM // 2   # voxel 6 — pq0 anchor
-        _SIGMA  = 1.5         # Gaussian width (tighter than 16³ to respect batch boundary)
-        _SHIFT  = 3           # z-offset for V and IV legs (within batch slice)
+        # Quantum state — NATIVE 64³ 3D DENSITY TENSOR (NOT 256×256)
+        # 64×64×64 spatial-temporal field representation of quantum coherence
+        # Initialized as coherent 3D W-state with Gaussian envelope
+        _DIM = 64  # 64³ = 262,144 elements (native 3D quantum field)
 
-        _ix, _iy, _iz = np.mgrid[0:_DIM, 0:_DIM, 0:_DIM]
+        # Initialize 64³ density tensor — SERVER LATTICE (GROUND TRUTH)
+        # Streamed to all clients via SSE /rpc/oracle/snapshot
+        # Clients receive this, compute measurements, average with neighbors → quantum mesh
+        self.current_density_matrix = np.zeros((_DIM, _DIM, _DIM), dtype=np.complex64)
 
-        # Leg 1: pq0_oracle at origin — phase 0
-        _r0 = ((_ix - _ORIGIN) / _SIGMA) ** 2 + ((_iy - _ORIGIN) / _SIGMA) ** 2 + ((_iz - _ORIGIN) / _SIGMA) ** 2
-        # Leg 2: pq0_V (forward, pq_curr) — phase 2π/3
-        _rv = ((_ix - _ORIGIN) / _SIGMA) ** 2 + ((_iy - _ORIGIN) / _SIGMA) ** 2 + ((_iz - (_ORIGIN + _SHIFT)) / _SIGMA) ** 2
-        # Leg 3: pq0_IV (backward/conjugate, pq_last) — phase 4π/3
-        _ri = ((_ix - _ORIGIN) / _SIGMA) ** 2 + ((_iy - _ORIGIN) / _SIGMA) ** 2 + ((_iz - (_ORIGIN - _SHIFT)) / _SIGMA) ** 2
+        # Multi-mode coherent quantum state (superposition of spatial W-state modes)
+        _num_modes = 8
+        for _m in range(_num_modes):
+            _cx = 16 + _m * 4
+            _cy = 16 + _m * 4
+            _cz = 32
 
-        _psi = (
-            np.exp(-_r0 / 2.0)
-            + np.exp(-_rv / 2.0) * np.exp(1j * 2 * np.pi / 3)
-            + np.exp(-_ri / 2.0) * np.exp(1j * 4 * np.pi / 3)
-        ) / np.sqrt(3.0)
+            for i in range(_DIM):
+                for j in range(_DIM):
+                    for k in range(_DIM):
+                        _dx = (i - _cx) / 20.0
+                        _dy = (j - _cy) / 20.0
+                        _dz = (k - _cz) / 20.0
+                        _r2 = _dx * _dx + _dy * _dy + _dz * _dz
+                        _envelope = np.exp(-_r2 / 2.0)
+                        _phase = 2 * np.pi * _m / _num_modes
+                        self.current_density_matrix[i, j, k] += (
+                            _envelope / _num_modes
+                        ) * np.exp(1j * _phase)
 
-        _norm = float(np.sum(np.abs(_psi) ** 2))
+        # Normalize: trace = 1 (proper density matrix for quantum state)
+        _norm = np.sum(np.abs(self.current_density_matrix) ** 2)
         if _norm > 1e-12:
-            _psi = _psi / np.sqrt(_norm)
+            self.current_density_matrix = self.current_density_matrix / np.sqrt(_norm)
 
-        self.current_density_matrix = _psi.astype(np.complex64)
+        # Store target for fidelity (clients measure against this)
         self._w8_target = self.current_density_matrix.copy()
-        NOISE_BATH._last_target = self._w8_target
-
         self.w_state_strength = 0.8
         self.coherence = 0.9
-        self.fidelity = 1.0
+        self.fidelity = 0.99
         self.metrics_history = deque(maxlen=10000)
 
         self._lock = threading.RLock()
@@ -2430,8 +2398,8 @@ class QuantumLatticeController:
                 # k*(k-1)/k = k-1 = 7  (not 255, which is the max for a fully-coherent
                 # 256-dim state like |+>^8).  Dividing by 255 gives ~0.022 for a healthy
                 # W-state instead of the correct ~0.82; dividing by 7 gives C ≈ F.
-                # L2 coherence: C = L1/(L1+1) maps [0,∞)→[0,1) correctly for any tensor size
-                self.coherence = float(_raw_coh / (_raw_coh + 1.0)) if _raw_coh > 0 else 0.0
+                _W8_COHERENCE_MAX = 7.0  # = n_excitation_states - 1 = 8 - 1
+                self.coherence = float(np.clip(_raw_coh / _W8_COHERENCE_MAX, 0.0, 1.0))
 
                 # FIX: fidelity reference must be |W_8><W_8|, NOT the maximally-mixed
                 # state I/256.  F(rho, I/256) measures how close we are to THERMAL
@@ -2464,9 +2432,8 @@ class QuantumLatticeController:
                     np.clip(
                         QuantumInformationMetrics.coherence_l1_norm(
                             self.current_density_matrix
-                        ) / (QuantumInformationMetrics.coherence_l1_norm(
-                            self.current_density_matrix
-                        ) + 1.0 + 1e-12),
+                        )
+                        / 7.0,
                         0.0,
                         1.0,
                     )
@@ -2492,7 +2459,7 @@ class QuantumLatticeController:
                 # has drifted below 0.85 — this is Floquet engineering (timed
                 # resonance kick), not state injection.  The DM evolves under a
                 # valid unitary; no state is ever overwritten directly.
-                if self.fidelity < 0.75:
+                if (self.cycle_count % 8) == 0 and self.fidelity < 0.95:
                     # ── σ-REVIVAL: target-aligned Hamiltonian pulse on W8 subspace ──
                     self.current_density_matrix = self._apply_sigma_revival_unitary(
                         self.current_density_matrix
@@ -2509,16 +2476,21 @@ class QuantumLatticeController:
                         _rho_pumped = (
                             1.0 - _pump_alpha
                         ) * self.current_density_matrix + _pump_alpha * self._w8_target
-                        # L2 normalize — correct for 3D amplitude tensor
-                        _norm = float(np.sum(np.abs(_rho_pumped) ** 2))
-                        if _norm > 1e-12:
-                            _rho_pumped = _rho_pumped / np.sqrt(_norm)
-                        self.current_density_matrix = _rho_pumped.astype(np.complex64)
+                        # Enforce valid DM after blend
+                        _rho_pumped = 0.5 * (_rho_pumped + _rho_pumped.conj().T)
+                        _ev, _ec = np.linalg.eigh(_rho_pumped)
+                        _ev = np.clip(_ev, 0.0, None)
+                        _tr = float(np.sum(_ev))
+                        if _tr > 1e-12:
+                            _ev /= _tr
+                        self.current_density_matrix = (
+                            _ec @ np.diag(_ev) @ _ec.conj().T
+                        ).astype(np.complex128)
                     # Recompute metrics after revival pulse + pump
                     _raw_coh_r = QuantumInformationMetrics.coherence_l1_norm(
                         self.current_density_matrix
                     )
-                    self.coherence = float(_raw_coh_r / (_raw_coh_r + 1.0)) if _raw_coh_r > 0 else 0.0
+                    self.coherence = float(np.clip(_raw_coh_r / 7.0, 0.0, 1.0))
                     self.fidelity = QuantumInformationMetrics.state_fidelity(
                         self.current_density_matrix, self._w8_target
                     )

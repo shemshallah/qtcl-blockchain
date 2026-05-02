@@ -901,6 +901,66 @@ body::before {
   <!-- MAIN CONTENT -->
   <div class="main">
 
+    <!-- ═══════ WALLET CONNECT DROPDOWN (TOP) ═══════ -->
+    <div class="card" id="walletConnectCard" style="margin-bottom:20px;">
+      <div class="card-header" onclick="toggleWalletDropdown()" style="cursor:pointer;">
+        <div class="card-title">🔐 Wallet Connect <span style="color:var(--muted);font-weight:normal;font-size:12px;">(click to expand)</span></div>
+        <span id="walletDropdownArrow" style="transition:transform 0.2s;">▼</span>
+      </div>
+      <div id="walletDropdownContent" class="card-body" style="display:none;">
+        <!-- Tab: Address-Only vs Wallet File -->
+        <div class="tab-bar" style="margin-bottom:16px; border-radius:4px;">
+          <button class="tab-btn active" onclick="showConnectTab('address')">Address Only</button>
+          <button class="tab-btn" onclick="showConnectTab('walletfile')">Wallet File + Password</button>
+        </div>
+
+        <!-- Address-Only Connect (Read-Only) -->
+        <div id="connectTabAddr">
+          <div class="form-group">
+            <label class="form-label">QTCL Address (Read-Only Mode)</label>
+            <input type="text" class="form-input" id="connectAddr" placeholder="qtcl1… or paste your address">
+            <div class="form-hint">View balance and history. Sending requires wallet file authentication.</div>
+          </div>
+          <button class="btn btn-primary btn-full" onclick="connectWallet()">Connect (Read-Only)</button>
+        </div>
+
+        <!-- Wallet File + Password (Full Auth — HypΓ PBKDF2) -->
+        <div id="connectTabWallet" class="hidden">
+          <div class="form-group">
+            <label class="form-label">Wallet File (wallet.json)</label>
+            <input type="file" id="walletFileInput" accept=".json" class="form-input" onchange="handleWalletFile(event)" style="padding:8px;">
+            <div class="form-hint">Your wallet file stays in your browser. The private key is NEVER sent to the server.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">🔑 Wallet Password</label>
+            <input type="password" class="form-input" id="walletPassword" placeholder="Enter your wallet password">
+            <div class="form-hint">PBKDF2-HMAC-SHA256 · 600,000 iterations · SHAKE-256-CTR + SHA3-256 MAC</div>
+          </div>
+          <div id="walletAuthStatus" class="hidden" style="margin-bottom:12px;"></div>
+          <button class="btn btn-primary btn-full" onclick="authenticateWallet()" id="walletAuthBtn">
+            🔓 Unlock Wallet (HypΓ Auth)
+          </button>
+          <div class="form-hint mt-12" style="color:var(--amber);">
+            ⚛ Authentication uses the HypΓ verifier tag system — your password is verified against the PBKDF2-derived verifier WITHOUT decrypting your private key on the server. The encrypted private key remains in-browser for client-side signing.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    function toggleWalletDropdown() {
+      const content = document.getElementById('walletDropdownContent');
+      const arrow = document.getElementById('walletDropdownArrow');
+      if (content.style.display === 'none') {
+        content.style.display = 'block';
+        arrow.style.transform = 'rotate(180deg)';
+      } else {
+        content.style.display = 'none';
+        arrow.style.transform = 'rotate(0deg)';
+      }
+    }
+    </script>
+
     <!-- ═══════ PAGE: DASHBOARD ═══════ -->
     <div class="page active" id="page-dashboard">
       <div class="page-title">Wallet Overview</div>
@@ -960,52 +1020,8 @@ body::before {
           <div class="card-title">Recent Transactions</div>
           <button class="btn btn-sm" onclick="showPage('transactions')">View All →</button>
         </div>
-        <div id="recentTxList" class="loading"><span class="spinner"></span> Loading…</div>
+          <div id="recentTxList" class="loading"><span class="spinner"></span> Loading…</div>
       </div>
-
-      <!-- Wallet Connect — HypΓ Post-Quantum Authentication -->
-      <div class="card" id="walletConnectCard">
-        <div class="card-header"><div class="card-title">🔐 Connect Wallet — HypΓ Authentication</div></div>
-        <div class="card-body">
-          <!-- Tab: Address-Only vs Wallet File -->
-          <div class="tab-bar" style="margin:-16px -16px 16px; border-radius:0;">
-            <button class="tab-btn active" onclick="showConnectTab('address')">Address Only</button>
-            <button class="tab-btn" onclick="showConnectTab('walletfile')">Wallet File + Password</button>
-          </div>
-
-          <!-- Address-Only Connect (Read-Only) -->
-          <div id="connectTabAddr">
-            <div class="form-group">
-              <label class="form-label">QTCL Address (Read-Only Mode)</label>
-              <input type="text" class="form-input" id="connectAddr" placeholder="qtcl1… or paste your address">
-              <div class="form-hint">View balance and history. Sending requires wallet file authentication.</div>
-            </div>
-            <button class="btn btn-primary btn-full" onclick="connectWallet()">Connect (Read-Only)</button>
-          </div>
-
-          <!-- Wallet File + Password (Full Auth — HypΓ PBKDF2) -->
-          <div id="connectTabWallet" class="hidden">
-            <div class="form-group">
-              <label class="form-label">Wallet File (wallet.json)</label>
-              <input type="file" id="walletFileInput" accept=".json" class="form-input" onchange="handleWalletFile(event)" style="padding:8px;">
-              <div class="form-hint">Your wallet file stays in your browser. The private key is NEVER sent to the server.</div>
-            </div>
-            <div class="form-group">
-              <label class="form-label">🔑 Wallet Password</label>
-              <input type="password" class="form-input" id="walletPassword" placeholder="Enter your wallet password">
-              <div class="form-hint">PBKDF2-HMAC-SHA256 · 600,000 iterations · SHAKE-256-CTR + SHA3-256 MAC</div>
-            </div>
-            <div id="walletAuthStatus" class="hidden" style="margin-bottom:12px;"></div>
-            <button class="btn btn-primary btn-full" onclick="authenticateWallet()" id="walletAuthBtn">
-              🔓 Unlock Wallet (HypΓ Auth)
-            </button>
-            <div class="form-hint mt-12" style="color:var(--amber);">
-              ⚛ Authentication uses the HypΓ verifier tag system — your password is verified against the PBKDF2-derived verifier WITHOUT decrypting your private key on the server. The encrypted private key remains in-browser for client-side signing.
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
 
     <!-- ═══════ PAGE: SEND ═══════ -->
     <div class="page" id="page-send">
