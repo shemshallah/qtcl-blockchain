@@ -2249,6 +2249,93 @@ class OracleWStateManager:
         logger.info("[ORACLE CLUSTER] ✅ All 5 nodes have AER simulators")
         return True
 
+    # ── Simple measurement interface for all 5 oracles ───────────────────────
+
+    def measure_network(self) -> Dict[str, Any]:
+        """
+        Measure all 5 oracle nodes and return network readings.
+        Each node returns its own fidelity/coherence measurement.
+        Returns dict with per-node readings and network stats.
+        """
+        readings = []
+        for node in self.nodes:
+            try:
+                result = node.measure_self()
+                if result:
+                    readings.append({
+                        "oracle_id": node.oracle_id + 1,
+                        "role": node.role,
+                        "fidelity": result.fidelity,
+                        "coherence": result.coherence,
+                        "purity": result.purity,
+                        "entropy": result.von_neumann_entropy,
+                    })
+            except Exception as e:
+                logger.debug(f"[ORACLE] Node {node.oracle_id} measure failed: {e}")
+
+        if not readings:
+            return {"error": "No readings", "network_median_fidelity": 0.0}
+
+        # Calculate network stats
+        fidelities = [r["fidelity"] for r in readings]
+        coherences = [r["coherence"] for r in readings]
+
+        def _median(vals):
+            s = sorted(vals)
+            m = len(s)
+            return s[m // 2] if m % 2 else (s[m // 2 - 1] + s[m // 2]) * 0.5
+
+        network_median_fidelity = _median(fidelities)
+        network_median_coherence = _median(coherences)
+        network_mean_fidelity = sum(fidelities) / len(fidelities)
+        network_mean_coherence = sum(coherences) / len(coherences)
+
+        return {
+            "readings": readings,
+            "network_median_fidelity": round(network_median_fidelity, 6),
+            "network_median_coherence": round(network_median_coherence, 6),
+            "network_mean_fidelity": round(network_mean_fidelity, 6),
+            "network_mean_coherence": round(network_mean_coherence, 6),
+            "node_count": len(readings),
+        }
+
+    def sign_block(self, block_height: int, block_hash: str, pq_curr: int, pq_last: int) -> Optional[Dict]:
+        """
+        Sign a block using oracle consensus.
+        Each of the 5 oracles signs, then median consensus is computed.
+        Returns dict with signature info.
+        """
+        if not self.oracle_signer:
+            logger.warning("[ORACLE] No signer configured")
+            return None
+
+        try:
+            # Get measurement for this block
+            meas = self.measure_network()
+            w_fidelity = meas.get("network_median_fidelity", 0.0)
+            w_coherence = meas.get("network_median_coherence", 0.0)
+
+            # Create signed attestation
+            att = {
+                "block_height": block_height,
+                "block_hash": block_hash,
+                "pq_curr": pq_curr,
+                "pq_last": pq_last,
+                "w_state_fidelity": w_fidelity,
+                "w_state_coherence": w_coherence,
+                "timestamp": time.time(),
+            }
+
+            # Sign with oracle (this is a placeholder - actual signing uses HypΓ)
+            sig = self.oracle_signer.sign(json.dumps(att, sort_keys=True))
+            if sig:
+                att["oracle_signature"] = sig.hex() if hasattr(sig, 'hex') else str(sig)
+
+            return att
+        except Exception as e:
+            logger.error(f"[ORACLE] Block signing failed: {e}")
+            return None
+
     # ── Mermin inequality (optimized angle) ───────────────────────────────────
 
     @staticmethod

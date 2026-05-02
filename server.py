@@ -4499,6 +4499,90 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         )
 
 
+def _rpc_getOracleNetwork(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getOracleNetwork — get network measurements from all 5 oracle nodes.
+
+    Returns per-node fidelity/coherence and network median/mean.
+    Easy for all 5 oracles to call and utilize.
+    """
+    try:
+        if not ORACLE_AVAILABLE or not ORACLE_W_STATE_MANAGER:
+            return _rpc_ok({
+                "network_median_fidelity": 0.0,
+                "network_median_coherence": 0.0,
+                "network_mean_fidelity": 0.0,
+                "network_mean_coherence": 0.0,
+                "node_count": 0,
+                "readings": [],
+            }, rpc_id)
+
+        meas = _call_with_timeout(
+            lambda: ORACLE_W_STATE_MANAGER.measure_network(),
+            timeout_sec=10.0,
+            default={"error": "timeout"},
+        )
+
+        if isinstance(meas, dict) and "error" in meas:
+            return _rpc_ok({
+                "network_median_fidelity": 0.0,
+                "network_median_coherence": 0.0,
+                "network_mean_fidelity": 0.0,
+                "network_mean_coherence": 0.0,
+                "node_count": 0,
+                "readings": [],
+            }, rpc_id)
+
+        return _rpc_ok({
+            "network_median_fidelity": meas.get("network_median_fidelity", 0.0),
+            "network_median_coherence": meas.get("network_median_coherence", 0.0),
+            "network_mean_fidelity": meas.get("network_mean_fidelity", 0.0),
+            "network_mean_coherence": meas.get("network_mean_coherence", 0.0),
+            "node_count": meas.get("node_count", 0),
+            "readings": meas.get("readings", []),
+        }, rpc_id)
+    except Exception as e:
+        logger.warning(f"[RPC-METHOD] qtcl_getOracleNetwork: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+def _rpc_signBlock(params: Any, rpc_id: Any) -> dict:
+    """qtcl_signBlock — sign a block using oracle consensus.
+
+    Params: [block_height, block_hash, pq_curr, pq_last]
+    Signs block with oracle consensus measurement.
+    """
+    try:
+        block_height = 0
+        block_hash = ""
+        pq_curr = 1
+        pq_last = 0
+
+        if isinstance(params, list) and len(params) >= 2:
+            block_height = int(params[0])
+            block_hash = str(params[1])
+            pq_curr = int(params[2]) if len(params) > 2 else 1
+            pq_last = int(params[3]) if len(params) > 3 else 0
+
+        if not ORACLE_AVAILABLE or not ORACLE_W_STATE_MANAGER:
+            return _rpc_error(-32000, "Oracle not available", rpc_id)
+
+        result = _call_with_timeout(
+            lambda: ORACLE_W_STATE_MANAGER.sign_block(
+                block_height, block_hash, pq_curr, pq_last
+            ),
+            timeout_sec=10.0,
+            default=None,
+        )
+
+        if not result:
+            return _rpc_error(-32000, "Block signing failed", rpc_id)
+
+        return _rpc_ok(result, rpc_id)
+    except Exception as e:
+        logger.warning(f"[RPC-METHOD] qtcl_signBlock: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
 def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
     """
     qtcl_getPythPrice — atomic Pyth Network price snapshot.
@@ -6480,6 +6564,8 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getBlock": _rpc_getBlock,
     "qtcl_getBlockRange": _rpc_getBlockRange,
     "qtcl_getQuantumMetrics": _rpc_getQuantumMetrics,
+    "qtcl_getOracleNetwork": _rpc_getOracleNetwork,
+    "qtcl_signBlock": _rpc_signBlock,
     "qtcl_getPythPrice": _rpc_getPythPrice,
     "qtcl_getMempoolStats": _rpc_getMempoolStats,
     "qtcl_getMempool": _rpc_getMempool,
