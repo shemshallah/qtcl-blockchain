@@ -1446,6 +1446,13 @@ setInterval(async () => {
   }
 }, 8000);
 
+// Initial boot sequence
+(async () => {
+  await waitForServer();
+  await fetchChain();
+  await fetchStats();
+})();
+
 // Explorer page refresh every 15s if active
 setInterval(async () => {
   const exPage = document.getElementById('explorer');
