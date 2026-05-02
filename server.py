@@ -96,7 +96,7 @@ _RPC_INLINE_METHODS: frozenset = frozenset(
 
 # Slow methods (DB round-trips, crypto ops) — get pool + timeout protection
 _RPC_TIMEOUT_MAP: dict = {
-    "qtcl_getBlockRange": 10.0,
+    "qtcl_getBlockRange": 30.0,  # Increased timeout for batch DB queries
     "qtcl_getTransactions": 10.0,
     "qtcl_getBlock": 5.0,
     "qtcl_getBalance": 4.0,
@@ -4039,10 +4039,11 @@ def _cache_block(block_dict):
             _BLOCK_CACHE[h] = block_dict
 
 
-def _query_block_from_db(h: int) -> Optional[dict]:
-    """Query block from PostgreSQL database using connection pool.
-    Returns block dict or None if not found.
+def _query_blocks_from_db(from_h: int, to_h: int) -> list:
+    """Query multiple blocks from PostgreSQL database in a single query.
+    Returns list of block dicts sorted by height descending.
     """
+    blocks = []
     try:
         with get_db_cursor() as cur:
             cur.execute(
@@ -4050,13 +4051,15 @@ def _query_block_from_db(h: int) -> Optional[dict]:
                 SELECT height, block_hash, timestamp, w_state_hash,
                        parent_hash, nonce, difficulty,
                        coherence_snapshot, merkle_root, tx_count
-                FROM blocks WHERE height = %s LIMIT 1
+                FROM blocks 
+                WHERE height >= %s AND height <= %s
+                ORDER BY height DESC
             """,
-                (h,),
+                (from_h, to_h),
             )
-            row = cur.fetchone()
-            if row:
-                return {
+            rows = cur.fetchall()
+            for row in rows:
+                blocks.append({
                     "height": row[0],
                     "block_height": row[0],
                     "block_hash": row[1],
@@ -4070,23 +4073,24 @@ def _query_block_from_db(h: int) -> Optional[dict]:
                     "nonce": int(row[5]) if row[5] else 0,
                     "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
                     "w_entropy_hash": row[3] or "",
-                    "pq_curr": h,
-                    "pq_last": max(0, h - 1),
+                    "pq_curr": row[0],
+                    "pq_last": max(0, row[0] - 1),
                     "tx_count": int(row[9]) if row[9] else 0,
                     "mined": True,
                     "finalized": True,
-                }
-        return None
+                })
+        return blocks
     except Exception as e:
-        logger.debug(f"[RPC] _query_block_from_db({h}) error: {e}")
-        return None
+        logger.debug(f"[RPC] _query_blocks_from_db({from_h}, {to_h}) error: {e}")
+        return []
 
 
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockRange — return blocks from cache + DB.
+    """qtcl_getBlockRange — return blocks from cache + DB (batch query).
 
     params: [from_height, to_height]
     Negative to_height means "from end" (e.g., [-20, -1] = last 20 blocks)
+    Uses single batch DB query to avoid timeouts.
     """
     try:
         if not isinstance(params, (list, tuple)) or len(params) < 2:
@@ -4125,15 +4129,14 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 if h in _BLOCK_CACHE:
                     blocks.append(_BLOCK_CACHE[h])
 
-        # Then, query DB for any missing blocks
+        # Then, batch query DB for any missing blocks (single query)
         if len(blocks) < (to_h - from_h + 1):
-            logger.info(f"[RPC] getBlockRange: cache has {len(blocks)} blocks, querying DB for rest")
-            for h in range(from_h, to_h + 1):
-                # Skip if already in blocks
-                if any(b.get("height") == h for b in blocks):
-                    continue
-                db_block = _query_block_from_db(h)
-                if db_block:
+            logger.info(f"[RPC] getBlockRange: cache has {len(blocks)} blocks, batch querying DB for rest")
+            db_blocks = _query_blocks_from_db(from_h, to_h)
+            # Merge: avoid duplicates
+            cached_heights = {b.get("height") for b in blocks}
+            for db_block in db_blocks:
+                if db_block.get("height") not in cached_heights:
                     blocks.append(db_block)
 
         # Sort by height descending
