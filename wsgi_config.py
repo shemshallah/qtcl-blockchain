@@ -30,7 +30,7 @@ class _ErrorOnlyAccessFilter(logging.Filter):
     _SUPPRESS_PREFIXES = (" 2", " 3")  # status codes in gunicorn format: ' 200 ', ' 301 '
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if os.environ.get("LOG_200"):
+        if os.environ.get("LOG_200") == "1":
             return True  # debug mode: show everything
         msg = record.getMessage()
         # Gunicorn access log format: '10.x.x.x - [...] "GET /path HTTP/1.1" 200 ...'
