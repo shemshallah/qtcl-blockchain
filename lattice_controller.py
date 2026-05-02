@@ -702,43 +702,7 @@ class NoiseChannelType(Enum):
 
 # ════════════════════════════════════════════════════════════════════════════════
 # DATABASE CONFIGURATION (PostgreSQL/Supabase)
-import os
-import re
-from urllib.parse import parse_qs
-
-
-def _parse_DATABASE_URL(url: str) -> dict:
-    """Parse DATABASE_URL into connection params, handling query params."""
-    if not url or url.startswith("sqlite"):
-        return {}
-
-    query_params = {}
-    if "?" in url:
-        base_url, query_string = url.split("?", 1)
-        parsed = parse_qs(query_string)
-        for k, v in parsed.items():
-            if v:
-                query_params[k] = v[0]
-    else:
-        base_url = url
-
-    m = re.match(r"postgresql://([^:]+):([^@]+)@([^:/]+):?(\d*)/?(.*)", base_url)
-    if not m:
-        return {}
-    user, pw, host, port, db = m.groups()
-
-    return {
-        "host": host,
-        "port": int(port) if port else 5432,
-        "database": db or "postgres",
-        "user": user,
-        "password": pw,
-    } | query_params
-
-
-# Pre-parse DATABASE_URL at module load time
-_DB_URL = os.getenv("DATABASE_URL", "")
-_PARSED_DB = _parse_DATABASE_URL(_DB_URL)
+# ════════════════════════════════════════════════════════════════════════════════
 
 
 class DatabaseConfig:
@@ -748,14 +712,22 @@ class DatabaseConfig:
     Variable priority (first wins):
       1. DATABASE_URL — Neon connection string (recommended)
       2. POOLER_*      — Legacy fallback variables
+
+    This means you only need ONE set of env vars in your deployment; whichever
+    the platform injects will be picked up automatically.
     """
 
-    HOST = _PARSED_DB.get("host") if _PARSED_DB else (os.getenv("POOLER_HOST") or os.getenv("DB_HOST", "localhost"))
-    PORT = _PARSED_DB.get("port", 5432) if _PARSED_DB else int(os.getenv("POOLER_PORT") or os.getenv("DB_PORT", "5432"))
-    USER = _PARSED_DB.get("user") if _PARSED_DB else (os.getenv("POOLER_USER") or os.getenv("DB_USER", "postgres"))
-    PASSWORD = _PARSED_DB.get("password") if _PARSED_DB else (os.getenv("POOLER_PASSWORD") or os.getenv("DB_PASSWORD", ""))
-    DATABASE = _PARSED_DB.get("database") if _PARSED_DB else (os.getenv("POOLER_DB") or os.getenv("DB_NAME", "postgres"))
-    SSLMODE = _PARSED_DB.get("sslmode", "") if _PARSED_DB else os.getenv("DB_SSLMODE", "")
+    # ── DATABASE_URL ───────────────────────────────────────────────────────────
+    DATABASE_URL = os.getenv("DATABASE_URL", "")
+    # ── Host ──────────────────────────────────────────────────────────────────
+    HOST = os.getenv("POOLER_HOST") or os.getenv("DB_HOST", "localhost")
+    # ── Port ──────────────────────────────────────────────────────────────────
+    PORT = int(os.getenv("POOLER_PORT") or os.getenv("DB_PORT", "5432"))
+    # ── Credentials ───────────────────────────────────────────────────────────
+    USER = os.getenv("POOLER_USER") or os.getenv("DB_USER", "postgres")
+    PASSWORD = os.getenv("POOLER_PASSWORD") or os.getenv("DB_PASSWORD", "")
+    DATABASE = os.getenv("POOLER_DB") or os.getenv("DB_NAME", "postgres")
+    # ── Pool & misc ───────────────────────────────────────────────────────────
     POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
     TIMEOUT = int(os.getenv("DB_TIMEOUT", "10"))
     USE_POSTGRES = os.getenv("DB_USE_POSTGRES", "true").lower() == "true"

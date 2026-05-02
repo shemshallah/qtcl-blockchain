@@ -347,8 +347,8 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
   <div class="tab" data-page="dashboard">DASHBOARD</div>
   <div class="tab" data-page="explorer">CHAIN EXPLORER</div>
   <div class="tab" data-page="network">NETWORK</div>
-  <div class="tab" data-page="tx" onclick="window.location.href='/tx'">TRANSACTIONS</div>
-  <div class="tab" data-page="vault" onclick="window.location.href='/vault'">VAULT</div>
+  <div class="tab" data-page="tx" onclick="showTab('tx')">TRANSACTIONS</div>
+  <div class="tab" data-page="vault" onclick="showTab('vault')">VAULT</div>
   <div class="tab" data-page="hyp">HYPΓ DOCS</div>
 </div>
 
@@ -618,6 +618,16 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
       <div class="loading"><div class="spinner"></div>Scanning peers...</div>
     </div>
   </div>
+</div>
+
+<!-- ═══════════════════ TX PAGE ═══════════════════ -->
+<div id="tx" class="page" style="padding:0;max-width:none">
+  <iframe src="/tx" style="width:100%;height:calc(100vh - 108px);border:none;display:block"></iframe>
+</div>
+
+<!-- ═══════════════════ VAULT PAGE ═══════════════════ -->
+<div id="vault" class="page" style="padding:0;max-width:none">
+  <iframe src="/vault" style="width:100%;height:calc(100vh - 108px);border:none;display:block"></iframe>
 </div>
 
 <!-- ═══════════════════ BRIDGE PAGE ═══════════════════ -->
