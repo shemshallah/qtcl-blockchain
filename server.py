@@ -3799,6 +3799,14 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         # Query from PostgreSQL (source of truth)
         blocks = query_block_range_db(from_h, to_h)
 
+        # If DB returns empty, fallback to cache
+        if not blocks:
+            logger.warning(f"[RPC] getBlockRange DB returned empty, fallback to cache")
+            with _BLOCK_CACHE_LOCK:
+                for h in range(from_h, to_h + 1):
+                    if h in _BLOCK_CACHE:
+                        blocks.append(_BLOCK_CACHE[h])
+
         # Populate cache
         with _BLOCK_CACHE_LOCK:
             for b in blocks:
@@ -3820,8 +3828,6 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.warning(f"[RPC-METHOD] qtcl_getBlockRange: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
-        logger.exception(f"[RPC] _rpc_getBlockRange exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
@@ -7236,107 +7242,67 @@ logger.info("[HEALTH] ✅ /health and /ready endpoints mounted (immediate 200 OK
 def serve_root():
     """GET / — Serve index.html as the dashboard."""
     try:
-        # First, try to serve from a dedicated static directory
         import os
         from flask import send_file
 
         index_path = os.path.join(os.path.dirname(__file__), "index.html")
         if os.path.exists(index_path):
             return send_file(index_path, mimetype="text/html")
-
-        # Fallback: inline the dashboard HTML (for production on Koyeb)
-        return render_template_string("""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>QTCL - Quantum Blockchain</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{font-family:'JetBrains Mono',monospace;background:#030610;color:#bbc8e0;min-height:100vh;padding:20px}
-        #app{max-width:1200px;margin:0 auto;padding:20px;background:#080e20;border:1px solid rgba(0,220,255,.1);border-radius:8px}
-        h1{color:#00dcff;margin-bottom:20px;font-size:28px;letter-spacing:2px}
-        .status{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:15px;margin-bottom:30px}
-        .card{background:#0a1228;border:1px solid rgba(0,220,255,.2);border-radius:6px;padding:15px}
-        .card-title{color:#00dcff;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
-        .card-value{font-size:18px;color:#fff;font-weight:bold}
-        .card-unit{font-size:11px;color:#666;margin-top:4px}
-        .loading{text-align:center;padding:40px;color:#666}
-        .error{color:#ff3355;background:rgba(255,51,85,.1);padding:15px;border-radius:6px;margin:15px 0}
-        .success{color:#00ff9d;background:rgba(0,255,157,.1);padding:15px;border-radius:6px;margin:15px 0}
-    </style>
-</head>
-<body>
-<div id="app">
-    <h1>⚛️ QTCL — Quantum Temporal Coherence Ledger</h1>
-    <div class="status">
-        <div class="card">
-            <div class="card-title">Oracle Status</div>
-            <div class="card-value" id="oracle-status">Loading...</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Lattice State</div>
-            <div class="card-value" id="lattice-status">Loading...</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Block Height</div>
-            <div class="card-value" id="block-height">—</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Consensus</div>
-            <div class="card-value" id="consensus">—</div>
-        </div>
-    </div>
-    <div id="status-message" class="loading">Connecting to QTCL network...</div>
-</div>
-<script>
-    async function updateStatus() {
-        try {
-            const health = await fetch('/health').then(() => '✅ Healthy');
-            document.getElementById('oracle-status').textContent = health;
-            
-            try {
-                const rpc = await fetch('/rpc', {
-                    method:'POST',
-                    headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify({
-                        jsonrpc:'2.0',
-                        method:'qtcl_getHealth',
-                        params:[],
-                        id:1
-                    })
-                }).then(r => r.json());
-                
-                if(rpc.result?.status) {
-                    document.getElementById('lattice-status').textContent = '✅ Active';
-                    document.getElementById('status-message').innerHTML = 
-                        '<div class="success">✅ QTCL system is operational</div>';
-                } else {
-                    document.getElementById('status-message').innerHTML = 
-                        '<div class="error">⚠️ System initializing...</div>';
-                }
-            } catch(e) {
-                document.getElementById('status-message').innerHTML = 
-                    '<div class="loading">System initializing... (quantum subsystems booting)</div>';
-            }
-        } catch(e) {
-            document.getElementById('status-message').innerHTML = 
-                '<div class="error">❌ Connection failed</div>';
-        }
-    }
-    updateStatus();
-    setInterval(updateStatus, 5000);
-</script>
-</body>
-</html>
-        """), 200
+        return "index.html not found", 404
     except Exception as e:
-        logger.error(f"[ROOT] Failed to serve index: {e}")
-        return jsonify({"error": "Root endpoint failed", "detail": str(e)}), 500
+        logger.error(f"[ROOT] Failed to serve index.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/tx", methods=["GET"])
+def serve_tx():
+    """GET /tx — Serve tx.html"""
+    try:
+        import os
+        from flask import send_file
+
+        tx_path = os.path.join(os.path.dirname(__file__), "tx.html")
+        if os.path.exists(tx_path):
+            return send_file(tx_path, mimetype="text/html")
+        return "tx.html not found", 404
+    except Exception as e:
+        logger.error(f"[TX] Failed to serve tx.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/vault", methods=["GET"])
+def serve_vault():
+    """GET /vault — Serve vault.html"""
+    try:
+        import os
+        from flask import send_file
+
+        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
+        if os.path.exists(vault_path):
+            return send_file(vault_path, mimetype="text/html")
+        return "vault.html not found", 404
+    except Exception as e:
+        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
+        return f"Error: {e}", 500
 
 
 @app.route("/hyp", methods=["GET"])
+def serve_hyp():
+    """GET /hyp — Serve hyp.html"""
+    try:
+        import os
+        from flask import send_file
+
+        hyp_path = os.path.join(os.path.dirname(__file__), "hyp.html")
+        if os.path.exists(hyp_path):
+            return send_file(hyp_path, mimetype="text/html")
+        return "hyp.html not found", 404
+    except Exception as e:
+        logger.error(f"[HYP] Failed to serve hyp.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/rpc", methods=["GET"])
 def serve_hyp_doc():
     """GET /hyp — Serve hyp.html (canonical architecture reference)."""
     try:
