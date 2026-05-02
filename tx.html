@@ -849,13 +849,60 @@ body::before {
 <!-- ═══ APP LAYOUT ═══ -->
 <div class="app-layout">
 
-  <!-- SIDEBAR -->
+<!-- SIDEBAR -->
   <div class="sidebar" id="sidebar">
-    <div class="nav-section-title">Wallet</div>
-    <div class="nav-section">
+    <div class="sidebar-header">
       <div class="nav-item active" data-page="dashboard" onclick="showPage('dashboard')">
-        <span class="nav-icon">◈</span> Dashboard
+        <span class="nav-icon">🏠</span><span class="nav-label">Dashboard</span>
       </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="nav-item" data-page="send" onclick="showPage('send')">
+        <span class="nav-icon">📤</span><span class="nav-label">Send</span>
+      </div>
+      <div class="nav-item" data-page="receive" onclick="showPage('receive')">
+        <span class="nav-icon">📥</span><span class="nav-label">Receive</span>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="nav-item" data-page="transactions" onclick="showPage('transactions')">
+        <span class="nav-icon">📋</span><span class="nav-label">Transactions</span>
+      </div>
+      <div class="nav-item" data-page="blocks" onclick="showPage('blocks')">
+        <span class="nav-icon">🧱</span><span class="nav-label">Blocks</span>
+      </div>
+      <div class="nav-item" data-page="mempool" onclick="showPage('mempool')">
+        <span class="nav-icon">⏳</span><span class="nav-label">Mempool</span>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="nav-item" data-page="contacts" onclick="showPage('contacts')">
+        <span class="nav-icon">📒</span><span class="nav-label">Address Book</span>
+      </div>
+      <div class="nav-item" data-page="bridge" onclick="showPage('bridge')">
+        <span class="nav-icon">🌉</span><span class="nav-label">Bridge</span>
+      </div>
+      <div class="nav-item" data-page="lookup" onclick="showPage('lookup')">
+        <span class="nav-icon">🔍</span><span class="nav-label">Lookup</span>
+      </div>
+    </div>
+    <div class="sidebar-footer">
+      <div class="wallet-dropdown-mini" onclick="toggleWalletDropdown()" style="cursor:pointer;padding:12px;background:var(--card);border:1px solid var(--border);border-radius:4px;margin:8px;">
+        <span>🔐 Wallet</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function toggleWalletDropdown() {
+      const wcc = document.getElementById('walletConnectCard');
+      if (wcc.style.display === 'none') {
+        wcc.style.display = 'block';
+      } else {
+        wcc.style.display = 'none';
+      }
+    }
+  </script>
       <div class="nav-item" data-page="send" onclick="showPage('send')">
         <span class="nav-icon">↗</span> Send
       </div>
