@@ -52,41 +52,10 @@ max_requests = 50000  # Recycle after 50k requests
 max_requests_jitter = 5000  # Spread recycling
 
 # ── Logging ────────────────────────────────────────────────────────────────────
-# Access log: 200s hidden by default. Set LOG_200=1 env var to restore.
-# Oracle/lattice metrics (WARNING level) always visible.
-loglevel = "warning"
+loglevel = "info"
 accesslog = "-"
 errorlog = "-"
-access_log_format = '%(h)s %(l)s %(t)s "%(r)s" %(s)s %(b)s %(D)s "%(a)s"'
-
-import logging as _logging
-import os as _os
-
-
-class _ErrorOnlyAccessFilter(_logging.Filter):
-    """Pass only 4xx/5xx. Drop 2xx/3xx. Enable with LOG_200=1."""
-    def filter(self, record: _logging.LogRecord) -> bool:
-        if _os.environ.get("LOG_200") == "1":
-            return True
-        try:
-            status = int(record.getMessage().rsplit('"', 1)[-1].strip().split()[0])
-            return status >= 400
-        except (ValueError, IndexError):
-            return True
-
-
-def _apply_filters():
-    if _os.environ.get("LOG_200") != "1":
-        _al = _logging.getLogger("gunicorn.access")
-        _al.setLevel(_logging.WARNING)
-        if not any(isinstance(f, _ErrorOnlyAccessFilter) for f in _al.filters):
-            _al.addFilter(_ErrorOnlyAccessFilter())
-    _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
-    for _ns in ("oracle", "lattice_controller", "globals", "qrng_ensemble"):
-        _lg = _logging.getLogger(_ns)
-        if _lg.level == _logging.NOTSET or _lg.level > _logging.WARNING:
-            _lg.setLevel(_logging.WARNING)
-
+access_log_format = '%(h)s %(l)s %(t)s "%(r)s" %(s)s %(b)s %(D)s "%(a)s"'  # Added %(D)s for request time
 
 # ── Connection ─────────────────────────────────────────────────────────────────
 backlog = 4096  # 🚀 4k backlog for connection bursts
@@ -95,21 +64,22 @@ worker_connections = 2000  # 2k concurrent connections
 # ── Hooks ──────────────────────────────────────────────────────────────────────
 
 
-def on_starting(server):
-    """Wire access log filter in master before any worker forks."""
-    _apply_filters()
-    server.log.info(
-        "[GUNICORN] 200s suppressed (LOG_200=1 to restore) | "
-        "oracle/lattice metrics at WARNING+ always visible"
-    )
-
-
 def post_fork(server, worker):
-    """Re-apply filter in each worker process (filters don't cross fork)."""
-    _apply_filters()
+    """
+    Called inside the new worker process after fork.
+    Each worker must re-open its own PG connections — psycopg2 connections
+    are NOT fork-safe and must never be shared across fork.
+
+    The Mempool singleton is lazy-initialised on first get_mempool() call,
+    which starts _PGListenerThread and _PGNotifier in the worker process.
+    The _SSEBroadcaster starts its own _listen_loop thread.
+    Nothing to do here explicitly — lazy init handles everything.
+    """
     import logging
-    logging.getLogger("gunicorn.error").info(
-        f"[GUNICORN] Worker {worker.pid} ready — access log: errors only"
+
+    log = logging.getLogger("gunicorn.error")
+    log.info(
+        f"[GUNICORN] Worker pid={worker.pid} forked — PG conns will init on first request"
     )
 
 
