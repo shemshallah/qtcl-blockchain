@@ -145,7 +145,7 @@ def application(environ, start_response):
         return _health_app(environ, start_response)
 
     if not _full_app:
-        _load_done.wait(timeout=30)
+        _load_done.wait(timeout=120)
 
     if _full_app:
         return _full_app(environ, start_response)
