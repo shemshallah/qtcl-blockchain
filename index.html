@@ -347,8 +347,7 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
   <div class="tab" data-page="dashboard">DASHBOARD</div>
   <div class="tab" data-page="explorer">CHAIN EXPLORER</div>
   <div class="tab" data-page="network">NETWORK</div>
-  <div class="tab" data-page="vault">VAULT</div>
-  <div class="tab" data-page="tx-page">TRANSACTIONS</div>
+  <div class="tab" data-page="bridge">BRIDGE</div>
   <div class="tab" data-page="hyp">HYPΓ DOCS</div>
 </div>
 
@@ -420,34 +419,9 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
         <div class="lp-card-body">W-state fidelity scores from distributed oracle nodes govern difficulty calibration and block validity. Non-Markovian bath physics governs oracle coherence globally.</div>
       </div>
       <div class="lp-card go">
-        <span class="lp-card-icon">🔐</span>
-        <div class="lp-card-title">Post-Quantum Vault</div>
-        <div class="lp-card-body">Encryption-as-a-Service: store secrets with GeodesicLWE (post-quantum), anchor immutable proofs on-chain, and set up dead man's switch inheritance — all from one vault account.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- QUICKLINKS — Vault & Transactions -->
-  <div class="lp-section">
-    <div class="lp-section-label">Services</div>
-    <div class="lp-section-title">NETWORK SERVICES</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:840px;margin:0 auto;">
-      <div style="background:linear-gradient(135deg,rgba(139,92,246,.08),rgba(0,212,255,.06));border:1px solid rgba(139,92,246,.25);border-radius:10px;padding:24px;cursor:pointer;" onclick="document.querySelector('[data-page=vault]').click();">
-        <div style="font-size:28px;margin-bottom:10px;">🔐</div>
-        <div style="font-family:var(--font-display);font-weight:700;font-size:16px;color:var(--tx);margin-bottom:6px;">QTCL Vault</div>
-        <div style="font-size:11px;color:var(--dim);line-height:1.5;">
-          Post-quantum encrypted secret storage. Store credentials, seed phrases, and documents with GeodesicLWE encryption.
-          Chain-anchor proofs. Dead man's switch inheritance.
-        </div>
-        <div style="margin-top:12px;font-size:10px;letter-spacing:1px;color:var(--vi);font-weight:600;">OPEN VAULT →</div>
-      </div>
-      <div style="background:linear-gradient(135deg,rgba(0,212,255,.08),rgba(16,185,129,.06));border:1px solid rgba(0,212,255,.25);border-radius:10px;padding:24px;cursor:pointer;" onclick="document.querySelector('[data-page=tx-page]').click();">
-        <div style="font-size:28px;margin-bottom:10px;">⚛</div>
-        <div style="font-family:var(--font-display);font-weight:700;font-size:16px;color:var(--tx);margin-bottom:6px;">QTCL Transact</div>
-        <div style="font-size:11px;color:var(--dim);line-height:1.5;">
-          Send and receive QTCL. Browse transactions, inspect blocks, monitor the mempool. Full wallet with HypΓ authentication.
-        </div>
-        <div style="margin-top:12px;font-size:10px;letter-spacing:1px;color:var(--cy);font-weight:600;">OPEN TRANSACTIONS →</div>
+        <span class="lp-card-icon">⛏</span>
+        <div class="lp-card-title">Classical PoW Bridge</div>
+        <div class="lp-card-body">SHA-256 proof-of-work anchors quantum-derived entropy to classical compute, making the chain verifiable by any node without quantum hardware.</div>
       </div>
     </div>
   </div>
@@ -488,7 +462,7 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
     <div class="lp-mining-box">
       <div class="lp-mining-title">⛏ &nbsp;Get the Client — Mine Now</div>
       <div class="lp-mining-body">
-        The QTCL alpha network is <strong>live and open</strong>. Grab the mining client from GitHub, connect to the network,
+        The QTCL alpha network is <strong>live and open</strong>. Download the mining client, connect to the network,
         and become one of the founding nodes of the first hyperbolic-geometry blockchain.
         <strong>Beta Miners and Beta Nodes will be rewarded</strong> — when the time comes, it will be announced
         here and throughout the community.
@@ -498,13 +472,12 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
         There will be rewards for Beta Miners and Beta Nodes — details will be posted here and in Discord when we reach that milestone.
       </div>
       <div class="lp-mining-actions">
-        <a class="lp-cta-primary" href="https://github.com/shemshallah/qtcl-miner" target="_blank" rel="noopener">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-          ⛏ &nbsp;Get the Miner Client
+        <a class="lp-cta-primary" href="https://discord.gg/b8eMJyXw" target="_blank" rel="noopener">
+          ⛏ &nbsp;Get the Client
         </a>
         <a class="lp-cta-discord" href="https://discord.gg/b8eMJyXw" target="_blank" rel="noopener">
           <svg width="16" height="12" viewBox="0 0 127.14 96.36" fill="currentColor" style="flex-shrink:0"><path d="M107.7 8.07A105.15 105.15 0 0 0 81.47 0a72.06 72.06 0 0 0-3.36 6.83 97.68 97.68 0 0 0-29.11 0A72.37 72.37 0 0 0 45.64 0a105.89 105.89 0 0 0-26.25 8.09C2.79 32.65-1.71 56.6.54 80.21a105.73 105.73 0 0 0 32.17 16.15 77.7 77.7 0 0 0 6.89-11.11 68.42 68.42 0 0 1-10.85-5.18c.91-.66 1.8-1.34 2.66-2a75.57 75.57 0 0 0 64.32 0c.87.71 1.76 1.39 2.66 2a68.68 68.68 0 0 1-10.87 5.19 77 77 0 0 0 6.89 11.1 105.25 105.25 0 0 0 32.19-16.14c2.64-27.38-4.51-51.11-18.9-72.14zM42.45 65.69C36.18 65.69 31 60 31 53s5-12.74 11.43-12.74S54 46 53.89 53s-5.05 12.69-11.44 12.69zm42.24 0C78.41 65.69 73.25 60 73.25 53s5-12.74 11.44-12.74S96.23 46 96.12 53s-5.04 12.69-11.43 12.69z"/></svg>
-          Join Discord
+          discord.gg/b8eMJyXw
         </a>
       </div>
     </div>
@@ -515,10 +488,6 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
     <div class="lp-footer-left">© 2025 QTCL · Quantum Token Chain Ledger · All rights reserved</div>
     <div class="lp-footer-right" style="display:flex;gap:20px;align-items:center">
       <span style="color:var(--dim)">HypΓ Cryptosystem · PSL(2,ℝ) · {8,3} Tessellation</span>
-      <a href="https://github.com/shemshallah/qtcl-miner" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none;letter-spacing:.5px;display:flex;align-items:center;gap:5px">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-        GitHub ↗
-      </a>
       <a href="https://discord.gg/b8eMJyXw" target="_blank" rel="noopener" style="color:#7289da;text-decoration:none;letter-spacing:.5px">Discord ↗</a>
     </div>
   </div>
@@ -650,14 +619,9 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
   </div>
 </div>
 
-<!-- ═══════════════════ VAULT PAGE ═══════════════════ -->
-<div id="vault" class="page" style="padding:0;max-width:none">
-  <iframe src="/vault" style="width:100%;height:calc(100vh - 108px);border:none;display:block"></iframe>
-</div>
-
-<!-- ═══════════════════ TX PAGE ═══════════════════ -->
-<div id="tx-page" class="page" style="padding:0;max-width:none">
-  <iframe src="/tx" style="width:100%;height:calc(100vh - 108px);border:none;display:block"></iframe>
+<!-- ═══════════════════ BRIDGE PAGE ═══════════════════ -->
+<div id="bridge" class="page" style="padding:0;max-width:none">
+  <iframe src="/bridge" style="width:100%;height:calc(100vh - 108px);border:none;display:block"></iframe>
 </div>
 
 <!-- ═══════════════════ HYP PAGE ═══════════════════ -->
@@ -852,10 +816,6 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     this.classList.add('active');
-    // Notify iframes of tab change (wallet clearing)
-    document.querySelectorAll('iframe').forEach(f => {
-      try { f.contentWindow.postMessage('qtcl_tab_changed', '*'); } catch(e) {}
-    });
   });
 });
 
@@ -1305,41 +1265,24 @@ async function selectBlockFromExplorer(height) {
 async function fetchNetwork() {
   const body = document.getElementById('net-body');
   try {
-    const [peersRes, oraclePeersRes] = await Promise.all([
-      rpc('qtcl_getPeers', [100]).catch(() => ({peers:[]})),
-      rpc('qtcl_getOraclePeers', {limit: 50}).catch(() => ({oracle_peers:[]})),
-    ]);
-    const peers = peersRes && peersRes.peers ? peersRes.peers : [];
-    const oraclePeers = oraclePeersRes && oraclePeersRes.oracle_peers ? oraclePeersRes.oracle_peers : [];
-    const seen = new Set();
-    const allPeers = [];
-    for (const op of oraclePeers) {
-      const nid = op.node_id || '';
-      if (nid && !seen.has(nid)) { seen.add(nid); allPeers.push({...op, _isOracle: true}); }
-    }
-    for (const p of peers) {
-      const nid = p.node_id || p.peer_id || '';
-      if (nid && !seen.has(nid)) { seen.add(nid); allPeers.push({...p, _isOracle: false}); }
-    }
-    const total = allPeers.length;
-    const oCount = allPeers.filter(p => p._isOracle).length;
-    document.getElementById('net-count').textContent = `${total} peers${oCount ? ` · ${oCount} oracle` : ''}`;
-    if (!total) {
-      body.innerHTML = `<div style="padding:24px;text-align:center;font-family:var(--mono);font-size:9px;color:var(--dim2)">No peers connected yet<br><br><a href="https://github.com/shemshallah/qtcl-miner" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none">⛏ Start a miner client to join the mesh →</a></div>`;
+    const res = await rpc('qtcl_getPeers', [100]);
+    const peers = res && res.peers ? res.peers : [];
+    document.getElementById('net-count').textContent = `${peers.length} peers`;
+    if (!peers.length) {
+      body.innerHTML = '<div style="padding:20px;text-align:center;font-family:var(--mono);font-size:9px;color:var(--dim2)">No peers found</div>';
       return;
     }
-    body.innerHTML = `<div class="peers-grid">${allPeers.map(p => {
-      const addr = p.external_addr || p.address || 'unknown';
-      const nodeId = p.node_id || p.peer_id || 'unknown';
-      const height = p.chain_height || 0;
-      const lastSeen = p.last_seen ? new Date(p.last_seen * 1000).toLocaleString() : '—';
-      const callerIp = p.caller_ip || '';
-      const fid = p.fidelity ? (p.fidelity * 100).toFixed(1) + '%' : '';
-      const caps = (p.capabilities || []).join(', ');
-      const oB = p._isOracle ? '<span style="background:rgba(0,220,255,.15);color:var(--tx);padding:1px 5px;border-radius:3px;font-size:7px;letter-spacing:.5px;margin-left:6px">ORACLE</span>' : '';
-      const rB = (p.capabilities||[]).includes('relay') ? '<span style="background:rgba(0,255,157,.12);color:var(--gr);padding:1px 5px;border-radius:3px;font-size:7px;letter-spacing:.5px;margin-left:4px">RELAY</span>' : '';
-      return `<div class="peer-card" style="${p._isOracle?'border-color:rgba(0,220,255,.25)':''}"><div style="display:flex;align-items:center;gap:4px"><div class="peer-id" title="${nodeId}" style="flex:1">${nodeId.slice(0,12)}…${nodeId.slice(-6)}</div>${oB}${rB}</div><div class="peer-addr">${addr}</div>${callerIp?`<div style="font-family:var(--mono);font-size:7.5px;color:var(--dim2);margin-top:2px">NAT: ${callerIp}</div>`:''}<div style="display:flex;gap:10px;margin-top:5px;flex-wrap:wrap;align-items:center"><div class="peer-height">H: ${height.toLocaleString()}</div>${fid?`<div style="font-family:var(--mono);font-size:8px;color:var(--vi)">F: ${fid}</div>`:''}<div style="font-family:var(--mono);font-size:7.5px;color:var(--dim2)">${lastSeen}</div></div>${caps?`<div style="font-family:var(--mono);font-size:7px;color:var(--dim2);margin-top:3px;opacity:.7">${caps}</div>`:''}</div>`;
-    }).join('')}</div>`;
+    body.innerHTML = `<div class="peers-grid">${peers.map(p => `
+      <div class="peer-card">
+        <div class="peer-id">${p.peer_id || p.node_id || 'unknown'}</div>
+        <div class="peer-addr" style="color:var(--vi)">${p.address || p.external_addr || 'unknown'}</div>
+        <div style="display:flex;gap:12px;margin-top:4px">
+          <div class="peer-height">H: ${(p.chain_height || 0).toLocaleString()}</div>
+          ${p.version ? `<div style="font-family:var(--mono);font-size:8px;color:var(--dim2)">v${p.version}</div>` : ''}
+          ${p.latency_ms !== undefined ? `<div style="font-family:var(--mono);font-size:8px;color:var(--am)">${p.latency_ms}ms</div>` : ''}
+        </div>
+      </div>
+    `).join('')}</div>`;
   } catch(e) {
     body.innerHTML = `<div class="error-msg" style="margin:10px">Network scan failed: ${e.message}</div>`;
   }
