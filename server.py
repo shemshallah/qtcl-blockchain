@@ -7270,43 +7270,20 @@ def serve_tx():
         return f"Error: {e}", 500
 
 
-@app.route("/vault", methods=["GET"])
-def serve_vault():
-    """GET /vault — Serve vault.html"""
-    try:
-        import os
-        from flask import send_file
-
-        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
-        if os.path.exists(vault_path):
-            return send_file(vault_path, mimetype="text/html")
-        return "vault.html not found", 404
-    except Exception as e:
-        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
-        return f"Error: {e}", 500
-
-
-@app.route("/vault", methods=["GET"])
-def serve_vault():
-    """GET /vault — Serve vault.html"""
-    try:
-        import os
-        from flask import send_file
-
-        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
-        if os.path.exists(vault_path):
-            return send_file(vault_path, mimetype="text/html")
-        return "vault.html not found", 404
-    except Exception as e:
-        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
-        return f"Error: {e}", 500
-
-
 @app.route("/hyp", methods=["GET"])
-
-
-@app.route("/rpc", methods=["GET"])
 def serve_hyp_doc():
+    """GET /hyp — Serve hyp.html (canonical architecture reference)."""
+    try:
+        import os
+        from flask import send_file
+
+        hyp_path = os.path.join(os.path.dirname(__file__), "hyp.html")
+        if os.path.exists(hyp_path):
+            return send_file(hyp_path, mimetype="text/html")
+        return "hyp.html not found", 404
+    except Exception as e:
+        logger.error(f"[HYP] Failed to serve hyp.html: {e}")
+        return f"Error: {e}", 500
     """GET /hyp — Serve hyp.html (canonical architecture reference)."""
     try:
         import os
