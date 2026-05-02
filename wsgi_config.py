@@ -55,7 +55,7 @@ def _configure_logging():
     """
     # Suppress 200s from gunicorn.access logger
     access_logger = logging.getLogger("gunicorn.access")
-    if not os.environ.get("LOG_200"):
+    if os.environ.get("LOG_200") != "1":
         _f = _ErrorOnlyAccessFilter()
         access_logger.addFilter(_f)
         # Also suppress via a custom handler that respects the filter

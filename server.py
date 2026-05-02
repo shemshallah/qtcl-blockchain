@@ -2921,6 +2921,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
 
     For 10,000 miners, this eliminates 99% of DB queries
     Cache TTL: 1 second (configurable for consistency vs performance)
+    Uses PostgreSQL via DATABASE_URL and connection pool
     """
     # 🧠 L1 CACHE: Try memory cache first (sub-millisecond)
     cached = _blockchain_cache.get("blockchain:latest_block")
@@ -2928,7 +2929,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
         logger.debug(f"[QUERY-LATEST] 🧠 CACHE HIT: h={cached.get('height')}")
         return cached
 
-    # 🗄️ DB FALLBACK: Query database
+    # 🗄️ DB FALLBACK: Query database using connection pool
     try:
         with get_db_cursor() as cur:
             cur.execute("""
@@ -2959,7 +2960,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
 
 
 def query_block_by_height(height: int) -> Optional[Dict[str, Any]]:
-    """Get block by height from Supabase PostgreSQL (authoritative source)."""
+    """Get block by height from PostgreSQL database using connection pool."""
     try:
         with get_db_cursor() as cur:
             cur.execute("SELECT * FROM blocks WHERE height = %s", (height,))
@@ -4038,8 +4039,51 @@ def _cache_block(block_dict):
             _BLOCK_CACHE[h] = block_dict
 
 
+def _query_block_from_db(h: int) -> Optional[dict]:
+    """Query block from PostgreSQL database using connection pool.
+    Returns block dict or None if not found.
+    """
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT height, block_hash, timestamp, w_state_hash,
+                       parent_hash, nonce, difficulty,
+                       coherence_snapshot, merkle_root, tx_count
+                FROM blocks WHERE height = %s LIMIT 1
+            """,
+                (h,),
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "height": row[0],
+                    "block_height": row[0],
+                    "block_hash": row[1],
+                    "hash": row[1],
+                    "parent_hash": row[4] or ("0" * 64),
+                    "previous_hash": row[4] or ("0" * 64),
+                    "merkle_root": row[8] or ("0" * 64),
+                    "timestamp_s": int(row[2]) if row[2] else 0,
+                    "timestamp": int(row[2]) if row[2] else 0,
+                    "difficulty": int(float(row[6])) if row[6] else 5,
+                    "nonce": int(row[5]) if row[5] else 0,
+                    "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                    "w_entropy_hash": row[3] or "",
+                    "pq_curr": h,
+                    "pq_last": max(0, h - 1),
+                    "tx_count": int(row[9]) if row[9] else 0,
+                    "mined": True,
+                    "finalized": True,
+                }
+        return None
+    except Exception as e:
+        logger.debug(f"[RPC] _query_block_from_db({h}) error: {e}")
+        return None
+
+
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)
+    """qtcl_getBlockRange — return blocks from cache + DB.
 
     params: [from_height, to_height]
     Negative to_height means "from end" (e.g., [-20, -1] = last 20 blocks)
@@ -4059,6 +4103,13 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
             # Handle negative to_height: "from end"
             if to_h < 0:
                 max_height = max(_BLOCK_CACHE.keys()) if _BLOCK_CACHE else 0
+                # Also check DB for max height
+                try:
+                    db_tip = query_latest_block()
+                    if db_tip and db_tip.get("height", 0) > max_height:
+                        max_height = int(db_tip["height"])
+                except:
+                    pass
                 to_h = max_height
                 from_h = max(
                     0, to_h + from_h + 1
@@ -4069,9 +4120,24 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
             if from_h < 0:
                 from_h = 0
 
+            # First, get blocks from cache
             for h in range(from_h, to_h + 1):
                 if h in _BLOCK_CACHE:
                     blocks.append(_BLOCK_CACHE[h])
+
+        # Then, query DB for any missing blocks
+        if len(blocks) < (to_h - from_h + 1):
+            logger.info(f"[RPC] getBlockRange: cache has {len(blocks)} blocks, querying DB for rest")
+            for h in range(from_h, to_h + 1):
+                # Skip if already in blocks
+                if any(b.get("height") == h for b in blocks):
+                    continue
+                db_block = _query_block_from_db(h)
+                if db_block:
+                    blocks.append(db_block)
+
+        # Sort by height descending
+        blocks.sort(key=lambda b: b.get("height", 0), reverse=True)
 
         logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
         return _rpc_ok(
@@ -4087,8 +4153,6 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.warning(f"[RPC-METHOD] qtcl_getBlockRange: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
-        logger.exception(f"[RPC] _rpc_getBlockRange exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
