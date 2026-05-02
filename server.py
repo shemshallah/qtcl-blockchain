@@ -3912,6 +3912,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                                 "tx_count": int(row[9]) if row[9] else 0,
                                 "mined": True,
                                 "finalized": True,
+                                "transactions": [],
                             }
                             return block
                         except Exception as _se:
@@ -4042,6 +4043,7 @@ def _cache_block(block_dict):
 def _query_blocks_from_db(from_h: int, to_h: int) -> list:
     """Query multiple blocks from PostgreSQL database in a single query.
     Returns list of block dicts sorted by height descending.
+    Also fetches transactions for each block.
     """
     blocks = []
     try:
@@ -4058,7 +4060,42 @@ def _query_blocks_from_db(from_h: int, to_h: int) -> list:
                 (from_h, to_h),
             )
             rows = cur.fetchall()
+            
+            # Also fetch all transactions for these blocks in one query
+            cur.execute(
+                """
+                SELECT tx_hash, from_address, to_address, amount,
+                       height, transaction_index, tx_type, status,
+                       quantum_state_hash, metadata
+                FROM transactions
+                WHERE height >= %s AND height <= %s
+                ORDER BY height ASC, transaction_index ASC
+            """,
+                (from_h, to_h),
+            )
+            tx_rows = cur.fetchall()
+            
+            # Group transactions by height
+            txs_by_height = {}
+            for tr in tx_rows:
+                h = tr[4]
+                if h not in txs_by_height:
+                    txs_by_height[h] = []
+                txs_by_height[h].append({
+                    "tx_id": tr[0],
+                    "from_addr": tr[1] or "",
+                    "to_addr": tr[2] or "",
+                    "amount": int(tr[3]) if tr[3] is not None else 0,
+                    "tx_index": int(tr[5]) if tr[5] is not None else 0,
+                    "tx_type": tr[6] or "transfer",
+                    "status": tr[7] or "confirmed",
+                    "w_proof": tr[8] or "",
+                    "metadata": tr[9] if tr[9] else None,
+                })
+            
             for row in rows:
+                h = row[0]
+                block_txs = txs_by_height.get(h, [])
                 blocks.append({
                     "height": row[0],
                     "block_height": row[0],
@@ -4076,6 +4113,7 @@ def _query_blocks_from_db(from_h: int, to_h: int) -> list:
                     "pq_curr": row[0],
                     "pq_last": max(0, row[0] - 1),
                     "tx_count": int(row[9]) if row[9] else 0,
+                    "transactions": block_txs,
                     "mined": True,
                     "finalized": True,
                 })
