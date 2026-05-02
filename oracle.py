@@ -2144,8 +2144,7 @@ class OracleNode:
 
 
 # ─── Oracle W-State Manager (5-node cluster) ──────────────────────────────────
-# OracleNode = canonical alias for QuantumOracleNode (used throughout this module)
-OracleNode = QuantumOracleNode
+# OracleNode is defined above at line 1709
 
 
 class OracleWStateManager:
