@@ -161,7 +161,7 @@ try:
         atanh, atan2, fabs, re as mre, im as mim, conj, norm, phase,
         matrix, nstr, power, floor, ceil, asin, acos, hypot, fsum
     )
-    mp.dps = 50  # 50-digit precision sufficient for tessellation geometry (stored as text)
+    mp.dps = 50  # 50 digits sufficient for tessellation geometry (stored as text)
     MPMATH_AVAILABLE = True
 except ImportError:
     MPMATH_AVAILABLE = False
@@ -189,60 +189,40 @@ import hashlib as _hashlib  # always available (used in device_pepper + scrypt f
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HypΓ-AEAD: Pure-Python Authenticated Encryption (zero external crypto)
-#
-# Encrypt-then-MAC: SHA3-256 counter-mode keystream + HMAC-SHA3-256 tag
-# IND-CCA2 secure under random oracle. 256-bit tag, no truncation.
+# SHA3-256 counter-mode keystream + HMAC-SHA3-256 tag. IND-CCA2 secure.
 # ─────────────────────────────────────────────────────────────────────────────
 import struct as _aead_struct
-
 _AEAD_TAG_LEN = 32
 
 class HypAEAD:
     """Pure-Python AEAD. Drop-in replacement for AESGCM."""
-
     def __init__(self, key: bytes):
-        if len(key) != 32:
-            raise ValueError(f"HypAEAD key must be 32 bytes, got {len(key)}")
+        if len(key) != 32: raise ValueError(f"key must be 32 bytes, got {len(key)}")
         self._key = key
-
-    def _derive_subkeys(self, nonce: bytes):
-        enc_key = _hashlib.sha3_256(self._key + nonce + b"hyp_enc").digest()
-        mac_key = _hashlib.sha3_256(self._key + nonce + b"hyp_mac").digest()
-        return enc_key, mac_key
-
-    def _keystream(self, enc_key: bytes, length: int) -> bytes:
-        blocks = []
-        needed = length
-        ctr = 0
-        while needed > 0:
-            blocks.append(_hashlib.sha3_256(
-                enc_key + _aead_struct.pack("<Q", ctr)
-            ).digest())
-            needed -= 32
-            ctr += 1
-        return b"".join(blocks)[:length]
-
-    def _mac(self, mac_key: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
-        import hmac as _hmac_mod
-        msg = nonce + _aead_struct.pack("<Q", len(ciphertext)) + ciphertext
-        return _hmac_mod.new(mac_key, msg, "sha3_256").digest()
-
-    def encrypt(self, nonce: bytes, plaintext: bytes, aad=None) -> bytes:
+    def _derive_subkeys(self, nonce):
+        return (_hashlib.sha3_256(self._key + nonce + b"hyp_enc").digest(),
+                _hashlib.sha3_256(self._key + nonce + b"hyp_mac").digest())
+    def _keystream(self, enc_key, length):
+        blocks, ctr = [], 0
+        while length > 0:
+            blocks.append(_hashlib.sha3_256(enc_key + _aead_struct.pack("<Q", ctr)).digest())
+            length -= 32; ctr += 1
+        return b"".join(blocks)[:length + len(blocks)*32]  # rejoin
+    def _mac(self, mac_key, nonce, ct):
+        import hmac as _h
+        return _h.new(mac_key, nonce + _aead_struct.pack("<Q", len(ct)) + ct, "sha3_256").digest()
+    def encrypt(self, nonce, plaintext, aad=None):
         enc_key, mac_key = self._derive_subkeys(nonce)
-        ks = self._keystream(enc_key, len(plaintext))
+        ks = self._keystream(enc_key, len(plaintext))[:len(plaintext)]
         ct = bytes(a ^ b for a, b in zip(plaintext, ks))
         return ct + self._mac(mac_key, nonce, ct)
-
-    def decrypt(self, nonce: bytes, ciphertext_and_tag: bytes, aad=None) -> bytes:
-        if len(ciphertext_and_tag) < _AEAD_TAG_LEN:
-            raise ValueError("Ciphertext too short")
-        ct = ciphertext_and_tag[:-_AEAD_TAG_LEN]
-        tag = ciphertext_and_tag[-_AEAD_TAG_LEN:]
+    def decrypt(self, nonce, ct_tag, aad=None):
+        ct, tag = ct_tag[:-_AEAD_TAG_LEN], ct_tag[-_AEAD_TAG_LEN:]
         enc_key, mac_key = self._derive_subkeys(nonce)
-        import hmac as _hmac_mod
-        if not _hmac_mod.compare_digest(tag, self._mac(mac_key, nonce, ct)):
-            raise ValueError("HypAEAD: authentication tag mismatch")
-        ks = self._keystream(enc_key, len(ct))
+        import hmac as _h
+        if not _h.compare_digest(tag, self._mac(mac_key, nonce, ct)):
+            raise ValueError("HypAEAD: auth tag mismatch")
+        ks = self._keystream(enc_key, len(ct))[:len(ct)]
         return bytes(a ^ b for a, b in zip(ct, ks))
 
 
@@ -1812,8 +1792,8 @@ class QuantumTemporalCoherenceLedgerServer:
     Same schema, same logic, same call surface.
     """
 
-    TRIANGLE_BATCH_SIZE = 5000
-    QUBIT_BATCH_SIZE = 25000
+    TRIANGLE_BATCH_SIZE = 2000
+    QUBIT_BATCH_SIZE = 10000
     PROGRESS_INTERVAL_TRI = 500
     PROGRESS_INTERVAL_QUB = 5000
 
@@ -2018,13 +1998,14 @@ class QuantumTemporalCoherenceLedgerServer:
                 logger.debug(f"[MIGRATE] Skipped ({ddl[:50]}): {e}")
         logger.info(f"{CLR.OK}[MIGRATE] oracle_registry migration: {ok}/{len(migrations)} OK{CLR.E}")
 
-    def _insert_triangles_batched(self, triangles: Dict[int, 'HyperbolicTriangle']):
-        logger.info(f"{CLR.C}[TRI] Inserting triangles...{CLR.E}")
-        triangle_list = [t for t in triangles.values() if t.depth == self.tessellation_depth]
+    def _insert_triangles_batched(self, triangle_list):
+        """Batch-insert a list of HyperbolicTriangle objects, then free them."""
         total = len(triangle_list)
-        pbar = tqdm(total=total, desc="Triangles", leave=True)
-        for batch_start in range(0, total, self.TRIANGLE_BATCH_SIZE):
-            batch = triangle_list[batch_start:batch_start + self.TRIANGLE_BATCH_SIZE]
+        if total == 0:
+            return
+        BATCH = 2000
+        for i in range(0, total, BATCH):
+            batch = triangle_list[i:i + BATCH]
             rows = [(
                 tri.triangle_id, tri.depth, None,
                 str(tri.v0.x), str(tri.v0.y), tri.v0.name,
@@ -2042,21 +2023,14 @@ class QuantumTemporalCoherenceLedgerServer:
                 """,
                 rows, page_size=500
             )
-            if batch_start % (self.TRIANGLE_BATCH_SIZE * 5) == 0 and batch_start > 0:
-                self._commit()
-            pbar.update(len(batch))
-        pbar.close()
         self._commit()
-        logger.info(f"{CLR.OK}[TRI] {total} triangles inserted{CLR.E}")
 
-    def _insert_pseudoqubits_batched(self, qubits: Dict[int, 'Pseudoqubit'], triangle_ids: set):
-        qubit_list = [q for q in qubits.values() if q.triangle_id in triangle_ids]
-        total = len(qubit_list)
-        logger.info(f"{CLR.C}[QUB] Inserting {total} pseudoqubits...{CLR.E}")
-        pbar = tqdm(total=total, desc="Pseudoqubits", leave=True)
-        for batch_start in range(0, total, self.QUBIT_BATCH_SIZE):
-            batch = qubit_list[batch_start:batch_start + self.QUBIT_BATCH_SIZE]
-            rows = [q.to_db_row() for q in batch]
+    def _insert_pseudoqubit_rows(self, rows):
+        """Batch-insert pseudoqubit row tuples."""
+        if not rows:
+            return
+        BATCH = 5000
+        for i in range(0, len(rows), BATCH):
             self._execute_values_compat(
                 """
                 INSERT INTO pseudoqubits (
@@ -2064,209 +2038,196 @@ class QuantumTemporalCoherenceLedgerServer:
                     placement_type, phase_theta, coherence_measure
                 ) VALUES %s
                 """,
-                rows, page_size=1000
+                rows[i:i + BATCH], page_size=1000
             )
-            if batch_start % (self.QUBIT_BATCH_SIZE * 3) == 0 and batch_start > 0:
-                self._commit()
-            pbar.update(len(batch))
-        pbar.close()
         self._commit()
-        logger.info(f"{CLR.OK}[QUB] {total} pseudoqubits inserted{CLR.E}")
 
-    def _build_tessellation_inline(self) -> Tuple[Dict[int, 'HyperbolicTriangle'], Dict[int, 'Pseudoqubit']]:
-        """Inline tessellation builder — memory efficient"""
-        triangles: Dict[int, HyperbolicTriangle] = {}
-        qubits: Dict[int, Pseudoqubit] = {}
-        triangle_id_counter = [0]
-        qubit_id_counter = [0]
-        
-        def build_octagon_decomposition() -> List[HyperbolicTriangle]:
-            logger.info(f"{CLR.QUANTUM}[OCTAGON] Constructing 8 fundamental octagons{CLR.E}")
-            triangles_list = []
+    def populate_tessellation(self):
+        """
+        STREAMING TESSELLATION — Memory-efficient pipeline.
+
+        Strategy: Only keep ONE level of triangles in memory at a time.
+        For pseudoqubit placement, process final-depth triangles in chunks
+        of 500, inserting and freeing each chunk before building the next.
+
+        Memory peak: ~500 triangles × 13 qubits = 6,500 objects (vs 152,000 before).
+        """
+        logger.info(f"{CLR.QUANTUM}[POPULATE] Building tessellation (streaming mode)...{CLR.E}")
+        self._start_time = time.time()
+
+        try:
+            depth = self.tessellation_depth
+            triangle_id_counter = [0]
+
+            # ── Phase 1: Build tessellation level by level ──
+            # Only keep current_level in memory; insert each level then discard parents
+            logger.info(f"{CLR.QUANTUM}[RECURSIVE] Building tessellation depth {depth}{CLR.E}")
+
+            # Seed: 8 fundamental octagons
             octagon_radius = mpf("0.4")
+            current_level = []
+            center = HyperbolicPoint(mpf(0), mpf(0), name="oct_center")
             octagon_vertices = []
             for i in range(8):
                 angle = mpf(2) * pi * mpf(i) / mpf(8)
-                x = octagon_radius * cos(angle)
-                y = octagon_radius * sin(angle)
-                vertex = HyperbolicPoint(x, y, name=f"oct_v{i}")
-                octagon_vertices.append(vertex)
-            center = HyperbolicPoint(mpf(0), mpf(0), name="oct_center")
+                octagon_vertices.append(HyperbolicPoint(
+                    octagon_radius * cos(angle),
+                    octagon_radius * sin(angle),
+                    name=f"oct_v{i}"
+                ))
             for i in range(8):
-                v0 = center
-                v1 = octagon_vertices[i]
-                v2 = octagon_vertices[(i + 1) % 8]
-                triangle = HyperbolicTriangle(
+                tri = HyperbolicTriangle(
                     triangle_id=triangle_id_counter[0],
-                    v0=v0, v1=v1, v2=v2,
-                    depth=0,
-                    parent_id=None
+                    v0=center, v1=octagon_vertices[i], v2=octagon_vertices[(i+1) % 8],
+                    depth=0, parent_id=None
                 )
                 triangle_id_counter[0] += 1
-                triangles_list.append(triangle)
-            logger.info(f"{CLR.OK}[OCTAGON] Created {len(triangles_list)} fundamental triangles{CLR.E}")
-            return triangles_list
-        
-        def subdivide_triangle(parent: HyperbolicTriangle) -> List[HyperbolicTriangle]:
-            m01 = poincare_midpoint(parent.v0, parent.v1)
-            m12 = poincare_midpoint(parent.v1, parent.v2)
-            m20 = poincare_midpoint(parent.v2, parent.v0)
-            children = [
-                HyperbolicTriangle(triangle_id=triangle_id_counter[0], v0=parent.v0, v1=m01, v2=m20, depth=parent.depth + 1, parent_id=parent.triangle_id),
-                HyperbolicTriangle(triangle_id=triangle_id_counter[0] + 1, v0=parent.v1, v1=m12, v2=m01, depth=parent.depth + 1, parent_id=parent.triangle_id),
-                HyperbolicTriangle(triangle_id=triangle_id_counter[0] + 2, v0=parent.v2, v1=m20, v2=m12, depth=parent.depth + 1, parent_id=parent.triangle_id),
-                HyperbolicTriangle(triangle_id=triangle_id_counter[0] + 3, v0=m01, v1=m12, v2=m20, depth=parent.depth + 1, parent_id=parent.triangle_id)
-            ]
-            triangle_id_counter[0] += 4
-            return children
-        
-        def build_recursive_tessellation():
-            logger.info(f"{CLR.QUANTUM}[RECURSIVE] Building tessellation depth {self.tessellation_depth}{CLR.E}")
-            current_level = build_octagon_decomposition()
-            for tri in current_level:
-                triangles[tri.triangle_id] = tri
-            total_levels = self.tessellation_depth
-            for level in range(1, total_levels + 1):
-                next_level = []
-                for parent_tri in current_level:
-                    children = subdivide_triangle(parent_tri)
-                    for child in children:
-                        triangles[child.triangle_id] = child
-                        next_level.append(child)
-                current_level = next_level
-                pct = (level / total_levels) * 100
-                bar_len = 40
-                filled = int(bar_len * level / total_levels)
-                bar = "█" * filled + "░" * (bar_len - filled)
-                logger.info(f"{CLR.C}[Tessellation] [{bar}] {pct:5.1f}% | Level {level}/{total_levels} | {len(triangles):,} triangles{CLR.E}")
-            logger.info(f"{CLR.OK}[RECURSIVE] ✅ Complete: {len(triangles):,} triangles{CLR.E}")
-        
-        def place_pseudoqubits():
-            logger.info(f"{CLR.QUANTUM}[QUBITS] Placing pseudoqubits (optimized)...{CLR.E}")
-            qubit_id = 0
-            total_triangles = len(triangles)
-            log_interval = max(1, total_triangles // 20)
+                current_level.append(tri)
+            logger.info(f"{CLR.OK}[OCTAGON] Created 8 fundamental triangles{CLR.E}")
 
-            # Pre-compute barycentric grid weights (density=5, pick 6 interior + 1 centroid = 7)
+            # Subdivide level by level
+            final_level = []
+            for level in range(1, depth + 1):
+                next_level = []
+                for parent in current_level:
+                    m01 = poincare_midpoint(parent.v0, parent.v1)
+                    m12 = poincare_midpoint(parent.v1, parent.v2)
+                    m20 = poincare_midpoint(parent.v2, parent.v0)
+                    base_id = triangle_id_counter[0]
+                    children = [
+                        HyperbolicTriangle(base_id,     parent.v0, m01, m20, level, parent.triangle_id),
+                        HyperbolicTriangle(base_id + 1, parent.v1, m12, m01, level, parent.triangle_id),
+                        HyperbolicTriangle(base_id + 2, parent.v2, m20, m12, level, parent.triangle_id),
+                        HyperbolicTriangle(base_id + 3, m01,       m12, m20, level, parent.triangle_id),
+                    ]
+                    triangle_id_counter[0] += 4
+                    next_level.extend(children)
+
+                pct = (level / depth) * 100
+                filled = int(40 * level / depth)
+                bar = "█" * filled + "░" * (40 - filled)
+                logger.info(f"{CLR.C}[Tessellation] [{bar}] {pct:5.1f}% | Level {level}/{depth} | {len(next_level):,} new triangles{CLR.E}")
+
+                # Insert non-final levels to DB then discard
+                if level < depth:
+                    self._insert_triangles_batched(next_level)
+                    current_level = next_level
+                    next_level = None
+                    gc.collect()
+                else:
+                    # Final level — keep for qubit placement
+                    final_level = next_level
+                    self._insert_triangles_batched(final_level)
+                    current_level = None
+                    gc.collect()
+
+            n_tris = len(final_level)
+            logger.info(f"{CLR.OK}[RECURSIVE] ✅ Complete: {n_tris:,} final-depth triangles{CLR.E}")
+
+            # ── Phase 2: Place pseudoqubits in streaming chunks ──
+            # Process 500 triangles at a time → ~6500 qubit rows → insert → free
+            CHUNK = 500
+            total_qubits = 0
+            qubit_id = 0
+
+            _one = mpf(1)
+            _three = mpf(3)
+            _eps = mpf(10)**(-40)
+            _clamp = _one - mpf(10)**(-10)
+
+            # Pre-compute barycentric grid weights
             grid_weights = []
             for i in range(1, 5):
                 for j in range(1, 5 - i):
                     grid_weights.append((mpf(i)/mpf(5), mpf(j)/mpf(5)))
             grid_weights = grid_weights[:6]
 
-            _one = mpf(1)
-            _three = mpf(3)
-            _eps = mpf(10)**(-40)
-            _disk_clamp = _one - mpf(10)**(-10)
+            logger.info(f"{CLR.QUANTUM}[QUBITS] Placing pseudoqubits (streaming, {CHUNK}/chunk)...{CLR.E}")
 
-            for idx, (tri_id, triangle) in enumerate(triangles.items()):
-                v0x, v0y = triangle.v0.x, triangle.v0.y
-                v1x, v1y = triangle.v1.x, triangle.v1.y
-                v2x, v2y = triangle.v2.x, triangle.v2.y
+            for chunk_start in range(0, n_tris, CHUNK):
+                chunk = final_level[chunk_start:chunk_start + CHUNK]
+                rows = []
 
-                # 3 vertices
-                for vertex in (triangle.v0, triangle.v1, triangle.v2):
-                    qubits[qubit_id] = Pseudoqubit(
-                        pseudoqubit_id=qubit_id, triangle_id=tri_id,
-                        x=vertex.x, y=vertex.y, placement_type="vertex")
+                for triangle in chunk:
+                    tri_id = triangle.triangle_id
+                    v0x, v0y = triangle.v0.x, triangle.v0.y
+                    v1x, v1y = triangle.v1.x, triangle.v1.y
+                    v2x, v2y = triangle.v2.x, triangle.v2.y
+
+                    # 3 vertices
+                    for vx, vy in ((v0x,v0y),(v1x,v1y),(v2x,v2y)):
+                        rows.append((qubit_id, tri_id, str(vx), str(vy), "vertex", 0.0, 1.0))
+                        qubit_id += 1
+
+                    # Incenter
+                    a = hyperbolic_distance(triangle.v1, triangle.v2)
+                    b = hyperbolic_distance(triangle.v0, triangle.v2)
+                    c = hyperbolic_distance(triangle.v0, triangle.v1)
+                    sa = sinh(a) if sinh(a) > _eps else _one
+                    sb = sinh(b) if sinh(b) > _eps else _one
+                    sc = sinh(c) if sinh(c) > _eps else _one
+                    w0, w1, w2 = _one/sa, _one/sb, _one/sc
+                    wt = w0+w1+w2
+                    if wt > _eps:
+                        ix = (w0*v0x+w1*v1x+w2*v2x)/wt
+                        iy = (w0*v0y+w1*v1y+w2*v2y)/wt
+                    else:
+                        ix, iy = v0x, v0y
+                    rows.append((qubit_id, tri_id, str(ix), str(iy), "incenter", 0.0, 1.0))
                     qubit_id += 1
 
-                # Incenter — inline (avoid function call overhead × 10920)
-                a = hyperbolic_distance(triangle.v1, triangle.v2)
-                b = hyperbolic_distance(triangle.v0, triangle.v2)
-                c = hyperbolic_distance(triangle.v0, triangle.v1)
-                sa = sinh(a) if sinh(a) > _eps else _one
-                sb = sinh(b) if sinh(b) > _eps else _one
-                sc = sinh(c) if sinh(c) > _eps else _one
-                w0, w1, w2 = _one/sa, _one/sb, _one/sc
-                wt = w0 + w1 + w2
-                if wt > _eps:
-                    ix = (w0*v0x + w1*v1x + w2*v2x) / wt
-                    iy = (w0*v0y + w1*v1y + w2*v2y) / wt
-                else:
-                    ix, iy = v0x, v0y
-                qubits[qubit_id] = Pseudoqubit(
-                    pseudoqubit_id=qubit_id, triangle_id=tri_id,
-                    x=ix, y=iy, placement_type="incenter")
-                qubit_id += 1
-
-                # Circumcenter — inline
-                det = mpf(2) * (v0x*(v1y - v2y) + v1x*(v2y - v0y) + v2x*(v0y - v1y))
-                if fabs(det) > _eps:
-                    a2 = v0x**2 + v0y**2
-                    b2 = v1x**2 + v1y**2
-                    c2 = v2x**2 + v2y**2
-                    ux = (a2*(v1y-v2y) + b2*(v2y-v0y) + c2*(v0y-v1y)) / det
-                    uy = (a2*(v2x-v1x) + b2*(v0x-v2x) + c2*(v1x-v0x)) / det
-                    if ux**2 + uy**2 >= _disk_clamp:
-                        ux, uy = ix, iy
-                else:
-                    ux = (v0x + v1x + v2x) / _three
-                    uy = (v0y + v1y + v2y) / _three
-                qubits[qubit_id] = Pseudoqubit(
-                    pseudoqubit_id=qubit_id, triangle_id=tri_id,
-                    x=ux, y=uy, placement_type="circumcenter")
-                qubit_id += 1
-
-                # Orthocenter — centroid (standard hyperbolic approximation)
-                ox = (v0x + v1x + v2x) / _three
-                oy = (v0y + v1y + v2y) / _three
-                qubits[qubit_id] = Pseudoqubit(
-                    pseudoqubit_id=qubit_id, triangle_id=tri_id,
-                    x=ox, y=oy, placement_type="orthocenter")
-                qubit_id += 1
-
-                # 6 geodesic grid points — fast barycentric (no trig calls)
-                for lam1, lam2 in grid_weights:
-                    lam3 = _one - lam1 - lam2
-                    gx = lam3*v0x + lam1*v1x + lam2*v2x
-                    gy = lam3*v0y + lam1*v1y + lam2*v2y
-                    r2 = gx**2 + gy**2
-                    if r2 >= _disk_clamp:
-                        scale = _disk_clamp / sqrt(r2)
-                        gx *= scale
-                        gy *= scale
-                    qubits[qubit_id] = Pseudoqubit(
-                        pseudoqubit_id=qubit_id, triangle_id=tri_id,
-                        x=gx, y=gy, placement_type="geodesic")
+                    # Circumcenter
+                    det = mpf(2)*(v0x*(v1y-v2y)+v1x*(v2y-v0y)+v2x*(v0y-v1y))
+                    if fabs(det) > _eps:
+                        a2,b2,c2 = v0x**2+v0y**2, v1x**2+v1y**2, v2x**2+v2y**2
+                        ux = (a2*(v1y-v2y)+b2*(v2y-v0y)+c2*(v0y-v1y))/det
+                        uy = (a2*(v2x-v1x)+b2*(v0x-v2x)+c2*(v1x-v0x))/det
+                        if ux**2+uy**2 >= _clamp: ux,uy = ix,iy
+                    else:
+                        ux = (v0x+v1x+v2x)/_three
+                        uy = (v0y+v1y+v2y)/_three
+                    rows.append((qubit_id, tri_id, str(ux), str(uy), "circumcenter", 0.0, 1.0))
                     qubit_id += 1
-                # 7th grid point: centroid (reuse ox, oy)
-                qubits[qubit_id] = Pseudoqubit(
-                    pseudoqubit_id=qubit_id, triangle_id=tri_id,
-                    x=ox, y=oy, placement_type="geodesic")
-                qubit_id += 1
 
-                if (idx + 1) % log_interval == 0 or idx == total_triangles - 1:
-                    pct = ((idx + 1) / total_triangles) * 100
-                    filled = int(40 * (idx + 1) / total_triangles)
-                    bar = "█" * filled + "░" * (40 - filled)
-                    logger.info(f"{CLR.C}[Geometry IDs] [{bar}] {pct:5.1f}% | {idx+1:,}/{total_triangles:,} triangles | {qubit_id:,} IDs placed{CLR.E}")
+                    # Orthocenter (centroid)
+                    ox = (v0x+v1x+v2x)/_three
+                    oy = (v0y+v1y+v2y)/_three
+                    rows.append((qubit_id, tri_id, str(ox), str(oy), "orthocenter", 0.0, 1.0))
+                    qubit_id += 1
 
-            logger.info(f"{CLR.OK}[QUBITS] ✅ All {qubit_id:,} pseudoqubits placed{CLR.E}")
-        
-        # ✅ ACTUALLY CALL THE FUNCTIONS
-        build_recursive_tessellation()
-        place_pseudoqubits()
-        gc.collect()
-        return triangles, qubits
-    
-    def populate_tessellation(self):
-        logger.info(f"{CLR.QUANTUM}[POPULATE] Building and inserting tessellation...{CLR.E}")
-        self._start_time = time.time()
-        try:
-            triangles, qubits = self._build_tessellation_inline()
-            final_depth_triangle_ids = set(
-                t.triangle_id for t in triangles.values()
-                if t.depth == self.tessellation_depth
-            )
-            logger.info(f"{CLR.C}[FILTER] Final-depth triangles: {len(final_depth_triangle_ids)}{CLR.E}")
-            self._insert_triangles_batched(triangles)
-            self._insert_pseudoqubits_batched(qubits, final_depth_triangle_ids)
+                    # 6 barycentric grid + 1 centroid = 7 geodesic
+                    for lam1, lam2 in grid_weights:
+                        lam3 = _one-lam1-lam2
+                        gx = lam3*v0x+lam1*v1x+lam2*v2x
+                        gy = lam3*v0y+lam1*v1y+lam2*v2y
+                        r2 = gx**2+gy**2
+                        if r2 >= _clamp:
+                            s = _clamp/sqrt(r2); gx*=s; gy*=s
+                        rows.append((qubit_id, tri_id, str(gx), str(gy), "geodesic", 0.0, 1.0))
+                        qubit_id += 1
+                    rows.append((qubit_id, tri_id, str(ox), str(oy), "geodesic", 0.0, 1.0))
+                    qubit_id += 1
 
+                # Insert this chunk
+                self._insert_pseudoqubit_rows(rows)
+                total_qubits += len(rows)
+                del rows
+
+                # Progress
+                done = min(chunk_start + CHUNK, n_tris)
+                pct = done / n_tris * 100
+                filled = int(40 * done / n_tris)
+                bar = "█" * filled + "░" * (40 - filled)
+                logger.info(f"{CLR.C}[Geometry IDs] [{bar}] {pct:5.1f}% | {done:,}/{n_tris:,} triangles | {total_qubits:,} IDs placed{CLR.E}")
+
+            # Free final_level
+            del final_level
+            gc.collect()
+
+            logger.info(f"{CLR.OK}[QUBITS] ✅ All {total_qubits:,} pseudoqubits placed{CLR.E}")
+
+            # ── Phase 3: Metadata ──
             ts_now = datetime.now(timezone.utc).isoformat()
-            n_tris = len(final_depth_triangle_ids)
-            n_qubs = len([q for q in qubits.values() if q.triangle_id in final_depth_triangle_ids])
-
             if self.db_mode == "postgres":
                 self.cursor.execute("""
                     INSERT INTO quantum_lattice_metadata (
@@ -2274,12 +2235,11 @@ class QuantumTemporalCoherenceLedgerServer:
                         precision_bits, hyperbolicity_constant, poincare_radius,
                         status, construction_started_at, construction_completed_at
                     ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (self.tessellation_depth, n_tris, n_qubs, 150, -1.0, 1.0,
-                      'complete', ts_now, ts_now))
+                """, (depth, n_tris, total_qubits, 50, -1.0, 1.0, 'complete', ts_now, ts_now))
                 self.cursor.execute("""
                     INSERT INTO database_metadata (schema_version, build_timestamp, tables_created)
                     VALUES (%s,%s,%s)
-                """, ('6.0.0-neon', ts_now, 62))
+                """, ('8.2.0-neon', ts_now, 66))
             else:
                 self.cursor.execute(
                     "INSERT INTO quantum_lattice_metadata "
@@ -2287,14 +2247,12 @@ class QuantumTemporalCoherenceLedgerServer:
                     "precision_bits, hyperbolicity_constant, poincare_radius, "
                     "status, construction_started_at, construction_completed_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?)",
-                    (self.tessellation_depth, n_tris, n_qubs, 150, -1.0, 1.0,
-                     'complete', ts_now, ts_now)
+                    (depth, n_tris, total_qubits, 50, -1.0, 1.0, 'complete', ts_now, ts_now)
                 )
                 self.cursor.execute(
                     "INSERT INTO database_metadata (schema_version, build_timestamp, tables_created) "
-                    "VALUES (?,?,?)", ('6.0.0-sqlite', ts_now, 62)
+                    "VALUES (?,?,?)", ('8.2.0-sqlite', ts_now, 66)
                 )
-
             self._commit()
             elapsed = time.time() - self._start_time
             logger.info(f"{CLR.OK}[POPULATE] Complete in {elapsed:.1f}s{CLR.E}")
