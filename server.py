@@ -5296,12 +5296,11 @@ def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
         except ValueError:
             return _rpc_error(-32602, "malformed hex in salt_hex or verifier_hex", rpc_id)
 
-        # PBKDF2-HMAC-SHA3-256, 600K iterations, 64 bytes → enc_key + verifier_key
-        raw = hashlib.pbkdf2_hmac(
-            "sha3_256", password.encode("utf-8"), salt, 600_000, dklen=64
+        # PBKDF2-HMAC-SHA256, 600K iterations, 32 bytes → master key for HypAEAD
+        key = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), salt, 600_000, dklen=32
         )
-        verifier_key = raw[32:]
-        expected_v = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + verifier_key).digest()
+        expected_v = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + key).digest()
 
         if not hmac.compare_digest(stored_v, expected_v):
             return _rpc_ok(
@@ -5491,6 +5490,51 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         import hashlib
         import hmac
         import json
+        import struct as _aead_struct
+
+        # ═══ HypAEAD: Pure-Python AEAD using SHA3-256-CTR + HMAC-SHA3-256 ═══
+        _AEAD_TAG_LEN = 32  # SHA3-256 output = 32 bytes
+
+        class _HypAEAD:
+            """Pure-Python AEAD cipher using SHA3-256 keystream + HMAC-SHA3-256 tag."""
+            def __init__(self, key: bytes):
+                if len(key) != 32:
+                    raise ValueError(f"HypAEAD key must be 32 bytes, got {len(key)}")
+                self._key = key
+
+            def _derive_subkeys(self, nonce: bytes):
+                enc_key = hashlib.sha3_256(self._key + nonce + b"hyp_enc").digest()
+                mac_key = hashlib.sha3_256(self._key + nonce + b"hyp_mac").digest()
+                return enc_key, mac_key
+
+            def _keystream(self, enc_key: bytes, length: int) -> bytes:
+                blocks = []
+                needed = length
+                ctr = 0
+                while needed > 0:
+                    block = hashlib.sha3_256(
+                        enc_key + _aead_struct.pack("<Q", ctr)
+                    ).digest()
+                    blocks.append(block)
+                    needed -= 32
+                    ctr += 1
+                return b"".join(blocks)[:length]
+
+            def _mac(self, mac_key: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
+                msg = nonce + _aead_struct.pack("<Q", len(ciphertext)) + ciphertext
+                return hmac.new(mac_key, msg, "sha3_256").digest()
+
+            def decrypt(self, nonce: bytes, ciphertext_and_tag: bytes) -> bytes:
+                if len(ciphertext_and_tag) < _AEAD_TAG_LEN:
+                    raise ValueError("Ciphertext too short (no auth tag)")
+                ct = ciphertext_and_tag[:-_AEAD_TAG_LEN]
+                tag = ciphertext_and_tag[-_AEAD_TAG_LEN:]
+                enc_key, mac_key = self._derive_subkeys(nonce)
+                expected_tag = self._mac(mac_key, nonce, ct)
+                if not hmac.compare_digest(tag, expected_tag):
+                    raise ValueError("HypAEAD: authentication tag mismatch")
+                ks = self._keystream(enc_key, len(ct))
+                return bytes(a ^ b for a, b in zip(ct, ks))
 
         p = params[0] if isinstance(params, (list, tuple)) and len(params) > 0 else params if isinstance(params, dict) else {}
         wallet_data = p.get("wallet_data")
@@ -5509,41 +5553,30 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         verifier_hex = enc_pk.get("verifier_hex", "")
         nonce_hex = enc_pk.get("nonce_hex", "")
         ciphertext_hex = enc_pk.get("ciphertext_hex", "")
-        mac_hex = enc_pk.get("mac_hex", "")
 
-        if not all([salt_hex, verifier_hex, nonce_hex, ciphertext_hex, mac_hex]):
+        if not all([salt_hex, verifier_hex, nonce_hex, ciphertext_hex]):
             return _rpc_error(-32602, "Malformed encrypted_private_key: missing required fields", rpc_id)
 
-        # Derive key using PBKDF2-HMAC-SHA3-256 (600K iterations, dklen=64)
+        # Derive key using PBKDF2-HMAC-SHA256 (600K iterations, dklen=32)
         salt = bytes.fromhex(salt_hex)
-        raw = hashlib.pbkdf2_hmac("sha3_256", password.encode("utf-8"), salt, 600_000, dklen=64)
-
-        enc_key = raw[0:16]      # 16 bytes for SHAKE-256-CTR
-        mac_key = raw[16:32]     # 16 bytes for SHA3-256 MAC
-        verifier_key = raw[32:64] # 32 bytes for password verification
+        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 600_000, dklen=32)
 
         # Verify password using verifier tag
-        expected_verifier = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + verifier_key).digest()
+        expected_verifier = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + key).digest()
         stored_verifier = bytes.fromhex(verifier_hex)
         if not hmac.compare_digest(stored_verifier, expected_verifier):
             return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
 
-        # Verify MAC: SHA3-256(mac_key + nonce + ciphertext)
+        # Decrypt private key using HypAEAD
         nonce = bytes.fromhex(nonce_hex)
         ciphertext = bytes.fromhex(ciphertext_hex)
-        stored_mac = bytes.fromhex(mac_hex)
-        expected_mac = hashlib.sha3_256(mac_key + nonce + ciphertext).digest()
-        if not hmac.compare_digest(stored_mac, expected_mac):
-            return _rpc_error(-32603, "MAC verification failed: data tampered or wrong key", rpc_id)
-
-        # Decrypt private key using SHAKE-256-CTR
-        shake = hashlib.shake_256(enc_key + nonce)
-        keystream = shake.digest(len(ciphertext))
-        private_key_bytes = bytes(a ^ b for a, b in zip(ciphertext, keystream))
-        private_key = private_key_bytes.hex()
+        try:
+            private_key_bytes = _HypAEAD(key).decrypt(nonce, ciphertext)
+            private_key = private_key_bytes.hex()
+        except ValueError as e:
+            return _rpc_error(-32603, f"Decryption failed: {str(e)}", rpc_id)
 
         # Prepare transaction for signing - must match mempool's get_signing_hash() format
-        # Mempool uses: sender, recipient, amount (in QTCL, not cents), nonce
         tx_for_signing = {
             "from_address": tx.get("from_address", ""),
             "to_address": tx.get("to_address", ""),
@@ -5554,7 +5587,6 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         }
 
         # Compute signing hash - must match mempool's get_signing_hash()
-        # Mempool uses: sender, recipient, amount (QTCL float), nonce
         signing_data = {
             'sender': tx_for_signing["from_address"],
             'recipient': tx_for_signing["to_address"],
@@ -5562,7 +5594,7 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             'nonce': tx_for_signing["nonce"]
         }
         signing_json = json.dumps(signing_data, sort_keys=True, default=str)
-        tx_hash = hashlib.sha3_256(signing_json.encode('utf-8')).digest()
+        tx_hash = hashlib.sha256(signing_json.encode('utf-8')).digest()
 
         # Sign the hash using HypΓ Schnorr
         engine = _init_hlwe_engine()
@@ -5829,7 +5861,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         for tx in txs or []:
             tx_type = tx.get("tx_type", "").lower()
-            if tx_type == "coinbase":
+            # miner_reward and treasury_reward are the canonical coinbase types
+            if tx_type in ("coinbase", "miner_reward", "treasury_reward"):
                 _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
