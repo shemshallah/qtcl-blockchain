@@ -416,9 +416,9 @@ class DHTNode:
         """
         if node_id is None:
             # Generate from address hash
-            node_id = hashlib.sha3_256(
+            node_id = hashlib.sha1(
                 f"{address}:{port}:{secrets.token_hex(16)}".encode()
-            ).hexdigest()[:40]
+            ).hexdigest()
 
         self.node_id = node_id
         self.node_id_int = int(node_id, 16)
@@ -1201,129 +1201,123 @@ def _settle_block_rewards(
         # MANDATORY SETTLEMENT: This MUST execute and update balances
         # ════════════════════════════════════════════════════════════════════════════════
 
-        # Get treasury address first (needed for validation)
-        _treasury_addr = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b"
-
         _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} SETTLEMENT EXECUTING NOW")
         _settle_log.critical(f"   miner={miner_address}")
-        _settle_log.critical(f"   treasury={_treasury_addr}")
+        _settle_log.critical(f"   treasury={treasury_address}")
 
         # GUARD: Reject invalid inputs
         if not miner_address or len(str(miner_address).strip()) < 10:
             _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
             return
-        if not _treasury_addr or len(str(_treasury_addr).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {_treasury_addr}")
+        if not treasury_address or len(str(treasury_address).strip()) < 10:
+            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {treasury_address}")
             return
 
         _settle_log.critical(f"✅ [SETTLE-VALIDATE] Addresses valid, proceeding with settlement")
 
         # HARDCODED REWARDS — Single source of truth
-        # Miner: 7.20 QTCL
-        # Treasury: 0.80 QTCL
-        miner_reward_qtcl = 7.20
-        treasury_reward_qtcl = 0.80
+        # Miner: 7.20 QTCL (720 base units)
+        # Treasury: 0.80 QTCL (80 base units)
+        # These scale with TessellationRewardSchedule but have explicit hardcoded defaults
+        miner_reward_base = 720  # base units: 7.20 QTCL
+        treasury_reward_base = 80  # base units: 0.80 QTCL
 
         # Try to get from schedule, but use hardcoded defaults if unavailable
         try:
             if TessellationRewardSchedule:
                 rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                miner_reward_qtcl = float(rewards.get("miner", 7.20))
-                treasury_reward_qtcl = float(rewards.get("treasury", 0.80))
-                _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_qtcl:.2f} QTCL, treasury={treasury_reward_qtcl:.2f} QTCL")
+                miner_reward_base = int(rewards.get("miner", 720))
+                treasury_reward_base = int(rewards.get("treasury", 80))
+                _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL")
         except Exception as sch_err:
             _settle_log.warning(f"[SETTLE] Schedule lookup failed: {sch_err}, using hardcoded: 7.20 + 0.80")
 
-        # Convert to base units for database storage
-        miner_reward_base = int(round(miner_reward_qtcl * 100))
-        treasury_reward_base = int(round(treasury_reward_qtcl * 100))
-
-        # Collect all transaction fees for treasury (in base units)
+        # Collect all transaction fees for treasury
         total_tx_fees = 0
         for tx in txs:
             f = tx.get("fee", tx.get("fee_base", 0))
             if f:
                 try:
-                    # Fees are in QTCL (float), convert to base units
-                    total_tx_fees += int(round(float(f) * 100))
+                    total_tx_fees += int(float(f) if isinstance(f, (float, str)) else f)
                 except (ValueError, TypeError):
                     pass
         treasury_reward_base += total_tx_fees
 
         # Compute wallet fingerprints
-        miner_fp = hashlib.sha3_256(miner_address.encode()).hexdigest()[:64]
-        treasury_address = _treasury_addr
-        treasury_fp = hashlib.sha3_256(treasury_address.encode()).hexdigest()[:64]
+        miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+        treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
+        treasury_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
 
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # ALWAYS update in-memory balance FIRST (guaranteed, even if DB fails)
-        # This ensures balances are always trackable regardless of DB state
-        # ═══════════════════════════════════════════════════════════════════════════════
-        _update_in_memory_balance(miner_address, miner_reward_qtcl, "miner")
-        _update_in_memory_balance(treasury_address, treasury_reward_qtcl + (total_tx_fees / 100.0), "treasury")
-        _settle_log.critical(f"[SETTLE-MEM] ✅ In-memory balances updated: miner={_get_in_memory_balance(miner_address)['balance']:.2f} QTCL, treasury={_get_in_memory_balance(treasury_address)['balance']:.2f} QTCL")
-
-        # PHASE 2: Execute DB settlement (best-effort, failure is OK)
+        # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
         # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_qtcl:.2f} QTCL, {treasury_address[:16]}… += {treasury_reward_qtcl:.2f} QTCL")
+        _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL, {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
 
-        _db_success = False
-        try:
-            with get_db_cursor() as cur:
-                # MINER REWARD — MANDATORY, ALWAYS EXECUTED
-                _miner_sql = """
-                INSERT INTO wallet_addresses
-                (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-                VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
-                ON CONFLICT (address) DO UPDATE SET
-                    balance = wallet_addresses.balance + %s,
-                    transaction_count = wallet_addresses.transaction_count + 1,
-                    address_type = 'miner',
-                    last_updated = NOW()
-                """
-                cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
-                _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_qtcl:.2f} QTCL")
+        with get_db_cursor() as cur:
+            # TEST: Verify database connectivity with simple SELECT
+            try:
+                cur.execute("SELECT COUNT(*) FROM wallet_addresses")
+                _test_count = cur.fetchone()[0] if cur.fetchone() else 0
+                cur.execute("SELECT COUNT(*) FROM wallet_addresses")  # Re-execute since we consumed the result
+                _test_count = cur.fetchone()[0]
+                _settle_log.critical(f"[SETTLE-TEST] ✅ Database connectivity OK: {_test_count} wallets exist")
+            except Exception as _test_err:
+                _settle_log.critical(f"[SETTLE-TEST] ❌ Database connectivity FAILED: {_test_err}")
+                return
+            # MINER REWARD — MANDATORY, ALWAYS EXECUTED
+            _miner_sql = """
+            INSERT INTO wallet_addresses
+            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+            VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                balance = wallet_addresses.balance + %s,
+                transaction_count = wallet_addresses.transaction_count + 1,
+                address_type = 'miner',
+                last_updated = NOW()
+            """
+            cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
+            _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
 
-                # VERIFY MINER WALLET WAS UPDATED
-                cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (miner_address,))
-                _miner_balance = cur.fetchone()
-                _miner_balance_val = _miner_balance[0] if _miner_balance else None
-                _settle_log.critical(f"[SETTLE-VERIFY] Miner {miner_address[:16]}… balance after INSERT: {_miner_balance_val} base units ({_miner_balance_val/100 if _miner_balance_val else 0:.2f} QTCL)")
+            # VERIFY MINER WALLET WAS UPDATED
+            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (miner_address,))
+            _miner_balance = cur.fetchone()
+            _miner_balance_val = _miner_balance[0] if _miner_balance else None
+            _settle_log.critical(f"[SETTLE-VERIFY] Miner {miner_address[:16]}… balance after INSERT: {_miner_balance_val} base units ({_miner_balance_val/100 if _miner_balance_val else 0:.2f} QTCL)")
 
-                # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
-                _treasury_sql = """
-                INSERT INTO wallet_addresses
-                (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-                VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
-                ON CONFLICT (address) DO UPDATE SET
-                    balance = wallet_addresses.balance + %s,
-                    transaction_count = wallet_addresses.transaction_count + 1,
-                    address_type = 'treasury',
-                    last_updated = NOW()
-                """
-                cur.execute(_treasury_sql, (treasury_address, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
-                _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {treasury_address[:16]}… += {treasury_reward_qtcl:.2f} QTCL")
+            # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
+            _treasury_sql = """
+            INSERT INTO wallet_addresses
+            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+            VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                balance = wallet_addresses.balance + %s,
+                transaction_count = wallet_addresses.transaction_count + 1,
+                address_type = 'treasury',
+                last_updated = NOW()
+            """
+            cur.execute(_treasury_sql, (treasury_address, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
+            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
 
-                # VERIFY TREASURY WALLET WAS UPDATED
-                cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (treasury_address,))
-                _treasury_balance = cur.fetchone()
-                _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
-                _settle_log.critical(f"[SETTLE-VERIFY] Treasury {treasury_address[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
+            # VERIFY TREASURY WALLET WAS UPDATED
+            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (treasury_address,))
+            _treasury_balance = cur.fetchone()
+            _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
+            _settle_log.critical(f"[SETTLE-VERIFY] Treasury {treasury_address[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
 
-                # TRANSACTION FEES TO TREASURY — OPTIONAL
-                if non_coinbase_txs:
-                    for tx in non_coinbase_txs:
-                        tx_fee_base = int(round(float(tx.get("fee", 0)) * 100))
-                        if tx_fee_base > 0:
-                            cur.execute(
-                                "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
-                                (tx_fee_base, treasury_address),
-                            )
-                
-                _db_success = True
-        except Exception as _db_err:
-            _settle_log.critical(f"[SETTLE] ⚠️  Database settlement failed (in-memory has correct balance): {_db_err}")
-            # DB failure is NOT fatal — in-memory already has the correct balance
+            # TRANSACTION FEES TO TREASURY — OPTIONAL
+            if non_coinbase_txs:
+                for tx in non_coinbase_txs:
+                    tx_fee = int(round(float(tx.get("fee", 0)) * 100))
+                    if tx_fee > 0:
+                        cur.execute(
+                            "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
+                            (tx_fee, treasury_address),
+                        )
+
+            # UPDATE CHAIN STATE
+            cur.execute(
+                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
+                (height, block_hash),
+            )
 
         # PHASE 3: Log completion
         # ─────────────────────────────────────────────────────────────────────────────
@@ -1637,7 +1631,7 @@ class Message:
     timestamp: float = field(default_factory=time.time)
     sender_id: Optional[str] = None
     message_id: str = field(
-        default_factory=lambda: hashlib.sha3_256(str(time.time()).encode()).hexdigest()[
+        default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[
             :16
         ]
     )
@@ -2902,39 +2896,6 @@ def verify_chain_integrity() -> dict:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# IN-MEMORY BALANCE TRACKER (UTXO-style) — used when DB is unavailable
-# ═══════════════════════════════════════════════════════════════════════════════
-_in_memory_balances: Dict[str, Dict[str, Any]] = {}
-_balance_lock = threading.RLock()
-
-def _get_in_memory_balance(address: str) -> Dict[str, Any]:
-    """Get balance from in-memory tracker."""
-    with _balance_lock:
-        return _in_memory_balances.get(address, {
-            "balance": 0.0,
-            "tx_count": 0,
-            "address_type": "unknown",
-            "last_updated": 0
-        })
-
-def _update_in_memory_balance(address: str, amount_qtcl: float, address_type: str = "unknown") -> None:
-    """Update in-memory balance (UTXO-style accumulation)."""
-    with _balance_lock:
-        if address not in _in_memory_balances:
-            _in_memory_balances[address] = {
-                "balance": 0.0,
-                "tx_count": 0,
-                "address_type": address_type,
-                "last_updated": time.time()
-            }
-        _in_memory_balances[address]["balance"] += amount_qtcl
-        _in_memory_balances[address]["tx_count"] += 1
-        _in_memory_balances[address]["last_updated"] = time.time()
-        if address_type != "unknown":
-            _in_memory_balances[address]["address_type"] = address_type
-
-
 @contextmanager
 def get_db_cursor():
     """Context manager for database cursor with connection pooling.
@@ -3714,58 +3675,26 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
             _diagnostic["db_error"] = str(_wqe)
             wallet = None
 
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # ALWAYS check in-memory balance — it's the source of truth when DB lags
-        # Return the MAXIMUM of DB balance and in-memory balance
-        # ═══════════════════════════════════════════════════════════════════════════════
-        _mem = _get_in_memory_balance(address)
-        _mem_balance = float(_mem.get("balance", 0.0))
-        
         if wallet is None:
-            # Address not in DB — use in-memory if available
-            if _mem["tx_count"] > 0:
-                result = {
-                    "address": address,
-                    "balance": _mem_balance,
-                    "symbol": "QTCL",
-                    "transaction_count": _mem["tx_count"],
-                    "address_type": _mem["address_type"],
-                    "diagnostic": _diagnostic,
-                    "note": "Balance from in-memory UTXO tracker (DB has no record)",
-                }
-            else:
-                result = {
-                    "address": address,
-                    "balance": 0.0,
-                    "symbol": "QTCL",
-                    "diagnostic": _diagnostic,
-                    "note": "Address not found — no balance recorded",
-                }
-        else:
-            # Address in DB — take MAX of DB and in-memory
-            raw_balance = int(wallet.get("balance") or 0)
-            db_balance = raw_balance / 100.0
-            
-            # Use whichever is higher: DB or in-memory
-            final_balance = max(db_balance, _mem_balance)
-            
+            # Address not yet in DB — return 0 balance with diagnostic info
             result = {
                 "address": address,
-                "balance": final_balance,
+                "balance": 0.0,
+                "symbol": "QTCL",
+                "diagnostic": _diagnostic,
+                "note": "Address not found in wallet_addresses table — no balance recorded",
+            }
+        else:
+            raw_balance = int(wallet.get("balance") or 0)
+            result = {
+                "address": address,
+                "balance": raw_balance / 100.0,
                 "symbol": "QTCL",
                 "raw_balance_base_units": raw_balance,
-                "db_balance_qtcl": db_balance,
-                "mem_balance_qtcl": _mem_balance,
-                "transaction_count": max(wallet.get("tx_count", 0), _mem["tx_count"]),
+                "transaction_count": wallet.get("tx_count", 0),
                 "address_type": wallet.get("address_type", "unknown"),
                 "diagnostic": _diagnostic,
             }
-            
-            if _mem_balance > db_balance:
-                result["note"] = f"DB balance ({db_balance:.2f}) lagging behind in-memory ({_mem_balance:.2f}) — returning in-memory"
-                logger.warning(
-                    f"[RPC-BALANCE] DB lag for {address[:16]}…: DB={db_balance:.2f} < MEM={_mem_balance:.2f}"
-                )
         logger.debug(
             f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}"
         )
@@ -4618,7 +4547,7 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
             caller_ip = "127.0.0.1"
 
         pubkey_hash = (
-            hashlib.sha3_256(pubkey_b64.encode()).hexdigest()[:32]
+            hashlib.sha256(pubkey_b64.encode()).hexdigest()[:32]
             if pubkey_b64
             else node_id[:32]
         )
@@ -4633,7 +4562,7 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
         fp_payload = (
             f"NAT:{caller_ip}|REP:{reported_ip}|MAC:{mac_address}|DEV:{device_id}"
         )
-        fingerprint = hashlib.sha3_256(fp_payload.encode()).hexdigest()
+        fingerprint = hashlib.sha256(fp_payload.encode()).hexdigest()
 
         # Debug pairing details
         logger.debug(
@@ -5062,7 +4991,7 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
 
     cert_preimage = f"{oracle_addr}|{wallet_addr}|{oracle_pub}"
     cert_sig_hex = str(
-        p.get("cert_sig", _hh.sha3_256(cert_preimage.encode()).hexdigest())
+        p.get("cert_sig", _hh.sha256(cert_preimage.encode()).hexdigest())
     )
     cert_auth_tag = str(
         p.get("cert_auth_tag", _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32])
@@ -5367,11 +5296,12 @@ def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
         except ValueError:
             return _rpc_error(-32602, "malformed hex in salt_hex or verifier_hex", rpc_id)
 
-        # PBKDF2-HMAC-SHA256, 600K iterations, 32 bytes → master key for HypAEAD
-        key = hashlib.pbkdf2_hmac(
-            "sha256", password.encode("utf-8"), salt, 600_000, dklen=32
+        # PBKDF2-HMAC-SHA256, 600K iterations, 64 bytes → enc_key + verifier_key
+        raw = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), salt, 600_000, dklen=64
         )
-        expected_v = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + key).digest()
+        verifier_key = raw[32:]
+        expected_v = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + verifier_key).digest()
 
         if not hmac.compare_digest(stored_v, expected_v):
             return _rpc_ok(
@@ -5561,51 +5491,6 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         import hashlib
         import hmac
         import json
-        import struct as _aead_struct
-
-        # ═══ HypAEAD: Pure-Python AEAD using SHA3-256-CTR + HMAC-SHA3-256 ═══
-        _AEAD_TAG_LEN = 32  # SHA3-256 output = 32 bytes
-
-        class _HypAEAD:
-            """Pure-Python AEAD cipher using SHA3-256 keystream + HMAC-SHA3-256 tag."""
-            def __init__(self, key: bytes):
-                if len(key) != 32:
-                    raise ValueError(f"HypAEAD key must be 32 bytes, got {len(key)}")
-                self._key = key
-
-            def _derive_subkeys(self, nonce: bytes):
-                enc_key = hashlib.sha3_256(self._key + nonce + b"hyp_enc").digest()
-                mac_key = hashlib.sha3_256(self._key + nonce + b"hyp_mac").digest()
-                return enc_key, mac_key
-
-            def _keystream(self, enc_key: bytes, length: int) -> bytes:
-                blocks = []
-                needed = length
-                ctr = 0
-                while needed > 0:
-                    block = hashlib.sha3_256(
-                        enc_key + _aead_struct.pack("<Q", ctr)
-                    ).digest()
-                    blocks.append(block)
-                    needed -= 32
-                    ctr += 1
-                return b"".join(blocks)[:length]
-
-            def _mac(self, mac_key: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
-                msg = nonce + _aead_struct.pack("<Q", len(ciphertext)) + ciphertext
-                return hmac.new(mac_key, msg, "sha3_256").digest()
-
-            def decrypt(self, nonce: bytes, ciphertext_and_tag: bytes) -> bytes:
-                if len(ciphertext_and_tag) < _AEAD_TAG_LEN:
-                    raise ValueError("Ciphertext too short (no auth tag)")
-                ct = ciphertext_and_tag[:-_AEAD_TAG_LEN]
-                tag = ciphertext_and_tag[-_AEAD_TAG_LEN:]
-                enc_key, mac_key = self._derive_subkeys(nonce)
-                expected_tag = self._mac(mac_key, nonce, ct)
-                if not hmac.compare_digest(tag, expected_tag):
-                    raise ValueError("HypAEAD: authentication tag mismatch")
-                ks = self._keystream(enc_key, len(ct))
-                return bytes(a ^ b for a, b in zip(ct, ks))
 
         p = params[0] if isinstance(params, (list, tuple)) and len(params) > 0 else params if isinstance(params, dict) else {}
         wallet_data = p.get("wallet_data")
@@ -5624,30 +5509,41 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         verifier_hex = enc_pk.get("verifier_hex", "")
         nonce_hex = enc_pk.get("nonce_hex", "")
         ciphertext_hex = enc_pk.get("ciphertext_hex", "")
+        mac_hex = enc_pk.get("mac_hex", "")
 
-        if not all([salt_hex, verifier_hex, nonce_hex, ciphertext_hex]):
+        if not all([salt_hex, verifier_hex, nonce_hex, ciphertext_hex, mac_hex]):
             return _rpc_error(-32602, "Malformed encrypted_private_key: missing required fields", rpc_id)
 
-        # Derive key using PBKDF2-HMAC-SHA256 (600K iterations, dklen=32)
+        # Derive key using PBKDF2-HMAC-SHA256 (600K iterations, dklen=64)
         salt = bytes.fromhex(salt_hex)
-        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 600_000, dklen=32)
+        raw = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 600_000, dklen=64)
+
+        enc_key = raw[0:16]      # 16 bytes for SHAKE-256-CTR
+        mac_key = raw[16:32]     # 16 bytes for SHA3-256 MAC
+        verifier_key = raw[32:64] # 32 bytes for password verification
 
         # Verify password using verifier tag
-        expected_verifier = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + key).digest()
+        expected_verifier = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + verifier_key).digest()
         stored_verifier = bytes.fromhex(verifier_hex)
         if not hmac.compare_digest(stored_verifier, expected_verifier):
             return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
 
-        # Decrypt private key using HypAEAD
+        # Verify MAC: SHA3-256(mac_key + nonce + ciphertext)
         nonce = bytes.fromhex(nonce_hex)
         ciphertext = bytes.fromhex(ciphertext_hex)
-        try:
-            private_key_bytes = _HypAEAD(key).decrypt(nonce, ciphertext)
-            private_key = private_key_bytes.hex()
-        except ValueError as e:
-            return _rpc_error(-32603, f"Decryption failed: {str(e)}", rpc_id)
+        stored_mac = bytes.fromhex(mac_hex)
+        expected_mac = hashlib.sha3_256(mac_key + nonce + ciphertext).digest()
+        if not hmac.compare_digest(stored_mac, expected_mac):
+            return _rpc_error(-32603, "MAC verification failed: data tampered or wrong key", rpc_id)
+
+        # Decrypt private key using SHAKE-256-CTR
+        shake = hashlib.shake_256(enc_key + nonce)
+        keystream = shake.digest(len(ciphertext))
+        private_key_bytes = bytes(a ^ b for a, b in zip(ciphertext, keystream))
+        private_key = private_key_bytes.hex()
 
         # Prepare transaction for signing - must match mempool's get_signing_hash() format
+        # Mempool uses: sender, recipient, amount (in QTCL, not cents), nonce
         tx_for_signing = {
             "from_address": tx.get("from_address", ""),
             "to_address": tx.get("to_address", ""),
@@ -5658,6 +5554,7 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         }
 
         # Compute signing hash - must match mempool's get_signing_hash()
+        # Mempool uses: sender, recipient, amount (QTCL float), nonce
         signing_data = {
             'sender': tx_for_signing["from_address"],
             'recipient': tx_for_signing["to_address"],
@@ -5671,10 +5568,10 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         engine = _init_hlwe_engine()
         sig = engine.sign_hash(tx_hash, private_key)
 
-        # Submit to mempool - amounts in QTCL (float), mempool handles conversion internally
+        # Submit to mempool - convert amount and fee to cents (int) as expected by mempool
         tx_for_mempool = tx_for_signing.copy()
-        tx_for_mempool["amount"] = float(tx_for_signing["amount"])  # QTCL (float)
-        tx_for_mempool["fee"] = float(tx_for_signing["fee"])  # QTCL (float)
+        tx_for_mempool["amount"] = int(round(float(tx_for_signing["amount"]) * 100))  # Convert to cents
+        tx_for_mempool["fee"] = int(round(float(tx_for_signing["fee"]) * 100))  # Convert to cents
         tx_for_mempool["signature"] = json.dumps(sig)  # Mempool expects JSON string
         tx_for_mempool["public_key"] = wallet_data.get("public_key", "")
 
@@ -5913,41 +5810,40 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ═══════════════════════════════════════════════════════════════════════
 
         # Get reward schedule for validation
-        # QTCL is stored as float directly — no base units (1 QTCL = 1.0)
-        _scheduled_miner_reward = 7.2  # default: 7.2 QTCL per block
-        _scheduled_treasury_reward = 0.8  # default: 0.8 QTCL per block
+        _scheduled_miner_reward = 720.0  # default
+        _scheduled_treasury_reward = 80.0  # default
         if TessellationRewardSchedule:
             try:
                 _rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                _scheduled_miner_reward = float(_rewards.get("miner", 7.2))
-                _scheduled_treasury_reward = float(_rewards.get("treasury", 0.8))
+                _scheduled_miner_reward = float(_rewards.get("miner", 720))
+                _scheduled_treasury_reward = float(_rewards.get("treasury", 80))
             except Exception as _e:
                 logger.warning(
                     f"[RPC-submitBlock] Could not fetch reward schedule: {_e}"
                 )
 
         # Calculate expected total coinbase (miner + treasury + fees)
-        # All amounts are in QTCL (float) — no base unit conversion
-        _total_fees = 0.0
+        _total_fees = 0
         _non_coinbase_txs = []
         _coinbase_txs = []
 
         for tx in txs or []:
             tx_type = tx.get("tx_type", "").lower()
-            # miner_reward and treasury_reward are the canonical coinbase types
-            if tx_type in ("coinbase", "miner_reward", "treasury_reward"):
+            if tx_type == "coinbase":
                 _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
-                # Sum fees from non-coinbase transactions (in QTCL)
+                # Sum fees from non-coinbase transactions
                 _fee = tx.get("fee", tx.get("fee_base", 0))
                 if isinstance(_fee, (float, str)):
                     try:
-                        _total_fees += float(_fee)
+                        _total_fees += int(
+                            round(float(_fee) * 100)
+                        )  # convert to base units
                     except:
                         pass
-                elif isinstance(_fee, int):
-                    _total_fees += float(_fee)
+                else:
+                    _total_fees += int(_fee)
 
         # Validate coinbase structure
         if len(_coinbase_txs) < 1:
@@ -5963,24 +5859,27 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             )
 
         # Validate each coinbase amount matches schedule + fees
-        # All comparisons in QTCL (float) — no base unit conversion
         _miner_coinbase = None
         _treasury_coinbase = None
 
         for cb in _coinbase_txs:
             _to = cb.get("to_addr", cb.get("to_address", ""))
             _amount = float(cb.get("amount", 0))
+            _amount_base = int(round(_amount * 100))  # Convert to base units
 
             if _to == miner_address:
                 _miner_coinbase = cb
                 # Miner reward = scheduled reward + 50% of fees
-                _expected_miner = _scheduled_miner_reward + (_total_fees / 2)
-                # Allow 0.01 QTCL tolerance for floating point
-                if abs(_amount - _expected_miner) > 0.01:
+                _expected_miner = int(round(_scheduled_miner_reward * 100)) + (
+                    _total_fees // 2
+                )
+                if (
+                    abs(_amount_base - _expected_miner) > 1
+                ):  # Allow 1 unit rounding tolerance
                     return _rpc_error(
                         -32003,
-                        f"Invalid miner coinbase: got {_amount} QTCL, expected {_expected_miner} "
-                        f"(reward={_scheduled_miner_reward} + fees/2={_total_fees / 2})",
+                        f"Invalid miner coinbase: got {_amount_base} base units, expected {_expected_miner} "
+                        f"(reward={_scheduled_miner_reward}*100 + fees/2={_total_fees // 2})",
                         rpc_id,
                     )
             elif (
@@ -5989,11 +5888,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             ):
                 _treasury_coinbase = cb
                 # Treasury reward = scheduled reward + 50% of fees
-                _expected_treasury = _scheduled_treasury_reward + (_total_fees - (_total_fees / 2))
-                if abs(_amount - _expected_treasury) > 0.01:
+                _expected_treasury = int(round(_scheduled_treasury_reward * 100)) + (
+                    _total_fees - (_total_fees // 2)
+                )
+                if abs(_amount_base - _expected_treasury) > 1:
                     return _rpc_error(
                         -32003,
-                        f"Invalid treasury coinbase: got {_amount} QTCL, expected {_expected_treasury}",
+                        f"Invalid treasury coinbase: got {_amount_base} base units, expected {_expected_treasury}",
                         rpc_id,
                     )
             else:
@@ -7006,7 +6907,7 @@ def _p2p_fanout_broadcast():
         },
         separators=(",", ":"),
     )
-    dht_hash = hashlib.sha3_256(dht_json.encode()).hexdigest()
+    dht_hash = hashlib.sha256(dht_json.encode()).hexdigest()
     if dht_hash in _p2p_seen_hashes:
         return
     _p2p_seen_hashes.add(dht_hash)
@@ -7645,6 +7546,47 @@ def serve_favicon():
     except Exception as e:
         logger.error(f"[FAVICON] Failed to serve favicon.png: {e}")
         return f"Error: {e}", 500
+
+
+@app.route("/agents", methods=["GET"])
+def serve_agents():
+    """GET /agents — Serve agents.html (MCP integration landing page)."""
+    try:
+        import os
+        from flask import send_file
+
+        agents_path = os.path.join(os.path.dirname(__file__), "agents.html")
+        if os.path.exists(agents_path):
+            return send_file(agents_path, mimetype="text/html")
+        return "agents.html not found", 404
+    except Exception as e:
+        logger.error(f"[AGENTS] Failed to serve agents.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/agents/capability.json", methods=["GET"])
+def serve_agent_capability():
+    """GET /agents/capability.json — Machine-readable QTCL capability document."""
+    try:
+        import os
+        from flask import send_file
+
+        cap_path = os.path.join(os.path.dirname(__file__), "qtcl_agent_capability.json")
+        if os.path.exists(cap_path):
+            return send_file(cap_path, mimetype="application/json")
+        return '{"error": "capability document not found"}', 404
+    except Exception as e:
+        return f'{{"error": "{e}"}}', 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MCP SERVER — Register QTCL MCP routes for agent integration
+# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    from qtcl_mcp_server import register_mcp_routes
+    register_mcp_routes(app)
+except ImportError:
+    logger.warning("[MCP] qtcl_mcp_server.py not found — MCP endpoints not available")
 
 
 @app.route("/rpc/hlwe/system-info", methods=["GET"])

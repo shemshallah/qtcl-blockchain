@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QTCL — Agent Integration</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#020408;--bg2:#060b14;--bg3:#0a1220;--bg4:#0f1a2e;
+  --text:#c8d6e5;--bright:#e8f0fe;--muted:#4a6080;--dim:#2a3a50;
+  --accent:#00d4ff;--accent2:#0099cc;--green:#00ff88;--amber:#ffaa00;
+  --violet:#8b5cf6;--coral:#ff6b6b;--pink:#ec4899;
+  --border:#1a2a40;--card:#080e1a;
+  --mono:'JetBrains Mono',monospace;--sans:'Space Grotesk',sans-serif;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.7;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ── Layout ── */
+.container{max-width:920px;margin:0 auto;padding:0 24px}
+.hero{padding:80px 0 60px;text-align:center}
+.hero-badge{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:4px;color:var(--accent);border:1px solid var(--accent);border-radius:20px;padding:4px 16px;margin-bottom:20px;text-transform:uppercase}
+.hero h1{font-size:42px;font-weight:600;color:var(--bright);line-height:1.15;margin-bottom:16px}
+.hero h1 span{background:linear-gradient(135deg,var(--accent),var(--violet));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{font-size:16px;color:var(--muted);max-width:560px;margin:0 auto;line-height:1.8}
+
+/* ── Stats ── */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:40px 0}
+.stat{background:var(--bg2);padding:20px 16px;text-align:center}
+.stat-val{font-family:var(--mono);font-size:26px;font-weight:600;color:var(--bright)}
+.stat-label{font-size:11px;color:var(--muted);letter-spacing:1.5px;margin-top:4px;text-transform:uppercase}
+.stat-live{color:var(--green);font-size:10px;font-family:var(--mono)}
+
+/* ── Connect Box ── */
+.connect{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:32px;margin:40px 0}
+.connect-title{font-size:18px;font-weight:500;color:var(--bright);margin-bottom:6px}
+.connect-desc{font-size:13px;color:var(--muted);margin-bottom:20px}
+.code-block{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px 20px;font-family:var(--mono);font-size:13px;line-height:1.8;color:var(--text);overflow-x:auto;position:relative}
+.code-block .key{color:var(--accent)}
+.code-block .str{color:var(--green)}
+.code-block .comment{color:var(--muted);font-style:italic}
+.copy-btn{position:absolute;top:8px;right:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--muted);font-family:var(--mono);font-size:10px;padding:4px 10px;cursor:pointer;transition:all .2s}
+.copy-btn:hover{color:var(--accent);border-color:var(--accent)}
+.copy-btn.copied{color:var(--green);border-color:var(--green)}
+.connect-badges{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
+.badge{font-family:var(--mono);font-size:10px;letter-spacing:1px;padding:4px 12px;border-radius:12px;border:1px solid var(--border);color:var(--muted)}
+.badge-accent{border-color:var(--accent2);color:var(--accent)}
+
+/* ── Sections ── */
+.section{padding:40px 0}
+.section-title{font-size:20px;font-weight:500;color:var(--bright);margin-bottom:24px;display:flex;align-items:center;gap:10px}
+.section-title::before{content:'';width:3px;height:20px;background:var(--accent);border-radius:2px}
+
+/* ── Tool Cards ── */
+.tools-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.tool-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px;transition:border-color .2s}
+.tool-card:hover{border-color:var(--accent2)}
+.tool-name{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--accent);margin-bottom:6px}
+.tool-desc{font-size:12px;color:var(--muted);line-height:1.6}
+
+/* ── Comparison ── */
+.compare-table{width:100%;border-collapse:collapse}
+.compare-table td{padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px}
+.compare-table td:first-child{color:var(--muted);font-family:var(--mono);font-size:12px;width:140px;white-space:nowrap}
+.compare-table tr:last-child td{border-bottom:none}
+.compare-table tr:hover td{background:var(--bg2)}
+
+/* ── Use Cases ── */
+.usecases{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.usecase{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px}
+.usecase-icon{font-size:20px;margin-bottom:8px}
+.usecase-title{font-size:13px;font-weight:500;color:var(--bright);margin-bottom:4px}
+.usecase-desc{font-size:12px;color:var(--muted);line-height:1.6}
+
+/* ── MCP Server Code ── */
+.server-section{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:32px;margin:40px 0}
+.server-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+.server-title{font-size:18px;font-weight:500;color:var(--bright)}
+.server-status{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.server-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px}
+.server-field{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 16px}
+.server-field-label{font-size:10px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:4px}
+.server-field-value{font-family:var(--mono);font-size:13px;color:var(--bright);word-break:break-all}
+.server-field-value a{color:var(--accent)}
+.server-tools-list{display:flex;flex-wrap:wrap;gap:6px}
+.server-tool-chip{font-family:var(--mono);font-size:10px;padding:3px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text)}
+
+/* ── Footer ── */
+.footer{padding:40px 0;border-top:1px solid var(--border);margin-top:40px;text-align:center}
+.footer-links{display:flex;justify-content:center;gap:24px;margin-bottom:12px}
+.footer-links a{font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--muted);text-transform:uppercase}
+.footer-links a:hover{color:var(--accent)}
+.footer-copy{font-size:11px;color:var(--dim)}
+
+/* ── Responsive ── */
+@media(max-width:640px){
+  .hero h1{font-size:28px}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .stat-val{font-size:20px}
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="hero-badge">Model Context Protocol</div>
+    <h1>Build agents that <span>transact</span></h1>
+    <p>QTCL is the first blockchain designed for autonomous AI agents. Post-quantum security. Flat fees. One JSON-RPC call to transact. Connect any MCP-compatible agent in 3 lines.</p>
+  </div>
+
+  <!-- LIVE STATS -->
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-val" id="chainHeight">—</div>
+      <div class="stat-label">Chain Height</div>
+      <div class="stat-live" id="chainLive"></div>
+    </div>
+    <div class="stat">
+      <div class="stat-val">18s</div>
+      <div class="stat-label">Block Time</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val">1 qsat</div>
+      <div class="stat-label">Fee / TX</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val">11</div>
+      <div class="stat-label">MCP Tools</div>
+    </div>
+  </div>
+
+  <!-- CONNECT -->
+  <div class="connect">
+    <div class="connect-title">Connect any agent in 3 lines</div>
+    <div class="connect-desc">Add to your MCP client config (Claude, Cursor, Windsurf, or any MCP-compatible framework). Zero SDK. Zero API keys.</div>
+    <div class="code-block" id="mcpConfig">
+      <button class="copy-btn" onclick="copyConfig(this)">COPY</button>
+<span class="comment">// claude_desktop_config.json or .cursor/mcp.json</span>
+{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"qtcl"</span>: {
+      <span class="key">"type"</span>: <span class="str">"url"</span>,
+      <span class="key">"url"</span>: <span class="str">"https://qtcl-blockchain.koyeb.app/mcp/sse"</span>
+    }
+  }
+}</div>
+    <div class="connect-badges">
+      <span class="badge badge-accent">Claude</span>
+      <span class="badge badge-accent">Claude Code</span>
+      <span class="badge badge-accent">Cursor</span>
+      <span class="badge badge-accent">Windsurf</span>
+      <span class="badge">CrewAI</span>
+      <span class="badge">LangChain</span>
+      <span class="badge">AutoGen</span>
+      <span class="badge">Any MCP Client</span>
+    </div>
+  </div>
+
+  <!-- TOOLS -->
+  <div class="section">
+    <div class="section-title">Available tools</div>
+    <div class="tools-grid">
+      <div class="tool-card">
+        <div class="tool-name">qtcl_create_wallet</div>
+        <div class="tool-desc">Create a post-quantum secured wallet. Returns a 64-char hex address and HypΓ public key.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_balance</div>
+        <div class="tool-desc">Check confirmed and pending balance for any address. Amounts in QTCL (1 QTCL = 100 qsat).</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_send_transaction</div>
+        <div class="tool-desc">Send QTCL with flat 1 qsat fee. No gas estimation, no approval dance. Optional 256-char memo.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_transaction</div>
+        <div class="tool-desc">Look up any transaction by hash. Verify payment receipt, check confirmations, read memo.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_chain_info</div>
+        <div class="tool-desc">Current chain height, latest block hash, mempool depth, oracle status, network health.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_block</div>
+        <div class="tool-desc">Block details by height or hash. Header, transactions, miner, reward, coherence metrics.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_recent_transactions</div>
+        <div class="tool-desc">Recent transactions, optionally filtered by address. Up to 50 results sorted by time.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_quantum_metrics</div>
+        <div class="tool-desc">Live W-state fidelity, entanglement witness, density matrix dimensions, oracle consensus round.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_oracle_registry</div>
+        <div class="tool-desc">List registered quantum oracles. Addresses, stake, uptime, last heartbeat. 3-of-5 BFT consensus.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_peers</div>
+        <div class="tool-desc">Active network peers. Node IDs, connection times, NAT types. Kademlia DHT topology.</div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-name">qtcl_get_price</div>
+        <div class="tool-desc">QTCL/USD price from Pyth Network oracle feed. Price, confidence interval, last update.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- COMPARISON -->
+  <div class="section">
+    <div class="section-title">Why agents choose QTCL</div>
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+    <table class="compare-table">
+      <tr><td>vs Ethereum</td><td>No gas estimation. No ERC-20 approve/transferFrom. No MEV. Post-quantum signatures.</td></tr>
+      <tr><td>vs Solana</td><td>No program deployment. No rent. Deterministic fees. No account model complexity.</td></tr>
+      <tr><td>vs Lightning</td><td>No channel management. No liquidity routing. Direct transfers with memo field.</td></tr>
+      <tr><td>vs Stripe</td><td>No KYC. No chargebacks. No API keys. Cryptographic proof of payment. Censorship-resistant.</td></tr>
+      <tr><td>Unique to QTCL</td><td>Quantum oracle network, density matrix streaming, hyperbolic lattice tessellation, W-state consensus, post-quantum cryptography. No other chain has any of these.</td></tr>
+    </table>
+    </div>
+  </div>
+
+  <!-- USE CASES -->
+  <div class="section">
+    <div class="section-title">Agent use cases</div>
+    <div class="usecases">
+      <div class="usecase">
+        <div class="usecase-icon">⚡</div>
+        <div class="usecase-title">Agent-to-agent micropayments</div>
+        <div class="usecase-desc">Pay for API calls, compute cycles, and data in real-time. Flat 1 qsat fee makes sub-cent transactions viable.</div>
+      </div>
+      <div class="usecase">
+        <div class="usecase-icon">🤝</div>
+        <div class="usecase-title">Multi-agent escrow</div>
+        <div class="usecase-desc">Agent A locks QTCL. Agent B completes task. Smart release on verification. Memo field carries the contract reference.</div>
+      </div>
+      <div class="usecase">
+        <div class="usecase-icon">📊</div>
+        <div class="usecase-title">Autonomous treasury</div>
+        <div class="usecase-desc">Deterministic fee budgeting. No gas spikes. Agents can plan spend with 100% predictability.</div>
+      </div>
+      <div class="usecase">
+        <div class="usecase-icon">🔐</div>
+        <div class="usecase-title">Quantum-secured identity</div>
+        <div class="usecase-desc">Agent identity anchored to QTCL addresses with HypΓ post-quantum signatures. Survives the quantum transition.</div>
+      </div>
+      <div class="usecase">
+        <div class="usecase-icon">🧾</div>
+        <div class="usecase-title">Verifiable receipts</div>
+        <div class="usecase-desc">Transaction hash + memo = cryptographic proof of payment. No dispute resolution needed.</div>
+      </div>
+      <div class="usecase">
+        <div class="usecase-icon">🌐</div>
+        <div class="usecase-title">Cross-framework settlement</div>
+        <div class="usecase-desc">LangChain agent pays CrewAI agent. Different frameworks, same QTCL rail. MCP is the universal adapter.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MCP SERVER STATUS (LIVE) -->
+  <div class="server-section">
+    <div class="server-header">
+      <div class="server-title">MCP Server</div>
+      <div class="server-status">
+        <span class="status-dot" id="mcpDot"></span>
+        <span id="mcpStatus">checking...</span>
+      </div>
+    </div>
+    <div class="server-info">
+      <div class="server-field">
+        <div class="server-field-label">Endpoint</div>
+        <div class="server-field-value"><a href="/mcp/sse" target="_blank">/mcp/sse</a></div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Protocol</div>
+        <div class="server-field-value">MCP 2024-11-05</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Transport</div>
+        <div class="server-field-value">SSE (Server-Sent Events)</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Capability Doc</div>
+        <div class="server-field-value"><a href="/agents/capability.json" target="_blank">/agents/capability.json</a></div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px">Registered tools</div>
+    <div class="server-tools-list" id="toolsList">
+      <span class="server-tool-chip">qtcl_create_wallet</span>
+      <span class="server-tool-chip">qtcl_get_balance</span>
+      <span class="server-tool-chip">qtcl_send_transaction</span>
+      <span class="server-tool-chip">qtcl_get_transaction</span>
+      <span class="server-tool-chip">qtcl_get_chain_info</span>
+      <span class="server-tool-chip">qtcl_get_block</span>
+      <span class="server-tool-chip">qtcl_get_recent_transactions</span>
+      <span class="server-tool-chip">qtcl_get_quantum_metrics</span>
+      <span class="server-tool-chip">qtcl_get_oracle_registry</span>
+      <span class="server-tool-chip">qtcl_get_peers</span>
+      <span class="server-tool-chip">qtcl_get_price</span>
+    </div>
+  </div>
+
+  <!-- DIRECT RPC -->
+  <div class="section">
+    <div class="section-title">Direct RPC (no MCP needed)</div>
+    <div class="code-block">
+      <button class="copy-btn" onclick="copyRpc(this)">COPY</button>
+<span class="comment"># Any language. Any platform. One HTTP POST.</span>
+curl -X POST https://qtcl-blockchain.koyeb.app/rpc \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -d <span class="str">'{"jsonrpc":"2.0","method":"qtcl_getBlockHeight","params":[],"id":1}'</span></div>
+  </div>
+
+  <!-- CRYPTO SUMMARY -->
+  <div class="section">
+    <div class="section-title">Post-quantum cryptography</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+      <div class="server-field">
+        <div class="server-field-label">Hash</div>
+        <div class="server-field-value">SHA3-256 (Keccak)</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Signatures</div>
+        <div class="server-field-value">Schnorr-Γ / PSL(2,Z[i])</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Encryption</div>
+        <div class="server-field-value">GeodesicLWE</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Key Derivation</div>
+        <div class="server-field-value">BIP32 HD / SHA3-512</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Security Level</div>
+        <div class="server-field-value">NIST PQ Category 3</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Dependencies</div>
+        <div class="server-field-value">Zero. Pure Python stdlib.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <div class="footer-links">
+      <a href="/">Explorer</a>
+      <a href="/tx">Wallet</a>
+      <a href="/vault">Vault</a>
+      <a href="/hyp">HypΓ Docs</a>
+      <a href="/agents/capability.json">Capability JSON</a>
+      <a href="/mcp/health">MCP Health</a>
+    </div>
+    <div class="footer-copy">QTCL — Quantum Temporal Coherence Ledger</div>
+  </div>
+
+</div>
+
+<script>
+// ── Live chain height ──
+async function fetchHeight() {
+  try {
+    const r = await fetch('/rpc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0', method:'qtcl_getBlockHeight', params:[], id: Date.now()})
+    });
+    const d = await r.json();
+    const h = d.result?.height ?? d.result?.block_height;
+    if (h !== undefined) {
+      document.getElementById('chainHeight').textContent = h.toLocaleString();
+      document.getElementById('chainLive').textContent = 'LIVE';
+    }
+  } catch(e) {
+    document.getElementById('chainHeight').textContent = '—';
+    document.getElementById('chainLive').textContent = '';
+  }
+}
+
+// ── MCP health check ──
+async function checkMCP() {
+  try {
+    const r = await fetch('/mcp/health');
+    const d = await r.json();
+    if (d.status === 'ok') {
+      document.getElementById('mcpStatus').textContent = `online · ${d.tools} tools · ${d.active_sessions} sessions`;
+      document.getElementById('mcpDot').style.background = 'var(--green)';
+    } else {
+      throw new Error('not ok');
+    }
+  } catch(e) {
+    document.getElementById('mcpStatus').textContent = 'deploy qtcl_mcp_server.py to enable';
+    document.getElementById('mcpDot').style.background = 'var(--amber)';
+  }
+}
+
+// ── Copy helpers ──
+function copyConfig(btn) {
+  const text = `{
+  "mcpServers": {
+    "qtcl": {
+      "type": "url",
+      "url": "https://qtcl-blockchain.koyeb.app/mcp/sse"
+    }
+  }
+}`;
+  navigator.clipboard.writeText(text);
+  btn.textContent = 'COPIED'; btn.classList.add('copied');
+  setTimeout(() => { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 2000);
+}
+
+function copyRpc(btn) {
+  const text = `curl -X POST https://qtcl-blockchain.koyeb.app/rpc \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","method":"qtcl_getBlockHeight","params":[],"id":1}'`;
+  navigator.clipboard.writeText(text);
+  btn.textContent = 'COPIED'; btn.classList.add('copied');
+  setTimeout(() => { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 2000);
+}
+
+// ── Init ──
+fetchHeight();
+checkMCP();
+setInterval(fetchHeight, 15000);
+setInterval(checkMCP, 30000);
+</script>
+</body>
+</html>

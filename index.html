@@ -243,8 +243,8 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 #hyp.page{padding:0;max-width:none}
 #hyp.page.active{display:block}
 /* ── IFRAME PAGES ── */
-#tx.page.active,#vault.page.active,#bridge.page.active{display:block}
-#tx.page iframe,#vault.page iframe,#bridge.page iframe,#hyp.page iframe{width:100%;height:calc(100vh - 108px);border:none;display:block}
+#tx.page.active,#vault.page.active,#bridge.page.active,#agents.page.active{display:block}
+#tx.page iframe,#vault.page iframe,#bridge.page iframe,#hyp.page iframe,#agents.page iframe{width:100%;height:calc(100vh - 108px);border:none;display:block}
 
 /* ── PAGINATION ── */
 .pagination{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--border);justify-content:flex-end}
@@ -352,6 +352,7 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
   <div class="tab" data-page="network">NETWORK</div>
   <div class="tab" data-page="tx">TRANSACTIONS</div>
   <div class="tab" data-page="vault">VAULT</div>
+  <div class="tab" data-page="agents">AGENTS</div>
   <div class="tab" data-page="hyp">HYPΓ DOCS</div>
 </div>
 
@@ -636,6 +637,11 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 <!-- ═══════════════════ BRIDGE PAGE ═══════════════════ -->
 <div id="bridge" class="page" style="padding:0;max-width:none">
   <iframe src="/bridge" style="width:100%;height:calc(100vh - 108px);border:none;display:block"></iframe>
+</div>
+
+<!-- ═══════════════════ AGENTS PAGE ═══════════════════ -->
+<div id="agents" class="page" style="padding:0;max-width:none">
+  <iframe src="/agents" style="width:100%;height:calc(100vh - 108px);border:none;display:block"></iframe>
 </div>
 
 <!-- ═══════════════════ HYP PAGE ═══════════════════ -->
