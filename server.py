@@ -54,7 +54,6 @@ import threading
 import concurrent.futures as _cf
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable, Union, Deque
 from collections import deque, OrderedDict
-import requests  # For pushing data to SSE service
 
 # ═══ NUMPY — imported early for quantum code (takes ~1s but needed everywhere) ═══
 import numpy as np
@@ -372,7 +371,6 @@ import traceback
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from dataclasses import dataclass, field
-from collections import deque, OrderedDict
 from contextlib import contextmanager
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -596,9 +594,6 @@ class DHTManager:
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 from decimal import Decimal
-from concurrent.futures import (
-    ThreadPoolExecutor,
-)  # H2: Thread pooling for DoS prevention
 import random  # required by P2P broadcast loop
 
 try:
@@ -617,7 +612,6 @@ from urllib3.util.retry import Retry
 from io import BytesIO
 import msgpack
 import base64
-import queue as _queue_mod
 import uuid
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -2705,30 +2699,47 @@ def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
 
 
 def query_block_range_db(from_height: int, to_height: int) -> list:
-    """Get block range from Supabase PostgreSQL (batch query for performance)."""
+    """Get block range from PostgreSQL (batch query for performance).
+
+    Returns blocks with field names matching the frontend expectations.
+    """
     blocks = []
     try:
         with get_db_cursor() as cur:
             cur.execute("""
-                SELECT height, block_hash, timestamp, difficulty, reward,
-                       merkle_root, previous_hash, tx_count, transactions,
-                       w_state_fidelity, pq_curr, pq_last
-                FROM blocks 
+                SELECT height, block_hash, timestamp, difficulty,
+                       merkle_root, parent_hash, tx_count,
+                       fidelity_snapshot, pq_curr, pq_last, nonce,
+                       w_state_hash, miner_address
+                FROM blocks
                 WHERE height >= %s AND height <= %s
-                ORDER BY height ASC
+                ORDER BY height DESC
             """, (from_height, to_height))
-            cols = [desc[0] for desc in cur.description]
             for row in cur.fetchall():
-                block_dict = dict(zip(cols, row))
-                if block_dict.get("transactions"):
-                    import json
-                    try:
-                        block_dict["transactions"] = json.loads(block_dict["transactions"])
-                    except:
-                        block_dict["transactions"] = []
-                blocks.append(block_dict)
+                blocks.append({
+                    "height": row[0],
+                    "block_hash": row[1],
+                    "hash": row[1],
+                    "timestamp": int(row[2]) if row[2] else 0,
+                    "timestamp_s": int(row[2]) if row[2] else 0,
+                    "difficulty": int(row[3]) if row[3] else 6,
+                    "merkle_root": row[4] or ("0" * 64),
+                    "parent_hash": row[5] or ("0" * 64),
+                    "previous_hash": row[5] or ("0" * 64),
+                    "tx_count": int(row[6]) if row[6] else 0,
+                    "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                    "quantum_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                    "pq_curr": int(row[8]) if row[8] else 1,
+                    "pq_last": int(row[9]) if row[9] else 0,
+                    "nonce": int(row[10]) if row[10] else 0,
+                    "w_entropy_hash": row[11] or "",
+                    "w_state_hash": row[11] or "",
+                    "miner": row[12] or "",
+                    "mined": True,
+                    "finalized": True,
+                })
     except Exception as e:
-        logger.debug(f"[QUERY-BLOCK-RANGE] PG error: {e}")
+        logger.warning(f"[QUERY-BLOCK-RANGE] PG error: {e}")
     return blocks
 
 
@@ -2989,7 +3000,7 @@ def _lazy_ensure_blocks():
             if count == 0:
                 genesis_hash = "0" * 64
                 parent_hash = "0" * 64
-                genesis_ts = int(time.time() * 1e9)
+                genesis_ts = int(time.time())
                 cur.execute(
                     """
                     INSERT INTO blocks (
@@ -3005,44 +3016,43 @@ def _lazy_ensure_blocks():
                     (genesis_hash, parent_hash, genesis_hash, genesis_ts, genesis_ts),
                 )
                 logger.info(
-                    f"[SCHEMA] 🌱 Genesis block auto-created: h=0  hash={genesis_hash[:16]}…"
+                    f"[SCHEMA] Genesis block auto-created: h=0  hash={genesis_hash[:16]}…"
                 )
 
-        # Create quantum_field_distribution table with triggers for neighbor broadcast
-        try:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS quantum_field_distribution (
-                    id                      SERIAL PRIMARY KEY,
-                    block_height            BIGINT NOT NULL,
-                    block_hash              VARCHAR(255) NOT NULL,
-                    miner_address           VARCHAR(255) NOT NULL,
-                    quantum_field_16x16x16  BYTEA NOT NULL,  -- 4096 complex64 elements
-                    pq_curr                 INTEGER,
-                    pq_last                 INTEGER,
-                    timestamp_ns            BIGINT NOT NULL,
-                    received_by_neighbor    BOOLEAN DEFAULT FALSE,
-                    neighbor_broadcast_list TEXT,  -- JSON array of neighbor addresses
-                    created_at              TIMESTAMPTZ DEFAULT NOW()
+            # Create quantum_field_distribution table with triggers for neighbor broadcast
+            try:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS quantum_field_distribution (
+                        id                      SERIAL PRIMARY KEY,
+                        block_height            BIGINT NOT NULL,
+                        block_hash              VARCHAR(255) NOT NULL,
+                        miner_address           VARCHAR(255) NOT NULL,
+                        quantum_field_16x16x16  BYTEA NOT NULL,
+                        pq_curr                 INTEGER,
+                        pq_last                 INTEGER,
+                        timestamp_ns            BIGINT NOT NULL,
+                        received_by_neighbor    BOOLEAN DEFAULT FALSE,
+                        neighbor_broadcast_list TEXT,
+                        created_at              TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_qf_height ON quantum_field_distribution(block_height)"
                 )
-            """)
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_qf_height ON quantum_field_distribution(block_height)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_qf_miner ON quantum_field_distribution(miner_address)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_qf_broadcast ON quantum_field_distribution(received_by_neighbor)"
-            )
-
-            logger.info(
-                "[SCHEMA] ✅ quantum_field_distribution table ready (neighbor gossip)"
-            )
-        except Exception as _qf_e:
-            logger.debug(f"[SCHEMA] quantum_field_distribution table creation: {_qf_e}")
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_qf_miner ON quantum_field_distribution(miner_address)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_qf_broadcast ON quantum_field_distribution(received_by_neighbor)"
+                )
+                logger.info(
+                    "[SCHEMA] quantum_field_distribution table ready"
+                )
+            except Exception as _qf_e:
+                logger.debug(f"[SCHEMA] quantum_field_distribution table creation: {_qf_e}")
 
         _SCHEMA_ENSURED_BLOCKS = True
-        logger.info("[SCHEMA] ✅ blocks table ready")
+        logger.info("[SCHEMA] blocks table ready")
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_blocks failed: {e}")
 
@@ -3611,36 +3621,35 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                             sql = """
                                 SELECT height, block_hash, timestamp, w_state_hash,
                                        parent_hash, nonce, difficulty,
-                                       coherence_snapshot, merkle_root, tx_count
+                                       fidelity_snapshot, merkle_root, tx_count
                                 FROM blocks WHERE height = ? LIMIT 1
                             """
                             cursor = db._sqlite_conn.execute(sql, (h,))
                             row = cursor.fetchone()
-                            if not row:
-                                return None
-                            block = {
-                                "height": row[0],
-                                "block_height": row[0],
-                                "block_hash": row[1],
-                                "hash": row[1],
-                                "parent_hash": row[4] or ("0" * 64),
-                                "previous_hash": row[4] or ("0" * 64),
-                                "merkle_root": row[8] or ("0" * 64),
-                                "timestamp_s": int(row[2]) if row[2] else 0,
-                                "timestamp": int(row[2]) if row[2] else 0,
-                                "difficulty": int(float(row[6])) if row[6] else 5,
-                                "nonce": int(row[5]) if row[5] else 0,
-                                "w_state_fidelity": float(row[7])
-                                if row[7] is not None
-                                else 0.0,
-                                "w_entropy_hash": row[3] or "",
-                                "pq_curr": h,
-                                "pq_last": max(0, h - 1),
-                                "tx_count": int(row[9]) if row[9] else 0,
-                                "mined": True,
-                                "finalized": True,
-                            }
-                            return block
+                            if row:
+                                block = {
+                                    "height": row[0],
+                                    "block_height": row[0],
+                                    "block_hash": row[1],
+                                    "hash": row[1],
+                                    "parent_hash": row[4] or ("0" * 64),
+                                    "previous_hash": row[4] or ("0" * 64),
+                                    "merkle_root": row[8] or ("0" * 64),
+                                    "timestamp_s": int(row[2]) if row[2] else 0,
+                                    "timestamp": int(row[2]) if row[2] else 0,
+                                    "difficulty": int(float(row[6])) if row[6] else 5,
+                                    "nonce": int(row[5]) if row[5] else 0,
+                                    "w_state_fidelity": float(row[7])
+                                    if row[7] is not None
+                                    else 0.0,
+                                    "w_entropy_hash": row[3] or "",
+                                    "pq_curr": h,
+                                    "pq_last": max(0, h - 1),
+                                    "tx_count": int(row[9]) if row[9] else 0,
+                                    "mined": True,
+                                    "finalized": True,
+                                }
+                                return block
                         except Exception as _se:
                             logger.debug(f"[RPC] SQLite query failed: {_se}")
 
@@ -3650,7 +3659,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         """
                         SELECT height, block_hash, timestamp, w_state_hash,
                                parent_hash, nonce, difficulty,
-                               coherence_snapshot, merkle_root, tx_count
+                               fidelity_snapshot, merkle_root, tx_count
                         FROM blocks WHERE height = %s LIMIT 1
                     """,
                         (h,),
@@ -5458,12 +5467,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     """
                     INSERT INTO blocks
                     (height, block_hash, parent_hash, merkle_root, timestamp,
-                     oracle_w_state_hash, miner_address, nonce, difficulty, pq_curr, pq_last)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     w_state_hash, oracle_w_state_hash, miner_address, nonce, difficulty, pq_curr, pq_last)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (height) DO NOTHING
                     """,
                     (
                         height, block_hash, parent_hash, merkle_root, timestamp_s,
+                        w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                         w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                         miner_address, nonce, difficulty_bits, height, max(0, height - 1),
                     ),
@@ -5719,28 +5729,31 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     cur.execute(
                         """
                         INSERT INTO blocks
-                        (height, block_number, block_hash, previous_hash, timestamp,
-                         oracle_w_state_hash, validator_public_key, nonce,
-                         difficulty, entropy_score, transactions_root,
-                         pq_curr, pq_last, mermin_value, mermin_violated)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (height, block_hash, parent_hash, merkle_root, timestamp,
+                         w_state_hash, oracle_w_state_hash, miner_address, nonce,
+                         difficulty, coherence_snapshot, fidelity_snapshot, tx_count,
+                         pq_curr, pq_last, finalized, finalized_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (height) DO NOTHING
                     """,
                         (
                             height,
-                            height,
                             block_hash,
                             parent_hash,
+                            merkle_root,
                             timestamp_s,
+                            w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                             w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                             miner_address,
                             nonce,
                             difficulty_bits,
                             w_state_fidelity,
-                            merkle_root,
+                            w_state_fidelity,
+                            len(txs) if txs else 0,
                             height,
                             max(0, height - 1),
-                            mermin_value,
-                            mermin_violated,
+                            True,
+                            int(time.time()),
                         ),
                     )
 
@@ -7323,6 +7336,22 @@ def serve_bridge():
         return f"Error: {e}", 500
 
 
+@app.route("/favicon.png", methods=["GET"])
+def serve_favicon():
+    """GET /favicon.png — Serve the QTCL favicon."""
+    try:
+        import os
+        from flask import send_file
+
+        favicon_path = os.path.join(os.path.dirname(__file__), "favicon.png")
+        if os.path.exists(favicon_path):
+            return send_file(favicon_path, mimetype="image/png")
+        return "favicon.png not found", 404
+    except Exception as e:
+        logger.error(f"[FAVICON] Failed to serve favicon.png: {e}")
+        return f"Error: {e}", 500
+
+
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
 def rpc_hlwe_system_info():
     """GET /rpc/hlwe/system-info — HypΓ cryptographic system information.
@@ -7585,9 +7614,6 @@ def _build_snapshot_payload() -> dict:
     return _base
 
 
-import queue as _queue_module
-import threading as _threading_module
-
 # ──────────────────────────────────────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════════════════════════════
 # SSE STREAMING INFRASTRUCTURE (FIXED: oracle → server → client real-time delivery)
@@ -7597,7 +7623,7 @@ import threading as _threading_module
 # SNAPSHOT CACHING: Simple 16³ unified snapshot for RPC polling (no multiplexer)
 # ════════════════════════════════════════════════════════════════════════════════
 _latest_unified_snapshot = {}
-_snapshot_cache_lock = _threading_module.RLock()
+_snapshot_cache_lock = threading.RLock()
 
 # Removed: old SSE multiplexer infrastructure. SSE handled by external sse_server.py.
 # Removed: old 64³ snapshot generation. Clients fetch unified 16³ snapshots via RPC.

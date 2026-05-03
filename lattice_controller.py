@@ -3598,26 +3598,35 @@ class BlockManager:
                     self.db.execute(
                         """
                         INSERT INTO blocks
-                            (block_height, block_hash, parent_hash, oracle_w_state_hash,
-                             timestamp, tx_count, merkle_root, hyp_witness)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (block_height) DO UPDATE SET
+                            (height, block_hash, parent_hash, w_state_hash, hyp_witness,
+                             timestamp, tx_count, merkle_root, coherence_snapshot, fidelity_snapshot,
+                             finalized, finalized_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (height) DO UPDATE SET
                             block_hash        = EXCLUDED.block_hash,
-                            oracle_w_state_hash = EXCLUDED.oracle_w_state_hash,
+                            w_state_hash      = EXCLUDED.w_state_hash,
+                            hyp_witness       = EXCLUDED.hyp_witness,
                             timestamp         = EXCLUDED.timestamp,
                             tx_count          = EXCLUDED.tx_count,
                             merkle_root       = EXCLUDED.merkle_root,
-                            hyp_witness      = EXCLUDED.hyp_witness
+                            coherence_snapshot = EXCLUDED.coherence_snapshot,
+                            fidelity_snapshot  = EXCLUDED.fidelity_snapshot,
+                            finalized         = EXCLUDED.finalized,
+                            finalized_at      = EXCLUDED.finalized_at
                         """,
                         (
                             block.block_height,
                             block.block_hash,
                             block.parent_hash,
                             block.w_state_hash,
+                            block.hyp_witness,
                             block.timestamp_s,
                             block.tx_count,
                             block.merkle_root,
-                            block.hyp_witness,
+                            block.coherence_snapshot,
+                            block.fidelity_snapshot,
+                            block.finalized,
+                            block.finalized_at,
                         ),
                     )
                 except Exception as db_err:
@@ -3727,11 +3736,11 @@ class BlockManager:
                 if self.db is not None:
                     try:
                         rows = self.db.execute_fetch_all(
-                            "SELECT block_height, block_hash FROM blocks "
-                            "ORDER BY block_height DESC LIMIT 1"
+                            "SELECT height, block_hash FROM blocks "
+                            "ORDER BY height DESC LIMIT 1"
                         )
                         if rows:
-                            db_h = int(rows[0]["block_height"])
+                            db_h = int(rows[0]["height"])
                             db_hash = str(rows[0]["block_hash"])
                             # When only genesis (height=0) is in DB, the expected
                             # parent for the next block is the null hash, matching
