@@ -664,58 +664,98 @@ _LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
 
 
 def _sync_lattice_blocks_to_cache():
-    """Sync blocks from LATTICE into the server's block cache for RPC serving."""
+    """Warm the server's block cache from LATTICE (preferred) or DB fallback.
+
+    When the BlockManager resumes from a DB tip it only keeps the tip in memory,
+    so its block_by_height dict is empty.  We fall back to querying PostgreSQL
+    directly to warm the cache — this eliminates the noisy warning and makes
+    recent blocks serve from memory.
+    """
     global LATTICE
     try:
         if LATTICE is None:
             logger.warning("[BLOCK-CACHE] LATTICE is None")
             return
 
-        # Blocks are in LATTICE.block_manager.block_by_height
         block_manager = getattr(LATTICE, "block_manager", None)
         if block_manager is None:
             logger.warning("[BLOCK-CACHE] LATTICE.block_manager is None")
             return
 
         blocks_by_height = getattr(block_manager, "block_by_height", None)
-        if not blocks_by_height:
-            logger.warning(
-                "[BLOCK-CACHE] block_manager.block_by_height is empty or None"
-            )
-            logger.warning(
-                f"[BLOCK-CACHE] block_manager attrs: {[a for a in dir(block_manager) if not a.startswith('_')]}"
-            )
-            return
-
-        logger.info(
-            f"[BLOCK-CACHE] Found {len(blocks_by_height)} blocks in block_manager, syncing..."
-        )
+        synced = 0
 
         with _BLOCK_CACHE_LOCK:
-            for height, block in blocks_by_height.items():
-                if isinstance(block, dict):
-                    _BLOCK_CACHE[height] = block
-                else:
-                    _BLOCK_CACHE[height] = {
-                        "height": getattr(block, "block_height", height),
-                        "block_hash": getattr(block, "block_hash", ""),
-                        "parent_hash": getattr(block, "parent_hash", ""),
-                        "merkle_root": getattr(block, "merkle_root", ""),
-                        "timestamp": getattr(block, "timestamp_s", 0),
-                        "coherence": getattr(block, "coherence_snapshot", 0),
-                        "fidelity": getattr(block, "fidelity_snapshot", 0),
-                        "quantum_fidelity": getattr(block, "fidelity_snapshot", 0),
-                        "miner": getattr(block, "miner_address", ""),
-                        "tx_count": getattr(block, "tx_count", 0),
-                        "transaction_count": getattr(block, "tx_count", 0),
-                        "w_state_hash": getattr(block, "w_state_hash", ""),
-                        "hyp_witness": getattr(block, "hyp_witness", ""),
-                        "pq_curr": getattr(block, "pq_curr", height),
-                    }
+            # ── Path A: lattice has blocks in memory (normal after mining) ──
+            if blocks_by_height:
+                for height, block in blocks_by_height.items():
+                    if isinstance(block, dict):
+                        _BLOCK_CACHE[height] = block
+                    else:
+                        _BLOCK_CACHE[height] = {
+                            "height": getattr(block, "block_height", height),
+                            "block_hash": getattr(block, "block_hash", ""),
+                            "parent_hash": getattr(block, "parent_hash", ""),
+                            "merkle_root": getattr(block, "merkle_root", ""),
+                            "timestamp": getattr(block, "timestamp_s", 0),
+                            "coherence": getattr(block, "coherence_snapshot", 0),
+                            "fidelity": getattr(block, "fidelity_snapshot", 0),
+                            "quantum_fidelity": getattr(block, "fidelity_snapshot", 0),
+                            "miner": getattr(block, "miner_address", ""),
+                            "tx_count": getattr(block, "tx_count", 0),
+                            "transaction_count": getattr(block, "tx_count", 0),
+                            "w_state_hash": getattr(block, "w_state_hash", ""),
+                            "hyp_witness": getattr(block, "hyp_witness", ""),
+                            "pq_curr": getattr(block, "pq_curr", height),
+                        }
+                synced = len(blocks_by_height)
+                logger.info(
+                    f"[BLOCK-CACHE] ✅ Synced {synced} blocks from LATTICE.block_manager"
+                )
+                return
 
-        logger.info(
-            f"[BLOCK-CACHE] ✅ Synced {len(_BLOCK_CACHE)} blocks from LATTICE.block_manager"
-        )
+            # ── Path B: lattice cache empty (resume-from-DB) → warm from PostgreSQL ──
+            logger.info(
+                "[BLOCK-CACHE] Lattice cache empty (resume-from-DB mode) — warming from PostgreSQL"
+            )
+            try:
+                with get_db_cursor() as cur:
+                    # Load the most recent 50 blocks into memory cache
+                    cur.execute(
+                        """
+                        SELECT height, block_hash, parent_hash, merkle_root,
+                               timestamp, tx_count, coherence_snapshot, fidelity_snapshot,
+                               w_state_hash, hyp_witness, miner_address, pq_curr
+                        FROM blocks ORDER BY height DESC LIMIT 50
+                        """
+                    )
+                    for row in cur.fetchall():
+                        h = int(row[0])
+                        _BLOCK_CACHE[h] = {
+                            "height": h,
+                            "block_hash": row[1] or "",
+                            "parent_hash": row[2] or ("0" * 64),
+                            "merkle_root": row[3] or ("0" * 64),
+                            "timestamp": int(row[4]) if row[4] else 0,
+                            "tx_count": int(row[5]) if row[5] else 0,
+                            "coherence": float(row[6]) if row[6] is not None else 0.0,
+                            "fidelity": float(row[7]) if row[7] is not None else 0.0,
+                            "quantum_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                            "w_state_hash": row[8] or "",
+                            "hyp_witness": row[9] or "",
+                            "miner": row[10] or "",
+                            "pq_curr": int(row[11]) if row[11] else h,
+                        }
+                        synced += 1
+            except Exception as _db_err:
+                logger.warning(f"[BLOCK-CACHE] DB warm-up failed: {_db_err}")
+
+        if synced:
+            logger.info(
+                f"[BLOCK-CACHE] ✅ Warmed {synced} blocks from PostgreSQL (cache now {len(_BLOCK_CACHE)})"
+            )
+        else:
+            logger.info("[BLOCK-CACHE] No blocks to warm — empty chain or DB unavailable")
     except Exception as e:
         logger.warning(f"[BLOCK-CACHE] Failed to sync blocks: {e}")
 
@@ -4055,8 +4095,10 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                         f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained"
                     )
                 else:
-                    logger.warning(
-                        f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot is None"
+                    # Normal during warm-up — first measurement cycle hasn't completed yet
+                    result["w_state_status"] = "initializing"
+                    logger.debug(
+                        f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot not ready yet (initializing)"
                     )
             except Exception as we:
                 logger.exception(
