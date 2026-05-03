@@ -284,6 +284,7 @@ VAULT_SCHEMA_SQL = """
 -- Vault accounts
 CREATE TABLE IF NOT EXISTS vault_accounts (
     id              TEXT PRIMARY KEY,
+    display_name    TEXT,
     email           TEXT,
     passphrase_hash TEXT NOT NULL,
     tier            TEXT NOT NULL DEFAULT 'trial',
@@ -536,6 +537,19 @@ def _ensure_schema():
             try:
                 cur = conn.cursor()
                 cur.execute(VAULT_SCHEMA_SQL)
+                # Migration: add display_name column if missing (existing deployments)
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = 'vault_accounts' AND column_name = 'display_name'
+                        ) THEN
+                            ALTER TABLE vault_accounts ADD COLUMN display_name TEXT;
+                        END IF;
+                    END
+                    $$;
+                """)
                 logger.info("[VAULT] ✅ Schema initialized")
                 _SCHEMA_INITIALIZED = True
             finally:
@@ -595,6 +609,7 @@ def vault_create_account(params: dict, rpc_id: Any) -> dict:
 
     Params:
         passphrase: str (required, min 8 chars)
+        display_name: str (optional, 2-48 chars — human-friendly account label)
         email: str (optional, for recovery)
         device_fp: str (optional, browser fingerprint)
         qtcl_address: str (optional, for billing)
@@ -608,6 +623,10 @@ def vault_create_account(params: dict, rpc_id: Any) -> dict:
         if not passphrase or len(passphrase) < 8:
             return _rpc_error(-32602, "Passphrase must be at least 8 characters", rpc_id)
 
+        display_name = (params.get("display_name") or "").strip()
+        if display_name and (len(display_name) < 2 or len(display_name) > 48):
+            return _rpc_error(-32602, "Display name must be 2-48 characters", rpc_id)
+
         email = params.get("email", "")
         device_fp = params.get("device_fp", "")
         qtcl_address = params.get("qtcl_address", "")
@@ -617,7 +636,7 @@ def vault_create_account(params: dict, rpc_id: Any) -> dict:
         # but the response never reached the client)
         if device_fp:
             existing = _vault_query(
-                "SELECT id, tier, email, qtcl_address, secrets_count, bytes_stored, "
+                "SELECT id, tier, email, qtcl_address, display_name, secrets_count, bytes_stored, "
                 "anchors_used, credit_balance FROM vault_accounts "
                 "WHERE device_fp = %s AND tier = 'trial'",
                 (device_fp,), fetch="one"
@@ -632,6 +651,7 @@ def vault_create_account(params: dict, rpc_id: Any) -> dict:
                     logger.info(f"[VAULT] Returning existing account on retry: {existing['id'][:12]}...")
                     return _rpc_ok({
                         "account_id": existing['id'],
+                        "display_name": existing.get('display_name', '') or '',
                         "tier": existing['tier'],
                         "email": existing.get('email', ''),
                         "qtcl_address": existing.get('qtcl_address', ''),
@@ -658,16 +678,17 @@ def vault_create_account(params: dict, rpc_id: Any) -> dict:
 
         _vault_query(
             """INSERT INTO vault_accounts
-               (id, email, passphrase_hash, tier, device_fp, qtcl_address, created_at, updated_at)
-               VALUES (%s, %s, %s, 'trial', %s, %s, NOW(), NOW())""",
-            (account_id, email, stored_hash, device_fp, qtcl_address),
+               (id, display_name, email, passphrase_hash, tier, device_fp, qtcl_address, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, 'trial', %s, %s, NOW(), NOW())""",
+            (account_id, display_name or None, email, stored_hash, device_fp, qtcl_address),
             fetch="none"
         )
 
-        logger.info(f"[VAULT] Account created: {account_id[:12]}... tier=trial")
+        logger.info(f"[VAULT] Account created: {account_id[:12]}...{' name=' + display_name if display_name else ''} tier=trial")
 
         return _rpc_ok({
             "account_id": account_id,
+            "display_name": display_name or "",
             "tier": "trial",
             "limits": {
                 "max_secrets": TRIAL_MAX_SECRETS,
@@ -726,6 +747,7 @@ def vault_login(params: dict, rpc_id: Any) -> dict:
 
         return _rpc_ok({
             "account_id": account_id,
+            "display_name": account.get('display_name', '') or '',
             "session": session_token,
             "tier": tier,
             "email": account.get('email', ''),
@@ -1861,6 +1883,36 @@ def _get_tier_limits(tier: str) -> dict:
 # ACCOUNT SETTINGS — Change Account ID
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def vault_update_display_name(params: dict, rpc_id: Any) -> dict:
+    """RPC: vault_updateDisplayName — Change the human-friendly display name."""
+    try:
+        p = _normalize_params(params)
+        account_id = p.get("account_id", "")
+        passphrase = p.get("passphrase", "")
+        new_name = (p.get("display_name") or "").strip()
+        if not account_id or not passphrase:
+            return _rpc_error(-32602, "account_id and passphrase required", rpc_id)
+        if new_name and (len(new_name) < 2 or len(new_name) > 48):
+            return _rpc_error(-32602, "Display name must be 2-48 characters (or empty to clear)", rpc_id)
+
+        _ensure_schema()
+        acct = _vault_query("SELECT passphrase_hash FROM vault_accounts WHERE id = %s", (account_id,), fetch="one")
+        if not acct:
+            return _rpc_error(-32004, "Account not found", rpc_id)
+        if not _verify_passphrase(passphrase, acct["passphrase_hash"]):
+            return _rpc_error(-32003, "Invalid passphrase", rpc_id)
+
+        _vault_query(
+            "UPDATE vault_accounts SET display_name = %s, updated_at = NOW() WHERE id = %s",
+            (new_name or None, account_id), fetch="none"
+        )
+        logger.info(f"[VAULT] Display name updated: {account_id[:12]}... → '{new_name}'")
+        return _rpc_ok({"updated": True, "display_name": new_name}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[VAULT] vault_updateDisplayName error: {e}")
+        return _rpc_error(-32603, f"Failed: {str(e)}", rpc_id)
+
+
 def vault_change_account_id(params: dict, rpc_id: Any) -> dict:
     """RPC: vault_changeAccountId — Change the vault account ID (username)."""
     try:
@@ -2063,6 +2115,7 @@ VAULT_RPC_METHODS: Dict[str, Any] = {
     "vault_login":              vault_login,
     "vault_upgradeTier":        vault_upgrade_tier,
     "vault_changeAccountId":    vault_change_account_id,
+    "vault_updateDisplayName":  vault_update_display_name,
     # Secrets
     "vault_storeSecret":        vault_store_secret,
     "vault_retrieveSecret":     vault_retrieve_secret,

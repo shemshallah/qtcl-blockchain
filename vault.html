@@ -771,6 +771,11 @@ body::before {
     <!-- REGISTER -->
     <div id="authRegister" style="display:none">
       <div class="form-group">
+        <label class="form-label">Account Name <span style="color:var(--muted);font-weight:normal">(optional — you can change this later)</span></label>
+        <input class="form-input" id="regDisplayName" type="text" placeholder="e.g. satoshi, alice, my-vault" autocomplete="nickname" maxlength="48">
+        <div style="font-size:9px;color:var(--muted);margin-top:4px;letter-spacing:.3px">2-48 characters. A friendly label for your vault — doesn't need to be unique.</div>
+      </div>
+      <div class="form-group">
         <label class="form-label">Passphrase (min 8 characters)</label>
         <input class="form-input" id="regPass" type="password" placeholder="Choose a strong passphrase" autocomplete="new-password">
       </div>
@@ -1186,16 +1191,44 @@ body::before {
     <!-- ═══ SETTINGS ═══ -->
     <div class="page" id="page-settings">
       <div class="page-title">Account Settings</div>
-      <div class="page-desc">Manage your vault account</div>
+      <div class="page-desc">Manage your vault identity and account</div>
 
       <div class="card">
         <div class="card-title" style="margin-bottom:14px">ACCOUNT INFO</div>
         <div style="font-size:11px;line-height:2">
+          <div><span style="color:var(--muted)">Display Name:</span> <span id="setDisplayName" style="color:var(--text-bright)">—</span></div>
           <div><span style="color:var(--muted)">Account ID:</span> <span id="setAccountId" style="color:var(--text-bright)">—</span></div>
           <div><span style="color:var(--muted)">Tier:</span> <span id="setTier" style="color:var(--text-bright)">—</span></div>
           <div><span style="color:var(--muted)">Email:</span> <span id="setEmail" style="color:var(--text-bright)">—</span></div>
           <div><span style="color:var(--muted)">QTCL Address:</span> <span id="setQtcl" style="color:var(--text-bright)">—</span></div>
         </div>
+      </div>
+
+      <!-- DISPLAY NAME -->
+      <div class="card">
+        <div class="card-title" style="margin-bottom:14px">DISPLAY NAME</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+          Your display name is a human-friendly label shown throughout the vault. It doesn't need to be unique.
+        </div>
+        <div class="form-group">
+          <label class="form-label">New Display Name</label>
+          <input class="form-input" id="newDisplayName" placeholder="2-48 characters" maxlength="48">
+        </div>
+        <button class="btn btn-primary" onclick="doUpdateDisplayName()" id="updateNameBtn">UPDATE NAME</button>
+      </div>
+
+      <!-- CHANGE ACCOUNT ID -->
+      <div class="card">
+        <div class="card-title" style="margin-bottom:14px">CHANGE ACCOUNT ID</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+          Your account ID is used to log in. Changing it will update all vault references. The new ID must be unique and 3-64 characters.
+        </div>
+        <div class="form-group">
+          <label class="form-label">New Account ID</label>
+          <input class="form-input" id="newAccountId" placeholder="e.g. my-vault-id">
+        </div>
+        <button class="btn btn-primary" onclick="doChangeAccountId()" id="changeIdBtn">CHANGE ACCOUNT ID</button>
+        <div style="font-size:9px;color:var(--amber);margin-top:8px;letter-spacing:.3px">⚠ You will need to use the new ID to log in after changing it.</div>
       </div>
 
       <div class="card" id="upgradeCard">
@@ -1332,6 +1365,7 @@ async function getDeviceFingerprint() {
 
 // ─── Auth: Register ───
 async function doRegister() {
+  const displayName = document.getElementById('regDisplayName').value.trim();
   const pass = document.getElementById('regPass').value;
   const confirm = document.getElementById('regPassConfirm').value;
   const email = document.getElementById('regEmail').value;
@@ -1339,6 +1373,7 @@ async function doRegister() {
 
   if (!pass || pass.length < 8) return toast('Passphrase must be 8+ characters', 'error');
   if (pass !== confirm) return toast('Passphrases do not match', 'error');
+  if (displayName && (displayName.length < 2 || displayName.length > 48)) return toast('Display name must be 2-48 characters', 'error');
 
   const btn = document.getElementById('regBtn');
   btn.disabled = true;
@@ -1348,6 +1383,7 @@ async function doRegister() {
     const fp = await getDeviceFingerprint();
     const result = await rpc('vault_createAccount', {
       passphrase: pass,
+      display_name: displayName,
       email,
       qtcl_address: qtcl,
       device_fp: fp,
@@ -1421,10 +1457,15 @@ function enterApp(accountData) {
   updateDashboard(accountData);
 
   // Update settings
+  const displayName = accountData.display_name || '';
+  document.getElementById('setDisplayName').textContent = displayName || '(not set)';
   document.getElementById('setAccountId').textContent = STATE.accountId;
   document.getElementById('setTier').textContent = STATE.tier.toUpperCase();
   document.getElementById('setEmail').textContent = accountData.email || '—';
   document.getElementById('setQtcl').textContent = accountData.qtcl_address || '—';
+
+  // Pre-fill settings inputs
+  document.getElementById('newDisplayName').value = displayName;
 
   if (STATE.tier === 'paid') {
     document.getElementById('upgradeCard').style.display = 'none';
@@ -2020,6 +2061,58 @@ async function doCheckIn() {
 }
 
 // ═══════════════ UPGRADE ═══════════════
+
+async function doUpdateDisplayName() {
+  const newName = document.getElementById('newDisplayName').value.trim();
+  if (newName && (newName.length < 2 || newName.length > 48)) {
+    return toast('Display name must be 2-48 characters', 'error');
+  }
+  const btn = document.getElementById('updateNameBtn');
+  btn.disabled = true;
+  btn.textContent = 'UPDATING...';
+  try {
+    await rpc('vault_updateDisplayName', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      display_name: newName,
+    });
+    document.getElementById('setDisplayName').textContent = newName || '(not set)';
+    toast(newName ? `Display name updated to "${newName}"` : 'Display name cleared', 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'UPDATE NAME';
+  }
+}
+
+async function doChangeAccountId() {
+  const newId = document.getElementById('newAccountId').value.trim();
+  if (!newId || newId.length < 3 || newId.length > 64) {
+    return toast('Account ID must be 3-64 characters', 'error');
+  }
+  if (!confirm(`Change your account ID to "${newId}"?\n\nYou will need this new ID to log in.`)) return;
+  const btn = document.getElementById('changeIdBtn');
+  btn.disabled = true;
+  btn.textContent = 'CHANGING...';
+  try {
+    await rpc('vault_changeAccountId', {
+      account_id: STATE.accountId,
+      passphrase: STATE.passphrase,
+      new_account_id: newId,
+    });
+    STATE.accountId = newId;
+    localStorage.setItem('qtcl_vault_account', newId);
+    document.getElementById('setAccountId').textContent = newId;
+    document.getElementById('newAccountId').value = '';
+    toast(`Account ID changed to "${newId}" — use this to log in`, 'success', 8000);
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'CHANGE ACCOUNT ID';
+  }
+}
 
 async function doUpgrade() {
   const qtcl = document.getElementById('upgradeQtcl').value.trim();
