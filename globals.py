@@ -130,17 +130,17 @@ class TessellationRewardSchedule:
         8: 62_300_160,
     }
 
-    REWARDS: Dict[int, Dict[str, int]] = {
-        5: {'miner': 720, 'treasury': 80},
-        6: {'miner': 760, 'treasury': 40},
-        7: {'miner': 780, 'treasury': 20},
-        8: {'miner': 790, 'treasury': 10},
+    # Rewards in QTCL (float) — no base units
+    REWARDS: Dict[int, Dict[str, float]] = {
+        5: {'miner': 7.20, 'treasury': 0.80},
+        6: {'miner': 7.60, 'treasury': 0.40},
+        7: {'miner': 7.80, 'treasury': 0.20},
+        8: {'miner': 7.90, 'treasury': 0.10},
     }
 
-    TOTAL_PER_BLOCK_BASE: int = 800
+    TOTAL_PER_BLOCK_QTCL: float = 8.00
     TOTAL_BLOCKS: int = 62_300_160
-    TOTAL_SUPPLY_BASE: int = 62_300_160 * 800
-    TOTAL_SUPPLY_QTCL: int = 498_401_280
+    TOTAL_SUPPLY_QTCL: float = 498_401_280.0
 
     TREASURY_ADDRESS: str = os.environ.get(
         'TREASURY_ADDRESS',
@@ -157,62 +157,62 @@ class TessellationRewardSchedule:
         return 8
 
     @classmethod
-    def get_rewards_for_height(cls, height: int) -> Dict[str, int]:
-        """Return {'miner': <base_units>, 'treasury': <base_units>}."""
+    def get_rewards_for_height(cls, height: int) -> Dict[str, float]:
+        """Return {'miner': <QTCL>, 'treasury': <QTCL>}."""
         return dict(cls.REWARDS[cls.get_depth_for_height(height)])
 
     @classmethod
-    def get_miner_reward_base(cls, height: int) -> int:
-        """Miner reward in base units for block height."""
+    def get_miner_reward_qtcl(cls, height: int) -> float:
+        """Miner reward in QTCL for block height."""
         return cls.REWARDS[cls.get_depth_for_height(height)]['miner']
 
     @classmethod
-    def get_treasury_reward_base(cls, height: int) -> int:
-        """Treasury reward in base units for block height."""
+    def get_treasury_reward_qtcl(cls, height: int) -> float:
+        """Treasury reward in QTCL for block height."""
         return cls.REWARDS[cls.get_depth_for_height(height)]['treasury']
 
     @classmethod
-    def get_miner_reward_qtcl(cls, height: int) -> float:
-        """Miner reward in QTCL — display only."""
-        return cls.get_miner_reward_base(height) / 100.0
+    def get_miner_reward_base(cls, height: int) -> int:
+        """Miner reward in base units for block height (legacy compat)."""
+        return int(round(cls.REWARDS[cls.get_depth_for_height(height)]['miner'] * 100))
 
     @classmethod
-    def get_treasury_reward_qtcl(cls, height: int) -> float:
-        """Treasury reward in QTCL — display only."""
-        return cls.get_treasury_reward_base(height) / 100.0
+    def get_treasury_reward_base(cls, height: int) -> int:
+        """Treasury reward in base units for block height (legacy compat)."""
+        return int(round(cls.REWARDS[cls.get_depth_for_height(height)]['treasury'] * 100))
 
     @classmethod
     def get_supply_breakdown(cls) -> Dict[str, Any]:
         """Full supply breakdown."""
         breakdown: Dict[str, Any] = {}
-        total_miner_base = 0
-        total_treasury_base = 0
+        total_miner_qtcl = 0.0
+        total_treasury_qtcl = 0.0
         prev = 0
         for depth, boundary in cls.DEPTH_BOUNDARIES.items():
             blocks = boundary - prev
             r = cls.REWARDS[depth]
             m = blocks * r['miner']
             t = blocks * r['treasury']
-            total_miner_base += m
-            total_treasury_base += t
+            total_miner_qtcl += m
+            total_treasury_qtcl += t
             breakdown[depth] = {
                 'blocks': blocks,
-                'miner_reward_qtcl': r['miner'] / 100.0,
-                'treasury_reward_qtcl': r['treasury'] / 100.0,
-                'total_per_block_qtcl': (r['miner'] + r['treasury']) / 100.0,
-                'total_depth_miner_qtcl': m / 100.0,
-                'total_depth_treasury_qtcl': t / 100.0,
+                'miner_reward_qtcl': r['miner'],
+                'treasury_reward_qtcl': r['treasury'],
+                'total_per_block_qtcl': r['miner'] + r['treasury'],
+                'total_depth_miner_qtcl': m,
+                'total_depth_treasury_qtcl': t,
             }
             prev = boundary
         breakdown['TOTAL'] = {
-            'total_miner_qtcl': total_miner_base / 100.0,
-            'total_treasury_qtcl': total_treasury_base / 100.0,
-            'total_supply_qtcl': (total_miner_base + total_treasury_base) / 100.0,
+            'total_miner_qtcl': total_miner_qtcl,
+            'total_treasury_qtcl': total_treasury_qtcl,
+            'total_supply_qtcl': total_miner_qtcl + total_treasury_qtcl,
         }
         return breakdown
 
 
-MINING_COINBASE_REWARD = 720  # depth-5 miner base units
+MINING_COINBASE_REWARD = 7.20  # depth-5 miner reward in QTCL
 
 # Canonical null-sink burn address for oracle registration TXs.
 # No private key exists for this address — it is a pure chain commitment.

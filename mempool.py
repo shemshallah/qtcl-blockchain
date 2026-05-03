@@ -1289,7 +1289,7 @@ class Mempool:
         max_txs       : int = 2_000,
         block_height  : int = 0,
         miner_address : str = "",
-        block_reward_base : int = 720,      # depth-5 genesis miner default — callers must pass TessellationRewardSchedule.get_miner_reward_base(height)
+        block_reward_base : int = 720,      # depth-5 genesis miner default (7.20 QTCL × 100) — callers must pass TessellationRewardSchedule.get_miner_reward_base(height)
     ) -> Tuple[List[MempoolTx], 'MempoolTx']:
         """
         Select transactions for next block — Bitcoin fee-rate ordering.

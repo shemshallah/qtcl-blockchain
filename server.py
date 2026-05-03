@@ -1217,28 +1217,33 @@ def _settle_block_rewards(
 
         # HARDCODED REWARDS — Single source of truth
         # Miner: 7.20 QTCL (720 base units)
-        # Treasury: 0.80 QTCL (80 base units)
-        # These scale with TessellationRewardSchedule but have explicit hardcoded defaults
-        miner_reward_base = 720  # base units: 7.20 QTCL
-        treasury_reward_base = 80  # base units: 0.80 QTCL
+        # Treasury: 0.80 QTCL
+        # QTCL rewards — converted to base units (×100) for database storage
+        miner_reward_qtcl = 7.20
+        treasury_reward_qtcl = 0.80
 
         # Try to get from schedule, but use hardcoded defaults if unavailable
         try:
             if TessellationRewardSchedule:
                 rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                miner_reward_base = int(rewards.get("miner", 720))
-                treasury_reward_base = int(rewards.get("treasury", 80))
-                _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL")
+                miner_reward_qtcl = float(rewards.get("miner", 7.20))
+                treasury_reward_qtcl = float(rewards.get("treasury", 0.80))
+                _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_qtcl:.2f} QTCL, treasury={treasury_reward_qtcl:.2f} QTCL")
         except Exception as sch_err:
             _settle_log.warning(f"[SETTLE] Schedule lookup failed: {sch_err}, using hardcoded: 7.20 + 0.80")
 
-        # Collect all transaction fees for treasury
+        # Convert to base units for database storage
+        miner_reward_base = int(round(miner_reward_qtcl * 100))
+        treasury_reward_base = int(round(treasury_reward_qtcl * 100))
+
+        # Collect all transaction fees for treasury (in base units)
         total_tx_fees = 0
         for tx in txs:
             f = tx.get("fee", tx.get("fee_base", 0))
             if f:
                 try:
-                    total_tx_fees += int(float(f) if isinstance(f, (float, str)) else f)
+                    # Fees are in QTCL (float), convert to base units
+                    total_tx_fees += int(round(float(f) * 100))
                 except (ValueError, TypeError):
                     pass
         treasury_reward_base += total_tx_fees
@@ -5600,10 +5605,10 @@ def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         engine = _init_hlwe_engine()
         sig = engine.sign_hash(tx_hash, private_key)
 
-        # Submit to mempool - convert amount and fee to cents (int) as expected by mempool
+        # Submit to mempool - amounts in QTCL (float), mempool handles conversion internally
         tx_for_mempool = tx_for_signing.copy()
-        tx_for_mempool["amount"] = int(round(float(tx_for_signing["amount"]) * 100))  # Convert to cents
-        tx_for_mempool["fee"] = int(round(float(tx_for_signing["fee"]) * 100))  # Convert to cents
+        tx_for_mempool["amount"] = float(tx_for_signing["amount"])  # QTCL (float)
+        tx_for_mempool["fee"] = float(tx_for_signing["fee"])  # QTCL (float)
         tx_for_mempool["signature"] = json.dumps(sig)  # Mempool expects JSON string
         tx_for_mempool["public_key"] = wallet_data.get("public_key", "")
 
@@ -5842,20 +5847,22 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ═══════════════════════════════════════════════════════════════════════
 
         # Get reward schedule for validation
-        _scheduled_miner_reward = 720.0  # default
-        _scheduled_treasury_reward = 80.0  # default
+        # QTCL is stored as float directly — no base units (1 QTCL = 1.0)
+        _scheduled_miner_reward = 7.2  # default: 7.2 QTCL per block
+        _scheduled_treasury_reward = 0.8  # default: 0.8 QTCL per block
         if TessellationRewardSchedule:
             try:
                 _rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                _scheduled_miner_reward = float(_rewards.get("miner", 720))
-                _scheduled_treasury_reward = float(_rewards.get("treasury", 80))
+                _scheduled_miner_reward = float(_rewards.get("miner", 7.2))
+                _scheduled_treasury_reward = float(_rewards.get("treasury", 0.8))
             except Exception as _e:
                 logger.warning(
                     f"[RPC-submitBlock] Could not fetch reward schedule: {_e}"
                 )
 
         # Calculate expected total coinbase (miner + treasury + fees)
-        _total_fees = 0
+        # All amounts are in QTCL (float) — no base unit conversion
+        _total_fees = 0.0
         _non_coinbase_txs = []
         _coinbase_txs = []
 
@@ -5866,17 +5873,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
-                # Sum fees from non-coinbase transactions
+                # Sum fees from non-coinbase transactions (in QTCL)
                 _fee = tx.get("fee", tx.get("fee_base", 0))
                 if isinstance(_fee, (float, str)):
                     try:
-                        _total_fees += int(
-                            round(float(_fee) * 100)
-                        )  # convert to base units
+                        _total_fees += float(_fee)
                     except:
                         pass
-                else:
-                    _total_fees += int(_fee)
+                elif isinstance(_fee, int):
+                    _total_fees += float(_fee)
 
         # Validate coinbase structure
         if len(_coinbase_txs) < 1:
@@ -5892,27 +5897,24 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             )
 
         # Validate each coinbase amount matches schedule + fees
+        # All comparisons in QTCL (float) — no base unit conversion
         _miner_coinbase = None
         _treasury_coinbase = None
 
         for cb in _coinbase_txs:
             _to = cb.get("to_addr", cb.get("to_address", ""))
             _amount = float(cb.get("amount", 0))
-            _amount_base = int(round(_amount * 100))  # Convert to base units
 
             if _to == miner_address:
                 _miner_coinbase = cb
                 # Miner reward = scheduled reward + 50% of fees
-                _expected_miner = int(round(_scheduled_miner_reward * 100)) + (
-                    _total_fees // 2
-                )
-                if (
-                    abs(_amount_base - _expected_miner) > 1
-                ):  # Allow 1 unit rounding tolerance
+                _expected_miner = _scheduled_miner_reward + (_total_fees / 2)
+                # Allow 0.01 QTCL tolerance for floating point
+                if abs(_amount - _expected_miner) > 0.01:
                     return _rpc_error(
                         -32003,
-                        f"Invalid miner coinbase: got {_amount_base} base units, expected {_expected_miner} "
-                        f"(reward={_scheduled_miner_reward}*100 + fees/2={_total_fees // 2})",
+                        f"Invalid miner coinbase: got {_amount} QTCL, expected {_expected_miner} "
+                        f"(reward={_scheduled_miner_reward} + fees/2={_total_fees / 2})",
                         rpc_id,
                     )
             elif (
@@ -5921,13 +5923,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             ):
                 _treasury_coinbase = cb
                 # Treasury reward = scheduled reward + 50% of fees
-                _expected_treasury = int(round(_scheduled_treasury_reward * 100)) + (
-                    _total_fees - (_total_fees // 2)
-                )
-                if abs(_amount_base - _expected_treasury) > 1:
+                _expected_treasury = _scheduled_treasury_reward + (_total_fees - (_total_fees / 2))
+                if abs(_amount - _expected_treasury) > 0.01:
                     return _rpc_error(
                         -32003,
-                        f"Invalid treasury coinbase: got {_amount_base} base units, expected {_expected_treasury}",
+                        f"Invalid treasury coinbase: got {_amount} QTCL, expected {_expected_treasury}",
                         rpc_id,
                     )
             else:
