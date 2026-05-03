@@ -98,6 +98,21 @@ a:hover{text-decoration:underline}
 .footer-links a:hover{color:var(--accent)}
 .footer-copy{font-size:11px;color:var(--dim)}
 
+/* ── Accordion / Tool Examples ── */
+.tool-wrap{display:flex;flex-direction:column}
+.tool-card{cursor:pointer;position:relative}
+.tool-card::after{content:'+';position:absolute;top:16px;right:16px;color:var(--accent);font-family:var(--mono);font-size:16px;transition:transform .2s}
+.tool-card.expanded::after{content:'−'}
+.tool-example{display:none;background:var(--bg2);border:1px solid var(--border);border-top:none;border-radius:0 0 10px 10px;padding:0 20px 16px;font-family:var(--mono);font-size:12px;line-height:1.7;color:var(--text);margin-bottom:12px}
+.tool-example.active{display:block}
+.tool-example .ex-label{font-size:10px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;margin-top:12px}
+.tool-example pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px 14px;overflow-x:auto;margin:6px 0}
+.tool-example .method{color:var(--accent);font-weight:600}
+.tool-example .str{color:var(--green)}
+.tool-example .num{color:var(--pink)}
+.tool-example .key{color:var(--accent)}
+.tool-example .comment{color:var(--muted);font-style:italic}
+
 /* ── Responsive ── */
 @media(max-width:640px){
   .hero h1{font-size:28px}
@@ -169,49 +184,299 @@ a:hover{text-decoration:underline}
   <div class="section">
     <div class="section-title">Available tools</div>
     <div class="tools-grid">
-      <div class="tool-card">
-        <div class="tool-name">qtcl_create_wallet</div>
-        <div class="tool-desc">Create a post-quantum secured wallet. Returns a 64-char hex address and HypΓ public key.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_create_wallet</div>
+          <div class="tool-desc">Create a post-quantum secured wallet. Returns a 64-char hex address and HypΓ public key.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_create_wallet"</span>,
+    <span class="key">"arguments"</span>: {<span class="key">"label"</span>: <span class="str">"agent-payments"</span>}
+  },
+  <span class="key">"id"</span>: <span class="num">1</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+          <div class="comment">No direct RPC — keypair generated locally by MCP server.</div>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_balance</div>
-        <div class="tool-desc">Check confirmed and pending balance for any address. Amounts in QTCL (1 QTCL = 100 qsat).</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_balance</div>
+          <div class="tool-desc">Check confirmed and pending balance for any address. Amounts in QTCL (1 QTCL = 100 qsat).</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_balance"</span>,
+    <span class="key">"arguments"</span>: {
+      <span class="key">"address"</span>: <span class="str">"a1b2c3…"</span>
+    }
+  },
+  <span class="key">"id"</span>: <span class="num">2</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getBalance"</span>,
+  <span class="key">"params"</span>: [<span class="str">"a1b2c3…"</span>],
+  <span class="key">"id"</span>: <span class="num">2</span>
+}</pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_send_transaction</div>
-        <div class="tool-desc">Send QTCL with flat 1 qsat fee. No gas estimation, no approval dance. Optional 256-char memo.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_send_transaction</div>
+          <div class="tool-desc">Send QTCL with flat 1 qsat fee. No gas estimation, no approval dance. Optional 256-char memo.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_send_transaction"</span>,
+    <span class="key">"arguments"</span>: {
+      <span class="key">"from_address"</span>: <span class="str">"a1b2…"</span>,
+      <span class="key">"to_address"</span>: <span class="str">"d4e5…"</span>,
+      <span class="key">"amount"</span>: <span class="num">1.5</span>,
+      <span class="key">"memo"</span>: <span class="str">"invoice-42"</span>
+    }
+  },
+  <span class="key">"id"</span>: <span class="num">3</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_submitTransaction"</span>,
+  <span class="key">"params"</span>: [{
+    <span class="key">"from_address"</span>: <span class="str">"a1b2…"</span>,
+    <span class="key">"to_address"</span>: <span class="str">"d4e5…"</span>,
+    <span class="key">"amount"</span>: <span class="num">1.5</span>,
+    <span class="key">"memo"</span>: <span class="str">"invoice-42"</span>,
+    <span class="key">"signature"</span>: <span class="str">"…"</span>,
+    <span class="key">"public_key"</span>: <span class="str">"…"</span>
+  }],
+  <span class="key">"id"</span>: <span class="num">3</span>
+}</pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_transaction</div>
-        <div class="tool-desc">Look up any transaction by hash. Verify payment receipt, check confirmations, read memo.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_transaction</div>
+          <div class="tool-desc">Look up any transaction by hash. Verify payment receipt, check confirmations, read memo.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_transaction"</span>,
+    <span class="key">"arguments"</span>: {
+      <span class="key">"tx_hash"</span>: <span class="str">"0xabc…"</span>
+    }
+  },
+  <span class="key">"id"</span>: <span class="num">4</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getTransaction"</span>,
+  <span class="key">"params"</span>: [<span class="str">"0xabc…"</span>],
+  <span class="key">"id"</span>: <span class="num">4</span>
+}</pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_chain_info</div>
-        <div class="tool-desc">Current chain height, latest block hash, mempool depth, oracle status, network health.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_chain_info</div>
+          <div class="tool-desc">Current chain height, latest block hash, mempool depth, oracle status, network health.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_chain_info"</span>,
+    <span class="key">"arguments"</span>: {}
+  },
+  <span class="key">"id"</span>: <span class="num">5</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getBlockHeight"</span>,
+  <span class="key">"params"</span>: [],
+  <span class="key">"id"</span>: <span class="num">5</span>
+}
+<span class="comment">// Also: qtcl_getMempoolStats, qtcl_getHealth</span></pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_block</div>
-        <div class="tool-desc">Block details by height or hash. Header, transactions, miner, reward, coherence metrics.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_block</div>
+          <div class="tool-desc">Block details by height or hash. Header, transactions, miner, reward, coherence metrics.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_block"</span>,
+    <span class="key">"arguments"</span>: {<span class="key">"height"</span>: <span class="num">42</span>}
+  },
+  <span class="key">"id"</span>: <span class="num">6</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getBlock"</span>,
+  <span class="key">"params"</span>: [<span class="num">42</span>],
+  <span class="key">"id"</span>: <span class="num">6</span>
+}
+<span class="comment">// Or: params: ["0xhash…"] or {"hash":"0x…"}</span></pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_recent_transactions</div>
-        <div class="tool-desc">Recent transactions, optionally filtered by address. Up to 50 results sorted by time.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_recent_transactions</div>
+          <div class="tool-desc">Recent transactions, optionally filtered by address. Up to 50 results sorted by time.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_recent_transactions"</span>,
+    <span class="key">"arguments"</span>: {
+      <span class="key">"address"</span>: <span class="str">"a1b2…"</span>,
+      <span class="key">"limit"</span>: <span class="num">20</span>
+    }
+  },
+  <span class="key">"id"</span>: <span class="num">7</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getTransactions"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"address"</span>: <span class="str">"a1b2…"</span>,
+    <span class="key">"limit"</span>: <span class="num">20</span>
+  },
+  <span class="key">"id"</span>: <span class="num">7</span>
+}</pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_quantum_metrics</div>
-        <div class="tool-desc">Live W-state fidelity, entanglement witness, density matrix dimensions, oracle consensus round.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_quantum_metrics</div>
+          <div class="tool-desc">Live W-state fidelity, entanglement witness, density matrix dimensions, oracle consensus round.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_quantum_metrics"</span>,
+    <span class="key">"arguments"</span>: {}
+  },
+  <span class="key">"id"</span>: <span class="num">8</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getQuantumMetrics"</span>,
+  <span class="key">"params"</span>: [],
+  <span class="key">"id"</span>: <span class="num">8</span>
+}</pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_oracle_registry</div>
-        <div class="tool-desc">List registered quantum oracles. Addresses, stake, uptime, last heartbeat. 3-of-5 BFT consensus.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_oracle_registry</div>
+          <div class="tool-desc">List registered quantum oracles. Addresses, stake, uptime, last heartbeat. 3-of-5 BFT consensus.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_oracle_registry"</span>,
+    <span class="key">"arguments"</span>: {<span class="key">"limit"</span>: <span class="num">10</span>}
+  },
+  <span class="key">"id"</span>: <span class="num">9</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getOracleRegistry"</span>,
+  <span class="key">"params"</span>: {<span class="key">"limit"</span>: <span class="num">10</span>},
+  <span class="key">"id"</span>: <span class="num">9</span>
+}</pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_peers</div>
-        <div class="tool-desc">Active network peers. Node IDs, connection times, NAT types. Kademlia DHT topology.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_peers</div>
+          <div class="tool-desc">Active network peers. Node IDs, connection times, NAT types. Kademlia DHT topology.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_peers"</span>,
+    <span class="key">"arguments"</span>: {<span class="key">"limit"</span>: <span class="num">20</span>}
+  },
+  <span class="key">"id"</span>: <span class="num">10</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getPeers"</span>,
+  <span class="key">"params"</span>: [<span class="num">20</span>],
+  <span class="key">"id"</span>: <span class="num">10</span>
+}</pre>
+        </div>
       </div>
-      <div class="tool-card">
-        <div class="tool-name">qtcl_get_price</div>
-        <div class="tool-desc">QTCL/USD price from Pyth Network oracle feed. Price, confidence interval, last update.</div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_get_price</div>
+          <div class="tool-desc">QTCL/USD price from Pyth Network oracle feed. Price, confidence interval, last update.</div>
+        </div>
+        <div class="tool-example">
+          <div class="ex-label">MCP Request</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="str">"tools/call"</span>,
+  <span class="key">"params"</span>: {
+    <span class="key">"name"</span>: <span class="str">"qtcl_get_price"</span>,
+    <span class="key">"arguments"</span>: {}
+  },
+  <span class="key">"id"</span>: <span class="num">11</span>
+}</pre>
+          <div class="ex-label">Equivalent RPC</div>
+<pre>{
+  <span class="key">"jsonrpc"</span>: <span class="str">"2.0"</span>,
+  <span class="key">"method"</span>: <span class="method">"qtcl_getPythPrice"</span>,
+  <span class="key">"params"</span>: [],
+  <span class="key">"id"</span>: <span class="num">11</span>
+}</pre>
+        </div>
       </div>
     </div>
   </div>
@@ -331,23 +596,23 @@ curl -X POST https://qtcl-blockchain.koyeb.app/rpc \
       </div>
       <div class="server-field">
         <div class="server-field-label">Signatures</div>
-        <div class="server-field-value">Schnorr-Γ / PSL(2,Z[i])</div>
+        <div class="server-field-value">Schnorr-Γ / PSL(2,R)</div>
       </div>
       <div class="server-field">
-        <div class="server-field-label">Encryption</div>
-        <div class="server-field-value">GeodesicLWE</div>
+        <div class="server-field-label">Wallet Encryption</div>
+        <div class="server-field-value">HypAEAD (SHA3-256-CTR + HMAC-SHA3-256)</div>
       </div>
       <div class="server-field">
         <div class="server-field-label">Key Derivation</div>
-        <div class="server-field-value">BIP32 HD / SHA3-512</div>
+        <div class="server-field-value">PBKDF2-HMAC-SHA256, 600K iterations</div>
       </div>
       <div class="server-field">
         <div class="server-field-label">Security Level</div>
-        <div class="server-field-value">NIST PQ Category 3</div>
+        <div class="server-field-value">~256-bit classical / ~180-bit quantum</div>
       </div>
       <div class="server-field">
         <div class="server-field-label">Dependencies</div>
-        <div class="server-field-value">Zero. Pure Python stdlib.</div>
+        <div class="server-field-value">mpmath, numpy (engine); stdlib (wallet)</div>
       </div>
     </div>
   </div>
@@ -427,6 +692,22 @@ function copyRpc(btn) {
   navigator.clipboard.writeText(text);
   btn.textContent = 'COPIED'; btn.classList.add('copied');
   setTimeout(() => { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 2000);
+}
+
+// ── Accordion toggle ──
+function toggleExample(card) {
+  const wrap = card.parentElement;
+  const example = wrap.querySelector('.tool-example');
+  const isOpen = example.classList.contains('active');
+  // Close all others
+  document.querySelectorAll('.tool-example.active').forEach(el => {
+    el.classList.remove('active');
+    el.parentElement.querySelector('.tool-card').classList.remove('expanded');
+  });
+  if (!isOpen) {
+    example.classList.add('active');
+    card.classList.add('expanded');
+  }
 }
 
 // ── Init ──
