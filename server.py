@@ -48,6 +48,7 @@ if _HYP_DIR not in sys.path:
 import socket
 import struct
 import hashlib
+import hmac
 import secrets
 import logging
 import threading
