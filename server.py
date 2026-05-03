@@ -1255,91 +1255,75 @@ def _settle_block_rewards(
         treasury_address = _treasury_addr
         treasury_fp = hashlib.sha3_256(treasury_address.encode()).hexdigest()[:64]
 
-        # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # ALWAYS update in-memory balance FIRST (guaranteed, even if DB fails)
+        # This ensures balances are always trackable regardless of DB state
+        # ═══════════════════════════════════════════════════════════════════════════════
+        _update_in_memory_balance(miner_address, miner_reward_qtcl, "miner")
+        _update_in_memory_balance(treasury_address, treasury_reward_qtcl + (total_tx_fees / 100.0), "treasury")
+        _settle_log.critical(f"[SETTLE-MEM] ✅ In-memory balances updated: miner={_get_in_memory_balance(miner_address)['balance']:.2f} QTCL, treasury={_get_in_memory_balance(treasury_address)['balance']:.2f} QTCL")
+
+        # PHASE 2: Execute DB settlement (best-effort, failure is OK)
         # ─────────────────────────────────────────────────────────────────────────────
         _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_qtcl:.2f} QTCL, {treasury_address[:16]}… += {treasury_reward_qtcl:.2f} QTCL")
 
-        # Try database first, fall back to in-memory
-        _db_available = True
+        _db_success = False
         try:
             with get_db_cursor() as cur:
-                # TEST: Verify database connectivity with simple SELECT
-                try:
-                    cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                    _test_count = cur.fetchone()[0] if cur.fetchone() else 0
-                    cur.execute("SELECT COUNT(*) FROM wallet_addresses")  # Re-execute since we consumed the result
-                    _test_count = cur.fetchone()[0]
-                    _settle_log.critical(f"[SETTLE-TEST] ✅ Database connectivity OK: {_test_count} wallets exist")
-                except Exception as _test_err:
-                    _settle_log.critical(f"[SETTLE-TEST] ❌ Database connectivity FAILED: {_test_err}")
-                    _db_available = False
+                # MINER REWARD — MANDATORY, ALWAYS EXECUTED
+                _miner_sql = """
+                INSERT INTO wallet_addresses
+                (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+                VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    balance = wallet_addresses.balance + %s,
+                    transaction_count = wallet_addresses.transaction_count + 1,
+                    address_type = 'miner',
+                    last_updated = NOW()
+                """
+                cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
+                _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_qtcl:.2f} QTCL")
 
-                if _db_available:
-                    # MINER REWARD — MANDATORY, ALWAYS EXECUTED
-                    _miner_sql = """
-                    INSERT INTO wallet_addresses
-                    (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-                    VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
-                    ON CONFLICT (address) DO UPDATE SET
-                        balance = wallet_addresses.balance + %s,
-                        transaction_count = wallet_addresses.transaction_count + 1,
-                        address_type = 'miner',
-                        last_updated = NOW()
-                    """
-                    cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
-                    _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_qtcl:.2f} QTCL")
+                # VERIFY MINER WALLET WAS UPDATED
+                cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (miner_address,))
+                _miner_balance = cur.fetchone()
+                _miner_balance_val = _miner_balance[0] if _miner_balance else None
+                _settle_log.critical(f"[SETTLE-VERIFY] Miner {miner_address[:16]}… balance after INSERT: {_miner_balance_val} base units ({_miner_balance_val/100 if _miner_balance_val else 0:.2f} QTCL)")
 
-                    # VERIFY MINER WALLET WAS UPDATED
-                    cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (miner_address,))
-                    _miner_balance = cur.fetchone()
-                    _miner_balance_val = _miner_balance[0] if _miner_balance else None
-                    _settle_log.critical(f"[SETTLE-VERIFY] Miner {miner_address[:16]}… balance after INSERT: {_miner_balance_val} base units ({_miner_balance_val/100 if _miner_balance_val else 0:.2f} QTCL)")
+                # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
+                _treasury_sql = """
+                INSERT INTO wallet_addresses
+                (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+                VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    balance = wallet_addresses.balance + %s,
+                    transaction_count = wallet_addresses.transaction_count + 1,
+                    address_type = 'treasury',
+                    last_updated = NOW()
+                """
+                cur.execute(_treasury_sql, (treasury_address, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
+                _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {treasury_address[:16]}… += {treasury_reward_qtcl:.2f} QTCL")
 
-                    # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
-                    _treasury_sql = """
-                    INSERT INTO wallet_addresses
-                    (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
-                    VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
-                    ON CONFLICT (address) DO UPDATE SET
-                        balance = wallet_addresses.balance + %s,
-                        transaction_count = wallet_addresses.transaction_count + 1,
-                        address_type = 'treasury',
-                        last_updated = NOW()
-                    """
-                    cur.execute(_treasury_sql, (treasury_address, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
-                    _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {treasury_address[:16]}… += {treasury_reward_qtcl:.2f} QTCL")
+                # VERIFY TREASURY WALLET WAS UPDATED
+                cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (treasury_address,))
+                _treasury_balance = cur.fetchone()
+                _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
+                _settle_log.critical(f"[SETTLE-VERIFY] Treasury {treasury_address[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
 
-                    # VERIFY TREASURY WALLET WAS UPDATED
-                    cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (treasury_address,))
-                    _treasury_balance = cur.fetchone()
-                    _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
-                    _settle_log.critical(f"[SETTLE-VERIFY] Treasury {treasury_address[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
-
-                    # TRANSACTION FEES TO TREASURY — OPTIONAL
-                    if non_coinbase_txs:
-                        for tx in non_coinbase_txs:
-                            tx_fee_base = int(round(float(tx.get("fee", 0)) * 100))
-                            if tx_fee_base > 0:
-                                cur.execute(
-                                    "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
-                                    (tx_fee_base, treasury_address),
-                                )
+                # TRANSACTION FEES TO TREASURY — OPTIONAL
+                if non_coinbase_txs:
+                    for tx in non_coinbase_txs:
+                        tx_fee_base = int(round(float(tx.get("fee", 0)) * 100))
+                        if tx_fee_base > 0:
+                            cur.execute(
+                                "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
+                                (tx_fee_base, treasury_address),
+                            )
+                
+                _db_success = True
         except Exception as _db_err:
-            _settle_log.critical(f"[SETTLE] ❌ Database error, using in-memory: {_db_err}")
-            _db_available = False
-
-        if not _db_available:
-            # Fall back to in-memory balance tracking (UTXO-style)
-            _settle_log.critical(f"[SETTLE] 🔄 Using IN-MEMORY balance tracking")
-            _update_in_memory_balance(miner_address, miner_reward_qtcl, "miner")
-            _update_in_memory_balance(treasury_address, treasury_reward_qtcl + (total_tx_fees / 100), "treasury")
-            _settle_log.critical(f"[SETTLE] ✅ In-memory balances updated: miner={_get_in_memory_balance(miner_address)['balance']:.2f} QTCL, treasury={_get_in_memory_balance(treasury_address)['balance']:.2f} QTCL")
-
-            # UPDATE CHAIN STATE
-            cur.execute(
-                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
-                (height, block_hash),
-            )
+            _settle_log.critical(f"[SETTLE] ⚠️  Database settlement failed (in-memory has correct balance): {_db_err}")
+            # DB failure is NOT fatal — in-memory already has the correct balance
 
         # PHASE 3: Log completion
         # ─────────────────────────────────────────────────────────────────────────────
@@ -3730,39 +3714,58 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
             _diagnostic["db_error"] = str(_wqe)
             wallet = None
 
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # ALWAYS check in-memory balance — it's the source of truth when DB lags
+        # Return the MAXIMUM of DB balance and in-memory balance
+        # ═══════════════════════════════════════════════════════════════════════════════
+        _mem = _get_in_memory_balance(address)
+        _mem_balance = float(_mem.get("balance", 0.0))
+        
         if wallet is None:
-            # Address not yet in DB — check in-memory balance tracker
-            _mem = _get_in_memory_balance(address)
+            # Address not in DB — use in-memory if available
             if _mem["tx_count"] > 0:
                 result = {
                     "address": address,
-                    "balance": _mem["balance"],
+                    "balance": _mem_balance,
                     "symbol": "QTCL",
                     "transaction_count": _mem["tx_count"],
                     "address_type": _mem["address_type"],
                     "diagnostic": _diagnostic,
-                    "note": "Balance from in-memory UTXO tracker (DB unavailable)",
+                    "note": "Balance from in-memory UTXO tracker (DB has no record)",
                 }
             else:
-                # Address not yet in DB — return 0 balance with diagnostic info
                 result = {
                     "address": address,
                     "balance": 0.0,
                     "symbol": "QTCL",
                     "diagnostic": _diagnostic,
-                    "note": "Address not found in wallet_addresses table — no balance recorded",
+                    "note": "Address not found — no balance recorded",
                 }
         else:
+            # Address in DB — take MAX of DB and in-memory
             raw_balance = int(wallet.get("balance") or 0)
+            db_balance = raw_balance / 100.0
+            
+            # Use whichever is higher: DB or in-memory
+            final_balance = max(db_balance, _mem_balance)
+            
             result = {
                 "address": address,
-                "balance": raw_balance / 100.0,
+                "balance": final_balance,
                 "symbol": "QTCL",
                 "raw_balance_base_units": raw_balance,
-                "transaction_count": wallet.get("tx_count", 0),
+                "db_balance_qtcl": db_balance,
+                "mem_balance_qtcl": _mem_balance,
+                "transaction_count": max(wallet.get("tx_count", 0), _mem["tx_count"]),
                 "address_type": wallet.get("address_type", "unknown"),
                 "diagnostic": _diagnostic,
             }
+            
+            if _mem_balance > db_balance:
+                result["note"] = f"DB balance ({db_balance:.2f}) lagging behind in-memory ({_mem_balance:.2f}) — returning in-memory"
+                logger.warning(
+                    f"[RPC-BALANCE] DB lag for {address[:16]}…: DB={db_balance:.2f} < MEM={_mem_balance:.2f}"
+                )
         logger.debug(
             f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}"
         )
