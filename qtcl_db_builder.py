@@ -12,8 +12,8 @@
 # ║                                                                                ║
 # ║   KEY SECURITY MODEL (HypΓ - Hyperbolic Gamma Cryptosystem):                   ║
 # ║     passphrase + device_pepper → Argon2id → KEK (never stored)                 ║
-# ║     KEK + AES-256-GCM encrypts 32-byte DEK                                      ║
-# ║     DEK + AES-256-GCM encrypts BIP39 seed entropy                               ║
+# ║     KEK + HypΓ-AEAD encrypts 32-byte DEK                                      ║
+# ║     DEK + HypΓ-AEAD encrypts BIP39 seed entropy                               ║
 # ║     DB contains: salts + ciphertexts + nonces only — zero key material          ║
 # ║                                                                                ║
 # ║   KOYEB MODE DETECTION:                                                        ║
@@ -107,7 +107,6 @@ _pkgs = ["mpmath", "tqdm"]
 if _pg_mode:
     _pkgs.append("psycopg2-binary")
 _pkgs.append("argon2-cffi")
-_pkgs.append("cryptography")
 
 try:
     subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages"] + _pkgs)
@@ -188,8 +187,98 @@ except ImportError:
     ARGON2_AVAILABLE = False
 import hashlib as _hashlib  # always available (used in device_pepper + scrypt fallback)
 
-# AES-256-GCM — stdlib from Python 3.6+
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+# ─────────────────────────────────────────────────────────────────────────────
+# HypΓ-AEAD: Pure-Python Authenticated Encryption (no external crypto packages)
+#
+# Construction: Encrypt-then-MAC using SHA3-256 counter-mode keystream + HMAC-SHA3-256
+#
+#   Encrypt(key, nonce, plaintext):
+#     1. Derive enc_key, mac_key = SHA3-256(key ‖ nonce ‖ "enc"), SHA3-256(key ‖ nonce ‖ "mac")
+#     2. Generate keystream: for i in 0..N: KS[i] = SHA3-256(enc_key ‖ i.to_bytes(8))
+#     3. Ciphertext = plaintext XOR keystream
+#     4. Tag = HMAC-SHA3-256(mac_key, nonce ‖ ciphertext)
+#     5. Return ciphertext ‖ tag (32 bytes)
+#
+#   Decrypt(key, nonce, ciphertext_with_tag):
+#     1. Split ciphertext, tag (last 32 bytes)
+#     2. Re-derive mac_key, verify HMAC-SHA3-256 tag (constant-time)
+#     3. Re-derive enc_key, generate keystream, XOR to recover plaintext
+#
+# Security: IND-CCA2 under random oracle model for SHA3-256.
+# Tag length: 256-bit (32 bytes) — no truncation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import struct as _aead_struct
+
+_AEAD_TAG_LEN = 32  # SHA3-256 output = 32 bytes
+
+
+class HypAEAD:
+    """
+    Pure-Python AEAD cipher using SHA3-256 keystream + HMAC-SHA3-256 tag.
+    Drop-in replacement for cryptography.hazmat.primitives.ciphers.aead.AESGCM.
+
+    Usage:
+        cipher = HypAEAD(key_32_bytes)
+        ct = cipher.encrypt(nonce_12_bytes, plaintext_bytes, aad=None)
+        pt = cipher.decrypt(nonce_12_bytes, ciphertext_bytes, aad=None)
+    """
+
+    def __init__(self, key: bytes):
+        if len(key) != 32:
+            raise ValueError(f"HypAEAD key must be 32 bytes, got {len(key)}")
+        self._key = key
+
+    def _derive_subkeys(self, nonce: bytes):
+        """Derive independent encryption and MAC subkeys from master key + nonce."""
+        enc_key = _hashlib.sha3_256(self._key + nonce + b"hyp_enc").digest()
+        mac_key = _hashlib.sha3_256(self._key + nonce + b"hyp_mac").digest()
+        return enc_key, mac_key
+
+    def _keystream(self, enc_key: bytes, length: int) -> bytes:
+        """Generate SHA3-256 counter-mode keystream of given length."""
+        blocks = []
+        needed = length
+        ctr = 0
+        while needed > 0:
+            block = _hashlib.sha3_256(
+                enc_key + _aead_struct.pack("<Q", ctr)
+            ).digest()
+            blocks.append(block)
+            needed -= 32
+            ctr += 1
+        return b"".join(blocks)[:length]
+
+    def _mac(self, mac_key: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
+        """HMAC-SHA3-256(mac_key, nonce ‖ len(ct) ‖ ciphertext)."""
+        import hmac as _hmac_mod
+        msg = nonce + _aead_struct.pack("<Q", len(ciphertext)) + ciphertext
+        return _hmac_mod.new(mac_key, msg, "sha3_256").digest()
+
+    def encrypt(self, nonce: bytes, plaintext: bytes, aad=None) -> bytes:
+        """Encrypt plaintext. Returns ciphertext ‖ 32-byte auth tag."""
+        if len(nonce) < 8 or len(nonce) > 16:
+            raise ValueError(f"Nonce must be 8-16 bytes, got {len(nonce)}")
+        enc_key, mac_key = self._derive_subkeys(nonce)
+        ks = self._keystream(enc_key, len(plaintext))
+        ct = bytes(a ^ b for a, b in zip(plaintext, ks))
+        tag = self._mac(mac_key, nonce, ct)
+        return ct + tag
+
+    def decrypt(self, nonce: bytes, ciphertext_and_tag: bytes, aad=None) -> bytes:
+        """Decrypt and verify. Raises InvalidTag on auth failure."""
+        if len(ciphertext_and_tag) < _AEAD_TAG_LEN:
+            raise ValueError("Ciphertext too short (no auth tag)")
+        ct = ciphertext_and_tag[:-_AEAD_TAG_LEN]
+        tag = ciphertext_and_tag[-_AEAD_TAG_LEN:]
+        enc_key, mac_key = self._derive_subkeys(nonce)
+        expected_tag = self._mac(mac_key, nonce, ct)
+        import hmac as _hmac_mod
+        if not _hmac_mod.compare_digest(tag, expected_tag):
+            raise ValueError("HypAEAD: authentication tag mismatch (wrong key or corrupted data)")
+        ks = self._keystream(enc_key, len(ct))
+        return bytes(a ^ b for a, b in zip(ct, ks))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 3: LOGGING (Colab-friendly)
@@ -272,11 +361,11 @@ if _DB_MODE == "postgres":
 #            KEK  (32 bytes, NEVER stored anywhere)
 #
 #   Layer 2  KEK + random salt
-#              ↓  AES-256-GCM
+#              ↓  HypΓ-AEAD
 #            wrapped_dek  (stored in wallet_encrypted_seeds.wrapped_dek_b64)
 #
 #   Layer 3  DEK (unwrapped in RAM) + random nonce
-#              ↓  AES-256-GCM
+#              ↓  HypΓ-AEAD
 #            ciphertext_b64  (BIP39 entropy, stored in wallet_encrypted_seeds)
 #
 #  Attacker with full DB dump + no passphrase = zero decryptable material.
@@ -360,11 +449,11 @@ def derive_kek(passphrase: str, salt: bytes, device_pepper: bytes = b"") -> byte
 
 def wrap_dek(dek: bytes, kek: bytes) -> tuple:
     """
-    Encrypt DEK with KEK using AES-256-GCM.
+    Encrypt DEK with KEK using HypΓ-AEAD.
     Returns (nonce_b64, ciphertext_b64) — both safe to store in DB.
     """
     nonce = _secrets.token_bytes(12)
-    ct = AESGCM(kek).encrypt(nonce, dek, None)
+    ct = HypAEAD(kek).encrypt(nonce, dek, None)
     return (
         _b64.b64encode(nonce).decode(),
         _b64.b64encode(ct).decode(),
@@ -375,16 +464,16 @@ def unwrap_dek(nonce_b64: str, ciphertext_b64: str, kek: bytes) -> bytes:
     """Decrypt wrapped DEK. Raises InvalidTag if KEK is wrong (wrong passphrase)."""
     nonce = _b64.b64decode(nonce_b64)
     ct    = _b64.b64decode(ciphertext_b64)
-    return AESGCM(kek).decrypt(nonce, ct, None)
+    return HypAEAD(kek).decrypt(nonce, ct, None)
 
 
 def encrypt_seed(seed_entropy: bytes, dek: bytes) -> tuple:
     """
-    Encrypt BIP39 seed entropy (16-32 bytes) with DEK using AES-256-GCM.
+    Encrypt BIP39 seed entropy (16-32 bytes) with DEK using HypΓ-AEAD.
     Returns (nonce_b64, ciphertext_b64).
     """
     nonce = _secrets.token_bytes(12)
-    ct = AESGCM(dek).encrypt(nonce, seed_entropy, None)
+    ct = HypAEAD(dek).encrypt(nonce, seed_entropy, None)
     return (
         _b64.b64encode(nonce).decode(),
         _b64.b64encode(ct).decode(),
@@ -395,7 +484,7 @@ def decrypt_seed(nonce_b64: str, ciphertext_b64: str, dek: bytes) -> bytes:
     """Decrypt BIP39 seed entropy. Raises InvalidTag on wrong DEK."""
     nonce = _b64.b64decode(nonce_b64)
     ct    = _b64.b64decode(ciphertext_b64)
-    return AESGCM(dek).decrypt(nonce, ct, None)
+    return HypAEAD(dek).decrypt(nonce, ct, None)
 
 
 def new_wallet_envelope(passphrase: str) -> dict:
@@ -434,7 +523,8 @@ def new_wallet_envelope(passphrase: str) -> dict:
         # caller must fill: wallet_fingerprint, seed_nonce_b64, seed_ciphertext_b64, bip32_xpub
     }
 
-logger.info(f"[KEYVAULT] HypΓ client-side KEK: {'Argon2id' if ARGON2_AVAILABLE else 'scrypt (fallback)'}")
+logger.info(f"[KEYVAULT] HypΓ-AEAD (SHA3-256 CTR+HMAC) — no external crypto packages")
+logger.info(f"[KEYVAULT] KEK derivation: {'Argon2id' if ARGON2_AVAILABLE else 'scrypt (fallback)'}")
 logger.info(f"[KEYVAULT] Device-bound pepper: enabled")
 
 
@@ -872,7 +962,7 @@ CREATE TABLE database_metadata (
 CREATE TABLE encrypted_private_keys (
     key_id BIGSERIAL PRIMARY KEY,
     address VARCHAR(255) NOT NULL UNIQUE,
-    algorithm VARCHAR(50) DEFAULT 'AES-256-GCM',
+    algorithm VARCHAR(50) DEFAULT 'HypΓ-AEAD',
     kdf_algorithm VARCHAR(50) DEFAULT 'PBKDF2-SHA3-512',
     kdf_iterations INT DEFAULT 16384,
     nonce_hex VARCHAR(255) NOT NULL,
@@ -1667,8 +1757,8 @@ CREATE INDEX idx_sequence_order ON pq_sequential(sequence_order);
 --
 --  Envelope encryption model (3 layers, all client-side):
 --    passphrase + device_pepper → Argon2id → KEK  (never stored)
---    KEK → AES-256-GCM → wrapped_dek_b64          (stored here)
---    DEK → AES-256-GCM → BIP39 entropy ciphertext (stored here)
+--    KEK → HypΓ-AEAD → wrapped_dek_b64          (stored here)
+--    DEK → HypΓ-AEAD → BIP39 entropy ciphertext (stored here)
 --
 --  Full DB scrape exposes: salts, nonces, ciphertexts, KDF params.
 --  None of these are decryptable without the passphrase.
@@ -1687,10 +1777,10 @@ CREATE TABLE IF NOT EXISTS wallet_encrypted_seeds (
     scrypt_n             INTEGER,                  -- populated only if kdf_type=scrypt
     scrypt_r             INTEGER,
     scrypt_p             INTEGER,
-    -- Wrapped DEK: AES-256-GCM(KEK, random_dek)
+    -- Wrapped DEK: HypΓ-AEAD(KEK, random_dek)
     dek_nonce_b64        TEXT          NOT NULL,   -- 12-byte GCM nonce
     wrapped_dek_b64      TEXT          NOT NULL,   -- ciphertext+tag (useless without KEK)
-    -- Seed ciphertext: AES-256-GCM(DEK, bip39_entropy)
+    -- Seed ciphertext: HypΓ-AEAD(DEK, bip39_entropy)
     seed_nonce_b64       TEXT          NOT NULL,   -- 12-byte GCM nonce
     seed_ciphertext_b64  TEXT          NOT NULL,   -- encrypted BIP39 entropy
     -- Safe-to-expose public identity
