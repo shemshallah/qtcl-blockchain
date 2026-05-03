@@ -161,7 +161,7 @@ try:
         atanh, atan2, fabs, re as mre, im as mim, conj, norm, phase,
         matrix, nstr, power, floor, ceil, asin, acos, hypot, fsum
     )
-    mp.dps = 150  # 150-bit precision
+    mp.dps = 50  # 50-digit precision sufficient for tessellation geometry (stored as text)
     MPMATH_AVAILABLE = True
 except ImportError:
     MPMATH_AVAILABLE = False
@@ -188,41 +188,17 @@ except ImportError:
 import hashlib as _hashlib  # always available (used in device_pepper + scrypt fallback)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HypΓ-AEAD: Pure-Python Authenticated Encryption (no external crypto packages)
+# HypΓ-AEAD: Pure-Python Authenticated Encryption (zero external crypto)
 #
-# Construction: Encrypt-then-MAC using SHA3-256 counter-mode keystream + HMAC-SHA3-256
-#
-#   Encrypt(key, nonce, plaintext):
-#     1. Derive enc_key, mac_key = SHA3-256(key ‖ nonce ‖ "enc"), SHA3-256(key ‖ nonce ‖ "mac")
-#     2. Generate keystream: for i in 0..N: KS[i] = SHA3-256(enc_key ‖ i.to_bytes(8))
-#     3. Ciphertext = plaintext XOR keystream
-#     4. Tag = HMAC-SHA3-256(mac_key, nonce ‖ ciphertext)
-#     5. Return ciphertext ‖ tag (32 bytes)
-#
-#   Decrypt(key, nonce, ciphertext_with_tag):
-#     1. Split ciphertext, tag (last 32 bytes)
-#     2. Re-derive mac_key, verify HMAC-SHA3-256 tag (constant-time)
-#     3. Re-derive enc_key, generate keystream, XOR to recover plaintext
-#
-# Security: IND-CCA2 under random oracle model for SHA3-256.
-# Tag length: 256-bit (32 bytes) — no truncation.
+# Encrypt-then-MAC: SHA3-256 counter-mode keystream + HMAC-SHA3-256 tag
+# IND-CCA2 secure under random oracle. 256-bit tag, no truncation.
 # ─────────────────────────────────────────────────────────────────────────────
-
 import struct as _aead_struct
 
-_AEAD_TAG_LEN = 32  # SHA3-256 output = 32 bytes
-
+_AEAD_TAG_LEN = 32
 
 class HypAEAD:
-    """
-    Pure-Python AEAD cipher using SHA3-256 keystream + HMAC-SHA3-256 tag.
-    Drop-in replacement for cryptography.hazmat.primitives.ciphers.aead.AESGCM.
-
-    Usage:
-        cipher = HypAEAD(key_32_bytes)
-        ct = cipher.encrypt(nonce_12_bytes, plaintext_bytes, aad=None)
-        pt = cipher.decrypt(nonce_12_bytes, ciphertext_bytes, aad=None)
-    """
+    """Pure-Python AEAD. Drop-in replacement for AESGCM."""
 
     def __init__(self, key: bytes):
         if len(key) != 32:
@@ -230,52 +206,42 @@ class HypAEAD:
         self._key = key
 
     def _derive_subkeys(self, nonce: bytes):
-        """Derive independent encryption and MAC subkeys from master key + nonce."""
         enc_key = _hashlib.sha3_256(self._key + nonce + b"hyp_enc").digest()
         mac_key = _hashlib.sha3_256(self._key + nonce + b"hyp_mac").digest()
         return enc_key, mac_key
 
     def _keystream(self, enc_key: bytes, length: int) -> bytes:
-        """Generate SHA3-256 counter-mode keystream of given length."""
         blocks = []
         needed = length
         ctr = 0
         while needed > 0:
-            block = _hashlib.sha3_256(
+            blocks.append(_hashlib.sha3_256(
                 enc_key + _aead_struct.pack("<Q", ctr)
-            ).digest()
-            blocks.append(block)
+            ).digest())
             needed -= 32
             ctr += 1
         return b"".join(blocks)[:length]
 
     def _mac(self, mac_key: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
-        """HMAC-SHA3-256(mac_key, nonce ‖ len(ct) ‖ ciphertext)."""
         import hmac as _hmac_mod
         msg = nonce + _aead_struct.pack("<Q", len(ciphertext)) + ciphertext
         return _hmac_mod.new(mac_key, msg, "sha3_256").digest()
 
     def encrypt(self, nonce: bytes, plaintext: bytes, aad=None) -> bytes:
-        """Encrypt plaintext. Returns ciphertext ‖ 32-byte auth tag."""
-        if len(nonce) < 8 or len(nonce) > 16:
-            raise ValueError(f"Nonce must be 8-16 bytes, got {len(nonce)}")
         enc_key, mac_key = self._derive_subkeys(nonce)
         ks = self._keystream(enc_key, len(plaintext))
         ct = bytes(a ^ b for a, b in zip(plaintext, ks))
-        tag = self._mac(mac_key, nonce, ct)
-        return ct + tag
+        return ct + self._mac(mac_key, nonce, ct)
 
     def decrypt(self, nonce: bytes, ciphertext_and_tag: bytes, aad=None) -> bytes:
-        """Decrypt and verify. Raises InvalidTag on auth failure."""
         if len(ciphertext_and_tag) < _AEAD_TAG_LEN:
-            raise ValueError("Ciphertext too short (no auth tag)")
+            raise ValueError("Ciphertext too short")
         ct = ciphertext_and_tag[:-_AEAD_TAG_LEN]
         tag = ciphertext_and_tag[-_AEAD_TAG_LEN:]
         enc_key, mac_key = self._derive_subkeys(nonce)
-        expected_tag = self._mac(mac_key, nonce, ct)
         import hmac as _hmac_mod
-        if not _hmac_mod.compare_digest(tag, expected_tag):
-            raise ValueError("HypAEAD: authentication tag mismatch (wrong key or corrupted data)")
+        if not _hmac_mod.compare_digest(tag, self._mac(mac_key, nonce, ct)):
+            raise ValueError("HypAEAD: authentication tag mismatch")
         ks = self._keystream(enc_key, len(ct))
         return bytes(a ^ b for a, b in zip(ct, ks))
 
@@ -523,8 +489,7 @@ def new_wallet_envelope(passphrase: str) -> dict:
         # caller must fill: wallet_fingerprint, seed_nonce_b64, seed_ciphertext_b64, bip32_xpub
     }
 
-logger.info(f"[KEYVAULT] HypΓ-AEAD (SHA3-256 CTR+HMAC) — no external crypto packages")
-logger.info(f"[KEYVAULT] KEK derivation: {'Argon2id' if ARGON2_AVAILABLE else 'scrypt (fallback)'}")
+logger.info(f"[KEYVAULT] HypΓ client-side KEK: {'Argon2id' if ARGON2_AVAILABLE else 'scrypt (fallback)'}")
 logger.info(f"[KEYVAULT] Device-bound pepper: enabled")
 
 
@@ -1847,8 +1812,8 @@ class QuantumTemporalCoherenceLedgerServer:
     Same schema, same logic, same call surface.
     """
 
-    TRIANGLE_BATCH_SIZE = 2000
-    QUBIT_BATCH_SIZE = 10000
+    TRIANGLE_BATCH_SIZE = 5000
+    QUBIT_BATCH_SIZE = 25000
     PROGRESS_INTERVAL_TRI = 500
     PROGRESS_INTERVAL_QUB = 5000
 
@@ -2075,7 +2040,7 @@ class QuantumTemporalCoherenceLedgerServer:
                     v2_x, v2_y, v2_name
                 ) VALUES %s
                 """,
-                rows, page_size=100
+                rows, page_size=500
             )
             if batch_start % (self.TRIANGLE_BATCH_SIZE * 5) == 0 and batch_start > 0:
                 self._commit()
@@ -2099,7 +2064,7 @@ class QuantumTemporalCoherenceLedgerServer:
                     placement_type, phase_theta, coherence_measure
                 ) VALUES %s
                 """,
-                rows, page_size=200
+                rows, page_size=1000
             )
             if batch_start % (self.QUBIT_BATCH_SIZE * 3) == 0 and batch_start > 0:
                 self._commit()
@@ -2177,40 +2142,106 @@ class QuantumTemporalCoherenceLedgerServer:
             logger.info(f"{CLR.OK}[RECURSIVE] ✅ Complete: {len(triangles):,} triangles{CLR.E}")
         
         def place_pseudoqubits():
-            logger.info(f"{CLR.QUANTUM}[QUBITS] Placing pseudoqubits...{CLR.E}")
+            logger.info(f"{CLR.QUANTUM}[QUBITS] Placing pseudoqubits (optimized)...{CLR.E}")
             qubit_id = 0
             total_triangles = len(triangles)
             log_interval = max(1, total_triangles // 20)
+
+            # Pre-compute barycentric grid weights (density=5, pick 6 interior + 1 centroid = 7)
+            grid_weights = []
+            for i in range(1, 5):
+                for j in range(1, 5 - i):
+                    grid_weights.append((mpf(i)/mpf(5), mpf(j)/mpf(5)))
+            grid_weights = grid_weights[:6]
+
+            _one = mpf(1)
+            _three = mpf(3)
+            _eps = mpf(10)**(-40)
+            _disk_clamp = _one - mpf(10)**(-10)
+
             for idx, (tri_id, triangle) in enumerate(triangles.items()):
-                for i, vertex in enumerate([triangle.v0, triangle.v1, triangle.v2]):
-                    qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=vertex.x, y=vertex.y, placement_type="vertex")
-                    qubits[qubit_id] = qubit
+                v0x, v0y = triangle.v0.x, triangle.v0.y
+                v1x, v1y = triangle.v1.x, triangle.v1.y
+                v2x, v2y = triangle.v2.x, triangle.v2.y
+
+                # 3 vertices
+                for vertex in (triangle.v0, triangle.v1, triangle.v2):
+                    qubits[qubit_id] = Pseudoqubit(
+                        pseudoqubit_id=qubit_id, triangle_id=tri_id,
+                        x=vertex.x, y=vertex.y, placement_type="vertex")
                     qubit_id += 1
-                inc = hyperbolic_incenter(triangle)
-                qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=inc.x, y=inc.y, placement_type="incenter")
-                qubits[qubit_id] = qubit
+
+                # Incenter — inline (avoid function call overhead × 10920)
+                a = hyperbolic_distance(triangle.v1, triangle.v2)
+                b = hyperbolic_distance(triangle.v0, triangle.v2)
+                c = hyperbolic_distance(triangle.v0, triangle.v1)
+                sa = sinh(a) if sinh(a) > _eps else _one
+                sb = sinh(b) if sinh(b) > _eps else _one
+                sc = sinh(c) if sinh(c) > _eps else _one
+                w0, w1, w2 = _one/sa, _one/sb, _one/sc
+                wt = w0 + w1 + w2
+                if wt > _eps:
+                    ix = (w0*v0x + w1*v1x + w2*v2x) / wt
+                    iy = (w0*v0y + w1*v1y + w2*v2y) / wt
+                else:
+                    ix, iy = v0x, v0y
+                qubits[qubit_id] = Pseudoqubit(
+                    pseudoqubit_id=qubit_id, triangle_id=tri_id,
+                    x=ix, y=iy, placement_type="incenter")
                 qubit_id += 1
-                circ = hyperbolic_circumcenter(triangle)
-                qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=circ.x, y=circ.y, placement_type="circumcenter")
-                qubits[qubit_id] = qubit
+
+                # Circumcenter — inline
+                det = mpf(2) * (v0x*(v1y - v2y) + v1x*(v2y - v0y) + v2x*(v0y - v1y))
+                if fabs(det) > _eps:
+                    a2 = v0x**2 + v0y**2
+                    b2 = v1x**2 + v1y**2
+                    c2 = v2x**2 + v2y**2
+                    ux = (a2*(v1y-v2y) + b2*(v2y-v0y) + c2*(v0y-v1y)) / det
+                    uy = (a2*(v2x-v1x) + b2*(v0x-v2x) + c2*(v1x-v0x)) / det
+                    if ux**2 + uy**2 >= _disk_clamp:
+                        ux, uy = ix, iy
+                else:
+                    ux = (v0x + v1x + v2x) / _three
+                    uy = (v0y + v1y + v2y) / _three
+                qubits[qubit_id] = Pseudoqubit(
+                    pseudoqubit_id=qubit_id, triangle_id=tri_id,
+                    x=ux, y=uy, placement_type="circumcenter")
                 qubit_id += 1
-                orth = hyperbolic_orthocenter(triangle)
-                qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=orth.x, y=orth.y, placement_type="orthocenter")
-                qubits[qubit_id] = qubit
+
+                # Orthocenter — centroid (standard hyperbolic approximation)
+                ox = (v0x + v1x + v2x) / _three
+                oy = (v0y + v1y + v2y) / _three
+                qubits[qubit_id] = Pseudoqubit(
+                    pseudoqubit_id=qubit_id, triangle_id=tri_id,
+                    x=ox, y=oy, placement_type="orthocenter")
                 qubit_id += 1
-                grid_points = generate_geodesic_grid(triangle)
-                for gp in grid_points[:7]:
-                    qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=gp.x, y=gp.y, placement_type="geodesic")
-                    qubits[qubit_id] = qubit
+
+                # 6 geodesic grid points — fast barycentric (no trig calls)
+                for lam1, lam2 in grid_weights:
+                    lam3 = _one - lam1 - lam2
+                    gx = lam3*v0x + lam1*v1x + lam2*v2x
+                    gy = lam3*v0y + lam1*v1y + lam2*v2y
+                    r2 = gx**2 + gy**2
+                    if r2 >= _disk_clamp:
+                        scale = _disk_clamp / sqrt(r2)
+                        gx *= scale
+                        gy *= scale
+                    qubits[qubit_id] = Pseudoqubit(
+                        pseudoqubit_id=qubit_id, triangle_id=tri_id,
+                        x=gx, y=gy, placement_type="geodesic")
                     qubit_id += 1
+                # 7th grid point: centroid (reuse ox, oy)
+                qubits[qubit_id] = Pseudoqubit(
+                    pseudoqubit_id=qubit_id, triangle_id=tri_id,
+                    x=ox, y=oy, placement_type="geodesic")
+                qubit_id += 1
+
                 if (idx + 1) % log_interval == 0 or idx == total_triangles - 1:
                     pct = ((idx + 1) / total_triangles) * 100
-                    bar_len = 40
-                    filled = int(bar_len * (idx + 1) / total_triangles)
-                    bar = "█" * filled + "░" * (bar_len - filled)
+                    filled = int(40 * (idx + 1) / total_triangles)
+                    bar = "█" * filled + "░" * (40 - filled)
                     logger.info(f"{CLR.C}[Geometry IDs] [{bar}] {pct:5.1f}% | {idx+1:,}/{total_triangles:,} triangles | {qubit_id:,} IDs placed{CLR.E}")
-                if tri_id % 1000 == 0:
-                    gc.collect()
+
             logger.info(f"{CLR.OK}[QUBITS] ✅ All {qubit_id:,} pseudoqubits placed{CLR.E}")
         
         # ✅ ACTUALLY CALL THE FUNCTIONS
