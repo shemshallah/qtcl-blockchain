@@ -1914,7 +1914,11 @@ def vault_update_display_name(params: dict, rpc_id: Any) -> dict:
 
 
 def vault_change_account_id(params: dict, rpc_id: Any) -> dict:
-    """RPC: vault_changeAccountId — Change the vault account ID (username)."""
+    """RPC: vault_changeAccountId — Change the vault account ID (username).
+
+    Strategy: INSERT new row → UPDATE children → DELETE old row.
+    This avoids FK violations entirely — children always reference a valid PK.
+    """
     try:
         p = _normalize_params(params)
         old_id = p.get("account_id", "")
@@ -1924,6 +1928,8 @@ def vault_change_account_id(params: dict, rpc_id: Any) -> dict:
             return _rpc_error(-32602, "account_id, passphrase, and new_account_id required", rpc_id)
         if len(new_id) < 3 or len(new_id) > 64:
             return _rpc_error(-32602, "new_account_id must be 3-64 characters", rpc_id)
+        if old_id == new_id:
+            return _rpc_error(-32602, "New ID is the same as current ID", rpc_id)
 
         _ensure_schema()
         acct = _vault_query("SELECT passphrase_hash FROM vault_accounts WHERE id = %s", (old_id,), fetch="one")
@@ -1937,16 +1943,47 @@ def vault_change_account_id(params: dict, rpc_id: Any) -> dict:
         if existing:
             return _rpc_error(-32009, "Account ID already taken", rpc_id)
 
-        # Update all references — CASCADE handles vault_secrets, vault_contacts, etc.
-        # But we need to update the PK itself, so we do it in order:
+        # Strategy: copy old account row with new PK → re-point children → delete old row.
+        # This never violates FK constraints because the new PK exists before children update,
+        # and the old PK is deleted only after no children reference it.
         conn = _get_vault_conn()
         try:
             cur = conn.cursor()
-            # Temporarily disable FK checks, update referencing tables, then PK
-            for table in ['vault_contacts', 'vault_secrets', 'vault_anchors', 'vault_billing', 'vault_inheritance']:
-                cur.execute(f"UPDATE {table} SET account_id = %s WHERE account_id = %s", (new_id, old_id))
-            cur.execute("UPDATE vault_accounts SET id = %s, updated_at = NOW() WHERE id = %s", (new_id, old_id))
+
+            # 1. Insert clone of account row with new ID
+            cur.execute(
+                """INSERT INTO vault_accounts
+                       (id, display_name, email, passphrase_hash, tier, device_fp,
+                        qtcl_address, public_key, created_at, updated_at, last_login,
+                        secrets_count, bytes_stored, anchors_used, credit_balance)
+                   SELECT %s, display_name, email, passphrase_hash, tier, device_fp,
+                          qtcl_address, public_key, created_at, NOW(), last_login,
+                          secrets_count, bytes_stored, anchors_used, credit_balance
+                   FROM vault_accounts WHERE id = %s""",
+                (new_id, old_id)
+            )
+
+            # 2. Re-point all child tables to the new ID
+            _CHILD_TABLES = [
+                'vault_contacts', 'vault_secrets', 'vault_anchors',
+                'vault_billing', 'vault_inheritance',
+            ]
+            for table in _CHILD_TABLES:
+                try:
+                    cur.execute(
+                        f"UPDATE {table} SET account_id = %s WHERE account_id = %s",
+                        (new_id, old_id)
+                    )
+                except Exception:
+                    pass  # table may not exist in lightweight schema
+
+            # 3. Delete old account row (no children reference it now)
+            cur.execute("DELETE FROM vault_accounts WHERE id = %s", (old_id,))
+
             logger.info(f"[VAULT] Account ID changed: {old_id} → {new_id}")
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             _put_vault_conn(conn)
 

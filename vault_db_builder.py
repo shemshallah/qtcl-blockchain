@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS vault_metadata (
 
 CREATE TABLE IF NOT EXISTS vault_accounts (
     id                  TEXT PRIMARY KEY,           -- "va_" + 32 hex chars
+    display_name        TEXT,                       -- human-friendly label (optional, 2-48 chars)
     email               TEXT,                       -- optional, for recovery
     email_verified      BOOLEAN NOT NULL DEFAULT FALSE,
     passphrase_hash     TEXT NOT NULL,              -- "salt:dk" (PBKDF2-SHA256 600K)
@@ -752,6 +753,23 @@ BEGIN
       AND i.last_check_in + (i.check_in_days || ' days')::INTERVAL < NOW();
 END;
 $$ LANGUAGE plpgsql;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- MIGRATIONS — Safe to re-run (idempotent)
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- v1.1: Add display_name column to vault_accounts (existing deployments)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'vault_accounts' AND column_name = 'display_name'
+    ) THEN
+        ALTER TABLE vault_accounts ADD COLUMN display_name TEXT;
+        RAISE NOTICE 'Added display_name column to vault_accounts';
+    END IF;
+END
+$$;
 
 """
 
