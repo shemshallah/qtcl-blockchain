@@ -416,9 +416,9 @@ class DHTNode:
         """
         if node_id is None:
             # Generate from address hash
-            node_id = hashlib.sha1(
+            node_id = hashlib.sha3_256(
                 f"{address}:{port}:{secrets.token_hex(16)}".encode()
-            ).hexdigest()
+            ).hexdigest()[:40]
 
         self.node_id = node_id
         self.node_id_int = int(node_id, 16)
@@ -1244,9 +1244,9 @@ def _settle_block_rewards(
         treasury_reward_base += total_tx_fees
 
         # Compute wallet fingerprints
-        miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+        miner_fp = hashlib.sha3_256(miner_address.encode()).hexdigest()[:64]
         treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
-        treasury_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
+        treasury_fp = hashlib.sha3_256(treasury_address.encode()).hexdigest()[:64]
 
         # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
         # ─────────────────────────────────────────────────────────────────────────────
@@ -1631,7 +1631,7 @@ class Message:
     timestamp: float = field(default_factory=time.time)
     sender_id: Optional[str] = None
     message_id: str = field(
-        default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[
+        default_factory=lambda: hashlib.sha3_256(str(time.time()).encode()).hexdigest()[
             :16
         ]
     )
@@ -4547,7 +4547,7 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
             caller_ip = "127.0.0.1"
 
         pubkey_hash = (
-            hashlib.sha256(pubkey_b64.encode()).hexdigest()[:32]
+            hashlib.sha3_256(pubkey_b64.encode()).hexdigest()[:32]
             if pubkey_b64
             else node_id[:32]
         )
@@ -4562,7 +4562,7 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
         fp_payload = (
             f"NAT:{caller_ip}|REP:{reported_ip}|MAC:{mac_address}|DEV:{device_id}"
         )
-        fingerprint = hashlib.sha256(fp_payload.encode()).hexdigest()
+        fingerprint = hashlib.sha3_256(fp_payload.encode()).hexdigest()
 
         # Debug pairing details
         logger.debug(
@@ -4991,7 +4991,7 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
 
     cert_preimage = f"{oracle_addr}|{wallet_addr}|{oracle_pub}"
     cert_sig_hex = str(
-        p.get("cert_sig", _hh.sha256(cert_preimage.encode()).hexdigest())
+        p.get("cert_sig", _hh.sha3_256(cert_preimage.encode()).hexdigest())
     )
     cert_auth_tag = str(
         p.get("cert_auth_tag", _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32])
@@ -5296,9 +5296,9 @@ def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
         except ValueError:
             return _rpc_error(-32602, "malformed hex in salt_hex or verifier_hex", rpc_id)
 
-        # PBKDF2-HMAC-SHA256, 600K iterations, 64 bytes → enc_key + verifier_key
+        # PBKDF2-HMAC-SHA3-256, 600K iterations, 64 bytes → enc_key + verifier_key
         raw = hashlib.pbkdf2_hmac(
-            "sha256", password.encode("utf-8"), salt, 600_000, dklen=64
+            "sha3_256", password.encode("utf-8"), salt, 600_000, dklen=64
         )
         verifier_key = raw[32:]
         expected_v = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + verifier_key).digest()
@@ -5477,6 +5477,120 @@ def qtcl_hyp_verifyBlock(params: dict, rpc_id: Any) -> dict:
     except Exception as e:
         logger.error(f"[RPC-HYP-VERIFY-BLOCK] {e}", exc_info=True)
         return _rpc_error(-32603, f"Block verification failed: {str(e)}", rpc_id)
+
+
+def qtcl_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
+    """RPC: qtcl_signAndSubmitTx — Decrypt private key, sign transaction, submit to mempool.
+
+    Expected params[0]:
+        wallet_data: dict with encrypted_private_key
+        password: str
+        tx: dict with from_address, to_address, amount, fee, nonce, memo
+    """
+    try:
+        import hashlib
+        import hmac
+        import json
+
+        p = params[0] if isinstance(params, (list, tuple)) and len(params) > 0 else params if isinstance(params, dict) else {}
+        wallet_data = p.get("wallet_data")
+        password = p.get("password", "")
+        tx = p.get("tx", {})
+
+        if not wallet_data or not password or not tx:
+            return _rpc_error(-32602, "wallet_data, password, and tx required", rpc_id)
+
+        enc_pk = wallet_data.get("encrypted_private_key")
+        if not enc_pk or not isinstance(enc_pk, dict):
+            return _rpc_error(-32602, "wallet_data.encrypted_private_key missing or malformed", rpc_id)
+
+        # Get fields from encrypted_private_key
+        salt_hex = enc_pk.get("salt_hex", "")
+        verifier_hex = enc_pk.get("verifier_hex", "")
+        nonce_hex = enc_pk.get("nonce_hex", "")
+        ciphertext_hex = enc_pk.get("ciphertext_hex", "")
+        mac_hex = enc_pk.get("mac_hex", "")
+
+        if not all([salt_hex, verifier_hex, nonce_hex, ciphertext_hex, mac_hex]):
+            return _rpc_error(-32602, "Malformed encrypted_private_key: missing required fields", rpc_id)
+
+        # Derive key using PBKDF2-HMAC-SHA3-256 (600K iterations, dklen=64)
+        salt = bytes.fromhex(salt_hex)
+        raw = hashlib.pbkdf2_hmac("sha3_256", password.encode("utf-8"), salt, 600_000, dklen=64)
+
+        enc_key = raw[0:16]      # 16 bytes for SHAKE-256-CTR
+        mac_key = raw[16:32]     # 16 bytes for SHA3-256 MAC
+        verifier_key = raw[32:64] # 32 bytes for password verification
+
+        # Verify password using verifier tag
+        expected_verifier = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + verifier_key).digest()
+        stored_verifier = bytes.fromhex(verifier_hex)
+        if not hmac.compare_digest(stored_verifier, expected_verifier):
+            return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
+
+        # Verify MAC: SHA3-256(mac_key + nonce + ciphertext)
+        nonce = bytes.fromhex(nonce_hex)
+        ciphertext = bytes.fromhex(ciphertext_hex)
+        stored_mac = bytes.fromhex(mac_hex)
+        expected_mac = hashlib.sha3_256(mac_key + nonce + ciphertext).digest()
+        if not hmac.compare_digest(stored_mac, expected_mac):
+            return _rpc_error(-32603, "MAC verification failed: data tampered or wrong key", rpc_id)
+
+        # Decrypt private key using SHAKE-256-CTR
+        shake = hashlib.shake_256(enc_key + nonce)
+        keystream = shake.digest(len(ciphertext))
+        private_key_bytes = bytes(a ^ b for a, b in zip(ciphertext, keystream))
+        private_key = private_key_bytes.hex()
+
+        # Prepare transaction for signing - must match mempool's get_signing_hash() format
+        # Mempool uses: sender, recipient, amount (in QTCL, not cents), nonce
+        tx_for_signing = {
+            "from_address": tx.get("from_address", ""),
+            "to_address": tx.get("to_address", ""),
+            "amount": tx.get("amount", 0),
+            "fee": tx.get("fee", 0),
+            "nonce": tx.get("nonce", 0),
+            "memo": tx.get("memo", ""),
+        }
+
+        # Compute signing hash - must match mempool's get_signing_hash()
+        # Mempool uses: sender, recipient, amount (QTCL float), nonce
+        signing_data = {
+            'sender': tx_for_signing["from_address"],
+            'recipient': tx_for_signing["to_address"],
+            'amount': float(tx_for_signing["amount"]),  # QTCL (not cents)
+            'nonce': tx_for_signing["nonce"]
+        }
+        signing_json = json.dumps(signing_data, sort_keys=True, default=str)
+        tx_hash = hashlib.sha3_256(signing_json.encode('utf-8')).digest()
+
+        # Sign the hash using HypΓ Schnorr
+        engine = _init_hlwe_engine()
+        sig = engine.sign_hash(tx_hash, private_key)
+
+        # Submit to mempool - convert amount and fee to cents (int) as expected by mempool
+        tx_for_mempool = tx_for_signing.copy()
+        tx_for_mempool["amount"] = int(round(float(tx_for_signing["amount"]) * 100))  # Convert to cents
+        tx_for_mempool["fee"] = int(round(float(tx_for_signing["fee"]) * 100))  # Convert to cents
+        tx_for_mempool["signature"] = json.dumps(sig)  # Mempool expects JSON string
+        tx_for_mempool["public_key"] = wallet_data.get("public_key", "")
+
+        from mempool import get_mempool
+        result_code, message, tx_obj = get_mempool().accept(tx_for_mempool)
+
+        if tx_obj:
+            return _rpc_ok({
+                "status": "accepted",
+                "tx_hash": tx_obj.tx_hash,
+                "message": message,
+                "accepted": True,
+            }, rpc_id)
+        else:
+            return _rpc_error(-32000, f"Transaction rejected: {message}", rpc_id, {"code": result_code})
+
+    except Exception as e:
+        logger.exception(f"[RPC] qtcl_signAndSubmitTx error: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 _POW_SCRATCHPAD_BYTES = 512 * 1024
@@ -6665,6 +6779,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_hyp_decryptMessage": qtcl_hyp_decryptMessage,
     "qtcl_hyp_signBlock": qtcl_hyp_signBlock,
     "qtcl_hyp_verifyBlock": qtcl_hyp_verifyBlock,
+    "qtcl_signAndSubmitTx": qtcl_signAndSubmitTx,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -6792,7 +6907,7 @@ def _p2p_fanout_broadcast():
         },
         separators=(",", ":"),
     )
-    dht_hash = hashlib.sha256(dht_json.encode()).hexdigest()
+    dht_hash = hashlib.sha3_256(dht_json.encode()).hexdigest()
     if dht_hash in _p2p_seen_hashes:
         return
     _p2p_seen_hashes.add(dht_hash)
