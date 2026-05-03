@@ -49,7 +49,7 @@ from functools import wraps, lru_cache, partial
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, getcontext
 from pydantic import BaseModel, Field, ValidationError
-import traceback, random, struct, sqlite3, copy
+import traceback, random, struct, copy
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HypΓ CRYPTOSYSTEM INTEGRATION
@@ -946,16 +946,15 @@ class QuantumDatabaseConnector:
     def __init__(self, config: DatabaseConfig = None):
         self.config = config or DatabaseConfig()
         self.pool = None
+        self._db_pool = None
+        self._cursor_func = None
         self.log_queue = queue.Queue(maxsize=10000)
         self.logger_thread = None
         self.running = False
         self.lock = threading.RLock()
         self.stats = {"inserts_succeeded": 0, "inserts_failed": 0, "queue_depth": 0}
-        self._sqlite_conn = None  # SQLite fallback
         if DB_AVAILABLE:
             self._initialize_pool()
-        # Always initialize SQLite fallback
-        self._init_sqlite()
 
     def _initialize_pool(self):
         """
@@ -1001,78 +1000,8 @@ class QuantumDatabaseConnector:
         self._db_pool = pool
         logger.info("[DB] QuantumDatabaseConnector: server db_pool injected")
 
-    def _init_sqlite(self):
-        """Initialize SQLite fallback for block persistence."""
-        try:
-            import sqlite3
-
-            # Use /tmp on Koyeb (always writable) or data/ locally
-            if os.path.exists("/workspace"):
-                # Running on Koyeb - use /tmp which is writable
-                db_path = "/tmp/qtcl.db"
-            else:
-                # Running locally - use data/ directory
-                db_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), "data", "qtcl.db"
-                )
-                os.makedirs(os.path.dirname(db_path), exist_ok=True)
-            self._sqlite_conn = sqlite3.connect(db_path, check_same_thread=False)
-            # Create blocks table if not exists
-            self._sqlite_conn.execute("""
-                CREATE TABLE IF NOT EXISTS blocks (
-                    height INTEGER PRIMARY KEY,
-                    block_hash TEXT NOT NULL,
-                    parent_hash TEXT,
-                    w_state_hash TEXT,
-                    hyp_witness TEXT,
-                    timestamp REAL DEFAULT 0,
-                    tx_count INTEGER DEFAULT 0,
-                    merkle_root TEXT DEFAULT '',
-                    difficulty INTEGER DEFAULT 6,
-                    nonce INTEGER DEFAULT 0,
-                    coherence_snapshot REAL DEFAULT 1.0,
-                    fidelity_snapshot REAL DEFAULT 1.0,
-                    finalized INTEGER DEFAULT 0,
-                    finalized_at REAL DEFAULT 0
-                )
-            """)
-            self._sqlite_conn.commit()
-            logger.info(f"[DB] ✅ SQLite fallback initialized: {db_path}")
-        except Exception as e:
-            logger.warning(f"[DB] SQLite fallback init failed: {e}")
-            self._sqlite_conn = None
-
-    def _sqlite_execute(self, query: str, params: Tuple = None) -> bool:
-        """Execute query on SQLite."""
-        if not self._sqlite_conn:
-            return False
-        try:
-            # Convert PostgreSQL %s placeholders to SQLite ?
-            sql = query.replace("%s", "?")
-            self._sqlite_conn.execute(sql, params or ())
-            self._sqlite_conn.commit()
-            return True
-        except Exception as e:
-            logger.debug(f"[DB-SQLITE] Execute failed: {e}")
-            return False
-
-    def _sqlite_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
-        """Fetch all results from SQLite."""
-        if not self._sqlite_conn:
-            return []
-        try:
-            sql = query.replace("%s", "?")
-            cursor = self._sqlite_conn.execute(sql, params or ())
-            columns = (
-                [desc[0] for desc in cursor.description] if cursor.description else []
-            )
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.debug(f"[DB-SQLITE] Fetch failed: {e}")
-            return []
-
     def execute(self, query: str, params: Tuple = None) -> bool:
-        """Execute query using injected pool, pool, or SQLite fallback."""
+        """Execute query using injected pool or local pool. PostgreSQL only."""
         if self._db_pool:
             conn = None
             try:
@@ -1091,7 +1020,7 @@ class QuantumDatabaseConnector:
             finally:
                 if conn:
                     self._db_pool.put_connection(conn)
-        elif self.pool:  # Fallback to old pool
+        elif self.pool:
             conn = None
             try:
                 conn = self.pool.getconn()
@@ -1107,11 +1036,11 @@ class QuantumDatabaseConnector:
             finally:
                 if conn:
                     self.pool.putconn(conn)
-        # SQLite fallback
-        return self._sqlite_execute(query, params)
+        logger.warning("[DB-EXEC] No pool available — cannot execute query")
+        return False
 
     def execute_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
-        """Execute query and fetch all results using injected pool or SQLite fallback."""
+        """Execute query and fetch all results using injected pool or local pool. PostgreSQL only."""
         if self._db_pool:
             conn = None
             try:
@@ -1130,7 +1059,7 @@ class QuantumDatabaseConnector:
             finally:
                 if conn:
                     self._db_pool.put_connection(conn)
-        elif self.pool:  # Fallback to old pool
+        elif self.pool:
             conn = None
             try:
                 conn = self.pool.getconn()
@@ -1144,44 +1073,8 @@ class QuantumDatabaseConnector:
             finally:
                 if conn:
                     self.pool.putconn(conn)
-        # SQLite fallback
-        return self._sqlite_fetch_all(query, params)
-
-    def execute(self, query: str, params: Tuple = None) -> bool:
-        if not self.pool:
-            return False
-        conn = None
-        try:
-            conn = self.pool.getconn()
-            cursor = conn.cursor()
-            cursor.execute(query, params or ())
-            conn.commit()
-            cursor.close()
-            return True
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            return False
-        finally:
-            if conn:
-                self.pool.putconn(conn)
-
-    def execute_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
-        if not self.pool:
-            return []
-        conn = None
-        try:
-            conn = self.pool.getconn()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, params or ())
-            results = cursor.fetchall()
-            cursor.close()
-            return [dict(r) for r in results]
-        except Exception:
-            return []
-        finally:
-            if conn:
-                self.pool.putconn(conn)
+        logger.warning("[DB-FETCH] No pool available — cannot fetch")
+        return []
 
     def queue_metric(self, metric: Dict[str, Any]) -> bool:
         try:
@@ -3201,28 +3094,6 @@ class BlockManager:
             # ── Try to resume from persisted chain ───────────────────────────
             if self.db is not None:
                 try:
-                    # Try SQLite first (height column)
-                    if self.db._sqlite_conn:
-                        cursor = self.db._sqlite_conn.execute(
-                            "SELECT height, block_hash FROM blocks ORDER BY height DESC LIMIT 1"
-                        )
-                        row = cursor.fetchone()
-                        if row:
-                            tip_height, tip_hash = row[0], row[1]
-                            logger.info(
-                                f"📦 [GENESIS] Resuming from SQLite tip: "
-                                f"height={tip_height}  hash={tip_hash[:18]}…"
-                            )
-                            self.chain_height = tip_height + 1
-                            self.current_block_hash = tip_hash
-                            self.pending_block = QuantumBlock(
-                                block_height=self.chain_height,
-                                parent_hash=tip_hash,
-                                miner_address=self.validator.miner_address,
-                            )
-                            return
-
-                    # Fallback to PostgreSQL
                     rows = self.db.execute_fetch_all(
                         "SELECT height, block_hash FROM blocks ORDER BY height DESC LIMIT 1"
                     )
@@ -3647,34 +3518,35 @@ class BlockManager:
             self.chain_height += 1
             self.blocks_sealed += 1
 
-            # ── Broadcast sealed block to SSE service ──────────────────────────────
+            # ── Broadcast sealed block to native SSE subscribers + legacy SSE service ──
             try:
                 import sys
 
                 _srv = sys.modules.get("server")
-                if _srv and hasattr(_srv, "_push_to_sse_service"):
-                    block_event = {
-                        "height": block.block_height,
-                        "block_hash": block.block_hash,
-                        "parent_hash": block.parent_hash,
-                        "timestamp": block.timestamp_s,
-                        "tx_count": block.tx_count,
-                        "w_state_fidelity": getattr(block, "w_state_fidelity", None),
-                        # ═══════════════════════════════════════════════════════════
-                        # CATHEDRAL-GRADE: Include cryptographic signature in broadcast
-                        # ═══════════════════════════════════════════════════════════
-                        "hyp_signature": block.hyp_signature
-                        if block.hyp_signature
-                        else None,
-                        "miner_public_key_hex": block.miner_public_key_hex
-                        if block.miner_public_key_hex
-                        else None,
-                        "signature_verified": block.signature_verified,
-                    }
-                    _srv._push_to_sse_service("/push/block", block_event)
+                block_event = {
+                    "height": block.block_height,
+                    "block_hash": block.block_hash,
+                    "parent_hash": block.parent_hash,
+                    "timestamp_s": block.timestamp_s,
+                    "tx_count": block.tx_count,
+                    "w_state_fidelity": getattr(block, "w_state_fidelity", None),
+                    "hyp_signature": block.hyp_signature
+                    if block.hyp_signature
+                    else None,
+                    "miner_public_key_hex": block.miner_public_key_hex
+                    if block.miner_public_key_hex
+                    else None,
+                    "signature_verified": block.signature_verified,
+                }
+                # Native fan-out (Neon PostgreSQL nodes + dashboard clients)
+                if _srv and hasattr(_srv, "_broadcast_block_event"):
+                    _srv._broadcast_block_event(block_event)
                     logger.debug(
-                        f"[BLOCK-BRD] ✅ Pushed block #{block.block_height} to SSE service"
+                        f"[BLOCK-BRD] ✅ Native fan-out block #{block.block_height}"
                     )
+                # Legacy external SSE service (optional)
+                if _srv and hasattr(_srv, "_push_to_sse_service"):
+                    _srv._push_to_sse_service("/push/block", block_event)
             except Exception as _brd_err:
                 logger.debug(f"[BLOCK-BRD] skip: {_brd_err}")
 

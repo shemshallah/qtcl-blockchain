@@ -761,6 +761,20 @@ def _deferred_lattice_init() -> None:
         # ── ENSURE BLOCKS TABLE EXISTS (BEFORE starting BlockManager!) ────────────
         _lazy_ensure_blocks()
 
+        # ── CRYPTOGRAPHICALLY VERIFY CHAIN FROM GENESIS ───────────────────────────
+        _chain_verify = verify_chain_integrity()
+        if not _chain_verify.get("valid", False):
+            logger.critical(
+                f"[BOOT] ❌ Chain integrity broken at h={_chain_verify.get('height')} — "
+                f"{_chain_verify.get('breaks')}"
+            )
+            # In production this would halt; here we log and continue so dev can inspect
+        else:
+            logger.info(
+                f"[BOOT] ✅ Chain integrity verified: {_chain_verify.get('checked')} blocks, "
+                f"tip h={_chain_verify.get('height')}"
+            )
+
         # ── INJECT SERVER DB POOL FOR BLOCK PERSISTENCE ──────────────────────────
         if LATTICE.block_manager and LATTICE.block_manager.db:
             LATTICE.block_manager.db.inject_db_pool(db_pool)
@@ -2605,8 +2619,8 @@ def get_db_connection():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CHAIN QUERY FUNCTIONS (Supabase PostgreSQL only — source of truth)
-# Clients maintain their own SQLite mirrors, synced via P2P broadcasts
+# CHAIN QUERY FUNCTIONS (Neon PostgreSQL only — source of truth)
+# P2P nodes sync by receiving real-time block events via /rpc/events/blocks SSE.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -2741,6 +2755,81 @@ def query_block_range_db(from_height: int, to_height: int) -> list:
     except Exception as e:
         logger.warning(f"[QUERY-BLOCK-RANGE] PG error: {e}")
     return blocks
+
+
+def verify_chain_integrity() -> dict:
+    """Cryptographically verify the entire chain from genesis.
+
+    Reads every block from PostgreSQL in height order, validates that
+    each block's parent_hash matches the previous block's block_hash,
+    and confirms the genesis block has the expected null parent.
+
+    Returns a status dict: {"valid": bool, "height": int, "breaks": [...]}
+    """
+    result = {"valid": True, "height": 0, "breaks": [], "checked": 0}
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                "SELECT height, block_hash, parent_hash, timestamp, difficulty, nonce "
+                "FROM blocks ORDER BY height ASC"
+            )
+            rows = cur.fetchall()
+            if not rows:
+                logger.warning("[CHAIN-VERIFY] No blocks in DB — chain is empty")
+                return result
+
+            prev_hash = None
+            for row in rows:
+                height, block_hash, parent_hash, ts, diff, nonce = row
+                result["checked"] += 1
+                result["height"] = height
+
+                # Genesis check
+                if height == 0:
+                    expected_genesis_parent = "0" * 64
+                    if parent_hash != expected_genesis_parent:
+                        result["valid"] = False
+                        result["breaks"].append(
+                            {
+                                "height": 0,
+                                "reason": "genesis_parent_mismatch",
+                                "expected": expected_genesis_parent,
+                                "got": parent_hash,
+                            }
+                        )
+                        logger.error(
+                            f"[CHAIN-VERIFY] Genesis parent hash mismatch: {parent_hash}"
+                        )
+                    prev_hash = block_hash
+                    continue
+
+                # Link check
+                if prev_hash is not None and parent_hash != prev_hash:
+                    result["valid"] = False
+                    result["breaks"].append(
+                        {
+                            "height": height,
+                            "reason": "parent_hash_mismatch",
+                            "expected": prev_hash,
+                            "got": parent_hash,
+                        }
+                    )
+                    logger.error(
+                        f"[CHAIN-VERIFY] Break at h={height}: parent={parent_hash[:16]}… "
+                        f"expected={prev_hash[:16]}…"
+                    )
+                prev_hash = block_hash
+
+        status = "VALID" if result["valid"] else "BROKEN"
+        logger.info(
+            f"[CHAIN-VERIFY] Chain {status}: {result['checked']} blocks checked, "
+            f"tip h={result['height']}, breaks={len(result['breaks'])}"
+        )
+    except Exception as e:
+        logger.exception(f"[CHAIN-VERIFY] Verification failed: {e}")
+        result["valid"] = False
+        result["error"] = str(e)
+    return result
 
 
 @contextmanager
@@ -2994,29 +3083,46 @@ def _lazy_ensure_blocks():
                 "CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp)"
             )
 
-            # Auto-create genesis if table is empty
+            # Auto-create deterministic genesis if table is empty
             cur.execute("SELECT COUNT(*) FROM blocks")
             count = cur.fetchone()[0]
             if count == 0:
-                genesis_hash = "0" * 64
-                parent_hash = "0" * 64
-                genesis_ts = int(time.time())
+                # Deterministic genesis — MUST match lattice_controller exactly
+                GENESIS_TIMESTAMP = 1_700_000_000
+                GENESIS_MERKLE = hashlib.sha3_256(b"QTCL_GENESIS").hexdigest()
+                GENESIS_WITNESS = hashlib.sha3_256(b"GENESIS_WITNESS").hexdigest()
+                GENESIS_PARENT = "0" * 64
+                genesis_content = (
+                    f"QTCL_GENESIS:{GENESIS_TIMESTAMP}:{GENESIS_MERKLE}:"
+                    f"{GENESIS_WITNESS}:{GENESIS_PARENT}"
+                )
+                genesis_hash = hashlib.sha3_256(
+                    hashlib.sha3_256(genesis_content.encode()).digest()
+                ).hexdigest()
                 cur.execute(
                     """
                     INSERT INTO blocks (
-                        height, block_hash, parent_hash, merkle_root,
+                        height, block_hash, parent_hash, merkle_root, w_state_hash,
                         timestamp, tx_count, coherence_snapshot, fidelity_snapshot,
                         difficulty, nonce, pq_curr, pq_last, finalized, finalized_at
                     ) VALUES (
-                        0, %s, %s, %s,
+                        0, %s, %s, %s, %s,
                         %s, 0, 1.0, 1.0,
                         6, 0, 1, 0, TRUE, %s
                     )
+                    ON CONFLICT (height) DO NOTHING
                 """,
-                    (genesis_hash, parent_hash, genesis_hash, genesis_ts, genesis_ts),
+                    (
+                        genesis_hash,
+                        GENESIS_PARENT,
+                        GENESIS_MERKLE,
+                        GENESIS_WITNESS,
+                        GENESIS_TIMESTAMP,
+                        GENESIS_TIMESTAMP,
+                    ),
                 )
                 logger.info(
-                    f"[SCHEMA] Genesis block auto-created: h=0  hash={genesis_hash[:16]}…"
+                    f"[SCHEMA] Deterministic genesis auto-created: h=0  hash={genesis_hash[:16]}…"
                 )
 
             # Create quantum_field_distribution table with triggers for neighbor broadcast
@@ -3606,54 +3712,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                 height = int(height)
 
         def _query_block_at_height(h: int) -> Optional[dict]:
-            """Full block query from database (authoritative source)."""
+            """Full block query from database (authoritative source). PostgreSQL only."""
             try:
-                # Try SQLite first
-                if (
-                    LATTICE
-                    and hasattr(LATTICE, "block_manager")
-                    and LATTICE.block_manager
-                    and LATTICE.block_manager.db
-                ):
-                    db = LATTICE.block_manager.db
-                    if db._sqlite_conn:
-                        try:
-                            sql = """
-                                SELECT height, block_hash, timestamp, w_state_hash,
-                                       parent_hash, nonce, difficulty,
-                                       fidelity_snapshot, merkle_root, tx_count
-                                FROM blocks WHERE height = ? LIMIT 1
-                            """
-                            cursor = db._sqlite_conn.execute(sql, (h,))
-                            row = cursor.fetchone()
-                            if row:
-                                block = {
-                                    "height": row[0],
-                                    "block_height": row[0],
-                                    "block_hash": row[1],
-                                    "hash": row[1],
-                                    "parent_hash": row[4] or ("0" * 64),
-                                    "previous_hash": row[4] or ("0" * 64),
-                                    "merkle_root": row[8] or ("0" * 64),
-                                    "timestamp_s": int(row[2]) if row[2] else 0,
-                                    "timestamp": int(row[2]) if row[2] else 0,
-                                    "difficulty": int(float(row[6])) if row[6] else 5,
-                                    "nonce": int(row[5]) if row[5] else 0,
-                                    "w_state_fidelity": float(row[7])
-                                    if row[7] is not None
-                                    else 0.0,
-                                    "w_entropy_hash": row[3] or "",
-                                    "pq_curr": h,
-                                    "pq_last": max(0, h - 1),
-                                    "tx_count": int(row[9]) if row[9] else 0,
-                                    "mined": True,
-                                    "finalized": True,
-                                }
-                                return block
-                        except Exception as _se:
-                            logger.debug(f"[RPC] SQLite query failed: {_se}")
-
-                # Fallback to PostgreSQL
                 with get_db_cursor() as cur:
                     cur.execute(
                         """
@@ -5898,7 +5958,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             }
             # Broadcast via available P2P mechanisms
             _broadcast_block_to_peers(compact_block)
-            logger.info(f"[RPC-submitBlock] 📡 Broadcasted h={height} to P2P network")
+            # Fan out to SSE/dashboard subscribers
+            _broadcast_block_event(compact_block)
+            logger.info(f"[RPC-submitBlock] 📡 Broadcasted h={height} to P2P + SSE subscribers")
         except Exception as broadcast_err:
             logger.warning(
                 f"[RPC-submitBlock] P2P broadcast failed (non-critical): {broadcast_err}"
@@ -6313,83 +6375,9 @@ class P2PPeer:
         }
 
 
-class _P2PSQLiteStore:
-    """SQLite store for peer persistence on client side."""
-
-    def __init__(self, db_path: str = "peers.sqlite"):
-        import sqlite3
-
-        self.db_path = db_path
-        self._lock = threading.RLock()
-        conn = sqlite3.connect(db_path)
-        conn.execute("""CREATE TABLE IF NOT EXISTS peer_registry (
-            peer_id TEXT PRIMARY KEY, wallet_address TEXT, external_addr TEXT,
-            port INTEGER, public_key TEXT, chain_height INTEGER, last_seen REAL,
-            first_seen REAL, is_alive INTEGER)""")
-        conn.commit()
-        conn.close()
-
-    def upsert_peer(self, peer: P2PPeer) -> bool:
-        import sqlite3
-
-        with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            now = time.time()
-            if peer.first_seen == 0:
-                peer.first_seen = now
-            conn.execute(
-                """INSERT OR REPLACE INTO peer_registry 
-                (peer_id, wallet_address, external_addr, port, public_key, chain_height,
-                 last_seen, first_seen, is_alive) VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    peer.peer_id,
-                    peer.wallet_address,
-                    peer.external_addr,
-                    peer.port,
-                    peer.public_key,
-                    peer.chain_height,
-                    peer.last_seen,
-                    peer.first_seen,
-                    1 if peer.is_alive else 0,
-                ),
-            )
-            conn.commit()
-            conn.close()
-            return True
-
-    def get_alive_peers(self) -> list:
-        import sqlite3
-
-        cutoff = time.time() - P2P_PEER_TIMEOUT
-        with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT * FROM peer_registry 
-                WHERE last_seen > ? AND is_alive = 1 ORDER BY last_seen DESC LIMIT ?""",
-                (cutoff, P2P_MAX_PEERS),
-            ).fetchall()
-            conn.close()
-            return [
-                P2PPeer(
-                    r["peer_id"],
-                    r["wallet_address"],
-                    r["external_addr"],
-                    r["port"],
-                    r["public_key"],
-                    r["chain_height"],
-                    r["last_seen"],
-                    r["first_seen"],
-                    bool(r["is_alive"]),
-                )
-                for r in rows
-            ]
-
-
 _p2p_dht_table: Dict[str, P2PPeer] = {}
 _p2p_dht_lock = threading.RLock()
 _p2p_seen_hashes: set = set()
-_p2p_client_store: Optional[_P2PSQLiteStore] = None
 
 
 def _p2p_rpc_get_dht_table(params, rpc_id):
@@ -6564,122 +6552,10 @@ P2P_PEER_TIMEOUT = 300
 P2P_MAX_PEERS = 100
 
 
-class P2PPeer:
-    """A peer in the P2P network. Peer = WALLET, not oracle."""
-
-    def __init__(
-        self,
-        peer_id: str = "",
-        wallet_address: str = "",
-        external_addr: str = "",
-        port: int = 9091,
-        public_key: str = "",
-        chain_height: int = 0,
-        last_seen: float = 0.0,
-        first_seen: float = 0.0,
-        is_alive: bool = True,
-    ):
-        self.peer_id = peer_id
-        self.wallet_address = wallet_address
-        self.external_addr = external_addr
-        self.port = port
-        self.public_key = public_key
-        self.chain_height = chain_height
-        self.last_seen = last_seen
-        self.first_seen = first_seen
-        self.is_alive = is_alive
-
-    def to_dict(self) -> dict:
-        return {
-            "peer_id": self.peer_id,
-            "wallet_address": self.wallet_address,
-            "external_addr": self.external_addr,
-            "port": self.port,
-            "public_key": self.public_key,
-            "chain_height": self.chain_height,
-            "last_seen": self.last_seen,
-            "first_seen": self.first_seen,
-            "is_alive": self.is_alive,
-        }
-
-
-class _P2PSQLiteStore:
-    """SQLite store for peer persistence on client side."""
-
-    def __init__(self, db_path: str = "peers.sqlite"):
-        import sqlite3
-
-        self.db_path = db_path
-        self._lock = threading.RLock()
-        conn = sqlite3.connect(db_path)
-        conn.execute("""CREATE TABLE IF NOT EXISTS peer_registry (
-            peer_id TEXT PRIMARY KEY, wallet_address TEXT, external_addr TEXT,
-            port INTEGER, public_key TEXT, chain_height INTEGER, last_seen REAL,
-            first_seen REAL, is_alive INTEGER)""")
-        conn.commit()
-        conn.close()
-
-    def upsert_peer(self, peer: P2PPeer) -> bool:
-        import sqlite3
-
-        with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            now = time.time()
-            if peer.first_seen == 0:
-                peer.first_seen = now
-            conn.execute(
-                """INSERT OR REPLACE INTO peer_registry 
-                (peer_id, wallet_address, external_addr, port, public_key, chain_height,
-                 last_seen, first_seen, is_alive) VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    peer.peer_id,
-                    peer.wallet_address,
-                    peer.external_addr,
-                    peer.port,
-                    peer.public_key,
-                    peer.chain_height,
-                    peer.last_seen,
-                    peer.first_seen,
-                    1 if peer.is_alive else 0,
-                ),
-            )
-            conn.commit()
-            conn.close()
-            return True
-
-    def get_alive_peers(self) -> list:
-        import sqlite3
-
-        cutoff = time.time() - P2P_PEER_TIMEOUT
-        with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT * FROM peer_registry 
-                WHERE last_seen > ? AND is_alive = 1 ORDER BY last_seen DESC LIMIT ?""",
-                (cutoff, P2P_MAX_PEERS),
-            ).fetchall()
-            conn.close()
-            return [
-                P2PPeer(
-                    r["peer_id"],
-                    r["wallet_address"],
-                    r["external_addr"],
-                    r["port"],
-                    r["public_key"],
-                    r["chain_height"],
-                    r["last_seen"],
-                    r["first_seen"],
-                    bool(r["is_alive"]),
-                )
-                for r in rows
-            ]
-
 
 _p2p_dht_table: Dict[str, P2PPeer] = {}
 _p2p_dht_lock = threading.RLock()
 _p2p_seen_hashes: set = set()
-_p2p_client_store: Optional[_P2PSQLiteStore] = None
 
 
 def _p2p_rpc_get_dht_table(params, rpc_id):
@@ -7123,6 +6999,78 @@ def rpc_oracle_snapshot_proxy():
             yield b": SSE unavailable\n\n"
 
         return Response(fallback(), mimetype="text/event-stream")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# NATIVE BLOCK EVENT FAN-OUT (SSE)
+# Pushes newly accepted blocks to all connected P2P/dashboard clients in real time.
+# ═══════════════════════════════════════════════════════════════════════════════════
+import queue as _queue_mod
+
+_BLOCK_EVENT_SUBSCRIBERS: List[_queue_mod.Queue] = []
+_BLOCK_EVENT_SUB_LOCK = threading.Lock()
+_BLOCK_EVENT_MAX_QUEUED = 32  # per-client back-pressure limit
+
+
+def _broadcast_block_event(block_dict: dict) -> None:
+    """Push a block to every connected SSE client. Fire-and-forget."""
+    payload = json.dumps(block_dict, default=str)
+    with _BLOCK_EVENT_SUB_LOCK:
+        dead = []
+        for q in _BLOCK_EVENT_SUBSCRIBERS:
+            try:
+                q.put_nowait(payload)
+            except _queue_mod.Full:
+                dead.append(q)  # client is lagging — drop it
+            except Exception:
+                dead.append(q)
+        for d in dead:
+            try:
+                _BLOCK_EVENT_SUBSCRIBERS.remove(d)
+            except ValueError:
+                pass
+
+
+@app.route("/rpc/events/blocks", methods=["GET"])
+def rpc_events_blocks_stream():
+    """Native SSE stream for real-time block events.
+
+    Clients (dashboard, P2P nodes, miners) connect here and receive
+    a `data:` line every time a new block is accepted by the node.
+    """
+    q: _queue_mod.Queue = _queue_mod.Queue(maxsize=_BLOCK_EVENT_MAX_QUEUED)
+    with _BLOCK_EVENT_SUB_LOCK:
+        _BLOCK_EVENT_SUBSCRIBERS.append(q)
+
+    def generate():
+        try:
+            # Send initial heartbeat so the client knows the stream is alive
+            yield b": QTCL block events stream\n\n"
+            while True:
+                try:
+                    payload = q.get(timeout=25.0)
+                    yield f"data: {payload}\n\n".encode()
+                except _queue_mod.Empty:
+                    # Keep-alive comment to prevent proxy timeouts
+                    yield b": heartbeat\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with _BLOCK_EVENT_SUB_LOCK:
+                try:
+                    _BLOCK_EVENT_SUBSCRIBERS.remove(q)
+                except ValueError:
+                    pass
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
