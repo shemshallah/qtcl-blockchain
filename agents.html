@@ -3,9 +3,35 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>QTCL — Agent Integration</title>
+<meta name="description" content="QTCL agent integration: JSON-RPC blockchain API for autonomous AI agents. 11 MCP tools, flat 1-qsat fees, ~18s blocks, post-quantum Schnorr-Γ signatures. Connect via SSE at /mcp/sse or POST to /rpc.">
+<meta name="keywords" content="QTCL, blockchain, AI agent, MCP, Model Context Protocol, JSON-RPC, post-quantum, Schnorr-Γ, PSL(2,R), cryptocurrency, autonomous agent">
+<meta name="author" content="QTCL Network">
+<meta name="robots" content="index, follow">
+<meta property="og:title" content="QTCL — Agent Integration">
+<meta property="og:description" content="Connect any AI agent to the QTCL blockchain via MCP or JSON-RPC. 11 tools, flat fees, quantum-secure.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://qtcl-blockchain.koyeb.app/agents">
+<link rel="alternate" type="application/json" href="/agents/capability.json" title="QTCL Capability Document">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebAPI",
+  "name": "QTCL Blockchain API",
+  "description": "Post-quantum blockchain with flat-fee transactions and native MCP support for autonomous AI agents.",
+  "url": "https://qtcl-blockchain.koyeb.app/agents",
+  "documentation": "https://qtcl-blockchain.koyeb.app/agents",
+  "termsOfService": "https://qtcl-blockchain.koyeb.app/agents",
+  "provider": {
+    "@type": "Organization",
+    "name": "QTCL Network"
+  },
+  "serviceType": "Blockchain JSON-RPC API",
+  "endpointUrl": "https://qtcl-blockchain.koyeb.app/rpc",
+  "accessMode": "jsonrpc"
+}
+</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -98,6 +124,17 @@ a:hover{text-decoration:underline}
 .footer-links a:hover{color:var(--accent)}
 .footer-copy{font-size:11px;color:var(--dim)}
 
+/* ── Agent Quickstart ── */
+.agent-quick{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:32px;margin:40px 0}
+.agent-quick-title{font-size:18px;font-weight:500;color:var(--bright);margin-bottom:6px}
+.agent-quick-desc{font-size:13px;color:var(--muted);margin-bottom:20px}
+.agent-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.agent-step{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px}
+.agent-step-num{font-family:var(--mono);font-size:10px;color:var(--accent);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px}
+.agent-step-title{font-size:13px;font-weight:500;color:var(--bright);margin-bottom:4px}
+.agent-step-body{font-size:12px;color:var(--muted);line-height:1.6}
+.agent-step-body code{background:var(--bg3);color:var(--accent);padding:1px 5px;border-radius:4px;font-size:11px}
+
 /* ── Accordion / Tool Examples ── */
 .tool-wrap{display:flex;flex-direction:column}
 .tool-card{cursor:pointer;position:relative}
@@ -153,6 +190,44 @@ a:hover{text-decoration:underline}
     </div>
   </div>
 
+  <!-- AGENT QUICKSTART -->
+  <div class="agent-quick" id="agent-quickstart">
+    <div class="agent-quick-title">Agent Quickstart</div>
+    <div class="agent-quick-desc">Exact steps for any AI agent (Claude, GPT, Cursor, AutoGen, LangChain, CrewAI) to connect and transact.</div>
+    <div class="agent-steps">
+      <div class="agent-step">
+        <div class="agent-step-num">Step 1</div>
+        <div class="agent-step-title">Connect via MCP</div>
+        <div class="agent-step-body">Add <code>{"type":"url","url":"https://qtcl-blockchain.koyeb.app/mcp/sse"}</code> to your MCP client config. No API key required. The server exposes 11 tools.</div>
+      </div>
+      <div class="agent-step">
+        <div class="agent-step-num">Step 2</div>
+        <div class="agent-step-title">Create a wallet</div>
+        <div class="agent-step-body">Call <code>qtcl_create_wallet</code> to get a 64-char hex address and HypΓ public key. Save the address — it is your agent's on-chain identity.</div>
+      </div>
+      <div class="agent-step">
+        <div class="agent-step-num">Step 3</div>
+        <div class="agent-step-title">Check balance</div>
+        <div class="agent-step-body">Call <code>qtcl_get_balance</code> with your address. Amounts are in QTCL (1 QTCL = 100 qsat). The flat fee is 1 qsat per transaction.</div>
+      </div>
+      <div class="agent-step">
+        <div class="agent-step-num">Step 4</div>
+        <div class="agent-step-title">Send a transaction</div>
+        <div class="agent-step-body">Call <code>qtcl_send_transaction</code> with from_address, to_address, amount (float), and optional memo (max 256 chars). Returns tx_hash immediately.</div>
+      </div>
+      <div class="agent-step">
+        <div class="agent-step-num">Step 5</div>
+        <div class="agent-step-title">Verify receipt</div>
+        <div class="agent-step-body">Call <code>qtcl_get_transaction</code> with the tx_hash to confirm inclusion. Blocks arrive every ~18 seconds. 1 confirmation = finality.</div>
+      </div>
+      <div class="agent-step">
+        <div class="agent-step-num">Alternative</div>
+        <div class="agent-step-title">Direct JSON-RPC</div>
+        <div class="agent-step-body">POST to <code>/rpc</code> with JSON-RPC 2.0 payloads. No MCP required. Methods: qtcl_getBalance, qtcl_submitTransaction, qtcl_getBlockHeight, qtcl_getBlock, qtcl_getTransaction, qtcl_getTransactions, qtcl_getQuantumMetrics, qtcl_getOracleRegistry, qtcl_getPeers, qtcl_getPythPrice, qtcl_getMempoolStats, qtcl_getHealth.</div>
+      </div>
+    </div>
+  </div>
+
   <!-- CONNECT -->
   <div class="connect">
     <div class="connect-title">Connect any agent in 3 lines</div>
@@ -184,7 +259,7 @@ a:hover{text-decoration:underline}
   <div class="section">
     <div class="section-title">Available tools</div>
     <div class="tools-grid">
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_create_wallet" data-mcp-method="tools/call">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_create_wallet</div>
           <div class="tool-desc">Create a post-quantum secured wallet. Returns a 64-char hex address and HypΓ public key.</div>
@@ -204,7 +279,7 @@ a:hover{text-decoration:underline}
           <div class="comment">No direct RPC — keypair generated locally by MCP server.</div>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_balance" data-mcp-method="tools/call" data-rpc-method="qtcl_getBalance">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_balance</div>
           <div class="tool-desc">Check confirmed and pending balance for any address. Amounts in QTCL (1 QTCL = 100 qsat).</div>
@@ -231,7 +306,7 @@ a:hover{text-decoration:underline}
 }</pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_send_transaction" data-mcp-method="tools/call" data-rpc-method="qtcl_submitTransaction">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_send_transaction</div>
           <div class="tool-desc">Send QTCL with flat 1 qsat fee. No gas estimation, no approval dance. Optional 256-char memo.</div>
@@ -268,7 +343,7 @@ a:hover{text-decoration:underline}
 }</pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_transaction" data-mcp-method="tools/call" data-rpc-method="qtcl_getTransaction">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_transaction</div>
           <div class="tool-desc">Look up any transaction by hash. Verify payment receipt, check confirmations, read memo.</div>
@@ -295,7 +370,7 @@ a:hover{text-decoration:underline}
 }</pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_chain_info" data-mcp-method="tools/call" data-rpc-method="qtcl_getBlockHeight">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_chain_info</div>
           <div class="tool-desc">Current chain height, latest block hash, mempool depth, oracle status, network health.</div>
@@ -321,7 +396,7 @@ a:hover{text-decoration:underline}
 <span class="comment">// Also: qtcl_getMempoolStats, qtcl_getHealth</span></pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_block" data-mcp-method="tools/call" data-rpc-method="qtcl_getBlock">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_block</div>
           <div class="tool-desc">Block details by height or hash. Header, transactions, miner, reward, coherence metrics.</div>
@@ -347,7 +422,7 @@ a:hover{text-decoration:underline}
 <span class="comment">// Or: params: ["0xhash…"] or {"hash":"0x…"}</span></pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_recent_transactions" data-mcp-method="tools/call" data-rpc-method="qtcl_getTransactions">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_recent_transactions</div>
           <div class="tool-desc">Recent transactions, optionally filtered by address. Up to 50 results sorted by time.</div>
@@ -378,7 +453,7 @@ a:hover{text-decoration:underline}
 }</pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_quantum_metrics" data-mcp-method="tools/call" data-rpc-method="qtcl_getQuantumMetrics">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_quantum_metrics</div>
           <div class="tool-desc">Live W-state fidelity, entanglement witness, density matrix dimensions, oracle consensus round.</div>
@@ -403,7 +478,7 @@ a:hover{text-decoration:underline}
 }</pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_oracle_registry" data-mcp-method="tools/call" data-rpc-method="qtcl_getOracleRegistry">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_oracle_registry</div>
           <div class="tool-desc">List registered quantum oracles. Addresses, stake, uptime, last heartbeat. 3-of-5 BFT consensus.</div>
@@ -428,7 +503,7 @@ a:hover{text-decoration:underline}
 }</pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_peers" data-mcp-method="tools/call" data-rpc-method="qtcl_getPeers">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_peers</div>
           <div class="tool-desc">Active network peers. Node IDs, connection times, NAT types. Kademlia DHT topology.</div>
@@ -453,7 +528,7 @@ a:hover{text-decoration:underline}
 }</pre>
         </div>
       </div>
-      <div class="tool-wrap">
+      <div class="tool-wrap" data-tool-name="qtcl_get_price" data-mcp-method="tools/call" data-rpc-method="qtcl_getPythPrice">
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_get_price</div>
           <div class="tool-desc">QTCL/USD price from Pyth Network oracle feed. Price, confidence interval, last update.</div>
@@ -617,6 +692,67 @@ curl -X POST https://qtcl-blockchain.koyeb.app/rpc \
     </div>
   </div>
 
+  <!-- FOR AI AGENTS — Plain-text summary for LLM parsing -->
+  <div class="section" id="for-ai-agents">
+    <div class="section-title">For AI Agents</div>
+    <div class="code-block" style="white-space:pre-wrap">
+<span class="comment"># ── QTCL Agent Integration Summary ──</span>
+<span class="comment"># This section is optimized for AI agent parsing.</span>
+
+<span class="key">MCP_ENDPOINT</span>     = <span class="str">"https://qtcl-blockchain.koyeb.app/mcp/sse"</span>
+<span class="key">RPC_ENDPOINT</span>     = <span class="key">"https://qtcl-blockchain.koyeb.app/rpc"</span>
+<span class="key">CAPABILITY_JSON</span>  = <span class="str">"https://qtcl-blockchain.koyeb.app/agents/capability.json"</span>
+<span class="key">PROTOCOL</span>         = <span class="str">"MCP 2024-11-05 over SSE"</span>  <span class="comment"># or JSON-RPC 2.0 over HTTPS</span>
+<span class="key">BLOCK_TIME</span>       = <span class="num">18</span>  <span class="comment"># seconds</span>
+<span class="key">FEE_PER_TX</span>       = <span class="str">"1 qsat"</span>  <span class="comment"># flat, no gas estimation</span>
+<span class="key">CONFIRMATION_FINALITY</span> = <span class="num">1</span>  <span class="comment"># 1 block = final</span>
+
+<span class="comment"># ── MCP Tools (11 total) ──</span>
+<span class="comment"># All tools are called via method="tools/call" with params.name and params.arguments.</span>
+<span class="key">TOOLS</span> = [
+  {<span class="key">name</span>: <span class="str">"qtcl_create_wallet"</span>,            <span class="key">rpc</span>: <span class="str">"N/A (local)"</span>,        <span class="key">params</span>: [<span class="str">"label?"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_balance"</span>,              <span class="key">rpc</span>: <span class="str">"qtcl_getBalance"</span>,    <span class="key">params</span>: [<span class="str">"address"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_send_transaction"</span>,         <span class="key">rpc</span>: <span class="str">"qtcl_submitTransaction"</span>, <span class="key">params</span>: [<span class="str">"from_address"</span>, <span class="str">"to_address"</span>, <span class="str">"amount"</span>, <span class="str">"memo?"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_transaction"</span>,          <span class="key">rpc</span>: <span class="str">"qtcl_getTransaction"</span>,  <span class="key">params</span>: [<span class="str">"tx_hash"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_chain_info"</span>,           <span class="key">rpc</span>: <span class="str">"qtcl_getBlockHeight"</span>,  <span class="key">params</span>: []},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_block"</span>,                <span class="key">rpc</span>: <span class="str">"qtcl_getBlock"</span>,      <span class="key">params</span>: [<span class="str">"height?"</span>, <span class="str">"hash?"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_recent_transactions"</span>,  <span class="key">rpc</span>: <span class="str">"qtcl_getTransactions"</span>, <span class="key">params</span>: [<span class="str">"address?"</span>, <span class="str">"limit?"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_quantum_metrics"</span>,      <span class="key">rpc</span>: <span class="str">"qtcl_getQuantumMetrics"</span>, <span class="key">params</span>: []},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_oracle_registry"</span>,      <span class="key">rpc</span>: <span class="str">"qtcl_getOracleRegistry"</span>, <span class="key">params</span>: [<span class="str">"limit?"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_peers"</span>,                <span class="key">rpc</span>: <span class="str">"qtcl_getPeers"</span>,      <span class="key">params</span>: [<span class="str">"limit?"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_get_price"</span>,                <span class="key">rpc</span>: <span class="str">"qtcl_getPythPrice"</span>,  <span class="key">params</span>: []}
+]
+
+<span class="comment"># ── Cryptography ──</span>
+<span class="key">HASH</span>         = <span class="str">"SHA3-256"</span>
+<span class="key">SIGNATURES</span>   = <span class="str">"Schnorr-Γ / PSL(2,R)"</span>
+<span class="key">WALLET_ENC</span>   = <span class="str">"HypAEAD (SHA3-256-CTR + HMAC-SHA3-256)"</span>
+<span class="key">KDF</span>          = <span class="str">"PBKDF2-HMAC-SHA256, 600K iterations"</span>
+<span class="key">SECURITY</span>     = <span class="str">"~256-bit classical / ~180-bit quantum"</span>
+
+<span class="comment"># ── Economics ──</span>
+<span class="key">NATIVE_UNIT</span>  = <span class="str">"QTCL"</span>
+<span class="key">BASE_UNIT</span>    = <span class="str">"qsat (1 QTCL = 100 qsat)"</span>
+<span class="key">BLOCK_REWARD</span> = <span class="str">"8.0 QTCL (miner 7.20 + treasury 0.80)"</span>
+<span class="key">FEE_BURN</span>     = <span class="num">0.70</span>  <span class="comment"># 70% of fee burned</span>
+<span class="key">VALIDATOR_SHARE</span> = <span class="num">0.20</span>
+<span class="key">COHERENCE_FUND</span>  = <span class="num">0.10</span>
+
+<span class="comment"># ── Agent Use Cases ──</span>
+<span class="comment"># 1. Agent-to-agent micropayments (API calls, compute, data)</span>
+<span class="comment"># 2. Multi-agent escrow (lock QTCL, release on task completion)</span>
+<span class="comment"># 3. Autonomous treasury (deterministic fee budgeting)</span>
+<span class="comment"># 4. Verifiable receipts (tx_hash + memo = cryptographic proof)</span>
+<span class="comment"># 5. Cross-framework settlement (LangChain → CrewAI via QTCL)</span>
+<span class="comment"># 6. Quantum-secured identity (HypΓ addresses survive quantum transition)</span>
+
+<span class="comment"># ── How to transact without MCP ──</span>
+<span class="comment"># POST /rpc with Content-Type: application/json</span>
+<span class="comment"># Body: {"jsonrpc":"2.0","method":"qtcl_submitTransaction","params":[tx_obj],"id":1}</span>
+<span class="comment"># tx_obj must include: from_address, to_address, amount (float QTCL), signature, public_key</span>
+<span class="comment"># Optional: memo (max 256 chars), nonce (auto-assigned if omitted)</span></div>
+  </div>
+
   <!-- FOOTER -->
   <div class="footer">
     <div class="footer-links">
@@ -715,6 +851,222 @@ fetchHeight();
 checkMCP();
 setInterval(fetchHeight, 15000);
 setInterval(checkMCP, 30000);
+</script>
+<script type="application/json" id="mcp-capability">
+{
+  "$schema": "https://qtcl.network/schemas/capability/v1",
+  "name": "QTCL \u2014 Quantum Temporal Coherence Ledger",
+  "version": "8.2.0",
+  "protocol": "JSON-RPC 2.0 over HTTPS",
+  "mcp_endpoint": "https://qtcl-blockchain.koyeb.app/mcp/sse",
+  "rpc_endpoint": "https://qtcl-blockchain.koyeb.app/rpc",
+  "chain_id": "qtcl-mainnet-1",
+  "summary": "Post-quantum blockchain with flat-fee transactions, sub-second RPC settlement, and native quantum oracle consensus. Purpose-built for autonomous agent economies.",
+  "why_agents_should_use_this": {
+    "flat_fees": "1 qsat per operation. No variable gas, no fee estimation, no auction dynamics. Agents can budget deterministically.",
+    "fast_settlement": "~18 second block time. RPC submission returns transaction hash immediately. 1 confirmation = finality.",
+    "post_quantum_security": "Hyp\u0393 cryptography (Schnorr-\u0393 signatures over PSL(2,R) + GeodesicLWE encryption). Transactions are unforgeable even by quantum computers. Agent principals don't need to worry about quantum migration timelines.",
+    "machine_native_api": "Pure JSON-RPC. No Web3 libraries, no ABI encoding, no wallet browser extensions. One HTTP POST to transact.",
+    "mcp_native": "Ships with a Model Context Protocol server. Claude, GPT, Cursor, and any MCP-compatible agent can connect and transact with zero integration code.",
+    "no_token_approval_dance": "No ERC-20 approve/transferFrom pattern. Direct transfers. One call, one transaction.",
+    "memo_field": "Every transaction has a 256-char memo field for invoice IDs, service references, coordination messages, or structured data exchange between agents."
+  },
+  "economics": {
+    "native_unit": "QTCL",
+    "base_unit": "qsat (1 QTCL = 100 qsat)",
+    "total_supply": 998380,
+    "fee_model": "flat per-operation (no gas auction)",
+    "fee_per_tx": "1 qsat",
+    "fee_burn_rate": 0.7,
+    "validator_share": 0.2,
+    "coherence_fund": 0.1,
+    "block_reward": "8.0 QTCL (split miner/treasury)",
+    "block_time_seconds": 18
+  },
+  "cryptography": {
+    "hash_function": "SHA3-256 (Keccak, NIST FIPS 202)",
+    "signature_scheme": "Schnorr-\u0393 over PSL(2,R) \u2014 Fiat-Shamir on hyperbolic Fuchsian group",
+    "wallet_encryption": "HypAEAD (SHA3-256-CTR + HMAC-SHA3-256)",
+    "key_derivation": "PBKDF2-HMAC-SHA256, 600000 iterations, dklen=64",
+    "address_format": "64-character hex (SHA3-256 of public key)",
+    "post_quantum_security_level": "~256-bit classical / ~180-bit quantum",
+    "external_dependencies": "mpmath, numpy (engine); stdlib only (wallet)"
+  },
+  "quantum_features": {
+    "oracle_network": "5-oracle Byzantine consensus (3-of-5 majority voting)",
+    "oracle_types": [
+      "PRIMARY_LATTICE",
+      "SECONDARY_LATTICE",
+      "VALIDATION",
+      "ARBITER",
+      "METRICS_OBSERVER"
+    ],
+    "w_state_fidelity": "Tripartite W-state with NPT witness (min eigenvalue \u2212\u221a2/3)",
+    "density_matrix": "16\u00b3 Hilbert space snapshots streamed via SSE",
+    "qrng_entropy": "5-source ensemble (ANU, Random.org, QBICK, HotBits, Fourmilab)",
+    "coherence_mining": "Non-Markovian noise bath with \u03ba=0.11 memory kernel, period-8 revivals"
+  },
+  "network": {
+    "consensus": "Proof of Coherence (PoC)",
+    "tessellation": "{8,3} hyperbolic Poincar\u00e9 disk, depth 5, 10920 triangles, 141960 pseudoqubits",
+    "p2p_protocol": "Kademlia DHT with STUN NAT traversal",
+    "bootstrap_node": "Koyeb-hosted (oracle + bootstrap only, miners run peer-to-peer)"
+  },
+  "api_surface": {
+    "wallet": [
+      {
+        "method": "qtcl_getBalance",
+        "description": "Check address balance",
+        "params": [
+          "address"
+        ]
+      },
+      {
+        "method": "qtcl_submitTransaction",
+        "description": "Submit a signed transaction",
+        "params": [
+          "from_address",
+          "to_address",
+          "amount",
+          "memo?",
+          "signature",
+          "public_key",
+          "nonce?"
+        ]
+      }
+    ],
+    "chain": [
+      {
+        "method": "qtcl_getBlockHeight",
+        "description": "Current chain tip",
+        "params": []
+      },
+      {
+        "method": "qtcl_getBlock",
+        "description": "Block by height or hash",
+        "params": [
+          "height_or_hash"
+        ]
+      },
+      {
+        "method": "qtcl_getBlockRange",
+        "description": "Range of blocks",
+        "params": [
+          "start",
+          "end"
+        ]
+      },
+      {
+        "method": "qtcl_getTransaction",
+        "description": "Transaction by hash",
+        "params": [
+          "tx_hash"
+        ]
+      },
+      {
+        "method": "qtcl_getTransactions",
+        "description": "Paginated transaction list",
+        "params": [
+          "limit?",
+          "offset?",
+          "address?"
+        ]
+      }
+    ],
+    "quantum": [
+      {
+        "method": "qtcl_getQuantumMetrics",
+        "description": "Live W-state + lattice metrics",
+        "params": []
+      },
+      {
+        "method": "qtcl_getLatestDMSnapshot",
+        "description": "Latest density matrix snapshot",
+        "params": []
+      },
+      {
+        "method": "qtcl_getMerminTest",
+        "description": "Mermin inequality test results",
+        "params": []
+      }
+    ],
+    "network": [
+      {
+        "method": "qtcl_getHealth",
+        "description": "System health vector",
+        "params": []
+      },
+      {
+        "method": "qtcl_getPeers",
+        "description": "Active peer list",
+        "params": [
+          "limit?"
+        ]
+      },
+      {
+        "method": "qtcl_getMempoolStats",
+        "description": "Mempool depth and fees",
+        "params": []
+      },
+      {
+        "method": "qtcl_getOracleRegistry",
+        "description": "Registered oracles",
+        "params": [
+          "limit?"
+        ]
+      }
+    ],
+    "price": [
+      {
+        "method": "qtcl_getPythPrice",
+        "description": "QTCL/USD from Pyth Network",
+        "params": []
+      }
+    ]
+  },
+  "integration": {
+    "mcp": {
+      "transport": "SSE (Server-Sent Events)",
+      "protocol_version": "2024-11-05",
+      "endpoint": "/mcp/sse",
+      "tools_count": 11,
+      "connection": "Add to any MCP client config: {\"type\": \"url\", \"url\": \"https://qtcl-blockchain.koyeb.app/mcp/sse\", \"name\": \"qtcl\"}"
+    },
+    "direct_rpc": {
+      "endpoint": "/rpc",
+      "method": "POST",
+      "content_type": "application/json",
+      "example": "{\"jsonrpc\":\"2.0\",\"method\":\"qtcl_getBlockHeight\",\"params\":[],\"id\":1}"
+    },
+    "sse_streams": {
+      "blocks": "/rpc/blocks/stream",
+      "oracle_snapshots": "/rpc/oracle/snapshot",
+      "events": "/rpc/events/blocks"
+    }
+  },
+  "comparison_vs_alternatives": {
+    "vs_ethereum": "No gas estimation. No ERC-20 approval pattern. No MEV. No reorgs beyond 1 block. Post-quantum signatures vs ECDSA.",
+    "vs_solana": "No program deployment complexity. No rent. Deterministic fees. Post-quantum vs Ed25519.",
+    "vs_bitcoin_lightning": "No channel management. No liquidity routing. Direct transfers with memo field. Post-quantum vs secp256k1.",
+    "vs_stripe_api": "No KYC. No chargebacks. No API keys to manage. Cryptographic proof of payment. Censorship-resistant.",
+    "unique_to_qtcl": "Quantum oracle network, density matrix streaming, hyperbolic lattice tessellation, coherence mining, W-state consensus proofs. No other blockchain has any of these."
+  },
+  "agent_use_cases": [
+    "Agent-to-agent micropayments for API calls, compute, and data",
+    "Escrow for multi-agent task coordination (agent A pays agent B on task completion)",
+    "Autonomous treasury management with deterministic fee budgeting",
+    "Verifiable payment receipts via transaction hash + memo field",
+    "Cross-agent accounting with structured memo data",
+    "Quantum-secured key management for high-value agent operations",
+    "Decentralized agent identity anchored to QTCL addresses"
+  ],
+  "contact": {
+    "github": "https://github.com/qtcl-network",
+    "explorer": "https://qtcl-blockchain.koyeb.app/",
+    "wallet": "https://qtcl-blockchain.koyeb.app/tx",
+    "architecture": "https://qtcl-blockchain.koyeb.app/hyp"
+  }
+}
 </script>
 </body>
 </html>

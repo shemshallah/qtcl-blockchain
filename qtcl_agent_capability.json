@@ -12,7 +12,7 @@
   "why_agents_should_use_this": {
     "flat_fees": "1 qsat per operation. No variable gas, no fee estimation, no auction dynamics. Agents can budget deterministically.",
     "fast_settlement": "~18 second block time. RPC submission returns transaction hash immediately. 1 confirmation = finality.",
-    "post_quantum_security": "HypΓ cryptography (Schnorr-Γ signatures over PSL(2,Z[i]) + Geodesic LWE encryption). Transactions are unforgeable even by quantum computers. Agent principals don't need to worry about quantum migration timelines.",
+    "post_quantum_security": "HypΓ cryptography (Schnorr-Γ signatures over PSL(2,R) + GeodesicLWE encryption). Transactions are unforgeable even by quantum computers. Agent principals don't need to worry about quantum migration timelines.",
     "machine_native_api": "Pure JSON-RPC. No Web3 libraries, no ABI encoding, no wallet browser extensions. One HTTP POST to transact.",
     "mcp_native": "Ships with a Model Context Protocol server. Claude, GPT, Cursor, and any MCP-compatible agent can connect and transact with zero integration code.",
     "no_token_approval_dance": "No ERC-20 approve/transferFrom pattern. Direct transfers. One call, one transaction.",
@@ -34,12 +34,12 @@
 
   "cryptography": {
     "hash_function": "SHA3-256 (Keccak, NIST FIPS 202)",
-    "signature_scheme": "Schnorr-Γ over PSL(2,Z[i]) — post-quantum lattice group",
-    "encryption": "GeodesicLWE (Learning With Errors on hyperbolic lattices)",
-    "key_derivation": "BIP32 HD keys with SHA3-512 HMAC",
+    "signature_scheme": "Schnorr-Γ over PSL(2,R) — Fiat-Shamir on hyperbolic Fuchsian group",
+    "wallet_encryption": "HypAEAD (SHA3-256-CTR + HMAC-SHA3-256)",
+    "key_derivation": "PBKDF2-HMAC-SHA256, 600000 iterations, dklen=64",
     "address_format": "64-character hex (SHA3-256 of public key)",
-    "post_quantum_security_level": "Category 3 (equivalent to AES-192)",
-    "external_dependencies": "None. Pure Python stdlib (hashlib, hmac, secrets, struct)"
+    "post_quantum_security_level": "~256-bit classical / ~180-bit quantum",
+    "external_dependencies": "mpmath, numpy (engine); stdlib only (wallet)"
   },
 
   "quantum_features": {
@@ -61,7 +61,7 @@
   "api_surface": {
     "wallet": [
       {"method": "qtcl_getBalance", "description": "Check address balance", "params": ["address"]},
-      {"method": "qtcl_submitTransaction", "description": "Submit a signed transaction", "params": ["from", "to", "amount", "memo?"]}
+      {"method": "qtcl_submitTransaction", "description": "Submit a signed transaction", "params": ["from_address", "to_address", "amount", "memo?", "signature", "public_key", "nonce?"]}
     ],
     "chain": [
       {"method": "qtcl_getBlockHeight", "description": "Current chain tip", "params": []},
