@@ -127,23 +127,29 @@ SSE_SERVICE_URL = os.environ.get(
 
 
 def _push_to_sse_service(path: str, payload: dict) -> None:
-    """Push data to SSE service (fire-and-forget).
+    """Push data to SSE clients directly (no HTTP hop to localhost:8001).
 
-    Args:
-        path: e.g., "/push/snapshot" or "/push/block"
-        payload: dict to JSON-encode and POST
-
-    Note: Errors are silently swallowed — SSE is non-critical infrastructure.
+    Uses the inlined sse_server module for zero-latency fan-out when available.
     """
-    if not SSE_SERVICE_URL:
-        # SSE service not configured — skip push
+    if _SSE_INLINE:
+        try:
+            if path == "/push/snapshot":
+                _sse_mod._fan_out_snapshot(payload)
+            elif path == "/push/block":
+                _sse_mod._fan_out_block(payload)
+            elif path == "/push/metric":
+                _sse_mod._fan_out_metric(payload)
+        except Exception:
+            pass
         return
 
+    # Legacy fallback: external SSE service on port 8001
+    if not SSE_SERVICE_URL:
+        return
     try:
         url = f"{SSE_SERVICE_URL}{path}"
         requests.post(url, json=payload, timeout=1.0)
     except Exception:
-        # Silently swallow errors — don't let SSE failures block main server
         pass
 
 
@@ -607,6 +613,27 @@ except ImportError:
 from flask import Flask, jsonify, request, render_template_string, send_file, Response
 
 app = Flask(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SSE SERVER INTEGRATION — Inline (no separate process on port 8001)
+# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    import sse_server as _sse_mod
+    # Register SSE routes on the main Flask app
+    app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])(_sse_mod.rpc_oracle_snapshot)
+    app.route("/rpc/events/blocks", methods=["GET", "POST", "OPTIONS"])(_sse_mod.rpc_events_blocks)
+    app.route("/rpc/blocks/stream", methods=["GET"])(_sse_mod.rpc_blocks_stream)
+    app.route("/rpc/metrics/push", methods=["GET"])(_sse_mod.rpc_metrics_push)
+    app.route("/push/snapshot", methods=["POST"])(_sse_mod.push_snapshot)
+    app.route("/push/block", methods=["POST"])(_sse_mod.push_block)
+    app.route("/push/metric", methods=["POST"])(_sse_mod.push_metric)
+    logger.info("[SSE] ✅ SSE server routes registered on main app (inline mode)")
+    _SSE_INLINE = True
+except Exception as _sse_err:
+    logger.warning(f"[SSE] ⚠️  Inline SSE integration failed: {_sse_err}")
+    _SSE_INLINE = False
+
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -6639,6 +6666,16 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_hyp_signBlock": qtcl_hyp_signBlock,
     "qtcl_hyp_verifyBlock": qtcl_hyp_verifyBlock,
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VAULT SERVICE INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    from vault_service import VAULT_RPC_METHODS
+    _RPC_METHODS.update(VAULT_RPC_METHODS)
+    logger.info(f"[VAULT] ✅ {len(VAULT_RPC_METHODS)} vault RPC methods merged into server")
+except Exception as _vault_import_err:
+    logger.warning(f"[VAULT] ⚠️  Vault service not available: {_vault_import_err}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTERPRISE P2P NETWORK — Inline Implementation (no external files)

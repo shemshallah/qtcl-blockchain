@@ -239,6 +239,53 @@ def rpc_metrics_push():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+# ── Direct fan-out helpers (called inline from server.py, no HTTP hop) ──
+
+def _fan_out_snapshot(payload: dict) -> int:
+    """Fan-out a snapshot payload to all connected /rpc/oracle/snapshot clients."""
+    with _snapshot_lock:
+        for _, q in _snapshot_clients:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except Exception:
+                    pass
+        return len(_snapshot_clients)
+
+
+def _fan_out_block(payload: dict) -> int:
+    """Fan-out a block payload to all connected /rpc/events/blocks clients."""
+    with _blocks_lock:
+        for _, q in _blocks_clients:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except Exception:
+                    pass
+        return len(_blocks_clients)
+
+
+def _fan_out_metric(payload: dict) -> int:
+    """Fan-out a metric payload to all connected /rpc/metrics/push clients."""
+    with _metrics_lock:
+        for _, q in _metrics_clients:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except Exception:
+                    pass
+        return len(_metrics_clients)
+
+
 @app.route("/push/snapshot", methods=["POST"])
 def push_snapshot():
     """Internal: main server pushes snapshot frame, fan-out to all /rpc/oracle/snapshot clients."""
@@ -246,23 +293,9 @@ def push_snapshot():
         payload = request.get_json()
         if not payload:
             return {"error": "No payload"}, 400
-
-        with _snapshot_lock:
-            for client_id, client_queue in _snapshot_clients:
-                try:
-                    client_queue.put_nowait(payload)
-                except queue.Full:
-                    # Drop oldest item and retry (fire-and-forget: don't care if we fail)
-                    try:
-                        client_queue.get_nowait()
-                        client_queue.put_nowait(payload)
-                    except:
-                        pass
-
-        logger.debug(
-            f"[SSE] /push/snapshot fan-out to {len(_snapshot_clients)} clients"
-        )
-        return {"status": "ok", "clients": len(_snapshot_clients)}, 200
+        n = _fan_out_snapshot(payload)
+        logger.debug(f"[SSE] /push/snapshot fan-out to {n} clients")
+        return {"status": "ok", "clients": n}, 200
     except Exception as e:
         logger.error(f"[SSE] /push/snapshot error: {e}")
         return {"error": str(e)}, 500
@@ -275,20 +308,9 @@ def push_block():
         payload = request.get_json()
         if not payload:
             return {"error": "No payload"}, 400
-
-        with _blocks_lock:
-            for client_id, client_queue in _blocks_clients:
-                try:
-                    client_queue.put_nowait(payload)
-                except queue.Full:
-                    try:
-                        client_queue.get_nowait()
-                        client_queue.put_nowait(payload)
-                    except:
-                        pass
-
-        logger.debug(f"[SSE] /push/block fan-out to {len(_blocks_clients)} clients")
-        return {"status": "ok", "clients": len(_blocks_clients)}, 200
+        n = _fan_out_block(payload)
+        logger.debug(f"[SSE] /push/block fan-out to {n} clients")
+        return {"status": "ok", "clients": n}, 200
     except Exception as e:
         logger.error(f"[SSE] /push/block error: {e}")
         return {"error": str(e)}, 500
@@ -301,19 +323,8 @@ def push_metric():
         payload = request.get_json()
         if not payload:
             return {"error": "No payload"}, 400
-
-        with _metrics_lock:
-            for client_id, client_queue in _metrics_clients:
-                try:
-                    client_queue.put_nowait(payload)
-                except queue.Full:
-                    try:
-                        client_queue.get_nowait()
-                        client_queue.put_nowait(payload)
-                    except:
-                        pass
-
-        return {"status": "ok", "clients": len(_metrics_clients)}, 200
+        n = _fan_out_metric(payload)
+        return {"status": "ok", "clients": n}, 200
     except Exception as e:
         logger.error(f"[SSE] /push/metric error: {e}")
         return {"error": str(e)}, 500
