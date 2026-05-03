@@ -138,64 +138,72 @@ def calculate_vault_cost(encrypted_size_bytes: int = 0, operation: str = "anchor
 # ═══════════════════════════════════════════════════════════════════════════════
 # TOKENOMICS — 90/10 BURN/COHERENCE SPLIT
 #
-# All vault operation fees are split:
-#   90% → BURN ADDRESS (deflationary — permanently removed from supply)
-#   10% → COHERENCE FUND (funds oracle/quantum infrastructure)
+#   Exchange rate: 100 QTCL = $1.00 USD  (1 QTCL = $0.01)
 #
-# Block rewards (miner) retain their own 70/20/10 split — this is vault-only.
-# Reads (retrieve, verify, audit) are always FREE.
+# Vault pricing is ENFORCEABLE (zero-knowledge proof: server can't see plaintext).
+# We charge by what we can MEASURE: size, count, and anchor type.
+#
+# Subscription tiers = monthly capacity quota (like AWS S3)
+# Anchor fees = one-time insurance premium (user-driven, high-value secrets self-select)
+# Store fee = tiny flat spam deterrent
+# Retrieve / verify / audit = ALWAYS FREE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-TRIAL_MAX_SECRETS = 1
-TRIAL_MAX_SIZE_BYTES = 1024
-PAID_MAX_SIZE_BYTES = 100 * 1024 * 1024  # 100MB for Sovereign Archives
+QTCL_BASE = 100  # base units per QTCL (matches wallet_addresses.balance scale)
 
-# Base unit: 1 QTCL = 100 base units (matches wallet_addresses.balance scale)
-QTCL_BASE = 100  # base units per QTCL
+# ── Monthly Subscription Tiers ───────────────────────────────────────────────
+# Each tier resets monthly. Overages charged per-byte.
+VAULT_TIERS = {
+    "trial": {
+        "monthly_qtcl": 0,
+        "max_secrets": 1,
+        "max_bytes": 10 * 1024,           # 10 KB
+        "anchors_included": 0,
+        "overage_per_100kb": 0,            # trial can't go over
+    },
+    "personal": {
+        "monthly_qtcl": 1_000 * QTCL_BASE,  # $10/month
+        "max_secrets": 20,
+        "max_bytes": 1 * 1024 * 1024,      # 1 MB
+        "anchors_included": 5,
+        "overage_per_100kb": 1 * QTCL_BASE, # $0.01 per 100 KB overage
+    },
+    "professional": {
+        "monthly_qtcl": 5_000 * QTCL_BASE,  # $50/month
+        "max_secrets": 100,
+        "max_bytes": 10 * 1024 * 1024,     # 10 MB
+        "anchors_included": 10,
+        "overage_per_100kb": 1 * QTCL_BASE,
+    },
+    "enterprise": {
+        "monthly_qtcl": 20_000 * QTCL_BASE, # $200/month
+        "max_secrets": None,               # unlimited
+        "max_bytes": 100 * 1024 * 1024,    # 100 MB
+        "anchors_included": None,          # unlimited
+        "overage_per_100kb": 1 * QTCL_BASE,
+    },
+}
+
+# ── Per-Operation Fees (flat, enforceable, category-agnostic) ────────────────
+PRICE_STORE_SECRET        =  10 * QTCL_BASE   # $0.10 — spam deterrent
+PRICE_DELETE_SECRET       =   5 * QTCL_BASE   # $0.05 — cleanup
+PRICE_ANCHOR_STANDARD     = 100 * QTCL_BASE   # $1.00 — standard SHA3-256 chain anchor
+PRICE_ANCHOR_OBFUSCATED   = 500 * QTCL_BASE   # $5.00 — blinded, unlinkable anchor
+PRICE_REANCHOR            =  50 * QTCL_BASE   # $0.50 — update existing anchor
 
 # ── Burn / Coherence addresses ───────────────────────────────────────────────
 BURN_ADDRESS = os.environ.get(
     "VAULT_BURN_ADDRESS",
-    "qtcl1burn000000000000000000000000000000000000000000000000000000000"
+    "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b"
 )
 COHERENCE_FUND_ADDRESS = os.environ.get(
     "COHERENCE_FUND_ADDRESS",
-    "qtcl1coherence0fund0address0000000000000000000000000000000000000001"
+    "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b"
 )
 
 # Fee split ratios
 BURN_RATIO      = 0.90   # 90% permanently destroyed
 COHERENCE_RATIO = 0.10   # 10% to quantum infrastructure fund
-
-# ── Operation price ladder (in base units, 1 QTCL = 100 base) ───────────────
-#
-#   Operation                QTCL    USD (~$0.01/QTCL)
-#   ─────────────────────── ──────  ─────────────────
-#   Anchor a secret           100    $1.00  ← minimum commitment
-#   Obfuscated anchor         200    $2.00  ← blinded on-chain hash
-#   Vault account creation     50    $0.50  ← one-time
-#   Passphrase change          30    $0.30  ← security op
-#   Re-anchor / update         25    $0.25  ← mutation
-#   Export encrypted bundle    20    $0.20  ← portability
-#   Add collaborator           15    $0.15  ← per person
-#   Revoke / delete anchor     10    $0.10  ← cleanup
-#   Transfer QTCL               5    $0.05  ← network fee
-#   Read / decrypt own          0    FREE
-#   Audit log view              0    FREE
-#
-PRICE_ANCHOR              = 100 * QTCL_BASE   # 100 QTCL — anchor a secret
-PRICE_OBFUSCATED_ANCHOR   = 200 * QTCL_BASE   # 200 QTCL — blinded anchor
-PRICE_ACCOUNT_CREATE      =  50 * QTCL_BASE   #  50 QTCL — one-time account fee
-PRICE_PASSPHRASE_CHANGE   =  30 * QTCL_BASE   #  30 QTCL — passphrase rotation
-PRICE_REANCHOR            =  25 * QTCL_BASE   #  25 QTCL — update/re-anchor
-PRICE_EXPORT_BUNDLE       =  20 * QTCL_BASE   #  20 QTCL — export encrypted bundle
-PRICE_ADD_COLLABORATOR    =  15 * QTCL_BASE   #  15 QTCL — per collaborator
-PRICE_REVOKE_ANCHOR       =  10 * QTCL_BASE   #  10 QTCL — revoke/delete anchor
-PRICE_TRANSFER            =   5 * QTCL_BASE   #   5 QTCL — network transfer
-
-# Legacy aliases (kept for any external callers)
-PRICE_CHAIN_ANCHOR        = PRICE_ANCHOR
-PRICE_CHAIN_ANCHOR_OLD    = PRICE_ANCHOR  # was 1 QTCL, now 100 QTCL
 
 # ── Stripe purchase tiers (QTCL credited on purchase) ───────────────────────
 STRIPE_TIERS = [
@@ -283,21 +291,25 @@ _SCHEMA_LOCK = threading.Lock()
 VAULT_SCHEMA_SQL = """
 -- Vault accounts
 CREATE TABLE IF NOT EXISTS vault_accounts (
-    id              TEXT PRIMARY KEY,
-    display_name    TEXT,
-    email           TEXT,
-    passphrase_hash TEXT NOT NULL,
-    tier            TEXT NOT NULL DEFAULT 'trial',
-    device_fp       TEXT,
-    qtcl_address    TEXT,
-    public_key      TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_login      TIMESTAMPTZ,
-    secrets_count   INTEGER NOT NULL DEFAULT 0,
-    bytes_stored    BIGINT NOT NULL DEFAULT 0,
-    anchors_used    INTEGER NOT NULL DEFAULT 0,
-    credit_balance  BIGINT NOT NULL DEFAULT 0
+    id                   TEXT PRIMARY KEY,
+    display_name         TEXT,
+    email                TEXT,
+    passphrase_hash      TEXT NOT NULL,
+    tier                 TEXT NOT NULL DEFAULT 'trial',
+    device_fp            TEXT,
+    qtcl_address         TEXT,
+    public_key           TEXT,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login           TIMESTAMPTZ,
+    secrets_count        INTEGER NOT NULL DEFAULT 0,
+    bytes_stored         BIGINT NOT NULL DEFAULT 0,
+    anchors_used         INTEGER NOT NULL DEFAULT 0,
+    credit_balance       BIGINT NOT NULL DEFAULT 0,
+    subscription_expires_at TIMESTAMPTZ,
+    monthly_reset_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    monthly_bytes_used   BIGINT NOT NULL DEFAULT 0,
+    monthly_anchors_used INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_vault_accounts_email ON vault_accounts(email);
@@ -744,6 +756,7 @@ def vault_login(params: dict, rpc_id: Any) -> dict:
 
         tier = account['tier']
         limits = _get_tier_limits(tier)
+        _reset_monthly_quota_if_needed(account)
 
         return _rpc_ok({
             "account_id": account_id,
@@ -754,7 +767,11 @@ def vault_login(params: dict, rpc_id: Any) -> dict:
             "qtcl_address": account.get('qtcl_address', ''),
             "secrets_count": account.get('secrets_count', 0),
             "bytes_stored": account.get('bytes_stored', 0),
-            "credit_balance": account.get('credit_balance', 0),
+            "credit_balance_qtcl": account.get('credit_balance', 0) // QTCL_BASE,
+            "monthly_bytes_used": account.get('monthly_bytes_used', 0),
+            "monthly_anchors_used": account.get('monthly_anchors_used', 0),
+            "monthly_reset_at": str(account.get('monthly_reset_at', '')),
+            "subscription_expires_at": str(account.get('subscription_expires_at', '')),
             "limits": limits,
             "last_login": datetime.now(timezone.utc).isoformat(),
         }, rpc_id)
@@ -868,20 +885,38 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
         if not ciphertext:
             return _rpc_error(-32602, "ciphertext required", rpc_id)
 
-        valid_categories = ('general', 'private_key', 'seed_phrase', 'credential', 'document')
+        valid_categories = ('general', 'private_key', 'seed_phrase', 'credential', 'document', 'api_key', 'password', 'legal_document', 'bip_wordlist', 'note')
         if category not in valid_categories:
             category = 'general'
 
-        # Tier-based limits
-        tier = account['tier']
-        if tier == 'trial':
-            if account.get('secrets_count', 0) >= TRIAL_MAX_SECRETS:
-                return _rpc_error(-32010, "Trial tier: 1 secret max. Upgrade to store more.", rpc_id)
-            if size_bytes > TRIAL_MAX_SIZE_BYTES:
-                return _rpc_error(-32010, f"Trial tier: {TRIAL_MAX_SIZE_BYTES} bytes max.", rpc_id)
-        else:
-            if size_bytes > PAID_MAX_SIZE_BYTES:
-                return _rpc_error(-32010, f"Max secret size: {PAID_MAX_SIZE_BYTES // (1024*1024)}MB", rpc_id)
+        # ── Subscription capacity check ──────────────────────────────────────
+        _reset_monthly_quota_if_needed(account)
+        ok, cost, reason = _check_subscription_capacity(account, size_bytes)
+        if not ok:
+            return _rpc_error(-32010, reason, rpc_id)
+
+        # Check credit balance (vault balance, not on-chain wallet)
+        balance = account.get('credit_balance', 0)
+        if balance < cost:
+            return _rpc_error(-32010,
+                f"Insufficient vault balance: need {cost // QTCL_BASE} QTCL, have {balance // QTCL_BASE} QTCL. "
+                f"Load QTCL via Stripe or wallet transfer.", rpc_id)
+
+        # Deduct store fee (flat + overage) from vault credit balance
+        new_balance = balance - cost
+        _vault_query(
+            "UPDATE vault_accounts SET credit_balance = %s, updated_at = NOW() WHERE id = %s",
+            (new_balance, account_id), fetch="none"
+        )
+
+        # Burn split for store fee
+        split = _apply_vault_burn(cost, "store_secret", account_id)
+        _vault_query(
+            """INSERT INTO vault_billing (id, account_id, operation, amount, balance_after, description, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+            (f"vb_{secrets.token_hex(8)}", account_id, "store_secret", cost, new_balance, reason),
+            fetch="none"
+        )
 
         # ZERO-KNOWLEDGE: Store client ciphertext AS-IS. Server never decrypts.
         secret_id = f"vs_{secrets.token_hex(16)}"
@@ -889,35 +924,16 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
         # Content hash for anchoring (hash of the ciphertext, not plaintext)
         content_hash = hashlib.sha3_256(ciphertext.encode()).hexdigest()
 
-        anchor_hash = None
-        anchor_block = None
-        anchor_tx = None
-        anchor_result = None
-
-        # AUTO-ANCHOR for PAID tier (immediately link to blockchain)
-        if tier != 'trial':
-            try:
-                # Auto-anchor at store time (non-obfuscated for immutability)
-                anchor_result = _submit_chain_anchor(
-                    content_hash, f"Vault: {label}", account.get('qtcl_address', '')
-                )
-                anchor_hash = content_hash
-                anchor_block = anchor_result.get('block_height')
-                anchor_tx = anchor_result.get('tx_hash')
-                logger.info(f"[VAULT] Auto-anchored secret {secret_id} at block {anchor_block}")
-            except Exception as anchor_err:
-                logger.warning(f"[VAULT] Auto-anchor failed (non-critical): {anchor_err}")
-                # Don't fail the store operation — just log and continue
-
         _vault_query(
             """INSERT INTO vault_secrets
                (id, account_id, label, category, ciphertext, encryption_meta,
-                size_bytes, content_hash, anchor_hash, anchor_block, anchor_tx, 
-                created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, NOW(), NOW())""",
+                size_bytes, content_hash, anchor_hash, anchor_block, anchor_tx,
+                obfuscated, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, NULL, NULL, NULL,
+                       FALSE, NOW(), NOW())""",
             (
                 secret_id, account_id, label, category,
-                ciphertext,  # Stored as-is — opaque client-encrypted blob
+                ciphertext,
                 json.dumps({
                     **encryption_meta,
                     "zero_knowledge": True,
@@ -925,21 +941,19 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
                 }),
                 size_bytes,
                 content_hash,
-                anchor_hash,
-                anchor_block,
-                anchor_tx,
             ),
             fetch="none"
         )
 
-        # Update account counters
+        # Update account counters and monthly usage
         _vault_query(
-            """UPDATE vault_accounts 
-               SET secrets_count = secrets_count + 1, 
-                   bytes_stored = bytes_stored + %s, 
-                   updated_at = NOW() 
+            """UPDATE vault_accounts
+               SET secrets_count = secrets_count + 1,
+                   bytes_stored = bytes_stored + %s,
+                   monthly_bytes_used = monthly_bytes_used + %s,
+                   updated_at = NOW()
                WHERE id = %s""",
-            (size_bytes, account_id), fetch="none"
+            (size_bytes, size_bytes, account_id), fetch="none"
         )
 
         return _rpc_ok({
@@ -948,9 +962,9 @@ def vault_store_secret(params: dict, rpc_id: Any) -> dict:
             "category": category,
             "size_bytes": size_bytes,
             "content_hash": content_hash,
-            "anchor_hash": anchor_hash,
-            "anchor_block": anchor_block,
-            "anchor_tx": anchor_tx,
+            "vault_balance_qtcl": new_balance // QTCL_BASE,
+            "cost_qtcl": cost // QTCL_BASE,
+            "cost_usd": round(cost / QTCL_BASE * 0.01, 2),
             "zero_knowledge": True,
             "stored_at": datetime.now(timezone.utc).isoformat(),
         }, rpc_id)
@@ -1209,14 +1223,7 @@ def vault_anchor_hash(params: dict, rpc_id: Any) -> dict:
         if not _verify_passphrase(passphrase, account['passphrase_hash']):
             return _rpc_error(-32003, "Invalid passphrase", rpc_id)
 
-        tier = account['tier']
-        if tier == 'trial':
-            return _rpc_error(
-                -32010,
-                "Chain anchoring requires Paid tier. Upgrade to anchor secrets to the blockchain.",
-                rpc_id
-            )
-
+        _reset_monthly_quota_if_needed(account)
         content_hash = params.get("hash", "")
         if not content_hash or len(content_hash) != 64:
             return _rpc_error(-32602, "hash must be 64-char hex SHA3-256", rpc_id)
@@ -1225,11 +1232,21 @@ def vault_anchor_hash(params: dict, rpc_id: Any) -> dict:
         secret_id = params.get("secret_id")
         label = params.get("label", "Vault Anchor")
 
-        # Calculate cost
-        cost = PRICE_OBFUSCATED_ANCHOR if obfuscate else PRICE_ANCHOR
+        # Calculate cost — check if tier includes free anchors this month
+        limits = _get_tier_limits(account.get("tier", "trial"))
+        anchors_included = limits.get("anchors_included")
+        monthly_anchors = account.get("monthly_anchors_used", 0)
 
-        # Check balance
-        if account['credit_balance'] < cost:
+        if anchors_included is not None and monthly_anchors < anchors_included:
+            # Included in subscription — no charge
+            cost = 0
+            included = True
+        else:
+            cost = PRICE_ANCHOR_OBFUSCATED if obfuscate else PRICE_ANCHOR_STANDARD
+            included = False
+
+        # Check balance (skip if included in subscription)
+        if cost > 0 and account['credit_balance'] < cost:
             cost_qtcl    = cost / QTCL_BASE
             balance_qtcl = account['credit_balance'] / QTCL_BASE
             return _rpc_error(
@@ -1290,21 +1307,31 @@ def vault_anchor_hash(params: dict, rpc_id: Any) -> dict:
                 fetch="none"
             )
 
-        # ── Charge: 90% burn / 10% coherence ────────────────────────────────
-        try:
-            charge = _charge_account(
-                account_id=account_id,
-                cost=cost,
-                operation='obfuscated_anchor' if obfuscate else 'chain_anchor',
-                description=f"{'Obfuscated ' if obfuscate else ''}Chain anchor: {label}",
-                tx_ref=anchor_result.get('tx_hash', ''),
-            )
-        except ValueError as _ce:
-            return _rpc_error(-32020, str(_ce), rpc_id)
+        # ── Charge: 90% burn / 10% coherence (skip if included in subscription) ──
+        if cost > 0:
+            try:
+                charge = _charge_account(
+                    account_id=account_id,
+                    cost=cost,
+                    operation='obfuscated_anchor' if obfuscate else 'chain_anchor',
+                    description=f"{'Obfuscated ' if obfuscate else ''}Chain anchor: {label}",
+                    tx_ref=anchor_result.get('tx_hash', ''),
+                )
+            except ValueError as _ce:
+                return _rpc_error(-32020, str(_ce), rpc_id)
+            new_balance_qtcl = charge["new_balance_qtcl"]
+            fee_split = charge["split"]
+        else:
+            new_balance_qtcl = account['credit_balance'] / QTCL_BASE
+            fee_split = {"burn": 0, "coherence": 0, "free": True}
 
-        # Increment anchor count
+        # Increment anchor count (both total and monthly)
         _vault_query(
-            "UPDATE vault_accounts SET anchors_used = anchors_used + 1, updated_at = NOW() WHERE id = %s",
+            """UPDATE vault_accounts
+               SET anchors_used = anchors_used + 1,
+                   monthly_anchors_used = monthly_anchors_used + 1,
+                   updated_at = NOW()
+               WHERE id = %s""",
             (account_id,), fetch="none"
         )
 
@@ -1314,9 +1341,10 @@ def vault_anchor_hash(params: dict, rpc_id: Any) -> dict:
             "block_height":     anchor_result.get('block_height'),
             "tx_hash":          anchor_result.get('tx_hash'),
             "obfuscated":       obfuscate,
-            "cost_qtcl":        cost / QTCL_BASE,
-            "balance_remaining": charge["new_balance_qtcl"],
-            "fee_split":        charge["split"],
+            "included_free":    included,
+            "cost_qtcl":        cost / QTCL_BASE if cost > 0 else 0,
+            "balance_remaining": new_balance_qtcl,
+            "fee_split":        fee_split,
             "anchored_at":      datetime.now(timezone.utc).isoformat(),
         }
 
@@ -1860,23 +1888,58 @@ def _verify_deposit_tx(tx_hash: str, amount: int, expected_recipient: str) -> bo
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _get_tier_limits(tier: str) -> dict:
-    """Return limits for a given tier."""
-    if tier == 'trial':
-        return {
-            "max_secrets": TRIAL_MAX_SECRETS,
-            "max_size_bytes": TRIAL_MAX_SIZE_BYTES,
-            "chain_anchor": False,
-            "obfuscation": False,
-            "inheritance": False,
-        }
-    else:  # paid
-        return {
-            "max_secrets": -1,  # unlimited
-            "max_size_bytes": PAID_MAX_SIZE_BYTES,
-            "chain_anchor": True,
-            "obfuscation": True,
-            "inheritance": True,
-        }
+    """Return limits for a given tier from VAULT_TIERS config."""
+    return VAULT_TIERS.get(tier, VAULT_TIERS["trial"])
+
+
+def _reset_monthly_quota_if_needed(account: dict) -> None:
+    """Reset monthly counters if the monthly period has expired."""
+    reset_at = account.get("monthly_reset_at")
+    if reset_at is None:
+        return
+    now = datetime.now(timezone.utc)
+    if isinstance(reset_at, str):
+        reset_at = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
+    if now >= reset_at + timedelta(days=30):
+        _vault_query(
+            """UPDATE vault_accounts
+               SET monthly_bytes_used = 0, monthly_anchors_used = 0,
+                   monthly_reset_at = NOW()
+               WHERE id = %s""",
+            (account["id"],), fetch="none"
+        )
+
+
+def _check_subscription_capacity(account: dict, size_bytes: int) -> tuple:
+    """Check if storing a secret of given size fits within subscription quota.
+
+    Returns (ok: bool, cost_qtcl: int, reason: str).
+    cost_qtcl includes store fee + any overage.
+    """
+    tier = account.get("tier", "trial")
+    limits = _get_tier_limits(tier)
+    monthly_bytes = account.get("monthly_bytes_used", 0)
+    secrets_count = account.get("secrets_count", 0)
+    max_secrets = limits["max_secrets"]
+    max_bytes = limits["max_bytes"]
+
+    # Check secret count limit
+    if max_secrets is not None and secrets_count >= max_secrets:
+        return False, 0, f"Tier '{tier}': max {max_secrets} secrets reached. Upgrade to store more."
+
+    # Check if this secret would exceed total byte cap
+    if max_bytes is not None and (monthly_bytes + size_bytes) > max_bytes:
+        # Calculate overage
+        overage_bytes = (monthly_bytes + size_bytes) - max_bytes
+        overage_per_100kb = limits.get("overage_per_100kb", 0)
+        if overage_per_100kb == 0 and tier == "trial":
+            return False, 0, f"Trial tier: {max_bytes} bytes max. Upgrade to store more."
+        overage_cost = (overage_bytes // (100 * 1024) + 1) * overage_per_100kb
+        total_cost = PRICE_STORE_SECRET + overage_cost
+        return True, total_cost, f"Overage charge: {total_cost // QTCL_BASE} QTCL ({overage_bytes} bytes over quota)"
+
+    # Within quota — only flat store fee
+    return True, PRICE_STORE_SECRET, "Within quota"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2142,6 +2205,46 @@ def vault_get_burn_stats(params: dict, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Failed: {str(e)}", rpc_id)
 
 
+def vault_get_pricing(params: dict, rpc_id: Any) -> dict:
+    """RPC: vault_getPricing
+    Return the complete pricing sheet for all vault operations.
+    Public — no auth required.
+    """
+    return _rpc_ok({
+        "exchange_rate": "100 QTCL = $1.00 USD",
+        "tiers": {
+            name: {
+                "monthly_usd": info["monthly_qtcl"] // QTCL_BASE * 0.01,
+                "monthly_qtcl": info["monthly_qtcl"] // QTCL_BASE,
+                "max_secrets": info["max_secrets"],
+                "max_bytes": info["max_bytes"],
+                "max_bytes_human": _human_size(info["max_bytes"]),
+                "anchors_included": info["anchors_included"],
+                "overage_per_100kb": info["overage_per_100kb"] // QTCL_BASE,
+            }
+            for name, info in VAULT_TIERS.items()
+        },
+        "operations": {
+            "store_secret": {"qtcl": PRICE_STORE_SECRET // QTCL_BASE, "usd": round(PRICE_STORE_SECRET / QTCL_BASE * 0.01, 2)},
+            "delete_secret": {"qtcl": PRICE_DELETE_SECRET // QTCL_BASE, "usd": round(PRICE_DELETE_SECRET / QTCL_BASE * 0.01, 2)},
+            "anchor_standard": {"qtcl": PRICE_ANCHOR_STANDARD // QTCL_BASE, "usd": round(PRICE_ANCHOR_STANDARD / QTCL_BASE * 0.01, 2)},
+            "anchor_obfuscated": {"qtcl": PRICE_ANCHOR_OBFUSCATED // QTCL_BASE, "usd": round(PRICE_ANCHOR_OBFUSCATED / QTCL_BASE * 0.01, 2)},
+            "reanchor": {"qtcl": PRICE_REANCHOR // QTCL_BASE, "usd": round(PRICE_REANCHOR / QTCL_BASE * 0.01, 2)},
+        },
+        "free_operations": ["retrieve_secret", "list_secrets", "verify_anchor", "get_pricing", "login"],
+        "burn_split": f"{int(BURN_RATIO*100)}% burn / {int(COHERENCE_RATIO*100)}% coherence",
+    }, rpc_id)
+
+
+def _human_size(bytes_val: int) -> str:
+    """Convert bytes to human-readable string."""
+    if bytes_val >= 1024 * 1024:
+        return f"{bytes_val // (1024 * 1024)} MB"
+    if bytes_val >= 1024:
+        return f"{bytes_val // 1024} KB"
+    return f"{bytes_val} B"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # VAULT RPC METHOD REGISTRY
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2171,6 +2274,7 @@ VAULT_RPC_METHODS: Dict[str, Any] = {
     "vault_depositCredit":      vault_deposit_credit,
     "vault_getBalance":         vault_get_balance,
     "vault_getBurnStats":       vault_get_burn_stats,
+    "vault_getPricing":         vault_get_pricing,
     # Transactions (stub)
     "vault_getTransactions":    lambda p, r: _rpc_ok({"transactions": []}, r),
     # Inheritance
