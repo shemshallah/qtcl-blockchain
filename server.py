@@ -7284,17 +7284,42 @@ def serve_hyp_doc():
     except Exception as e:
         logger.error(f"[HYP] Failed to serve hyp.html: {e}")
         return f"Error: {e}", 500
-    """GET /hyp — Serve hyp.html (canonical architecture reference)."""
+
+
+@app.route("/vault", methods=["GET"])
+def serve_vault():
+    """GET /vault — Serve vault.html (post-quantum encrypted storage UI)."""
     try:
         import os
         from flask import send_file
 
-        hyp_path = os.path.join(os.path.dirname(__file__), "hyp.html")
-        if os.path.exists(hyp_path):
-            return send_file(hyp_path, mimetype="text/html")
-        return "hyp.html not found", 404
+        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
+        if os.path.exists(vault_path):
+            return send_file(vault_path, mimetype="text/html")
+        return "vault.html not found", 404
     except Exception as e:
-        logger.error(f"[HYP] Failed to serve hyp.html: {e}")
+        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/bridge", methods=["GET"])
+def serve_bridge():
+    """GET /bridge — Serve bridge.html (wQTCL ERC-20 bridge UI)."""
+    try:
+        import os
+        from flask import send_file
+
+        bridge_path = os.path.join(os.path.dirname(__file__), "bridge.html")
+        if os.path.exists(bridge_path):
+            resp = send_file(bridge_path, mimetype="text/html")
+            return resp
+        # If bridge.html doesn't exist yet, return a placeholder
+        return """<!DOCTYPE html><html><head><meta charset="UTF-8"><title>QTCL Bridge</title>
+        <style>body{background:#020408;color:#c8d6e5;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center}
+        .c{max-width:400px}.t{color:#00d4ff;font-size:24px;margin-bottom:12px;letter-spacing:4px}.s{color:#4a6080;font-size:12px;line-height:1.6}</style>
+        </head><body><div class="c"><div class="t">wQTCL BRIDGE</div><div class="s">Bridge interface under construction.<br>Oracle consensus fulfillment in progress.</div></div></body></html>""", 200
+    except Exception as e:
+        logger.error(f"[BRIDGE] Failed to serve bridge.html: {e}")
         return f"Error: {e}", 500
 
 

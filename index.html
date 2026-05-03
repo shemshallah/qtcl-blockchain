@@ -242,6 +242,9 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 /* ── HYP PAGE ── */
 #hyp.page{padding:0;max-width:none}
 #hyp.page.active{display:block}
+/* ── IFRAME PAGES ── */
+#tx.page.active,#vault.page.active,#bridge.page.active{display:block}
+#tx.page iframe,#vault.page iframe,#bridge.page iframe,#hyp.page iframe{width:100%;height:calc(100vh - 108px);border:none;display:block}
 
 /* ── PAGINATION ── */
 .pagination{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--border);justify-content:flex-end}
@@ -347,8 +350,8 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
   <div class="tab" data-page="dashboard">DASHBOARD</div>
   <div class="tab" data-page="explorer">CHAIN EXPLORER</div>
   <div class="tab" data-page="network">NETWORK</div>
-  <div class="tab" data-page="tx" onclick="showTab('tx')">TRANSACTIONS</div>
-  <div class="tab" data-page="vault" onclick="showTab('vault')">VAULT</div>
+  <div class="tab" data-page="tx">TRANSACTIONS</div>
+  <div class="tab" data-page="vault">VAULT</div>
   <div class="tab" data-page="hyp">HYPΓ DOCS</div>
 </div>
 
@@ -1033,7 +1036,7 @@ function renderTxCard(tx, idx) {
   const hash = tx.tx_id || tx.tx_hash || '';
   const from = tx.from_addr || '';
   const to = tx.to_addr || '';
-  const amount = parseFloat(tx.amount || 0).toFixed(4);
+  const amount = fmtAmount(tx.amount);
   const wProof = tx.w_proof || '';
   const typeClass = isCoinbase ? 'coinbase' : '';
   const isTreasury = tx.tx_type === 'treasury_reward' || tx.from_addr === 'TREASURY';
@@ -1057,7 +1060,7 @@ function renderTxCard(tx, idx) {
           ${tx.status || tx.tx_index !== undefined ? `<div style="font-size:7px;font-family:var(--mono);color:var(--dim2);margin-top:2px">STATUS: <span style="color:var(--gr)">${(tx.status || 'confirmed').toUpperCase()}</span> · INDEX: ${tx.tx_index !== undefined ? tx.tx_index : idx} · TIME: ${tx.timestamp ? new Date(tx.timestamp*1000).toLocaleString() : '?'}</div>` : ''}
         </div>
         <div class="tx-amount" style="color:${isCoinbase ? (isMinerReward?'#FF6B6B':'#4ECDC4') : 'var(--vi)'}">
-          +${amount} QTCL
+          +${amount}
         </div>
       </div>
       ${wProof ? `<div class="tx-proof"><span class="tx-proof-label">W-PROOF:</span> ${wProof}</div>` : ''}
@@ -1445,13 +1448,6 @@ setInterval(async () => {
     } catch(e) {}
   }
 }, 8000);
-
-// Initial boot sequence
-(async () => {
-  await waitForServer();
-  await fetchChain();
-  await fetchStats();
-})();
 
 // Explorer page refresh every 15s if active
 setInterval(async () => {
