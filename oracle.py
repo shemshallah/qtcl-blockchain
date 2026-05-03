@@ -1112,7 +1112,7 @@ QTCL_COIN = 0
 HARDENED_OFFSET = 0x80000000
 SEED_HMAC_KEY = b"QTCL hyperbolic {8,3} oracle seed"
 CHILD_HMAC_KEY = b"QTCL child key derivation"
-ADDRESS_PREFIX = "qtcl1"
+ADDRESS_PREFIX = ""  # Addresses are raw 64-char hex (SHA3-256²), no prefix
 
 _ORACLE_ROLES = [
     "PRIMARY_LATTICE",
@@ -1146,7 +1146,9 @@ class OracleKeyPair:
     path: str = "m"
 
     def address(self) -> str:
-        return ADDRESS_PREFIX + hashlib.sha3_256(self.public_key).digest()[:20].hex()
+        # Full 64-char hex address (SHA3-256²) — matches hyp_engine format
+        pk_hash = hashlib.sha3_256(self.public_key).digest()
+        return hashlib.sha3_256(pk_hash).hexdigest()
 
     def fingerprint_bytes(self) -> bytes:
         return hashlib.sha3_256(self.public_key).digest()[:4]

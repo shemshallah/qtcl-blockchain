@@ -1450,12 +1450,12 @@ def get_oracle_address(oracle_id: str, fallback: str = "") -> str:
 
 def get_consensus_oracle_address() -> str:
     """
-    Compute consensus oracle address (XOR of all 5 oracle addresses).
+    Compute consensus oracle address (deterministic hash of all oracle addresses).
     Used for transactions that require all-oracle sign-off.
     """
     try:
         if not db_ready():
-            return "qtcl1consensus_all_oracles_xor"
+            return "0" * 64
 
         conn = get_db_connection()
         try:
@@ -1474,12 +1474,8 @@ def get_consensus_oracle_address() -> str:
                     f"[ORACLE-ADDRESS] Expected 5 oracles, got {len(addresses)}"
                 )
 
-            # XOR all addresses together for deterministic consensus address
-            import hashlib
-
             consensus_seed = "|".join(addresses).encode()
-            consensus_hash = hashlib.sha256(consensus_seed).hexdigest()[:24]
-            return f"qtcl1consensus_{consensus_hash}"
+            return hashlib.sha3_256(consensus_seed).hexdigest()
         finally:
             if db_pool.use_pooling and db_pool.pool:
                 db_pool.pool.putconn(conn)
@@ -1487,7 +1483,7 @@ def get_consensus_oracle_address() -> str:
                 conn.close()
     except Exception as e:
         logger.debug(f"[ORACLE-ADDRESS] Consensus lookup failed: {e}")
-        return "qtcl1consensus_all_oracles_xor"
+        return "0" * 64
 
 
 logger.info(
@@ -4973,7 +4969,7 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
         p.get("cert_auth_tag", _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32])
     )
 
-    _ora_registry_addr = "qtcl1oracle_registry_000000000000000000000000"
+    _ora_registry_addr = "0" * 64  # Oracle registry uses null address (no value transfer)
     tx_payload = {
         "tx_type": "oracle_reg",
         "from_address": wallet_addr,
@@ -5241,6 +5237,62 @@ def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
     except Exception as e:
         logger.error(f"[RPC-HYP-KEYGEN] {e}", exc_info=True)
         return _rpc_error(-32603, f"Keypair generation failed: {str(e)}", rpc_id)
+
+
+def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
+    """RPC: qtcl_walletAuth — Verify wallet password via PBKDF2 verifier tag.
+
+    The server NEVER decrypts the private key. It only checks the HMAC verifier
+    derived from the password + salt. Wrong password → invalid tag, fast reject.
+    """
+    try:
+        p = params[0] if isinstance(params, (list, tuple)) and len(params) > 0 else params if isinstance(params, dict) else {}
+        wallet_data = p.get("wallet_data")
+        password = p.get("password", "")
+
+        if not wallet_data or not password:
+            return _rpc_error(-32602, "wallet_data and password required", rpc_id)
+
+        enc_pk = wallet_data.get("encrypted_private_key")
+        if not enc_pk or not isinstance(enc_pk, dict):
+            return _rpc_error(-32602, "wallet_data.encrypted_private_key missing or malformed", rpc_id)
+
+        salt_hex = enc_pk.get("salt_hex", "")
+        stored_v_hex = enc_pk.get("verifier_hex", "")
+        if not salt_hex or not stored_v_hex:
+            return _rpc_error(-32602, "wallet missing salt or verifier — legacy/invalid format", rpc_id)
+
+        try:
+            salt = bytes.fromhex(salt_hex)
+            stored_v = bytes.fromhex(stored_v_hex)
+        except ValueError:
+            return _rpc_error(-32602, "malformed hex in salt_hex or verifier_hex", rpc_id)
+
+        # PBKDF2-HMAC-SHA256, 600K iterations, 64 bytes → enc_key + verifier_key
+        raw = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), salt, 600_000, dklen=64
+        )
+        verifier_key = raw[32:]
+        expected_v = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + verifier_key).digest()
+
+        if not hmac.compare_digest(stored_v, expected_v):
+            return _rpc_ok(
+                {"valid": False, "reason": "PBKDF2 verifier tag mismatch"}, rpc_id
+            )
+
+        return _rpc_ok(
+            {
+                "valid": True,
+                "address": wallet_data.get("address", ""),
+                "public_key": wallet_data.get("public_key", ""),
+                "vault_version": wallet_data.get("vault_version", "unknown"),
+                "shamir_enabled": bool(wallet_data.get("shamir_config")),
+            },
+            rpc_id,
+        )
+    except Exception as e:
+        logger.error(f"[RPC-WALLETAUTH] {e}", exc_info=True)
+        return _rpc_error(-32603, f"Wallet auth failed: {str(e)}", rpc_id)
 
 
 def qtcl_hyp_signMessage(params: dict, rpc_id: Any) -> dict:
@@ -6156,7 +6208,7 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
         fidelity            float — W-state fidelity of the pushed DM  (0..1)
         oracle_type         str   — e.g. 'tripartite_client'
         node_ip             str   — caller self-reported WAN IP (advisory)
-        oracle_addr         str   — oracle signing address (qtcl1...)
+        oracle_addr         str   — oracle signing address (64-char hex)
 
     Server action:
         1. Validate 32³ tensor hex (length, finite values).
@@ -6554,7 +6606,7 @@ _RPC_METHODS: Dict[str, Any] = {
             "treasury_address": getattr(
                 TessellationRewardSchedule,
                 "TREASURY_ADDRESS",
-                "qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d",
+                "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b",
             )
         },
         rid,
@@ -6576,6 +6628,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_receiveDHTTable": _p2p_rpc_receive_dht_table,
     "qtcl_peerHeartbeat": _p2p_rpc_peer_heartbeat,
     # ── HypΓ Post-Quantum Cryptography (Schnorr-Γ + GeodesicLWE) ────────────────────
+    "qtcl_walletAuth": _rpc_walletAuth,
     "qtcl_hyp_generateKeypair": qtcl_hyp_generateKeypair,
     "qtcl_hyp_signMessage": qtcl_hyp_signMessage,
     "qtcl_hyp_verifySignature": qtcl_hyp_verifySignature,

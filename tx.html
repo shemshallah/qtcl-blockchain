@@ -918,7 +918,7 @@ body::before {
         <div id="connectTabAddr">
           <div class="form-group">
             <label class="form-label">QTCL Address (Read-Only Mode)</label>
-            <input type="text" class="form-input" id="connectAddr" placeholder="qtcl1… or paste your address">
+            <input type="text" class="form-input" id="connectAddr" placeholder="64-char hex address…">
             <div class="form-hint">View balance and history. Sending requires wallet file authentication.</div>
           </div>
           <button class="btn btn-primary btn-full" onclick="connectWallet()">Connect (Read-Only)</button>
@@ -1028,7 +1028,7 @@ body::before {
             <div class="form-group">
               <label class="form-label">Recipient Address</label>
               <div style="display:flex; gap:8px;">
-                <input type="text" class="form-input" id="sendTo" placeholder="qtcl1… recipient address" style="flex:1;">
+                <input type="text" class="form-input" id="sendTo" placeholder="Recipient 64-char hex address…" style="flex:1;">
                 <button class="btn btn-sm" onclick="pickContact('sendTo')" title="Address Book">👤</button>
               </div>
             </div>
@@ -1248,7 +1248,7 @@ body::before {
               </div>
               <div class="form-group">
                 <label class="form-label">QTCL Address</label>
-                <input type="text" class="form-input" id="contactAddr" placeholder="qtcl1…">
+                <input type="text" class="form-input" id="contactAddr" placeholder="64-char hex address…">
               </div>
             </div>
             <button class="btn btn-primary btn-sm mt-12" onclick="addContact()">+ Add Contact</button>
@@ -1297,7 +1297,7 @@ body::before {
               </div>
               <div class="form-group">
                 <label class="form-label">QTCL Receiving Address</label>
-                <input type="text" class="form-input" id="bridgeRedeemAddr" placeholder="qtcl1…">
+                <input type="text" class="form-input" id="bridgeRedeemAddr" placeholder="64-char hex address…">
               </div>
               <button class="btn btn-violet btn-full mt-12" disabled>Submit Redeem (Coming Soon)</button>
             </div>
@@ -1316,7 +1316,7 @@ body::before {
           <div class="form-group">
             <label class="form-label">QTCL Address</label>
             <div style="display:flex; gap:8px;">
-              <input type="text" class="form-input" id="lookupAddr" placeholder="qtcl1… or any address" style="flex:1;">
+              <input type="text" class="form-input" id="lookupAddr" placeholder="64-char hex address…" style="flex:1;">
               <button class="btn btn-primary" onclick="lookupAddress()">Lookup</button>
             </div>
           </div>

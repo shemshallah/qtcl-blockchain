@@ -108,18 +108,14 @@ BACKGROUND_INTERVAL_S     = 30            # background worker sleep interval
 PERSISTENCE_BATCH_SIZE    = 500           # DB batch write size
 DEV_MODE                  = os.getenv('QTCL_DEV_MODE', '').lower() in ('1', 'true', 'yes')  # bypass balance check for testing
 
-ADDRESS_PREFIX            = "qtcl1"       # canonical address prefix
-
 # ══════════════════════════════════════════════════════════════════════════════
 # DEPENDENCY RESOLUTION — ALL SOFT IMPORTS, ZERO HARD FAILURES AT BOOT
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Oracle (HypΓ verification + W-state entropy)
 try:
-    from oracle import ORACLE, ADDRESS_PREFIX as _ORACLE_PREFIX
-    # ✅ FIXED: Import from hlwe package
+    from oracle import ORACLE
     from hlwe.hyp_engine import get_hyp_engine
-    ADDRESS_PREFIX = _ORACLE_PREFIX
     _ORACLE_AVAILABLE = True
     _HYP_ENGINE = get_hyp_engine()
     logger.info("[MEMPOOL] ✅ Oracle / HypΓ engine loaded")
@@ -1342,7 +1338,10 @@ class Mempool:
             _treasury_addr = _TRS_mp.TREASURY_ADDRESS
         except Exception:
             _treasury_base = 800 - block_reward_base   # fallback: remainder
-            _treasury_addr = 'qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1'
+            _treasury_addr = os.environ.get(
+                'TREASURY_ADDRESS',
+                'e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b'
+            )
         # Collect all donations (formerly fees) for the treasury
         total_donations = sum(tx.fee_base for tx in selected)
         
@@ -1850,13 +1849,18 @@ class Mempool:
         self,
         block_height      : int,
         treasury_reward   : int,
-        treasury_address  : str = 'qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1',
+        treasury_address  : str = None,
         w_entropy_hash    : str = '',
     ) -> 'MempoolTx':
         """
         Build treasury coinbase (slot 1) - always paid on-chain regardless of miner.
-        Treasury address: qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1 (hardcoded)
+        Treasury address read from TREASURY_ADDRESS env var (Koyeb).
         """
+        if treasury_address is None:
+            treasury_address = os.environ.get(
+                'TREASURY_ADDRESS',
+                'e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b'
+            )
         import hashlib as _hl
         raw_input = f"TREASURY_COINBASE:{block_height}:{treasury_address}:{treasury_reward}:{w_entropy_hash}".encode()
         tx_hash   = _hl.sha3_256(raw_input).hexdigest()

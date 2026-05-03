@@ -3304,7 +3304,10 @@ class BlockManager:
             # Get miner reward for this block height (default: 720 QTCL)
             MINER_REWARD_BASE = 72000  # in base units (720.00 QTCL)
             TREASURY_REWARD_BASE = 8000  # in base units (80.00 QTCL)
-            TREASURY_ADDRESS = "qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1"
+            TREASURY_ADDRESS = os.environ.get(
+                'TREASURY_ADDRESS',
+                'e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b'
+            )
 
             miner_reward = MINER_REWARD_BASE
             treasury_reward = TREASURY_REWARD_BASE
