@@ -2,10 +2,14 @@
 """
 Standalone SSE Server — Quantum Information Streaming Service
 
-Handles unlimited concurrent clients streaming 16³ density matrix snapshots,
-block events, and metrics. Uses eventlet green threads (async) instead of
-synchronous OS threads, so thousands of concurrent SSE connections don't
-exhaust gunicorn worker pool.
+Handles concurrent clients streaming 16³ density matrix snapshots,
+block events, and metrics. Uses eventlet green threads (async).
+
+Connection Management:
+- Max 5 concurrent SSE streams per client IP
+- Max 500 total concurrent streams globally
+- Automatic cleanup of stale connections
+- Connection deduplication by IP
 
 Architecture:
 - /rpc/oracle/snapshot GET — stream real-time 16³ quantum snapshots
@@ -21,6 +25,8 @@ import json
 import queue
 import threading
 import logging
+import time
+from collections import defaultdict, deque
 from flask import Flask, Response, request
 
 # Configure logging
@@ -30,70 +36,229 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CONNECTION LIMITS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+MAX_CONNECTIONS_PER_IP = int(os.environ.get("SSE_MAX_PER_IP", 5))
+MAX_TOTAL_CONNECTIONS = int(os.environ.get("SSE_MAX_TOTAL", 500))
+CONNECTION_CLEANUP_INTERVAL = 30.0  # seconds
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # IN-MEMORY STATE: Per-client queues for fan-out
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_snapshot_clients = []  # list of (client_id, queue.Queue) tuples
-_snapshot_lock = threading.RLock()
+class SSEClient:
+    """Represents a single SSE client connection."""
+    __slots__ = ('client_id', 'ip', 'queue', 'connected_at', 'last_activity')
+    
+    def __init__(self, client_id, ip):
+        self.client_id = client_id
+        self.ip = ip
+        self.queue = queue.Queue(maxsize=50)
+        self.connected_at = time.time()
+        self.last_activity = time.time()
+    
+    def touch(self):
+        self.last_activity = time.time()
 
-_blocks_clients = []
-_blocks_lock = threading.RLock()
 
-_metrics_clients = []
-_metrics_lock = threading.RLock()
+class SSEChannel:
+    """Manages clients for a single SSE endpoint."""
+    
+    def __init__(self, name):
+        self.name = name
+        self.clients = []  # list of SSEClient
+        self.lock = threading.RLock()
+        self._next_id = 0
+        self._id_lock = threading.Lock()
+    
+    def _alloc_id(self):
+        with self._id_lock:
+            self._next_id += 1
+            return self._next_id
+    
+    def get_client_counts(self):
+        """Return (total_clients, per_ip_counts)."""
+        with self.lock:
+            per_ip = defaultdict(int)
+            for c in self.clients:
+                per_ip[c.ip] += 1
+            return len(self.clients), dict(per_ip)
+    
+    def connect(self, client_ip):
+        """Register a new client, enforcing connection limits."""
+        with self.lock:
+            # Count connections from this IP
+            ip_count = sum(1 for c in self.clients if c.ip == client_ip)
+            
+            if ip_count >= MAX_CONNECTIONS_PER_IP:
+                logger.warning(
+                    f"[SSE-{self.name}] IP {client_ip} already has {ip_count} connections (max {MAX_CONNECTIONS_PER_IP}). "
+                    f"Closing oldest connection."
+                )
+                # Close oldest connection from this IP
+                oldest = None
+                oldest_time = float('inf')
+                for c in self.clients:
+                    if c.ip == client_ip and c.connected_at < oldest_time:
+                        oldest = c
+                        oldest_time = c.connected_at
+                
+                if oldest:
+                    self._close_client(oldest, reason="per_ip_limit")
+            
+            # Check global limit
+            if len(self.clients) >= MAX_TOTAL_CONNECTIONS:
+                logger.warning(
+                    f"[SSE-{self.name}] Global limit reached ({len(self.clients)}/{MAX_TOTAL_CONNECTIONS}). "
+                    f"Closing oldest connection."
+                )
+                # Close oldest connection overall
+                oldest = min(self.clients, key=lambda c: c.connected_at, default=None)
+                if oldest:
+                    self._close_client(oldest, reason="global_limit")
+            
+            # Create new client
+            client = SSEClient(self._alloc_id(), client_ip)
+            self.clients.append(client)
+            
+            total, per_ip = self.get_client_counts()
+            ip_str = f" (IP {client_ip} now has {per_ip.get(client_ip, 0)} conns)"
+            logger.info(f"[SSE-{self.name}] client {client.client_id} connected{ip_str}. Total: {total}")
+            
+            return client
+    
+    def disconnect(self, client):
+        """Remove a client from the channel."""
+        with self.lock:
+            self._close_client(client, reason="disconnect")
+    
+    def _close_client(self, client, reason="cleanup"):
+        """Close a client connection and remove from list."""
+        if client in self.clients:
+            self.clients.remove(client)
+            # Signal closure by putting None in queue
+            try:
+                client.queue.put_nowait(None)
+            except queue.Full:
+                pass
+            total, per_ip = self.get_client_counts()
+            logger.info(
+                f"[SSE-{self.name}] client {client.client_id} closed ({reason}). "
+                f"Remaining: {total}"
+            )
+    
+    def cleanup_stale(self, max_age=60.0):
+        """Remove clients that haven't received data in max_age seconds."""
+        now = time.time()
+        with self.lock:
+            stale = [c for c in self.clients if (now - c.last_activity) > max_age]
+            for c in stale:
+                self._close_client(c, reason="stale")
+            return len(stale)
+    
+    def fan_out(self, payload):
+        """Send payload to all connected clients."""
+        with self.lock:
+            for client in list(self.clients):
+                client.touch()
+                try:
+                    client.queue.put_nowait(payload)
+                except queue.Full:
+                    try:
+                        client.queue.get_nowait()
+                        client.queue.put_nowait(payload)
+                    except Exception:
+                        pass
+            return len(self.clients)
 
-_next_client_id = 0
-_client_id_lock = threading.Lock()
+
+# Initialize channels
+_snapshot_channel = SSEChannel("snapshot")
+_blocks_channel = SSEChannel("blocks")
+_metrics_channel = SSEChannel("metrics")
 
 
-def _allocate_client_id():
-    global _next_client_id
-    with _client_id_lock:
-        _next_client_id += 1
-        return _next_client_id
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONNECTION CLEANUP WORKER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _cleanup_worker():
+    """Background thread: periodically remove stale connections."""
+    while True:
+        time.sleep(CONNECTION_CLEANUP_INTERVAL)
+        try:
+            total_removed = 0
+            total_removed += _snapshot_channel.cleanup_stale(max_age=60.0)
+            total_removed += _blocks_channel.cleanup_stale(max_age=60.0)
+            total_removed += _metrics_channel.cleanup_stale(max_age=60.0)
+            
+            if total_removed > 0:
+                snap_total, _ = _snapshot_channel.get_client_counts()
+                block_total, _ = _blocks_channel.get_client_counts()
+                metric_total, _ = _metrics_channel.get_client_counts()
+                logger.info(
+                    f"[SSE-CLEANUP] Removed {total_removed} stale connections. "
+                    f"Current: snapshot={snap_total}, blocks={block_total}, metrics={metric_total}"
+                )
+        except Exception as e:
+            logger.error(f"[SSE-CLEANUP] Error: {e}")
+
+
+# Start cleanup thread
+_cleanup_thread = threading.Thread(target=_cleanup_worker, daemon=True, name="sse-cleanup")
+_cleanup_thread.start()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SSE ENDPOINTS — Stream to connected clients
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _sse_generator(channel, client):
+    """Generic SSE generator for any channel."""
+    try:
+        while True:
+            try:
+                data = client.queue.get(timeout=1.0)
+                if data is None:
+                    # Shutdown signal
+                    break
+                if data:
+                    yield f"data: {json.dumps(data)}\n\n"
+            except queue.Empty:
+                client.touch()
+                yield ": heartbeat\n\n"
+    except GeneratorExit:
+        logger.debug(f"[SSE-{channel.name}] client {client.client_id} GeneratorExit")
+    finally:
+        channel.disconnect(client)
+
+
+def _get_client_ip():
+    """Extract client IP from request, handling proxies."""
+    # Check X-Forwarded-For header first (for reverse proxies)
+    forwarded = request.headers.get('X-Forwarded-For')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    # Check X-Real-IP
+    real_ip = request.headers.get('X-Real-IP')
+    if real_ip:
+        return real_ip.strip()
+    # Fall back to remote_addr
+    return request.remote_addr or "unknown"
+
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
-    """SSE stream: Real-time 16³ density matrix snapshots for quantum clients.
-
-    Unlimited concurrent connections supported (green threads via eventlet).
-    """
+    """SSE stream: Real-time 16³ density matrix snapshots for quantum clients."""
     if request.method == "OPTIONS":
         return "", 204
 
-    client_id = _allocate_client_id()
-    client_queue = queue.Queue(maxsize=50)
-
-    with _snapshot_lock:
-        _snapshot_clients.append((client_id, client_queue))
-
-    logger.info(f"[SSE] /rpc/oracle/snapshot client {client_id} connected")
-
-    def snapshot_generator():
-        try:
-            while True:
-                try:
-                    frame = client_queue.get(timeout=1.0)
-                    if frame:
-                        yield f"data: {json.dumps(frame)}\n\n"
-                except queue.Empty:
-                    yield ": heartbeat\n\n"
-        except GeneratorExit:
-            logger.info(f"[SSE] /rpc/oracle/snapshot client {client_id} disconnected")
-        finally:
-            with _snapshot_lock:
-                _snapshot_clients[:] = [
-                    (cid, q) for cid, q in _snapshot_clients if cid != client_id
-                ]
+    client_ip = _get_client_ip()
+    client = _snapshot_channel.connect(client_ip)
 
     return Response(
-        snapshot_generator(),
+        _sse_generator(_snapshot_channel, client),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -109,33 +274,11 @@ def rpc_events_blocks():
     if request.method == "OPTIONS":
         return "", 204
 
-    client_id = _allocate_client_id()
-    client_queue = queue.Queue(maxsize=50)
-
-    with _blocks_lock:
-        _blocks_clients.append((client_id, client_queue))
-
-    logger.info(f"[SSE] /rpc/events/blocks client {client_id} connected")
-
-    def blocks_generator():
-        try:
-            while True:
-                try:
-                    event = client_queue.get(timeout=1.0)
-                    if event:
-                        yield f"data: {json.dumps(event)}\n\n"
-                except queue.Empty:
-                    yield ": heartbeat\n\n"
-        except GeneratorExit:
-            logger.info(f"[SSE] /rpc/events/blocks client {client_id} disconnected")
-        finally:
-            with _blocks_lock:
-                _blocks_clients[:] = [
-                    (cid, q) for cid, q in _blocks_clients if cid != client_id
-                ]
+    client_ip = _get_client_ip()
+    client = _blocks_channel.connect(client_ip)
 
     return Response(
-        blocks_generator(),
+        _sse_generator(_blocks_channel, client),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -147,25 +290,18 @@ def rpc_events_blocks():
 
 @app.route("/rpc/blocks/stream", methods=["GET"])
 def rpc_blocks_stream():
-    """SSE stream: Real-time block information (height, hash, timestamp).
-
-    Streams block data in format: {"height": N, "hash": "...", "timestamp": ...}
-    """
-    client_id = _allocate_client_id()
-    client_queue = queue.Queue(maxsize=50)
-
-    with _blocks_lock:
-        _blocks_clients.append((client_id, client_queue))
-
-    logger.info(f"[SSE] /rpc/blocks/stream client {client_id} connected")
+    """SSE stream: Real-time block information (height, hash, timestamp)."""
+    client_ip = _get_client_ip()
+    client = _blocks_channel.connect(client_ip)
 
     def blocks_stream_generator():
         try:
             while True:
                 try:
-                    block = client_queue.get(timeout=1.0)
+                    block = client.queue.get(timeout=1.0)
+                    if block is None:
+                        break
                     if block:
-                        # Format block data with height, hash, timestamp
                         formatted = {
                             "height": block.get("height", 0),
                             "hash": block.get("hash", ""),
@@ -173,14 +309,12 @@ def rpc_blocks_stream():
                         }
                         yield f"data: {json.dumps(formatted)}\n\n"
                 except queue.Empty:
+                    client.touch()
                     yield ": heartbeat\n\n"
         except GeneratorExit:
-            logger.info(f"[SSE] /rpc/blocks/stream client {client_id} disconnected")
+            logger.debug(f"[SSE-blocks/stream] client {client.client_id} GeneratorExit")
         finally:
-            with _blocks_lock:
-                _blocks_clients[:] = [
-                    (cid, q) for cid, q in _blocks_clients if cid != client_id
-                ]
+            _blocks_channel.disconnect(client)
 
     return Response(
         blocks_stream_generator(),
@@ -197,34 +331,11 @@ def rpc_blocks_stream():
 @app.route("/rpc/metrics/push", methods=["GET"])
 def rpc_metrics_push():
     """SSE stream: Metrics push (placeholder — currently streams heartbeats only)."""
-
-    client_id = _allocate_client_id()
-    client_queue = queue.Queue(maxsize=50)
-
-    with _metrics_lock:
-        _metrics_clients.append((client_id, client_queue))
-
-    logger.info(f"[SSE] /rpc/metrics/push client {client_id} connected")
-
-    def metrics_generator():
-        try:
-            while True:
-                try:
-                    metric = client_queue.get(timeout=2.0)
-                    if metric:
-                        yield f"data: {json.dumps(metric)}\n\n"
-                except queue.Empty:
-                    yield ": heartbeat\n\n"
-        except GeneratorExit:
-            logger.info(f"[SSE] /rpc/metrics/push client {client_id} disconnected")
-        finally:
-            with _metrics_lock:
-                _metrics_clients[:] = [
-                    (cid, q) for cid, q in _metrics_clients if cid != client_id
-                ]
+    client_ip = _get_client_ip()
+    client = _metrics_channel.connect(client_ip)
 
     return Response(
-        metrics_generator(),
+        _sse_generator(_metrics_channel, client),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -239,51 +350,19 @@ def rpc_metrics_push():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-# ── Direct fan-out helpers (called inline from server.py, no HTTP hop) ──
-
 def _fan_out_snapshot(payload: dict) -> int:
     """Fan-out a snapshot payload to all connected /rpc/oracle/snapshot clients."""
-    with _snapshot_lock:
-        for _, q in _snapshot_clients:
-            try:
-                q.put_nowait(payload)
-            except queue.Full:
-                try:
-                    q.get_nowait()
-                    q.put_nowait(payload)
-                except Exception:
-                    pass
-        return len(_snapshot_clients)
+    return _snapshot_channel.fan_out(payload)
 
 
 def _fan_out_block(payload: dict) -> int:
     """Fan-out a block payload to all connected /rpc/events/blocks clients."""
-    with _blocks_lock:
-        for _, q in _blocks_clients:
-            try:
-                q.put_nowait(payload)
-            except queue.Full:
-                try:
-                    q.get_nowait()
-                    q.put_nowait(payload)
-                except Exception:
-                    pass
-        return len(_blocks_clients)
+    return _blocks_channel.fan_out(payload)
 
 
 def _fan_out_metric(payload: dict) -> int:
     """Fan-out a metric payload to all connected /rpc/metrics/push clients."""
-    with _metrics_lock:
-        for _, q in _metrics_clients:
-            try:
-                q.put_nowait(payload)
-            except queue.Full:
-                try:
-                    q.get_nowait()
-                    q.put_nowait(payload)
-                except Exception:
-                    pass
-        return len(_metrics_clients)
+    return _metrics_channel.fan_out(payload)
 
 
 @app.route("/push/snapshot", methods=["POST"])
@@ -338,12 +417,24 @@ def push_metric():
 @app.route("/health", methods=["GET"])
 def health():
     """Instant health check for Koyeb."""
+    snap_total, snap_per_ip = _snapshot_channel.get_client_counts()
+    block_total, block_per_ip = _blocks_channel.get_client_counts()
+    metric_total, metric_per_ip = _metrics_channel.get_client_counts()
+    
     return {
         "status": "ok",
         "service": "sse",
-        "snapshot_clients": len(_snapshot_clients),
-        "blocks_clients": len(_blocks_clients),
-        "metrics_clients": len(_metrics_clients),
+        "snapshot_clients": snap_total,
+        "blocks_clients": block_total,
+        "metrics_clients": metric_total,
+        "limits": {
+            "max_per_ip": MAX_CONNECTIONS_PER_IP,
+            "max_total": MAX_TOTAL_CONNECTIONS,
+        },
+        "top_ips": {
+            "snapshot": dict(sorted(snap_per_ip.items(), key=lambda x: -x[1])[:5]),
+            "blocks": dict(sorted(block_per_ip.items(), key=lambda x: -x[1])[:5]),
+        },
     }, 200
 
 
