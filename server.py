@@ -1201,24 +1201,26 @@ def _settle_block_rewards(
         # MANDATORY SETTLEMENT: This MUST execute and update balances
         # ════════════════════════════════════════════════════════════════════════════════
 
+        # Get treasury address first (needed for validation)
+        _treasury_addr = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b"
+
         _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} SETTLEMENT EXECUTING NOW")
         _settle_log.critical(f"   miner={miner_address}")
-        _settle_log.critical(f"   treasury={treasury_address}")
+        _settle_log.critical(f"   treasury={_treasury_addr}")
 
         # GUARD: Reject invalid inputs
         if not miner_address or len(str(miner_address).strip()) < 10:
             _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
             return
-        if not treasury_address or len(str(treasury_address).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {treasury_address}")
+        if not _treasury_addr or len(str(_treasury_addr).strip()) < 10:
+            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {_treasury_addr}")
             return
 
         _settle_log.critical(f"✅ [SETTLE-VALIDATE] Addresses valid, proceeding with settlement")
 
         # HARDCODED REWARDS — Single source of truth
-        # Miner: 7.20 QTCL (720 base units)
+        # Miner: 7.20 QTCL
         # Treasury: 0.80 QTCL
-        # QTCL rewards — converted to base units (×100) for database storage
         miner_reward_qtcl = 7.20
         treasury_reward_qtcl = 0.80
 
@@ -1250,7 +1252,7 @@ def _settle_block_rewards(
 
         # Compute wallet fingerprints
         miner_fp = hashlib.sha3_256(miner_address.encode()).hexdigest()[:64]
-        treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
+        treasury_address = _treasury_addr
         treasury_fp = hashlib.sha3_256(treasury_address.encode()).hexdigest()[:64]
 
         # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
