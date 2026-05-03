@@ -423,8 +423,8 @@ def _apply_vault_burn(cost: int, operation: str, account_id: str, tx_ref: str = 
         from server import get_db_cursor
         import hashlib as _hl
 
-        burn_fp = _hl.sha256(BURN_ADDRESS.encode()).hexdigest()[:64]
-        coh_fp  = _hl.sha256(COHERENCE_FUND_ADDRESS.encode()).hexdigest()[:64]
+        burn_fp = _hl.sha3_256(BURN_ADDRESS.encode()).hexdigest()[:64]
+        coh_fp  = _hl.sha3_256(COHERENCE_FUND_ADDRESS.encode()).hexdigest()[:64]
 
         with get_db_cursor() as cur:
             # Credit burn address (increases tracked burned supply)
@@ -591,11 +591,11 @@ def _normalize_params(params) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _hash_passphrase(passphrase: str, salt: bytes = None) -> Tuple[str, str]:
-    """Hash passphrase with PBKDF2-HMAC-SHA256 (600K iterations)."""
+    """Hash passphrase with PBKDF2-HMAC-SHA3-256 (600K iterations)."""
     import hashlib
     if salt is None:
         salt = secrets.token_bytes(32)
-    dk = hashlib.pbkdf2_hmac('sha256', passphrase.encode(), salt, 600_000, dklen=32)
+    dk = hashlib.pbkdf2_hmac('sha3_256', passphrase.encode(), salt, 600_000, dklen=32)
     return dk.hex(), salt.hex()
 
 
@@ -607,7 +607,7 @@ def _verify_passphrase(passphrase: str, stored_hash: str) -> bool:
             return False
         salt_hex, hash_hex = parts
         dk = hashlib.pbkdf2_hmac(
-            'sha256', passphrase.encode(), bytes.fromhex(salt_hex), 600_000, dklen=32
+            'sha3_256', passphrase.encode(), bytes.fromhex(salt_hex), 600_000, dklen=32
         )
         return hmac.compare_digest(dk.hex(), hash_hex)
     except Exception:

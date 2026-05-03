@@ -131,7 +131,7 @@ class OracleSSEBridge:
             if ts_ns <= self.last_timestamp_ns:
                 ts_ns = self.last_timestamp_ns + 1
             self.last_timestamp_ns = ts_ns
-            snapshot_id = hashlib.sha256(
+            snapshot_id = hashlib.sha3_256(
                 f"{ts_ns}:{self.sequence_counter}".encode()
             ).hexdigest()[:16]
             dm_real = oracle_measurement.get("density_matrix_real", [0.0] * 64)
@@ -3594,7 +3594,7 @@ class OracleEngine:
 
     def derive_stable_miner_id(self, public_key_hex: str) -> str:
         try:
-            return hashlib.sha256(public_key_hex.encode()).hexdigest()[:16]
+            return hashlib.sha3_256(public_key_hex.encode()).hexdigest()[:16]
         except:
             return secrets.token_hex(8)
 
@@ -3740,7 +3740,7 @@ class PythPriceFeed:
 class PythAtomicSnapshot:
     """Immutable atomic price snapshot — all feeds fetched in single round-trip."""
 
-    snapshot_id: str  # hex(sha256(canonical_repr))
+    snapshot_id: str  # hex(sha3_256(canonical_repr))
     fetch_time_ns: int  # monotonic fetch timestamp (ns)
     feeds: Dict[str, PythPriceFeed]  # symbol → PriceFeed
     outliers: List[str]  # symbols rejected by Byzantine filter
@@ -3998,7 +3998,7 @@ class PythPriceOracle:
             },
             sort_keys=True,
         )
-        snap_id = hashlib.sha256(f"{fetch_ns}:{canon}".encode()).hexdigest()
+        snap_id = hashlib.sha3_256(f"{fetch_ns}:{canon}".encode()).hexdigest()
 
         # HypΓ signature (non-blocking — if ORACLE not yet ready, skip)
         hyp_sig: Optional[str] = None

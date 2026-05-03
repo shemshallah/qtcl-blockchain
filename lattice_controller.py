@@ -2483,8 +2483,8 @@ class QuantumLatticeController:
     # def encode_transaction(self, tx_params: TransactionQuantumParameters) -> Dict[str, Any]:
     #     """Encode transaction as quantum state (COMMENTED OUT v13)"""
     #     # try:
-    #     #     user_hash = hashlib.sha256(tx_params.user_address.encode()).digest()
-    #     #     target_hash = hashlib.sha256(tx_params.target_address.encode()).digest()
+    #     #     user_hash = hashlib.sha3_256(tx_params.user_address.encode()).digest()
+    #     #     target_hash = hashlib.sha3_256(tx_params.target_address.encode()).digest()
     #     #     user_phase = float(int.from_bytes(user_hash[:4], 'big')) % (2 * np.pi)
     #     #     target_phase = float(int.from_bytes(target_hash[:4], 'big')) % (2 * np.pi)
     #     #     qc = QuantumCircuit(3, name=f"TX_{tx_params.tx_id[:8]}")

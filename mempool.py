@@ -335,7 +335,7 @@ class MempoolTx:
         
         # Format: from_addr:to_addr:amount:fee:nonce:ts
         tx_data = f"{from_address}:{to_address}:{amount_qtcl}:{fee_qtcl}:{nonce}:{timestamp_ns}"
-        return hashlib.sha256(tx_data.encode()).hexdigest()
+        return hashlib.sha3_256(tx_data.encode()).hexdigest()
 
     def get_signing_hash(self) -> bytes:
         """
@@ -350,7 +350,7 @@ class MempoolTx:
             'nonce': self.nonce
         }
         tx_json = json.dumps(tx_data, sort_keys=True, default=str)
-        return hashlib.sha256(tx_json.encode('utf-8')).digest()
+        return hashlib.sha3_256(tx_json.encode('utf-8')).digest()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FEE HISTOGRAM — Bitcoin-style estimatesmartfee
@@ -948,7 +948,7 @@ class BalanceOracle:
         if not _db.available:
             return
         try:
-            fp = hashlib.sha256(address.encode()).hexdigest()[:64]
+            fp = hashlib.sha3_256(address.encode()).hexdigest()[:64]
             pk = public_key or hashlib.sha3_256(address.encode()).hexdigest()
             with _db.cursor() as cur:
                 cur.execute("""
@@ -1190,7 +1190,7 @@ class Mempool:
                         return AcceptResult.ORACLE_CERT_INVALID, (
                             f"oracle_reg missing cert_sig for action={_action}"
                         ), None
-                    # cert_sig structure: sha256(oracle_addr + "|" + from_addr + "|" + oracle_pub)
+                    # cert_sig structure: sha3_256(oracle_addr + "|" + from_addr + "|" + oracle_pub)
                     # Full HypΓ cert verification is done server-side at block seal time.
                     # Here we do a fast structural check: cert_sig must be 64-char hex.
                     if _cert_sig and (len(_cert_sig) < 32 or not all(c in '0123456789abcdef' for c in _cert_sig.lower())):
@@ -1616,7 +1616,7 @@ class Mempool:
                 return False, "missing_public_key_in_signature"
 
             # 1. Reconstruct signing hash (the actual bytes signed by client)
-            # Client signs: sha256(json.dumps({'sender':..., 'recipient':..., 'amount':..., 'nonce':...}))
+            # Client signs: sha3_256(json.dumps({'sender':..., 'recipient':..., 'amount':..., 'nonce':...}))
             tx_data = {
                 'sender': norm['from_address'],
                 'recipient': norm['to_address'],
@@ -1625,7 +1625,7 @@ class Mempool:
             }
             tx_json = json.dumps(tx_data, sort_keys=True, default=str)
             logger.debug(f"[MEMPOOL-SIG] Reconstructed JSON: {tx_json}")
-            signing_hash_bytes = hashlib.sha256(tx_json.encode('utf-8')).digest()
+            signing_hash_bytes = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
             signing_hash_hex = signing_hash_bytes.hex()
             logger.debug(f"[MEMPOOL-SIG] Signing hash: {signing_hash_hex}")
 
