@@ -8095,6 +8095,129 @@ threading.Thread(
     name="ServerWalletInit",
 ).start()
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STRIPE INTEGRATION — Placeholder Routes (ready for production keys)
+# ═══════════════════════════════════════════════════════════════════════════════
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_PRICE_QTCL_1000 = os.environ.get("STRIPE_PRICE_QTCL_1000", "")
+
+@app.route("/stripe/create-checkout-session", methods=["POST"])
+def stripe_create_checkout_session():
+    """POST /stripe/create-checkout-session
+
+    Creates a Stripe Checkout Session for buying QTCL vault credit.
+    Placeholder — returns mock session ID until Stripe keys are configured.
+    """
+    try:
+        data = request.get_json() or {}
+        account_id = data.get("account_id", "")
+        qtcl_amount = int(data.get("qtcl_amount", 1000))  # default 1000 QTCL = $10
+
+        if not STRIPE_SECRET_KEY:
+            # Placeholder mode: return mock session
+            logger.info(f"[STRIPE] Placeholder checkout: {qtcl_amount} QTCL for account {account_id[:12]}...")
+            return jsonify({
+                "status": "placeholder",
+                "session_id": f"mock_sess_{secrets.token_hex(12)}",
+                "url": "https://checkout.stripe.com/mock",
+                "qtcl_amount": qtcl_amount,
+                "usd_amount": qtcl_amount / 100,
+                "message": "Stripe not configured. Set STRIPE_SECRET_KEY env var.",
+            }), 200
+
+        # Production path (requires stripe Python library)
+        try:
+            import stripe as _stripe
+            _stripe.api_key = STRIPE_SECRET_KEY
+            session = _stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                line_items=[{
+                    "price": STRIPE_PRICE_QTCL_1000,
+                    "quantity": qtcl_amount // 1000,
+                }],
+                mode="payment",
+                success_url=f"{request.headers.get('Origin', '')}/vault?stripe=success&session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=f"{request.headers.get('Origin', '')}/vault?stripe=cancel",
+                metadata={"account_id": account_id, "qtcl_amount": str(qtcl_amount)},
+            )
+            return jsonify({
+                "status": "ok",
+                "session_id": session.id,
+                "url": session.url,
+                "qtcl_amount": qtcl_amount,
+            }), 200
+        except ImportError:
+            return jsonify({"status": "error", "error": "stripe library not installed: pip install stripe"}), 500
+    except Exception as e:
+        logger.error(f"[STRIPE] Checkout creation failed: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    """POST /stripe/webhook
+
+    Stripe webhook endpoint for payment confirmations.
+    Credits vault account balance upon successful payment.
+    Placeholder — logs payload until Stripe keys are configured.
+    """
+    try:
+        payload = request.get_data()
+        sig_header = request.headers.get("Stripe-Signature", "")
+
+        if not STRIPE_WEBHOOK_SECRET:
+            # Placeholder mode: log and acknowledge
+            event_data = request.get_json() or {}
+            event_type = event_data.get("type", "unknown")
+            logger.info(f"[STRIPE-WEBHOOK] Placeholder received: {event_type}")
+            return jsonify({"status": "placeholder", "received": True, "event": event_type}), 200
+
+        # Production path: verify signature
+        try:
+            import stripe as _stripe
+            event = _stripe.Webhook.construct_event(
+                payload, sig_header, STRIPE_WEBHOOK_SECRET
+            )
+            if event["type"] == "checkout.session.completed":
+                session = event["data"]["object"]
+                metadata = session.get("metadata", {})
+                account_id = metadata.get("account_id")
+                qtcl_amount = int(metadata.get("qtcl_amount", 0))
+                if account_id and qtcl_amount > 0:
+                    # Credit vault account (100 QTCL = $1.00)
+                    _vault_credit_account(account_id, qtcl_amount * 100, f"Stripe payment {session['id']}")
+                    logger.info(f"[STRIPE] Credited {qtcl_amount} QTCL to {account_id[:12]}...")
+            return jsonify({"status": "ok"}), 200
+        except ImportError:
+            return jsonify({"status": "error", "error": "stripe library not installed"}), 500
+    except Exception as e:
+        logger.error(f"[STRIPE-WEBHOOK] Error: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+def _vault_credit_account(account_id: str, amount_base: int, description: str) -> bool:
+    """Credit a vault account with QTCL (used by Stripe webhook + manual deposits)."""
+    try:
+        from vault_service import _vault_query
+        _vault_query(
+            """UPDATE vault_accounts
+               SET credit_balance = credit_balance + %s, updated_at = NOW()
+               WHERE id = %s""",
+            (amount_base, account_id), fetch="none"
+        )
+        _vault_query(
+            """INSERT INTO vault_billing (id, account_id, operation, amount, balance_after, description, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+            (f"vb_{secrets.token_hex(8)}", account_id, "credit_deposit", amount_base, amount_base, description),
+            fetch="none"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"[VAULT-CREDIT] Failed to credit {account_id[:12]}: {e}")
+        return False
+
+
 # ═══ MODULE LOAD COMPLETE ═══
 # Flask app is ready to serve /health immediately
 logger.info(

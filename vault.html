@@ -848,6 +848,9 @@ body::before {
     </div>
 
     <div class="nav-group-label">ACCOUNT</div>
+    <div class="nav-item" data-page="pricing" onclick="showPage('pricing')">
+      <span class="nav-icon">💰</span> Pricing
+    </div>
     <div class="nav-item" data-page="transactions" onclick="showPage('transactions')">
       <span class="nav-icon">📊</span> Transactions
     </div>
@@ -1111,6 +1114,21 @@ body::before {
       </div>
 
       <div class="card">
+        <div class="card-title" style="margin-bottom:14px">BUY QTCL (STRIPE)</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+          Purchase QTCL instantly with credit card. No mining required. 100 QTCL = $1.00 USD.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <button class="btn btn-sm btn-secondary" onclick="buyQtcl(1000)">$10 · 1,000 QTCL</button>
+          <button class="btn btn-sm btn-secondary" onclick="buyQtcl(5000)">$50 · 5,000 QTCL</button>
+          <button class="btn btn-sm btn-secondary" onclick="buyQtcl(20000)">$200 · 20,000 QTCL</button>
+        </div>
+        <div style="font-size:9px;color:var(--amber);letter-spacing:.3px">
+          ⚠ Stripe integration placeholder. Set STRIPE_SECRET_KEY env var to enable live payments.
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-title" style="margin-bottom:14px">DEPOSIT QTCL</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
           Send mined QTCL to the vault deposit address below, then enter the TX hash.
@@ -1244,6 +1262,53 @@ body::before {
       </div>
     </div>
 
+    <!-- ═══ PRICING ═══ -->
+    <div class="page" id="page-pricing">
+      <div class="page-title">Vault Pricing</div>
+      <div class="page-desc">Transparent pay-as-you-go pricing. 100 QTCL = $1.00 USD.</div>
+
+      <div class="metrics-grid" style="grid-template-columns:repeat(4,1fr)">
+        <div class="metric-card" style="text-align:center">
+          <div class="metric-label" style="font-size:10px">TRIAL</div>
+          <div class="metric-value" style="font-size:18px;color:var(--text)">FREE</div>
+          <div class="metric-unit" style="font-size:10px">1 secret · 10 KB</div>
+        </div>
+        <div class="metric-card" style="text-align:center">
+          <div class="metric-label" style="font-size:10px">PERSONAL</div>
+          <div class="metric-value" style="font-size:18px;color:var(--cyan)">$10</div>
+          <div class="metric-unit" style="font-size:10px">20 secrets · 1 MB · 5 anchors</div>
+        </div>
+        <div class="metric-card" style="text-align:center">
+          <div class="metric-label" style="font-size:10px">PROFESSIONAL</div>
+          <div class="metric-value" style="font-size:18px;color:var(--violet)">$50</div>
+          <div class="metric-unit" style="font-size:10px">100 secrets · 10 MB · 10 anchors</div>
+        </div>
+        <div class="metric-card" style="text-align:center">
+          <div class="metric-label" style="font-size:10px">ENTERPRISE</div>
+          <div class="metric-value" style="font-size:18px;color:var(--emerald)">$200</div>
+          <div class="metric-unit" style="font-size:10px">Unlimited · 100 MB · ∞ anchors</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:14px">OPERATION FEES</div>
+        <div id="pricingOps" style="font-size:11px">
+          <div style="color:var(--muted);text-align:center;padding:20px">Loading pricing...</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:14px">FREE OPERATIONS</div>
+        <div style="font-size:11px;line-height:1.8;color:var(--text)">
+          <div>✓ <span style="color:var(--emerald)">Retrieve secret</span> — decrypt your own data anytime</div>
+          <div>✓ <span style="color:var(--emerald)">List secrets</span> — browse your vault metadata</div>
+          <div>✓ <span style="color:var(--emerald)">Verify anchor</span> — public chain lookup</div>
+          <div>✓ <span style="color:var(--emerald)">View pricing</span> — this page</div>
+          <div>✓ <span style="color:var(--emerald)">Login</span> — authenticate to your vault</div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -1322,6 +1387,7 @@ function showPage(page) {
   if (page === 'billing') loadBilling();
   if (page === 'anchor') populateAnchorSelect();
   if (page === 'transactions') loadTransactions();
+  if (page === 'pricing') loadPricing();
 
   // Close mobile menu
   document.getElementById('sidebar')?.classList.remove('mobile-open');
@@ -1999,6 +2065,40 @@ async function loadBilling() {
       </div>`;
     }
     container.innerHTML = html;
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function loadPricing() {
+  try {
+    const p = await rpc('vault_getPricing', {});
+    const ops = p.operations || {};
+    const tiers = p.tiers || {};
+
+    let html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
+    for (const [op, info] of Object.entries(ops)) {
+      const name = op.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+      html += `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--text)">${name}</span>
+        <span style="color:var(--cyan);font-weight:600">${info.qtcl} QTCL <span style="color:var(--muted);font-size:9px">($${info.usd})</span></span>
+      </div>`;
+    }
+    html += '</div>';
+    document.getElementById('pricingOps').innerHTML = html;
+  } catch (e) {
+    document.getElementById('pricingOps').innerHTML = `<div style="color:var(--red);padding:20px">Error loading pricing: ${escHtml(e.message)}</div>`;
+  }
+}
+
+async function buyQtcl(amount) {
+  try {
+    const result = await rpc('vault_createAccount', { qtcl_amount: amount });
+    if (result.status === 'placeholder') {
+      toast(`Stripe placeholder: ${amount} QTCL = $${(amount / 100).toFixed(2)}. Set STRIPE_SECRET_KEY to enable live payments.`, 'info', 8000);
+    } else if (result.url) {
+      window.open(result.url, '_blank');
+    }
   } catch (e) {
     toast(e.message, 'error');
   }
