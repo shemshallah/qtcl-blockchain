@@ -1299,13 +1299,12 @@ def _settle_block_rewards(
             # TEST: Verify database connectivity with simple SELECT
             try:
                 cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                _test_count = cur.fetchone()[0] if cur.fetchone() else 0
-                cur.execute("SELECT COUNT(*) FROM wallet_addresses")  # Re-execute since we consumed the result
-                _test_count = cur.fetchone()[0]
+                _test_row = cur.fetchone()
+                _test_count = _test_row[0] if _test_row else 0
                 _settle_log.critical(f"[SETTLE-TEST] ✅ Database connectivity OK: {_test_count} wallets exist")
             except Exception as _test_err:
                 _settle_log.critical(f"[SETTLE-TEST] ❌ Database connectivity FAILED: {_test_err}")
-                return
+                raise  # Re-raise so caller knows settlement failed
             # MINER REWARD — MANDATORY, ALWAYS EXECUTED
             _miner_sql = """
             INSERT INTO wallet_addresses
@@ -1362,8 +1361,22 @@ def _settle_block_rewards(
                 (height, block_hash),
             )
 
-        # PHASE 3: Log completion
+        # PHASE 3: Cache block and log completion
         # ─────────────────────────────────────────────────────────────────────────────
+        try:
+            _cache_block(
+                {
+                    "height": height,
+                    "block_hash": block_hash,
+                    "timestamp": int(time.time()),
+                    "difficulty": 4,
+                    "miner": miner_address,
+                    "w_state_fidelity": 0.0,
+                }
+            )
+        except Exception as cache_err:
+            _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
+
         _settle_log.warning(
             f"[SETTLE] ✅ h={height}: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL, txs={len(non_coinbase_txs)}"
         )
@@ -1371,7 +1384,7 @@ def _settle_block_rewards(
     except Exception as err:
         _settle_log.error(f"[SETTLE] ❌ h={height} settlement failed: {err}", exc_info=True)
 
-        # ── Update chain state ───────────────────────────────────────────────
+        # ── Update chain state even on failure ───────────────────────────────
         try:
             _lazy_ensure_chain_state()
             with get_db_cursor() as cur:
@@ -1391,26 +1404,8 @@ def _settle_block_rewards(
         except Exception as cs_err:
             _settle_log.warning(f"[SETTLE] ⚠️  Chain state update: {cs_err}")
 
-        # ── Cache block ──────────────────────────────────────────────────
-        try:
-            _cache_block(
-                {
-                    "height": height,
-                    "block_hash": block_hash,
-                    "timestamp": int(time.time()),
-                    "difficulty": 4,
-                    "miner": miner_address,
-                    "w_state_fidelity": 0.0,
-                }
-            )
-            _settle_log.debug(f"[SETTLE] ✅ Block cached: h={height}")
-        except Exception as cache_err:
-            _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
-
-        _settle_log.info(f"[SETTLE] ✅ Block h={height} settlement complete")
-
-    except Exception as settle_err:
-        _settle_log.error(f"[SETTLE] ❌ h={height}: {settle_err}", exc_info=True)
+        # RE-RAISE so caller (_rpc_submitBlock) knows settlement failed
+        raise
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -3826,7 +3821,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         """
                         SELECT height, block_hash, timestamp, w_state_hash,
                                parent_hash, nonce, difficulty,
-                               fidelity_snapshot, merkle_root, tx_count
+                               fidelity_snapshot, merkle_root, tx_count,
+                               miner_address
                         FROM blocks WHERE height = %s LIMIT 1
                     """,
                         (h,),
@@ -3853,6 +3849,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "pq_curr": h,
                         "pq_last": max(0, h - 1),
                         "tx_count": int(row[9]) if row[9] else 0,
+                        "miner": row[10] or "",
+                        "miner_address": row[10] or "",
                         "mined": True,
                         "finalized": True,
                     }
@@ -5798,32 +5796,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}... processing...")
 
-        # INSERT BLOCK INTO DATABASE
+        # EXTRACT TRANSACTIONS FROM BLOCK DATA (moved before validation)
         _block_rowcount = 0
-        try:
-            with get_db_cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO blocks
-                    (height, block_hash, parent_hash, merkle_root, timestamp,
-                     w_state_hash, oracle_w_state_hash, miner_address, nonce, difficulty, pq_curr, pq_last)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (height) DO NOTHING
-                    """,
-                    (
-                        height, block_hash, parent_hash, merkle_root, timestamp_s,
-                        w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                        w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                        miner_address, nonce, difficulty_bits, height, max(0, height - 1),
-                    ),
-                )
-                _block_rowcount = cur.rowcount
-            logger.critical(f"[RPC-submitBlock] ✅ Block inserted h={height}")
-        except Exception as e:
-            logger.exception(f"[RPC-submitBlock] ❌ Block insert ERROR: {e}")
-            return _rpc_error(-32603, f"Error: {str(e)[:100]}", rpc_id)
-
-        # EXTRACT TRANSACTIONS FROM BLOCK DATA
         txs = data.get("transactions", data.get("txs", []))
         logger.info(f"[RPC-submitBlock] h={height}: {len(txs or [])} transactions in block")
 
@@ -6247,15 +6221,34 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "parent_hash": parent_hash,
                 "merkle_root": merkle_root,
                 "timestamp_s": timestamp_s,
+                "timestamp": timestamp_s,
                 "nonce": nonce,
+                "difficulty": difficulty_bits,
                 "difficulty_bits": difficulty_bits,
                 "miner_address": miner_address,
+                "miner": miner_address,
                 "w_entropy_seed": w_entropy_hex,
+                "w_entropy_hash": w_entropy_hex[:64] if w_entropy_hex else "",
                 "tx_count": len(txs) if txs else 0,
                 "tx_ids": [
                     tx.get("tx_id", tx.get("tx_hash", "")) for tx in (txs or [])
                 ],
+                "transactions": [
+                    {
+                        "tx_id": tx.get("tx_id", tx.get("tx_hash", "")),
+                        "tx_hash": tx.get("tx_id", tx.get("tx_hash", "")),
+                        "from_addr": tx.get("from_addr", tx.get("from_address", "")),
+                        "to_addr": tx.get("to_addr", tx.get("to_address", "")),
+                        "amount": float(tx.get("amount_qtcl") or tx.get("amount") or (tx.get("amount_base", 0) / 100) or 0),
+                        "tx_type": tx.get("tx_type", "transfer"),
+                        "status": "confirmed",
+                    }
+                    for tx in (txs or [])
+                ],
                 "total_fees": _total_fees if "_total_fees" in dir() else 0,
+                "w_state_fidelity": w_state_fidelity,
+                "finalized": True,
+                "mined": True,
             }
             # Broadcast via available P2P mechanisms
             _broadcast_block_to_peers(compact_block)
