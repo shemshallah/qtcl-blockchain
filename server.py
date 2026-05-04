@@ -100,6 +100,8 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_getTransactions": 10.0,
     "qtcl_getBlock": 5.0,
     "qtcl_getBalance": 4.0,
+    "qtcl_listWallets": 2.0,
+    "qtcl_debugBalance": 2.0,
     "qtcl_getTransaction": 4.0,
     "qtcl_submitBlock": 30.0,
     "qtcl_submitTransaction": 6.0,
@@ -1250,6 +1252,13 @@ def _settle_block_rewards(
         _settle_log.critical(f"   miner={miner_address}")
         _settle_log.critical(f"   treasury={_treasury_addr}")
 
+        # GUARD: Ensure wallet_addresses table exists before writing
+        # (daemon init thread may not have finished if this is the first block)
+        try:
+            _ensure_wallet_addresses_table()
+        except Exception as _ewat_err:
+            _settle_log.warning(f"[SETTLE] _ensure_wallet_addresses_table: {_ewat_err}")
+
         # GUARD: Reject invalid inputs
         if not miner_address or len(str(miner_address).strip()) < 10:
             _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
@@ -1361,7 +1370,34 @@ def _settle_block_rewards(
                 (height, block_hash),
             )
 
-        # PHASE 3: Cache block and log completion
+        # PHASE 3: Post-commit durability verification (fresh connection — outside previous txn)
+        # ─────────────────────────────────────────────────────────────────────────────
+        try:
+            with get_db_cursor() as _vfy_cur:
+                _vfy_cur.execute(
+                    "SELECT address, balance, wallet_fingerprint FROM wallet_addresses WHERE address = %s",
+                    (miner_address,),
+                )
+                _vfy_row = _vfy_cur.fetchone()
+                if _vfy_row:
+                    _durable_bal = int(_vfy_row[1]) if _vfy_row[1] else 0
+                    _settle_log.critical(
+                        f"[SETTLE-DURABLE] ✅ Confirmed persisted: address={_vfy_row[0][:24]}… "
+                        f"balance={_durable_bal} base-units ({_durable_bal/100:.2f} QTCL) "
+                        f"fp={str(_vfy_row[2])[:16]}…"
+                    )
+                else:
+                    _settle_log.critical(
+                        f"[SETTLE-DURABLE] ❌ DURABILITY FAIL: address '{miner_address[:24]}…' "
+                        f"NOT FOUND after commit. Listing all wallet rows:"
+                    )
+                    _vfy_cur.execute("SELECT address, balance, address_type FROM wallet_addresses LIMIT 20")
+                    for _wr in _vfy_cur.fetchall():
+                        _settle_log.critical(f"  ROW: addr={str(_wr[0])[:32]} bal={_wr[1]} type={_wr[2]}")
+        except Exception as _vfy_err:
+            _settle_log.warning(f"[SETTLE-DURABLE] verification query failed: {_vfy_err}")
+
+        # PHASE 4: Cache block and log completion
         # ─────────────────────────────────────────────────────────────────────────────
         try:
             _cache_block(
@@ -3676,17 +3712,30 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                             WHERE table_name = 'wallet_addresses'
                         )
                     """)
-                    _table_exists = cur.fetchone()[0] if cur.fetchone() else False
-                    _diagnostic["table_exists"] = bool(_table_exists)
+                    _exists_row = cur.fetchone()  # FIX: single fetchone()
+                    _table_exists = bool(_exists_row[0]) if _exists_row else False
+                    _diagnostic["table_exists"] = _table_exists
                 except Exception as _te:
                     _diagnostic["table_check_error"] = str(_te)
 
-                # Query balance
+                # Query balance by address (primary lookup)
                 cur.execute(
                     "SELECT balance, transaction_count, address_type FROM wallet_addresses WHERE address = %s",
                     (address,),
                 )
                 row = cur.fetchone()
+                if not row:
+                    # Fallback: try lookup by wallet_fingerprint in case client sends fingerprint
+                    _fp_candidate = hashlib.sha256(address.encode()).hexdigest()[:64]
+                    cur.execute(
+                        "SELECT address, balance, transaction_count, address_type FROM wallet_addresses WHERE wallet_fingerprint = %s LIMIT 1",
+                        (_fp_candidate,),
+                    )
+                    _fp_row = cur.fetchone()
+                    if _fp_row:
+                        _diagnostic["note"] = f"resolved via fingerprint; canonical address={str(_fp_row[0])[:24]}…"
+                        _diagnostic["canonical_address"] = _fp_row[0]
+                        row = (_fp_row[1], _fp_row[2], _fp_row[3])
                 if row:
                     wallet = {
                         "address": address,
@@ -3742,8 +3791,138 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
+def _rpc_listWallets(params: Any, rpc_id: Any) -> dict:
+    """qtcl_listWallets — dump all wallet_addresses rows for debugging balance persistence."""
+    try:
+        limit = 50
+        if isinstance(params, list) and params:
+            limit = int(params[0]) if str(params[0]).isdigit() else 50
+        elif isinstance(params, dict):
+            limit = int(params.get("limit", 50))
+
+        wallets = []
+        total = 0
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM wallet_addresses")
+                _cnt = cur.fetchone()
+                total = int(_cnt[0]) if _cnt else 0
+                cur.execute(
+                    "SELECT address, wallet_fingerprint, balance, transaction_count, address_type, updated_at "
+                    "FROM wallet_addresses ORDER BY updated_at DESC NULLS LAST LIMIT %s",
+                    (limit,),
+                )
+                for row in cur.fetchall():
+                    raw_bal = int(row[2]) if row[2] else 0
+                    wallets.append({
+                        "address": row[0],
+                        "fingerprint": row[1],
+                        "balance_base_units": raw_bal,
+                        "balance_qtcl": raw_bal / 100.0,
+                        "tx_count": row[3],
+                        "address_type": row[4],
+                        "updated_at": str(row[5]) if row[5] else None,
+                    })
+        except Exception as _dbe:
+            return _rpc_error(-32603, f"DB error: {_dbe}", rpc_id)
+
+        return _rpc_ok({"total_wallets": total, "returned": len(wallets), "wallets": wallets}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] qtcl_listWallets: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_debugBalance(params: Any, rpc_id: Any) -> dict:
+    """qtcl_debugBalance — deep diagnostic: check by address AND fingerprint, show all matches."""
+    try:
+        address = (
+            (params[0] if isinstance(params, list) else params.get("address", ""))
+            if params else ""
+        )
+        if not address:
+            return _rpc_error(-32602, "address required", rpc_id)
+
+        result: dict = {"queried": address, "matches": []}
+        try:
+            with get_db_cursor() as cur:
+                # Direct address match
+                cur.execute(
+                    "SELECT address, wallet_fingerprint, balance, transaction_count, address_type, updated_at "
+                    "FROM wallet_addresses WHERE address = %s",
+                    (address,),
+                )
+                _dr = cur.fetchone()
+                if _dr:
+                    raw = int(_dr[2]) if _dr[2] else 0
+                    result["matches"].append({
+                        "match_type": "address_exact",
+                        "address": _dr[0],
+                        "fingerprint": _dr[1],
+                        "balance_base_units": raw,
+                        "balance_qtcl": raw / 100.0,
+                        "tx_count": _dr[3],
+                        "address_type": _dr[4],
+                        "updated_at": str(_dr[5]) if _dr[5] else None,
+                    })
+
+                # Fingerprint match (address treated as fingerprint)
+                cur.execute(
+                    "SELECT address, wallet_fingerprint, balance, transaction_count, address_type, updated_at "
+                    "FROM wallet_addresses WHERE wallet_fingerprint = %s LIMIT 5",
+                    (address,),
+                )
+                for _fr in cur.fetchall():
+                    raw = int(_fr[2]) if _fr[2] else 0
+                    result["matches"].append({
+                        "match_type": "fingerprint_match",
+                        "address": _fr[0],
+                        "fingerprint": _fr[1],
+                        "balance_base_units": raw,
+                        "balance_qtcl": raw / 100.0,
+                        "tx_count": _fr[3],
+                        "address_type": _fr[4],
+                        "updated_at": str(_fr[5]) if _fr[5] else None,
+                    })
+
+                # SHA256 of address as fingerprint
+                _fp = hashlib.sha256(address.encode()).hexdigest()[:64]
+                result["sha256_fingerprint"] = _fp
+                cur.execute(
+                    "SELECT address, wallet_fingerprint, balance, transaction_count, address_type, updated_at "
+                    "FROM wallet_addresses WHERE wallet_fingerprint = %s LIMIT 5",
+                    (_fp,),
+                )
+                for _fpr in cur.fetchall():
+                    raw = int(_fpr[2]) if _fpr[2] else 0
+                    result["matches"].append({
+                        "match_type": "sha256_fingerprint_match",
+                        "address": _fpr[0],
+                        "fingerprint": _fpr[1],
+                        "balance_base_units": raw,
+                        "balance_qtcl": raw / 100.0,
+                        "tx_count": _fpr[3],
+                        "address_type": _fpr[4],
+                        "updated_at": str(_fpr[5]) if _fpr[5] else None,
+                    })
+
+                # Total wallets in DB
+                cur.execute("SELECT COUNT(*), SUM(balance) FROM wallet_addresses")
+                _agg = cur.fetchone()
+                result["total_wallets"] = int(_agg[0]) if _agg and _agg[0] else 0
+                result["total_balance_base_units"] = int(_agg[1]) if _agg and _agg[1] else 0
+        except Exception as _dbe:
+            result["db_error"] = str(_dbe)
+
+        result["found"] = len(result["matches"]) > 0
+        return _rpc_ok(result, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] qtcl_debugBalance: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
 def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
     """qtcl_getTransaction — tx details by hash."""
+
     try:
         logger.debug(
             f"[RPC-METHOD] qtcl_getTransaction called with params={params}, id={rpc_id}"
@@ -6788,6 +6967,8 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,
+    "qtcl_listWallets": _rpc_listWallets,
+    "qtcl_debugBalance": _rpc_debugBalance,
     "qtcl_getTransaction": _rpc_getTransaction,
     "qtcl_getBlock": _rpc_getBlock,
     "qtcl_getBlockRange": _rpc_getBlockRange,
