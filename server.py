@@ -1201,16 +1201,23 @@ def _settle_block_rewards(
         # MANDATORY SETTLEMENT: This MUST execute and update balances
         # ════════════════════════════════════════════════════════════════════════════════
 
+        # Resolve treasury address FIRST (needed for guards and logs)
+        _treasury_addr = (
+            TessellationRewardSchedule.TREASURY_ADDRESS
+            if TessellationRewardSchedule
+            else ""
+        )
+
         _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} SETTLEMENT EXECUTING NOW")
         _settle_log.critical(f"   miner={miner_address}")
-        _settle_log.critical(f"   treasury={treasury_address}")
+        _settle_log.critical(f"   treasury={_treasury_addr}")
 
         # GUARD: Reject invalid inputs
         if not miner_address or len(str(miner_address).strip()) < 10:
             _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
             return
-        if not treasury_address or len(str(treasury_address).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {treasury_address}")
+        if not _treasury_addr or len(str(_treasury_addr).strip()) < 10:
+            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {_treasury_addr}")
             return
 
         _settle_log.critical(f"✅ [SETTLE-VALIDATE] Addresses valid, proceeding with settlement")
@@ -1222,15 +1229,14 @@ def _settle_block_rewards(
         miner_reward_base = 720  # base units: 7.20 QTCL
         treasury_reward_base = 80  # base units: 0.80 QTCL
 
-        # Try to get from schedule, but use hardcoded defaults if unavailable
+        # Try to get from schedule (returns QTCL floats — must convert to base units)
         try:
             if TessellationRewardSchedule:
-                rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                miner_reward_base = int(rewards.get("miner", 720))
-                treasury_reward_base = int(rewards.get("treasury", 80))
+                miner_reward_base = TessellationRewardSchedule.get_miner_reward_base(height)
+                treasury_reward_base = TessellationRewardSchedule.get_treasury_reward_base(height)
                 _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL")
         except Exception as sch_err:
-            _settle_log.warning(f"[SETTLE] Schedule lookup failed: {sch_err}, using hardcoded: 7.20 + 0.80")
+            _settle_log.warning(f"[SETTLE] Schedule lookup failed: {sch_err}, using hardcoded: 720 + 80 base units")
 
         # Collect all transaction fees for treasury
         total_tx_fees = 0
@@ -1245,12 +1251,11 @@ def _settle_block_rewards(
 
         # Compute wallet fingerprints
         miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-        treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
-        treasury_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
+        treasury_fp = hashlib.sha256(_treasury_addr.encode()).hexdigest()[:64]
 
         # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
         # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL, {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+        _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL, {_treasury_addr[:16]}… += {treasury_reward_base/100:.2f} QTCL")
 
         with get_db_cursor() as cur:
             # TEST: Verify database connectivity with simple SELECT
@@ -1294,14 +1299,14 @@ def _settle_block_rewards(
                 address_type = 'treasury',
                 last_updated = NOW()
             """
-            cur.execute(_treasury_sql, (treasury_address, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {treasury_address[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+            cur.execute(_treasury_sql, (_treasury_addr, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
+            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {_treasury_addr[:16]}… += {treasury_reward_base/100:.2f} QTCL")
 
             # VERIFY TREASURY WALLET WAS UPDATED
-            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (treasury_address,))
+            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (_treasury_addr,))
             _treasury_balance = cur.fetchone()
             _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
-            _settle_log.critical(f"[SETTLE-VERIFY] Treasury {treasury_address[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
+            _settle_log.critical(f"[SETTLE-VERIFY] Treasury {_treasury_addr[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
 
             # TRANSACTION FEES TO TREASURY — OPTIONAL
             if non_coinbase_txs:
@@ -1310,7 +1315,7 @@ def _settle_block_rewards(
                     if tx_fee > 0:
                         cur.execute(
                             "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
-                            (tx_fee, treasury_address),
+                            (tx_fee, _treasury_addr),
                         )
 
             # UPDATE CHAIN STATE
@@ -3833,7 +3838,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                                 "tx_id": tr[0],
                                 "from_addr": tr[1] or "",
                                 "to_addr": tr[2] or "",
-                                "amount": int(tr[3]) if tr[3] is not None else 0,
+                                "amount": float(tr[3]) if tr[3] is not None else 0.0,
                                 "tx_index": int(tr[4]) if tr[4] is not None else 0,
                                 "tx_type": tr[5] or "transfer",
                                 "status": tr[6] or "confirmed",
@@ -4025,7 +4030,7 @@ def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
                         "tx_id": r[0],
                         "from_addr": r[1] or "",
                         "to_addr": r[2] or "",
-                        "amount": int(r[3]) if r[3] is not None else 0,
+                        "amount": float(r[3]) if r[3] is not None else 0.0,
                         "tx_index": int(r[4]) if r[4] is not None else 0,
                         "tx_type": r[5] or "transfer",
                         "status": r[6] or "confirmed",
@@ -5809,14 +5814,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # Every transaction must be cryptographically valid and economically sound
         # ═══════════════════════════════════════════════════════════════════════
 
-        # Get reward schedule for validation
-        _scheduled_miner_reward = 720.0  # default
-        _scheduled_treasury_reward = 80.0  # default
+        # Get reward schedule for validation (returns QTCL floats)
+        _scheduled_miner_reward = 7.20  # default QTCL
+        _scheduled_treasury_reward = 0.80  # default QTCL
         if TessellationRewardSchedule:
             try:
                 _rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                _scheduled_miner_reward = float(_rewards.get("miner", 720))
-                _scheduled_treasury_reward = float(_rewards.get("treasury", 80))
+                _scheduled_miner_reward = float(_rewards.get("miner", 7.20))
+                _scheduled_treasury_reward = float(_rewards.get("treasury", 0.80))
             except Exception as _e:
                 logger.warning(
                     f"[RPC-submitBlock] Could not fetch reward schedule: {_e}"
@@ -5827,9 +5832,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _non_coinbase_txs = []
         _coinbase_txs = []
 
+        _COINBASE_TYPES = {"coinbase", "miner_reward", "treasury_reward"}
         for tx in txs or []:
             tx_type = tx.get("tx_type", "").lower()
-            if tx_type == "coinbase":
+            if tx_type in _COINBASE_TYPES:
                 _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
@@ -5863,8 +5869,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _treasury_coinbase = None
 
         for cb in _coinbase_txs:
-            _to = cb.get("to_addr", cb.get("to_address", ""))
-            _amount = float(cb.get("amount", 0))
+            _to = cb.get("to_addr") or cb.get("to_address", "")
+            _amount = float(
+                cb.get("amount_qtcl")
+                or cb.get("amount")
+                or (cb.get("amount_base", 0) / 100)
+                or 0
+            )
             _amount_base = int(round(_amount * 100))  # Convert to base units
 
             if _to == miner_address:
@@ -5957,8 +5968,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 )
 
             # Validate sender has sufficient balance by tracing unspent outputs
-            _from = tx.get("from_addr", tx.get("from_address", ""))
-            _amount = float(tx.get("amount", 0))
+            _from = tx.get("from_addr") or tx.get("from_address", "")
+            _amount = float(
+                tx.get("amount_qtcl")
+                or tx.get("amount")
+                or (tx.get("amount_base", 0) / 100)
+                or 0
+            )
 
             # Query sender's confirmed balance from DB
             try:
@@ -6076,6 +6092,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         if not tx_id:
                             continue
                         try:
+                            _tx_from = tx.get("from_addr") or tx.get("from_address", "0" * 64)
+                            _tx_to = tx.get("to_addr") or tx.get("to_address", "")
+                            _tx_amt = float(
+                                tx.get("amount_qtcl")
+                                or tx.get("amount")
+                                or (tx.get("amount_base", 0) / 100)
+                                or 0
+                            )
                             cur.execute(
                                 """
                                 INSERT INTO transactions
@@ -6089,9 +6113,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             """,
                                 (
                                     tx_id,
-                                    tx.get("from_addr", "0" * 64),
-                                    tx.get("to_addr", ""),
-                                    float(tx.get("amount", 0)),
+                                    _tx_from,
+                                    _tx_to,
+                                    _tx_amt,
                                     tx.get("tx_type", "transfer"),
                                     height,
                                 ),
@@ -6137,7 +6161,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             # Extract transactions (same as new block path)
             txs = data.get("transactions", data.get("txs", []))
-            _non_coinbase_txs = [tx for tx in (txs or []) if tx.get("tx_type", "").lower() != "coinbase"]
+            _COINBASE_TYPES = {"coinbase", "miner_reward", "treasury_reward"}
+            _non_coinbase_txs = [tx for tx in (txs or []) if tx.get("tx_type", "").lower() not in _COINBASE_TYPES]
 
             # RUN SETTLEMENT FOR DUPLICATE (in case first attempt failed)
             logger.critical(f"[RPC-submitBlock] 🔥 RUNNING SETTLEMENT FOR DUPLICATE h={height}")
