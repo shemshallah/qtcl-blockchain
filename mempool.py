@@ -206,6 +206,8 @@ class MempoolTx:
     memo          : str   = ""
     client_tx_id  : str   = ""    # client-supplied alias (may differ from tx_hash)
     metadata      : Dict[str, Any] = field(default_factory=dict)
+    inputs        : List[Dict[str, Any]] = field(default_factory=list)
+    outputs       : List[Dict[str, Any]] = field(default_factory=list)
 
     # Computed at accept time — not serialised to DB
     fee_rate      : float  = field(init=False)
@@ -279,6 +281,8 @@ class MempoolTx:
             'memo'           : self.memo,
             'client_tx_id'   : self.client_tx_id,
             'metadata'       : self.metadata,
+            'inputs'         : self.inputs,
+            'outputs'        : self.outputs,
             'status'         : TxStatus.PENDING,
         }
 
@@ -904,19 +908,19 @@ class BalanceOracle:
         self._lock = threading.RLock()
 
     def confirmed_balance(self, address: str) -> int:
-        """Fetch confirmed balance from wallet_addresses table."""
+        """Fetch confirmed balance from address_utxos (UTXO model)."""
         if not _db.available:
             return 0
         try:
             with _db.cursor() as cur:
                 cur.execute("""
-                    SELECT COALESCE(balance, 0) AS balance
-                    FROM wallet_addresses
-                    WHERE address = %s
+                    SELECT COALESCE(SUM(amount), 0) AS balance
+                    FROM address_utxos
+                    WHERE address = %s AND spent = FALSE
                 """, (address,))
                 row = cur.fetchone()
-                if not row: return 0
-                # Robustly handle both dict-style (RealDictCursor) and tuple-style results
+                if not row:
+                    return 0
                 if isinstance(row, dict):
                     return int(row.get('balance', 0))
                 return int(row[0])
@@ -1853,8 +1857,7 @@ class Mempool:
         w_entropy_hash    : str = '',
     ) -> 'MempoolTx':
         """
-        Build treasury coinbase (slot 1) - always paid on-chain regardless of miner.
-        Treasury address read from TREASURY_ADDRESS env var (Koyeb).
+        Build treasury coinbase (slot 1) - UTXO format with outputs.
         """
         if treasury_address is None:
             treasury_address = os.environ.get(
@@ -1883,6 +1886,8 @@ class Mempool:
             },
             tx_type        = "coinbase",
             memo           = f"Block {block_height} treasury",
+            inputs         = [{"prev_tx_hash": "0" * 64, "prev_output_index": 0xFFFFFFFF, "script_sig": {"height": block_height, "type": "treasury"}}],
+            outputs        = [{"address": treasury_address, "amount_base": treasury_reward, "script_pubkey": "OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG"}],
         )
 
     def _build_coinbase(
@@ -1892,12 +1897,8 @@ class Mempool:
         reward_base   : int,
     ) -> MempoolTx:
         """
-        Build a coinbase transaction — the first TX in every block.
-        Not subject to fee / balance / signature validation.
+        Build a coinbase transaction — UTXO format with outputs.
         Deterministic hash so the same coinbase is produced independently by all nodes.
-
-        Hash formula:
-            SHA3-256("COINBASE" || height_str || miner_address || reward_str || w_entropy_hash)
         """
         w_entropy_hash = self._capture_w_entropy()
         raw_input = f"COINBASE:{block_height}:{miner_address}:{reward_base}:{w_entropy_hash}".encode()
@@ -1905,11 +1906,11 @@ class Mempool:
 
         coinbase = MempoolTx(
             tx_hash        = COINBASE_PREFIX + tx_hash,
-            from_address   = "0" * 64,          # null sender
+            from_address   = "0" * 64,
             to_address     = miner_address or "0" * 64,
             amount_base    = reward_base,
             fee_base       = 0,
-            nonce          = block_height,       # coinbase nonce = block height
+            nonce          = block_height,
             signature      = json.dumps({
                 'coinbase'     : True,
                 'block_height' : block_height,
@@ -1925,6 +1926,8 @@ class Mempool:
                 'reward_qtcl'  : reward_base / 100,
                 'miner'        : miner_address,
             },
+            inputs         = [{"prev_tx_hash": "0" * 64, "prev_output_index": 0xFFFFFFFF, "script_sig": {"height": block_height, "type": "miner"}}],
+            outputs        = [{"address": miner_address or "0" * 64, "amount_base": reward_base, "script_pubkey": "OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG"}],
         )
         return coinbase
 

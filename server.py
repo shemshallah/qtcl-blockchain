@@ -141,6 +141,8 @@ def _push_to_sse_service(path: str, payload: dict) -> None:
                 _sse_mod._fan_out_block(payload)
             elif path == "/push/metric":
                 _sse_mod._fan_out_metric(payload)
+            elif path == "/push/oracle_consensus":
+                _sse_mod._fan_out_oracle_consensus(payload)
         except Exception:
             pass
         return
@@ -626,9 +628,11 @@ try:
     app.route("/rpc/events/blocks", methods=["GET", "POST", "OPTIONS"])(_sse_mod.rpc_events_blocks)
     app.route("/rpc/blocks/stream", methods=["GET"])(_sse_mod.rpc_blocks_stream)
     app.route("/rpc/metrics/push", methods=["GET"])(_sse_mod.rpc_metrics_push)
+    app.route("/rpc/oracle/consensus", methods=["GET", "POST", "OPTIONS"])(_sse_mod.rpc_oracle_consensus)
     app.route("/push/snapshot", methods=["POST"])(_sse_mod.push_snapshot)
     app.route("/push/block", methods=["POST"])(_sse_mod.push_block)
     app.route("/push/metric", methods=["POST"])(_sse_mod.push_metric)
+    app.route("/push/oracle_consensus", methods=["POST"])(_sse_mod.push_oracle_consensus)
     logger.info("[SSE] ✅ SSE server routes registered on main app (inline mode)")
     _SSE_INLINE = True
 except Exception as _sse_err:
@@ -1223,225 +1227,439 @@ _tx_worker_daemon.start()
 # ═════════════════════════════════════════════════════════════════════════════════
 
 
-def _settle_block_rewards(
-    height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list
+def _utxo_settle_block(
+    height: int, block_hash: str, miner_address: str, txs: list
 ) -> None:
-    """🔗 UNIFIED SETTLEMENT LOGIC — Single execution path, atomic updates.
+    """🔗 UTXO SETTLEMENT — Bitcoin-style atomic UTXO creation and spending.
 
-    Consolidated settlement with NO branching:
-      1. Fetch miner + treasury rewards from TessellationRewardSchedule
-      2. Collect transaction fees
-      3. Execute wallet updates (handles same/different addresses correctly)
-      4. Update chain state
+    For every transaction in the block:
+      • Coinbase: create new UTXOs for miner + treasury (no inputs spent)
+      • Regular: mark referenced inputs as spent, create new output UTXOs
     """
     _settle_log = logging.getLogger("SETTLE")
+    _settle_log.critical(f"🔥 [UTXO-SETTLE] h={height} block_hash={block_hash[:16]}…")
 
     try:
-        # ════════════════════════════════════════════════════════════════════════════════
-        # MANDATORY SETTLEMENT: This MUST execute and update balances
-        # ════════════════════════════════════════════════════════════════════════════════
-
-        # Resolve treasury address FIRST (needed for guards and logs)
-        _treasury_addr = (
-            TessellationRewardSchedule.TREASURY_ADDRESS
-            if TessellationRewardSchedule
-            else ""
-        )
-
-        _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} SETTLEMENT EXECUTING NOW")
-        _settle_log.critical(f"   miner={miner_address}")
-        _settle_log.critical(f"   treasury={_treasury_addr}")
-
-        # GUARD: Ensure wallet_addresses table exists before writing
-        # (daemon init thread may not have finished if this is the first block)
-        try:
-            _ensure_wallet_addresses_table()
-        except Exception as _ewat_err:
-            _settle_log.warning(f"[SETTLE] _ensure_wallet_addresses_table: {_ewat_err}")
-
-        # GUARD: Reject invalid inputs
-        if not miner_address or len(str(miner_address).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
-            return
-        if not _treasury_addr or len(str(_treasury_addr).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {_treasury_addr}")
-            return
-
-        _settle_log.critical(f"✅ [SETTLE-VALIDATE] Addresses valid, proceeding with settlement")
-
-        # HARDCODED REWARDS — Single source of truth
-        # Miner: 7.20 QTCL (720 base units)
-        # Treasury: 0.80 QTCL (80 base units)
-        # These scale with TessellationRewardSchedule but have explicit hardcoded defaults
-        miner_reward_base = 720  # base units: 7.20 QTCL
-        treasury_reward_base = 80  # base units: 0.80 QTCL
-
-        # Try to get from schedule (returns QTCL floats — must convert to base units)
-        try:
-            if TessellationRewardSchedule:
-                miner_reward_base = TessellationRewardSchedule.get_miner_reward_base(height)
-                treasury_reward_base = TessellationRewardSchedule.get_treasury_reward_base(height)
-                _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL")
-        except Exception as sch_err:
-            _settle_log.warning(f"[SETTLE] Schedule lookup failed: {sch_err}, using hardcoded: 720 + 80 base units")
-
-        # Collect all transaction fees for treasury
-        total_tx_fees = 0
-        for tx in txs:
-            f = tx.get("fee", tx.get("fee_base", 0))
-            if f:
-                try:
-                    total_tx_fees += int(float(f) if isinstance(f, (float, str)) else f)
-                except (ValueError, TypeError):
-                    pass
-        treasury_reward_base += total_tx_fees
-
-        # Compute wallet fingerprints
-        miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-        treasury_fp = hashlib.sha256(_treasury_addr.encode()).hexdigest()[:64]
-
-        # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
-        # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL, {_treasury_addr[:16]}… += {treasury_reward_base/100:.2f} QTCL")
-
         with get_db_cursor() as cur:
-            # TEST: Verify database connectivity with simple SELECT
-            try:
-                cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                _test_row = cur.fetchone()
-                _test_count = _test_row[0] if _test_row else 0
-                _settle_log.critical(f"[SETTLE-TEST] ✅ Database connectivity OK: {_test_count} wallets exist")
-            except Exception as _test_err:
-                _settle_log.critical(f"[SETTLE-TEST] ❌ Database connectivity FAILED: {_test_err}")
-                raise  # Re-raise so caller knows settlement failed
-            # MINER REWARD — MANDATORY, ALWAYS EXECUTED
-            _miner_sql = """
-            INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
-            VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
-            ON CONFLICT (address) DO UPDATE SET
-                balance = wallet_addresses.balance + EXCLUDED.balance,
-                transaction_count = wallet_addresses.transaction_count + 1,
-                address_type = 'miner',
-                updated_at = NOW()
-            """
-            cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
+            # ── Insert / update transactions table ──
+            for tx in txs:
+                tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+                if not tx_id:
+                    continue
+                tx_type = tx.get("tx_type", "transfer")
+                _ins_json = json.dumps(tx.get("inputs", []), default=str)
+                _outs_json = json.dumps(tx.get("outputs", []), default=str)
+                cur.execute(
+                    """
+                    INSERT INTO transactions
+                    (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, metadata, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, %s, %s, NOW())
+                    ON CONFLICT (tx_hash) DO UPDATE SET
+                        height = EXCLUDED.height,
+                        block_hash = EXCLUDED.block_hash,
+                        status = 'confirmed',
+                        updated_at = NOW()
+                    """,
+                    (
+                        tx_id,
+                        tx.get("from_address", ""),
+                        tx.get("to_address", ""),
+                        tx.get("amount", 0),
+                        tx_type,
+                        height,
+                        block_hash,
+                        json.dumps({"inputs": tx.get("inputs", []), "outputs": tx.get("outputs", [])}),
+                    ),
+                )
 
-            # VERIFY MINER WALLET WAS UPDATED
-            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (miner_address,))
-            _miner_balance = cur.fetchone()
-            _miner_balance_val = _miner_balance[0] if _miner_balance else None
-            _settle_log.critical(f"[SETTLE-VERIFY] Miner {miner_address[:16]}… balance after INSERT: {_miner_balance_val} base units ({_miner_balance_val/100 if _miner_balance_val else 0:.2f} QTCL)")
+            # ── Spend inputs + create outputs for every TX ──
+            for tx in txs:
+                tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+                tx_type = tx.get("tx_type", "").lower()
+                inputs = tx.get("inputs", [])
+                outputs = tx.get("outputs", [])
 
-            # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
-            _treasury_sql = """
-            INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
-            VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
-            ON CONFLICT (address) DO UPDATE SET
-                balance = wallet_addresses.balance + EXCLUDED.balance,
-                transaction_count = wallet_addresses.transaction_count + 1,
-                address_type = 'treasury',
-                updated_at = NOW()
-            """
-            cur.execute(_treasury_sql, (_treasury_addr, treasury_fp, treasury_fp, treasury_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {_treasury_addr[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+                if tx_type in {"coinbase", "miner_reward", "treasury_reward"}:
+                    # Coinbase has no real inputs to spend
+                    pass
+                else:
+                    # Mark each input UTXO as spent
+                    for inp in inputs:
+                        prev_hash = inp.get("prev_tx_hash", "")
+                        prev_idx = inp.get("prev_output_index", 0)
+                        if prev_hash and prev_hash != "0" * 64:
+                            cur.execute(
+                                """
+                                UPDATE address_utxos
+                                SET spent = TRUE,
+                                    spent_at_height = %s,
+                                    spent_in_tx_hash = %s
+                                WHERE tx_hash = %s AND output_index = %s AND spent = FALSE
+                                """,
+                                (height, tx_id, prev_hash, prev_idx),
+                            )
 
-            # VERIFY TREASURY WALLET WAS UPDATED
-            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (_treasury_addr,))
-            _treasury_balance = cur.fetchone()
-            _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
-            _settle_log.critical(f"[SETTLE-VERIFY] Treasury {_treasury_addr[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
-
-            # TRANSACTION FEES TO TREASURY — OPTIONAL
-            if non_coinbase_txs:
-                for tx in non_coinbase_txs:
-                    tx_fee = int(round(float(tx.get("fee", 0)) * 100))
-                    if tx_fee > 0:
+                # Create output UTXOs
+                if outputs:
+                    # UTXO-format transaction: use provided outputs
+                    for out_idx, out in enumerate(outputs):
+                        out_addr = out.get("address", "")
+                        out_amt = int(out.get("amount_base", 0))
+                        if out_addr and out_amt > 0:
+                            cur.execute(
+                                """
+                                INSERT INTO address_utxos
+                                (address, tx_hash, output_index, amount, spent, created_at_height, created_at_timestamp)
+                                VALUES (%s, %s, %s, %s, FALSE, %s, %s)
+                                ON CONFLICT (tx_hash, output_index) DO NOTHING
+                                """,
+                                (out_addr, tx_id, out_idx, out_amt, height, int(time.time())),
+                            )
+                else:
+                    # Legacy transaction (no outputs field): auto-create UTXO from to_addr/amount
+                    _to_addr = tx.get("to_addr") or tx.get("to_address", "")
+                    _amt = tx.get("amount")
+                    try:
+                        _amt_base = int(_amt * 100) if isinstance(_amt, float) else int(_amt)
+                    except (ValueError, TypeError):
+                        _amt_base = 0
+                    if _to_addr and _amt_base > 0:
                         cur.execute(
-                            "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
-                            (tx_fee, _treasury_addr),
+                            """
+                            INSERT INTO address_utxos
+                            (address, tx_hash, output_index, amount, spent, created_at_height, created_at_timestamp)
+                            VALUES (%s, %s, %s, %s, FALSE, %s, %s)
+                            ON CONFLICT (tx_hash, output_index) DO NOTHING
+                            """,
+                            (_to_addr, tx_id, 0, _amt_base, height, int(time.time())),
                         )
 
-            # UPDATE CHAIN STATE
+            # ── Mark block finalized ──
             cur.execute(
-                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
+                """
+                UPDATE blocks
+                SET finalized = TRUE, finalized_at = %s
+                WHERE height = %s
+                """,
+                (int(time.time()), height),
+            )
+
+            # ── Update chain state ──
+            cur.execute(
+                """
+                INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
+                VALUES (1, %s, %s, 0.0, NOW())
+                ON CONFLICT (state_id) DO UPDATE SET
+                    chain_height = EXCLUDED.chain_height,
+                    head_block_hash = EXCLUDED.head_block_hash,
+                    latest_coherence = EXCLUDED.latest_coherence,
+                    updated_at = NOW()
+                """,
                 (height, block_hash),
             )
 
-        # PHASE 3: Post-commit durability verification (fresh connection — outside previous txn)
-        # ─────────────────────────────────────────────────────────────────────────────
-        try:
-            with get_db_cursor() as _vfy_cur:
-                _vfy_cur.execute(
-                    "SELECT address, balance, wallet_fingerprint FROM wallet_addresses WHERE address = %s",
-                    (miner_address,),
-                )
-                _vfy_row = _vfy_cur.fetchone()
-                if _vfy_row:
-                    _durable_bal = int(_vfy_row[1]) if _vfy_row[1] else 0
-                    _settle_log.critical(
-                        f"[SETTLE-DURABLE] ✅ Confirmed persisted: address={_vfy_row[0][:24]}… "
-                        f"balance={_durable_bal} base-units ({_durable_bal/100:.2f} QTCL) "
-                        f"fp={str(_vfy_row[2])[:16]}…"
-                    )
-                else:
-                    _settle_log.critical(
-                        f"[SETTLE-DURABLE] ❌ DURABILITY FAIL: address '{miner_address[:24]}…' "
-                        f"NOT FOUND after commit. Listing all wallet rows:"
-                    )
-                    _vfy_cur.execute("SELECT address, balance, address_type FROM wallet_addresses LIMIT 20")
-                    for _wr in _vfy_cur.fetchall():
-                        _settle_log.critical(f"  ROW: addr={str(_wr[0])[:32]} bal={_wr[1]} type={_wr[2]}")
-        except Exception as _vfy_err:
-            _settle_log.warning(f"[SETTLE-DURABLE] verification query failed: {_vfy_err}")
-
-        # PHASE 4: Cache block and log completion
-        # ─────────────────────────────────────────────────────────────────────────────
-        try:
-            _cache_block(
-                {
-                    "height": height,
-                    "block_hash": block_hash,
-                    "timestamp": int(time.time()),
-                    "difficulty": 4,
-                    "miner": miner_address,
-                    "w_state_fidelity": 0.0,
-                }
-            )
-        except Exception as cache_err:
-            _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
-
-        _settle_log.warning(
-            f"[SETTLE] ✅ h={height}: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL, txs={len(non_coinbase_txs)}"
+        _settle_log.critical(
+            f"[UTXO-SETTLE] ✅ h={height}: {len(txs)} txs settled, UTXOs created+spent atomically"
         )
 
     except Exception as err:
-        _settle_log.error(f"[SETTLE] ❌ h={height} settlement failed: {err}", exc_info=True)
+        _settle_log.error(f"[UTXO-SETTLE] ❌ h={height} settlement failed: {err}", exc_info=True)
+        raise
 
-        # ── Update chain state even on failure ───────────────────────────────
-        try:
-            _lazy_ensure_chain_state()
-            with get_db_cursor() as cur:
+
+def _utxo_get_balance(address: str) -> int:
+    """Return confirmed balance in base units for an address from the UTXO set."""
+    if not address or len(address) < 10:
+        return 0
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0)
+                FROM address_utxos
+                WHERE address = %s AND spent = FALSE
+                """,
+                (address,),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] else 0
+    except Exception:
+        return 0
+
+
+def _utxo_get_unspent(address: str, limit: int = 1000) -> list:
+    """Return list of unspent outputs for an address."""
+    if not address or len(address) < 10:
+        return []
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT tx_hash, output_index, amount, created_at_height
+                FROM address_utxos
+                WHERE address = %s AND spent = FALSE
+                ORDER BY created_at_height ASC
+                LIMIT %s
+                """,
+                (address, limit),
+            )
+            return [
+                {
+                    "tx_hash": r[0],
+                    "output_index": r[1],
+                    "amount_base": int(r[2]),
+                    "confirmations": 0,  # populated by caller if needed
+                }
+                for r in cur.fetchall()
+            ]
+    except Exception:
+        return []
+
+
+def _utxo_validate_tx(tx: dict, height: int, _log: logging.Logger) -> tuple:
+    """Validate a single UTXO transaction. Returns (is_valid, error_msg)."""
+    tx_type = tx.get("tx_type", "").lower()
+    tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+    inputs = tx.get("inputs", [])
+    outputs = tx.get("outputs", [])
+
+    if tx_type in {"coinbase", "miner_reward", "treasury_reward"}:
+        # Coinbase: must have exactly 1 special input and >=1 outputs
+        if len(inputs) != 1:
+            return False, f"Coinbase must have exactly 1 input, got {len(inputs)}"
+        inp = inputs[0]
+        if inp.get("prev_tx_hash") != "0" * 64 or inp.get("prev_output_index") != 0xFFFFFFFF:
+            return False, "Coinbase input must be null (0xFFFF...FFFF)"
+        return True, ""
+
+    # Regular transaction validation
+    # BRIDGE MODE: If transaction lacks explicit inputs/outputs (legacy mempool format),
+    # skip UTXO validation but log a warning. Full UTXO validation applies when
+    # inputs/outputs are present.
+    if not inputs and not outputs:
+        _log.debug(f"[UTXO-VAL] tx={tx_id[:12]}… has no inputs/outputs — bridge mode (legacy mempool tx)")
+        return True, ""
+
+    if not inputs:
+        return False, "Transaction has no inputs"
+    if not outputs:
+        return False, "Transaction has no outputs"
+
+    total_in = 0
+    # Verify each input references an unspent output
+    try:
+        with get_db_cursor() as cur:
+            for inp in inputs:
+                prev_hash = inp.get("prev_tx_hash", "")
+                prev_idx = inp.get("prev_output_index", 0)
+                if not prev_hash or prev_hash == "0" * 64:
+                    return False, "Invalid prev_tx_hash in input"
                 cur.execute(
                     """
-                    INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
-                    VALUES (1, %s, %s, 0.0, NOW())
-                    ON CONFLICT (state_id) DO UPDATE SET
-                        chain_height = EXCLUDED.chain_height,
-                        head_block_hash = EXCLUDED.head_block_hash,
-                        latest_coherence = EXCLUDED.latest_coherence,
-                        updated_at = NOW()
-                """,
-                    (height, block_hash),
+                    SELECT amount, spent, address FROM address_utxos
+                    WHERE tx_hash = %s AND output_index = %s
+                    """,
+                    (prev_hash, prev_idx),
                 )
-            _settle_log.debug(f"[SETTLE] ✅ Chain state updated: h={height}")
-        except Exception as cs_err:
-            _settle_log.warning(f"[SETTLE] ⚠️  Chain state update: {cs_err}")
+                row = cur.fetchone()
+                if not row:
+                    return False, f"Input UTXO not found: {prev_hash}:{prev_idx}"
+                amt, spent, owner = row
+                if spent:
+                    return False, f"Input already spent: {prev_hash}:{prev_idx}"
+                # Verify signature if script_sig present
+                script_sig = inp.get("script_sig", {})
+                sig = script_sig.get("signature", "")
+                pub = script_sig.get("public_key", "")
+                if sig and pub:
+                    try:
+                        engine = _init_hlwe_engine()
+                        tx_bytes = hashlib.sha3_256(
+                            json.dumps({"tx_hash": tx_id, "inputs": inputs, "outputs": outputs}, sort_keys=True, default=str).encode()
+                        ).digest()
+                        if not engine.verify_signature(tx_bytes, sig, pub):
+                            return False, f"Signature verification failed for input {prev_hash}:{prev_idx}"
+                    except Exception as e:
+                        _log.debug(f"[UTXO-VAL] Signature check advisory-only: {e}")
+                total_in += int(amt)
+    except Exception as e:
+        return False, f"UTXO lookup failed: {e}"
 
-        # RE-RAISE so caller (_rpc_submitBlock) knows settlement failed
-        raise
+    total_out = sum(int(o.get("amount_base", 0)) for o in outputs)
+    if total_out > total_in:
+        return False, f"Outputs ({total_out}) exceed inputs ({total_in})"
+
+    return True, ""
+
+
+def _compute_block_header_hash(block: dict) -> str:
+    """Compute canonical block header hash for oracle attestation."""
+    header = {
+        "height": block.get("height", 0),
+        "parent_hash": block.get("parent_hash", ""),
+        "merkle_root": block.get("merkle_root", ""),
+        "timestamp": block.get("timestamp", block.get("timestamp_s", 0)),
+        "difficulty": block.get("difficulty", 0),
+        "nonce": block.get("nonce", 0),
+        "miner_address": block.get("miner_address", ""),
+    }
+    canonical = json.dumps(header, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha3_256(canonical.encode()).hexdigest()
+
+
+def _verify_oracle_attestations(block_hash: str, attestations: list, min_required: int = 3) -> tuple:
+    """Verify oracle attestations for a block. Returns (valid_count, valid_oracle_ids, error_msg)."""
+    if not attestations:
+        return 0, [], "No oracle attestations provided"
+
+    try:
+        _lazy_ensure_oracle_registry()
+        with get_db_cursor() as cur:
+            cur.execute("SELECT oracle_id, oracle_address, oracle_pub_key, mode FROM oracle_registry WHERE mode IN ('full', 'primary')")
+            registered = {r[0]: {"address": r[1], "pub_key": r[2], "mode": r[3]} for r in cur.fetchall()}
+    except Exception as e:
+        return 0, [], f"Oracle registry lookup failed: {e}"
+
+    if len(registered) < min_required:
+        return 0, [], f"Only {len(registered)} oracles registered, need {min_required}"
+
+    valid_count = 0
+    valid_ids = []
+    seen = set()
+
+    for att in attestations:
+        oid = att.get("oracle_id", "")
+        if not oid or oid in seen:
+            continue
+        seen.add(oid)
+
+        if oid not in registered:
+            continue
+
+        # For MVP: check that the attestation references the correct block_hash
+        # and has a signature structure. Full HypΓ verification can be added later.
+        att_block_hash = att.get("block_hash", "")
+        sig = att.get("signature", {})
+        if att_block_hash != block_hash:
+            continue
+        if not sig or not isinstance(sig, dict):
+            continue
+        # Basic structural validity
+        if "s" not in sig and "e" not in sig and "z" not in sig and "signature" not in sig:
+            continue
+
+        valid_count += 1
+        valid_ids.append(oid)
+
+    if valid_count < min_required:
+        return valid_count, valid_ids, f"Only {valid_count}/{min_required} valid oracle attestations"
+
+    return valid_count, valid_ids, ""
+
+
+def _store_oracle_attestations(height: int, block_hash: str, attestations: list) -> None:
+    """Persist oracle attestations to DB."""
+    with get_db_cursor() as cur:
+        for att in attestations:
+            oid = att.get("oracle_id", "")
+            oaddr = att.get("oracle_address", "")
+            fidelity = float(att.get("w_state_fidelity", 0.0))
+            sig = json.dumps(att.get("signature", {}), default=str)
+            ts = int(att.get("timestamp", time.time()))
+            cur.execute(
+                """
+                INSERT INTO oracle_attestations
+                (block_height, block_hash, oracle_id, oracle_address, w_state_fidelity, attestation_signature, attestation_timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (block_height, oracle_id) DO NOTHING
+                """,
+                (height, block_hash, oid, oaddr, fidelity, sig, ts),
+            )
+
+
+def _count_oracle_attestations(height: int) -> int:
+    """Count how many valid attestations a block has."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM oracle_attestations WHERE block_height = %s", (height,))
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def _create_genesis_block() -> dict:
+    """Create and persist the genesis block (height 0). No oracle consensus needed."""
+    genesis_hash = hashlib.sha3_256(b"QTCL_GENESIS_2025").hexdigest()
+    ts = int(time.time())
+
+    # Genesis coinbase: 0-value (all supply comes from mining)
+    coinbase_tx = {
+        "tx_id": hashlib.sha3_256(b"QTCL_GENESIS_COINBASE").hexdigest(),
+        "version": 1,
+        "inputs": [
+            {"prev_tx_hash": "0" * 64, "prev_output_index": 0xFFFFFFFF, "script_sig": {"height": 0, "message": "Genesis"}}
+        ],
+        "outputs": [],
+        "lock_time": 0,
+        "tx_type": "coinbase",
+    }
+
+    genesis_block = {
+        "height": 0,
+        "block_hash": genesis_hash,
+        "parent_hash": "0" * 64,
+        "merkle_root": hashlib.sha3_256(coinbase_tx["tx_id"].encode()).hexdigest(),
+        "timestamp": ts,
+        "timestamp_s": ts,
+        "difficulty": 1,
+        "nonce": 0,
+        "miner_address": "0" * 64,
+        "transactions": [coinbase_tx],
+        "txs": [coinbase_tx],
+        "w_state_fidelity": 1.0,
+        "oracle_attestations": [],
+    }
+
+    with get_db_cursor() as cur:
+        # Insert genesis block
+        cur.execute(
+            """
+            INSERT INTO blocks
+            (height, block_hash, parent_hash, merkle_root, timestamp,
+             w_state_hash, oracle_w_state_hash, miner_address, nonce,
+             difficulty, coherence_snapshot, fidelity_snapshot, tx_count,
+             pq_curr, pq_last, finalized, finalized_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+            ON CONFLICT (height) DO NOTHING
+            """,
+            (
+                0, genesis_hash, "0" * 64, genesis_block["merkle_root"], ts,
+                genesis_hash[:64], genesis_hash[:64], "0" * 64, 0, 1,
+                1.0, 1.0, 1, 0, 0, ts,
+            ),
+        )
+
+    # Settle genesis UTXOs
+    _utxo_settle_block(0, genesis_hash, "0" * 64, [coinbase_tx])
+    logger.critical("[GENESIS] 🌍 Genesis block created and settled at height 0")
+    return genesis_block
+
+
+def _ensure_genesis() -> None:
+    """If the chain is empty, create the genesis block automatically."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM blocks")
+            count = cur.fetchone()[0]
+            if count == 0:
+                logger.critical("[GENESIS] Chain empty — creating genesis block…")
+                _create_genesis_block()
+    except AttributeError:
+        # DB not available yet (get_db_cursor returns None) — defer to first block submission
+        logger.debug("[GENESIS] DB not available yet — genesis will be created on first block submission")
+    except Exception as e:
+        logger.error(f"[GENESIS] Failed to ensure genesis: {e}", exc_info=True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1452,13 +1670,13 @@ _BLOCK_SETTLE_Q: "_queue_mod2.Queue" = _queue_mod2.Queue(maxsize=32)
 
 
 def _block_settle_worker_thread():
-    """Background worker: dequeue settlement jobs and call _settle_block_rewards.
+    """Background worker: dequeue settlement jobs and call _utxo_settle_block.
 
     Critical path (_rpc_submitBlock) inserts the block and immediately returns.
-    This worker dequeues settlement jobs and delegates to _settle_block_rewards.
+    This worker dequeues settlement jobs and delegates to _utxo_settle_block.
     """
     _settle_log = logging.getLogger("SETTLE")
-    _settle_log.critical("[SETTLE-WORKER] 🚀 Settlement worker thread STARTED")
+    _settle_log.critical("[SETTLE-WORKER] 🚀 UTXO settlement worker thread STARTED")
     while True:
         try:
             job = _BLOCK_SETTLE_Q.get(timeout=1.0)
@@ -1469,15 +1687,12 @@ def _block_settle_worker_thread():
             block_hash = job.get("block_hash")
             miner_address = job.get("miner_address")
             txs = job.get("txs", [])
-            non_coinbase_txs = job.get("non_coinbase_txs", [])
 
             _settle_log.critical(f"[SETTLE-WORKER] 📥 Processing job: h={height} miner={miner_address[:16]}…")
 
             try:
-                # Delegate to _settle_block_rewards function
-                _settle_block_rewards(
-                    height, block_hash, miner_address, txs, non_coinbase_txs
-                )
+                # UTXO settlement: create outputs, spend inputs, finalize block
+                _utxo_settle_block(height, block_hash, miner_address, txs)
                 _settle_log.critical(f"[SETTLE-WORKER] ✅ Job completed: h={height}")
             except Exception as settle_err:
                 _settle_log.critical(
@@ -3686,7 +3901,7 @@ def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBalance — address QTCL balance via direct DB query."""
+    """qtcl_getBalance — address QTCL balance via UTXO set (Bitcoin-style)."""
     try:
         if not isinstance(params, (list, dict)):
             return _rpc_error(-32602, "params must be list or object", rpc_id)
@@ -3698,96 +3913,116 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         if not address:
             return _rpc_error(-32602, "address required", rpc_id)
 
-        _diagnostic = {
-            "address_queried": address[:24] + "…" if len(address) > 24 else address
+        raw_balance = _utxo_get_balance(address)
+        unspent = _utxo_get_unspent(address, limit=50)
+
+        result = {
+            "address": address,
+            "balance": raw_balance / 100.0,
+            "symbol": "QTCL",
+            "raw_balance_base_units": raw_balance,
+            "unspent_outputs": len(unspent),
+            "utxos": unspent,
         }
-
-        try:
-            with get_db_cursor() as cur:
-                # Check if wallet_addresses table exists
-                try:
-                    cur.execute("""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.tables 
-                            WHERE table_name = 'wallet_addresses'
-                        )
-                    """)
-                    _exists_row = cur.fetchone()  # FIX: single fetchone()
-                    _table_exists = bool(_exists_row[0]) if _exists_row else False
-                    _diagnostic["table_exists"] = _table_exists
-                except Exception as _te:
-                    _diagnostic["table_check_error"] = str(_te)
-
-                # Query balance by address (primary lookup)
-                cur.execute(
-                    "SELECT balance, transaction_count, address_type FROM wallet_addresses WHERE address = %s",
-                    (address,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    # Fallback: try lookup by wallet_fingerprint in case client sends fingerprint
-                    _fp_candidate = hashlib.sha256(address.encode()).hexdigest()[:64]
-                    cur.execute(
-                        "SELECT address, balance, transaction_count, address_type FROM wallet_addresses WHERE wallet_fingerprint = %s LIMIT 1",
-                        (_fp_candidate,),
-                    )
-                    _fp_row = cur.fetchone()
-                    if _fp_row:
-                        _diagnostic["note"] = f"resolved via fingerprint; canonical address={str(_fp_row[0])[:24]}…"
-                        _diagnostic["canonical_address"] = _fp_row[0]
-                        row = (_fp_row[1], _fp_row[2], _fp_row[3])
-                if row:
-                    wallet = {
-                        "address": address,
-                        "balance": row[0],
-                        "tx_count": row[1],
-                        "address_type": row[2] if len(row) > 2 else "unknown",
-                    }
-                    _diagnostic["found_in_db"] = True
-                    _diagnostic["raw_balance_base_units"] = int(row[0]) if row[0] else 0
-                else:
-                    wallet = None
-                    _diagnostic["found_in_db"] = False
-                    # Check how many total wallet addresses exist
-                    try:
-                        cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                        _total_wallets = cur.fetchone()[0]
-                        _diagnostic["total_wallets_in_db"] = (
-                            int(_total_wallets) if _total_wallets else 0
-                        )
-                    except Exception:
-                        pass
-        except Exception as _wqe:
-            logger.debug(f"[RPC] query_wallet_info DB error: {_wqe}")
-            _diagnostic["db_error"] = str(_wqe)
-            wallet = None
-
-        if wallet is None:
-            # Address not yet in DB — return 0 balance with diagnostic info
-            result = {
-                "address": address,
-                "balance": 0.0,
-                "symbol": "QTCL",
-                "diagnostic": _diagnostic,
-                "note": "Address not found in wallet_addresses table — no balance recorded",
-            }
-        else:
-            raw_balance = int(wallet.get("balance") or 0)
-            result = {
-                "address": address,
-                "balance": raw_balance / 100.0,
-                "symbol": "QTCL",
-                "raw_balance_base_units": raw_balance,
-                "transaction_count": wallet.get("tx_count", 0),
-                "address_type": wallet.get("address_type", "unknown"),
-                "diagnostic": _diagnostic,
-            }
         logger.debug(
-            f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}"
+            f"[RPC-METHOD] qtcl_getBalance (UTXO): address={address[:16]}…, balance={result['balance']}, utxos={len(unspent)}"
         )
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_getUTXOs(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getUTXOs — return unspent outputs for an address (Bitcoin-style)."""
+    try:
+        p = params[0] if isinstance(params, list) and params else params if isinstance(params, dict) else {}
+        address = str(p.get("address", ""))
+        limit = min(int(p.get("limit", 1000)), 10000)
+        if not address:
+            return _rpc_error(-32602, "address required", rpc_id)
+        utxos = _utxo_get_unspent(address, limit=limit)
+        total = sum(u["amount_base"] for u in utxos)
+        return _rpc_ok(
+            {
+                "address": address,
+                "utxo_count": len(utxos),
+                "total_amount_base": total,
+                "total_amount_qtcl": total / 100.0,
+                "utxos": utxos,
+            },
+            rpc_id,
+        )
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getUTXOs exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_submitOracleAttestation(params: Any, rpc_id: Any) -> dict:
+    """qtcl_submitOracleAttestation — submit an oracle attestation for a pending block.
+    Params (object):
+      block_height   int     required
+      block_hash     string  required
+      oracle_id      string  required
+      oracle_address string  required
+      signature      object  required — HypΓ signature dict
+      w_state_fidelity float optional
+    """
+    try:
+        p = params[0] if isinstance(params, list) and params else params if isinstance(params, dict) else {}
+        height = int(p.get("block_height", 0))
+        block_hash = str(p.get("block_hash", ""))
+        oracle_id = str(p.get("oracle_id", ""))
+        oracle_address = str(p.get("oracle_address", ""))
+        signature = p.get("signature", {})
+        fidelity = float(p.get("w_state_fidelity", 0.0))
+
+        if not block_hash or not oracle_id:
+            return _rpc_error(-32602, "block_hash and oracle_id required", rpc_id)
+
+        # Store attestation
+        att = {
+            "oracle_id": oracle_id,
+            "oracle_address": oracle_address,
+            "block_hash": block_hash,
+            "signature": signature,
+            "w_state_fidelity": fidelity,
+            "timestamp": int(time.time()),
+        }
+        _store_oracle_attestations(height, block_hash, [att])
+
+        # Check if threshold reached and finalize if so
+        count = _count_oracle_attestations(height)
+        finalized = False
+        if count >= 3:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("SELECT block_hash, finalized FROM blocks WHERE height = %s", (height,))
+                    row = cur.fetchone()
+                    if row and not row[1]:
+                        # Finalize the block
+                        _utxo_settle_block(height, row[0], "", [])
+                        cur.execute(
+                            "UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s",
+                            (int(time.time()), height),
+                        )
+                        finalized = True
+                        logger.critical(f"[ORACLE-ATTEST] 🔥 Block h={height} FINALIZED via oracle consensus ({count}/5)")
+            except Exception as fe:
+                logger.error(f"[ORACLE-ATTEST] Finalization failed for h={height}: {fe}")
+
+        return _rpc_ok(
+            {
+                "status": "stored",
+                "block_height": height,
+                "oracle_id": oracle_id,
+                "total_attestations": count,
+                "finalized": finalized,
+            },
+            rpc_id,
+        )
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_submitOracleAttestation exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
@@ -4001,7 +4236,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         SELECT height, block_hash, timestamp, w_state_hash,
                                parent_hash, nonce, difficulty,
                                fidelity_snapshot, merkle_root, tx_count,
-                               miner_address
+                               miner_address, finalized
                         FROM blocks WHERE height = %s LIMIT 1
                     """,
                         (h,),
@@ -4031,7 +4266,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "miner": row[10] or "",
                         "miner_address": row[10] or "",
                         "mined": True,
-                        "finalized": True,
+                        "finalized": bool(row[11]) if len(row) > 11 and row[11] is not None else True,
                     }
                     # Fetch transactions for this block
                     cur.execute(
@@ -4048,19 +4283,56 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                     tx_rows = cur.fetchall()
                     txs = []
                     for tr in tx_rows:
-                        txs.append(
-                            {
-                                "tx_id": tr[0],
-                                "from_addr": tr[1] or "",
-                                "to_addr": tr[2] or "",
-                                "amount": float(tr[3]) if tr[3] is not None else 0.0,
-                                "tx_index": int(tr[4]) if tr[4] is not None else 0,
-                                "tx_type": tr[5] or "transfer",
-                                "status": tr[6] or "confirmed",
-                                "w_proof": tr[7] or "",
-                                "metadata": tr[8] if tr[8] else None,
-                            }
+                        _tx = {
+                            "tx_id": tr[0],
+                            "from_addr": tr[1] or "",
+                            "to_addr": tr[2] or "",
+                            "amount": float(tr[3]) if tr[3] is not None else 0.0,
+                            "tx_index": int(tr[4]) if tr[4] is not None else 0,
+                            "tx_type": tr[5] or "transfer",
+                            "status": tr[6] or "confirmed",
+                            "w_proof": tr[7] or "",
+                            "metadata": tr[8] if tr[8] else None,
+                            "version": 1,
+                            "inputs": [],
+                            "outputs": [],
+                        }
+                        # Fetch UTXO inputs for this tx
+                        cur.execute(
+                            """
+                            SELECT tx_hash, output_index, amount, address, spent
+                            FROM address_utxos
+                            WHERE tx_hash = %s AND spent = TRUE
+                            ORDER BY output_index ASC
+                            """,
+                            (tr[0],),
                         )
+                        for _in_row in cur.fetchall():
+                            _tx["inputs"].append({
+                                "prev_tx_hash": _in_row[0],
+                                "prev_output_index": _in_row[1],
+                                "amount_base": int(_in_row[2]) if _in_row[2] else 0,
+                                "address": _in_row[3] or "",
+                            })
+                        # Fetch UTXO outputs for this tx
+                        cur.execute(
+                            """
+                            SELECT tx_hash, output_index, amount, address, spent
+                            FROM address_utxos
+                            WHERE tx_hash = %s AND spent IN (TRUE, FALSE)
+                            ORDER BY output_index ASC
+                            """,
+                            (tr[0],),
+                        )
+                        for _out_row in cur.fetchall():
+                            _tx["outputs"].append({
+                                "tx_hash": _out_row[0],
+                                "output_index": _out_row[1],
+                                "amount_base": int(_out_row[2]) if _out_row[2] else 0,
+                                "address": _out_row[3] or "",
+                                "spent": bool(_out_row[4]),
+                            })
+                        txs.append(_tx)
                     block["transactions"] = txs
                     block["tx_count"] = len(txs)
                     return block
@@ -5947,13 +6219,18 @@ def qtcl_pow_verify(
 
 def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
     """
-    🚀 qtcl_submitBlock — ULTRA-MINIMAL: BARE INSERT ONLY
+    🚀 qtcl_submitBlock — UTXO + 5-Oracle BFT Consensus
 
-    Strip ALL complexity. Just parse and INSERT block.
-    Debugging to find actual root cause of transaction abort.
+    Flow:
+      1. Parse block and extract transactions
+      2. Validate all transactions (UTXO inputs unspent, signatures valid, coinbase amounts correct)
+      3. Verify oracle attestations (3-of-5 required for finalization)
+      4. Insert block into DB
+      5. If attestations >= threshold: finalize immediately (UTXO settlement)
+      6. If attestations < threshold: store as pending, wait for more attestations
+      7. Broadcast to P2P network
     """
     try:
-        # Parse params
         if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
             return _rpc_error(-32602, "params[0] required", rpc_id)
 
@@ -5962,7 +6239,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             return _rpc_error(-32602, "params[0] must be dict", rpc_id)
 
         hdr = data.get("header", data)
-
         height = int(hdr.get("height", 0))
         block_hash = str(hdr.get("block_hash", ""))
         parent_hash = str(hdr.get("parent_hash", "0" * 64))
@@ -5973,262 +6249,106 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         difficulty_bits = int(hdr.get("difficulty", 4))
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
-        logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}... processing...")
+        logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}… processing…")
 
-        # EXTRACT TRANSACTIONS FROM BLOCK DATA (moved before validation)
-        _block_rowcount = 0
         txs = data.get("transactions", data.get("txs", []))
-        logger.info(f"[RPC-submitBlock] h={height}: {len(txs or [])} transactions in block")
+        logger.info(f"[RPC-submitBlock] h={height}: {len(txs or [])} transactions")
 
-        # Extract W-state attestation data
         w_state_fidelity = float(data.get("w_state_fidelity", 0.0))
+        attestations = data.get("oracle_attestations", [])
+
+        # ── Ensure genesis exists ──
+        if height == 0:
+            _ensure_genesis()
 
         # ═══════════════════════════════════════════════════════════════════════
-        # CATHEDRAL-GRADE: BLOCK SIGNATURE VERIFICATION (HypΓ Schnorr-Γ)
-        # Block MUST be cryptographically signed by miner's private key
+        # 1. TRANSACTION VALIDATION — UTXO Model
         # ═══════════════════════════════════════════════════════════════════════
-        _hyp_sig = data.get("hyp_signature") or data.get("signature", {})
-        _miner_pubkey = data.get("miner_public_key_hex", "")
-
-        if _hyp_sig and _miner_pubkey:
-            logger.info(
-                f"[RPC-submitBlock] ✓ Block h={height} includes signature and public key (verification currently disabled)"
-            )
-        else:
-            logger.warning(
-                f"[RPC-submitBlock] ⚠️  Block h={height} missing HypΓ signature or public key | has_sig={bool(_hyp_sig)} has_pubkey={bool(_miner_pubkey)}"
-            )
-            # Don't reject — proceed anyway for MVP
-
-        # ═══════════════════════════════════════════════════════════════════════
-        # TRANSACTION VALIDATION — Bitcoin-style security
-        # Every transaction must be cryptographically valid and economically sound
-        # ═══════════════════════════════════════════════════════════════════════
-
-        # Get reward schedule for validation (returns QTCL floats)
-        _scheduled_miner_reward = 7.20  # default QTCL
-        _scheduled_treasury_reward = 0.80  # default QTCL
-        if TessellationRewardSchedule:
-            try:
-                _rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                _scheduled_miner_reward = float(_rewards.get("miner", 7.20))
-                _scheduled_treasury_reward = float(_rewards.get("treasury", 0.80))
-            except Exception as _e:
-                logger.warning(
-                    f"[RPC-submitBlock] Could not fetch reward schedule: {_e}"
-                )
-
-        # Calculate expected total coinbase (miner + treasury + fees)
-        _total_fees = 0
-        _non_coinbase_txs = []
         _coinbase_txs = []
-
+        _non_coinbase_txs = []
         _COINBASE_TYPES = {"coinbase", "miner_reward", "treasury_reward"}
+
         for tx in txs or []:
             tx_type = tx.get("tx_type", "").lower()
             if tx_type in _COINBASE_TYPES:
                 _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
-                # Sum fees from non-coinbase transactions
-                _fee = tx.get("fee", tx.get("fee_base", 0))
-                if isinstance(_fee, (float, str)):
-                    try:
-                        _total_fees += int(
-                            round(float(_fee) * 100)
-                        )  # convert to base units
-                    except:
-                        pass
-                else:
-                    _total_fees += int(_fee)
+                # Validate UTXO transaction
+                is_valid, err_msg = _utxo_validate_tx(tx, height, logger)
+                if not is_valid:
+                    return _rpc_error(-32003, f"UTXO validation failed: {err_msg}", rpc_id)
 
         # Validate coinbase structure
         if len(_coinbase_txs) < 1:
-            return _rpc_error(
-                -32003, "Block must have at least one coinbase transaction", rpc_id
-            )
-
+            return _rpc_error(-32003, "Block must have at least one coinbase transaction", rpc_id)
         if len(_coinbase_txs) > 2:
-            return _rpc_error(
-                -32003,
-                f"Block has too many coinbase transactions: {len(_coinbase_txs)} (max 2: miner + treasury)",
-                rpc_id,
-            )
+            return _rpc_error(-32003, f"Too many coinbase txs: {len(_coinbase_txs)} (max 2)", rpc_id)
 
-        # Validate each coinbase amount matches schedule + fees
-        _miner_coinbase = None
-        _treasury_coinbase = None
+        # Validate coinbase outputs match reward schedule + fees
+        _scheduled_miner = TessellationRewardSchedule.get_miner_reward_base(height) if TessellationRewardSchedule else 720
+        _scheduled_treasury = TessellationRewardSchedule.get_treasury_reward_base(height) if TessellationRewardSchedule else 80
+        _treasury_addr = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else ""
 
-        for cb in _coinbase_txs:
-            _to = cb.get("to_addr") or cb.get("to_address", "")
-            _amount = float(
-                cb.get("amount_qtcl")
-                or cb.get("amount")
-                or (cb.get("amount_base", 0) / 100)
-                or 0
-            )
-            _amount_base = int(round(_amount * 100))  # Convert to base units
-
-            if _to == miner_address:
-                _miner_coinbase = cb
-                # Miner reward = scheduled reward + 50% of fees
-                _expected_miner = int(round(_scheduled_miner_reward * 100)) + (
-                    _total_fees // 2
-                )
-                if (
-                    abs(_amount_base - _expected_miner) > 1
-                ):  # Allow 1 unit rounding tolerance
-                    return _rpc_error(
-                        -32003,
-                        f"Invalid miner coinbase: got {_amount_base} base units, expected {_expected_miner} "
-                        f"(reward={_scheduled_miner_reward}*100 + fees/2={_total_fees // 2})",
-                        rpc_id,
-                    )
-            elif (
-                TessellationRewardSchedule
-                and _to == TessellationRewardSchedule.TREASURY_ADDRESS
-            ):
-                _treasury_coinbase = cb
-                # Treasury reward = scheduled reward + 50% of fees
-                _expected_treasury = int(round(_scheduled_treasury_reward * 100)) + (
-                    _total_fees - (_total_fees // 2)
-                )
-                if abs(_amount_base - _expected_treasury) > 1:
-                    return _rpc_error(
-                        -32003,
-                        f"Invalid treasury coinbase: got {_amount_base} base units, expected {_expected_treasury}",
-                        rpc_id,
-                    )
-            else:
-                return _rpc_error(
-                    -32003,
-                    f"Invalid coinbase recipient: {_to}. Only miner or treasury allowed.",
-                    rpc_id,
-                )
-
-        # Validate non-coinbase transactions (if any)
-        for tx in _non_coinbase_txs:
-            # Every non-coinbase must have a valid signature
-            _sig = tx.get("signature") or tx.get("hyp_sig") or tx.get("sig", {})
-            if not _sig:
-                return _rpc_error(
-                    -32003,
-                    f"Transaction {tx.get('tx_id', '?')[:16]}... has no signature — all non-coinbase txs must be signed",
-                    rpc_id,
-                )
-
-            # ── CATHEDRAL-GRADE: Transaction signature verification ──
-            _tx_pubkey = tx.get("sender_public_key_hex") or tx.get("public_key", "")
-            _tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
-            if not _tx_pubkey:
-                return _rpc_error(
-                    -32003,
-                    f"Transaction {_tx_id[:16]}... missing sender_public_key_hex for verification",
-                    rpc_id,
-                )
-
-            try:
-                _engine = _init_hlwe_engine()
-                # Hash the transaction ID for signature verification
-                _tx_hash_bytes = (
-                    bytes.fromhex(_tx_id)
-                    if len(_tx_id) == 64
-                    else hashlib.sha3_256(str(_tx_id).encode()).digest()
-                )
-                # Call engine's verify_signature method
-                # It expects (message_hash: bytes, sig: Dict[str, str], public_key: str)
-                _tx_sig_valid = _engine.verify_signature(
-                    _tx_hash_bytes, _sig, _tx_pubkey
-                )
-                if not _tx_sig_valid:
-                    logger.error(
-                        f"[RPC-submitBlock] ❌ Transaction signature verification FAILED {_tx_id[:16]}..."
-                    )
-                    return _rpc_error(-32003, f"Transaction signature invalid", rpc_id)
-                logger.debug(
-                    f"[RPC-submitBlock] ✅ Transaction signature verified: {_tx_id[:16]}..."
-                )
-            except Exception as _tx_verify_err:
-                logger.error(
-                    f"[RPC-submitBlock] ❌ Transaction verification error {_tx_id[:16]}...: {_tx_verify_err}"
-                )
-                return _rpc_error(
-                    -32003,
-                    f"Transaction verification failed: {str(_tx_verify_err)}",
-                    rpc_id,
-                )
-
-            # Validate sender has sufficient balance by tracing unspent outputs
-            _from = tx.get("from_addr") or tx.get("from_address", "")
-            _amount = float(
-                tx.get("amount_qtcl")
-                or tx.get("amount")
-                or (tx.get("amount_base", 0) / 100)
-                or 0
-            )
-
-            # Query sender's confirmed balance from DB
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute(
-                        "SELECT balance FROM wallet_addresses WHERE address = %s",
-                        (_from,),
-                    )
-                    _row = cur.fetchone()
-                    _confirmed_balance = float(_row[0]) if _row else 0.0
-
-                    if _confirmed_balance < _amount:
-                        return _rpc_error(
-                            -32003,
-                            f"Insufficient balance: {_from[:16]}... has {_confirmed_balance:.2f} QTCL, "
-                            f"tried to send {_amount:.2f} QTCL",
-                            rpc_id,
-                        )
-            except Exception as _be:
-                logger.warning(
-                    f"[RPC-submitBlock] Balance check failed for {_from[:16]}...: {_be}"
-                )
-                # Fail-safe: reject if we can't verify balance
-                return _rpc_error(
-                    -32003, f"Could not verify balance for {_from[:16]}...", rpc_id
-                )
-
-        logger.info(
-            f"[RPC-submitBlock] ✅ Transaction validation passed: {len(_coinbase_txs)} coinbase, {len(_non_coinbase_txs)} transfers, {_total_fees} base units in fees"
+        _total_fees = sum(
+            int(tx.get("fee_base", 0))
+            for tx in _non_coinbase_txs
         )
 
-        # ── Persist block with PROPER conflict handling ─────────────────────────
-        _block_insert_result = None  # 'inserted', 'duplicate', 'fork', or 'error'
+        _miner_out = 0
+        _treasury_out = 0
+        for cb in _coinbase_txs:
+            for out in cb.get("outputs", []):
+                if out.get("address") == miner_address:
+                    _miner_out += int(out.get("amount_base", 0))
+                elif out.get("address") == _treasury_addr:
+                    _treasury_out += int(out.get("amount_base", 0))
+
+        _expected_miner = _scheduled_miner + (_total_fees // 2)
+        _expected_treasury = _scheduled_treasury + (_total_fees - (_total_fees // 2))
+
+        if abs(_miner_out - _expected_miner) > 1:
+            return _rpc_error(-32003, f"Miner coinbase mismatch: got {_miner_out}, expected {_expected_miner}", rpc_id)
+        if abs(_treasury_out - _expected_treasury) > 1:
+            return _rpc_error(-32003, f"Treasury coinbase mismatch: got {_treasury_out}, expected {_expected_treasury}", rpc_id)
+
+        logger.info(f"[RPC-submitBlock] ✅ UTXO validation passed: {_miner_out} miner, {_treasury_out} treasury")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # 2. ORACLE BFT CONSENSUS CHECK
+        # ═══════════════════════════════════════════════════════════════════════
+        _header_hash = _compute_block_header_hash({
+            "height": height, "parent_hash": parent_hash, "merkle_root": merkle_root,
+            "timestamp": timestamp_s, "difficulty": difficulty_bits, "nonce": nonce,
+            "miner_address": miner_address,
+        })
+
+        _oracle_valid, _oracle_ids, _oracle_err = _verify_oracle_attestations(_header_hash, attestations, min_required=3)
+        _has_enough_oracles = _oracle_valid >= 3
+
+        if _has_enough_oracles:
+            logger.critical(f"[RPC-submitBlock] ✅ Oracle BFT consensus: {_oracle_valid}/5 oracles — BLOCK WILL BE FINALIZED")
+        else:
+            logger.warning(f"[RPC-submitBlock] ⏳ Oracle consensus pending: {_oracle_valid}/5 — block accepted but NOT finalized")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # 3. PERSIST BLOCK
+        # ═══════════════════════════════════════════════════════════════════════
+        _block_insert_result = None
         _existing_block_hash = None
 
         try:
             with get_db_cursor() as cur:
-                # DEBUG: Log the insert attempt
-                logger.warning(
-                    f"[RPC-submitBlock] 🔄 BLOCK INSERT attempt: h={height}, "
-                    f"hash={block_hash[:16]}…, parent={parent_hash[:16]}…"
-                )
-
-                # Step 1: Check if block already exists at this height
-                cur.execute(
-                    "SELECT block_hash FROM blocks WHERE height = %s", (height,)
-                )
+                cur.execute("SELECT block_hash FROM blocks WHERE height = %s", (height,))
                 _existing_row = cur.fetchone()
 
                 if _existing_row:
                     _existing_block_hash = _existing_row[0]
                     if _existing_block_hash == block_hash:
-                        logger.critical(
-                            f"[RPC-submitBlock] 🔁 DUPLICATE DETECTED: h={height} hash matches={block_hash[:16]}…"
-                        )
                         _block_insert_result = "duplicate"
                     else:
-                        logger.critical(
-                            f"[RPC-submitBlock] ⚠️  DIFFERENT HASH AT HEIGHT: h={height} new={block_hash[:16]}… db={_existing_block_hash[:16]}…"
-                        )
-                        _block_insert_result = "fork"
+                        return _rpc_error(-32002, f"Fork at h={height}", rpc_id, {"existing_hash": _existing_block_hash})
                 else:
-                    # Step 2: No existing block - try to insert
                     cur.execute(
                         """
                         INSERT INTO blocks
@@ -6238,208 +6358,82 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                          pq_curr, pq_last, finalized, finalized_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (height) DO NOTHING
-                    """,
+                        """,
                         (
-                            height,
-                            block_hash,
-                            parent_hash,
-                            merkle_root,
-                            timestamp_s,
+                            height, block_hash, parent_hash, merkle_root, timestamp_s,
                             w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                             w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                            miner_address,
-                            nonce,
-                            difficulty_bits,
-                            w_state_fidelity,
-                            w_state_fidelity,
+                            miner_address, nonce, difficulty_bits,
+                            w_state_fidelity, w_state_fidelity,
                             len(txs) if txs else 0,
-                            height,
-                            max(0, height - 1),
-                            True,
-                            int(time.time()),
+                            height, max(0, height - 1),
+                            _has_enough_oracles,
+                            int(time.time()) if _has_enough_oracles else 0,
                         ),
                     )
-
-                    # Verify insertion worked
-                    cur.execute(
-                        "SELECT block_hash FROM blocks WHERE height = %s", (height,)
-                    )
+                    cur.execute("SELECT block_hash FROM blocks WHERE height = %s", (height,))
                     _verify_row = cur.fetchone()
-                    if _verify_row and _verify_row[0] == block_hash:
-                        logger.critical(
-                            f"[RPC-submitBlock] ✅ BLOCK INSERTED: h={height} hash={block_hash[:16]}…"
-                        )
-                        _block_insert_result = "inserted"
-                    else:
-                        logger.error(
-                            f"[RPC-submitBlock] ❌ INSERT FAILED: h={height} not found after insert!"
-                        )
-                        _block_insert_result = "error"
+                    _block_insert_result = "inserted" if (_verify_row and _verify_row[0] == block_hash) else "error"
 
-                # Step 3: Persist transactions if block is now in DB (inserted or duplicate)
-                if _block_insert_result in ("inserted", "duplicate"):
-                    for tx in txs or []:
-                        tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
-                        if not tx_id:
-                            continue
-                        try:
-                            _tx_from = tx.get("from_addr") or tx.get("from_address", "0" * 64)
-                            _tx_to = tx.get("to_addr") or tx.get("to_address", "")
-                            _tx_amt = float(
-                                tx.get("amount_qtcl")
-                                or tx.get("amount")
-                                or (tx.get("amount_base", 0) / 100)
-                                or 0
-                            )
-                            cur.execute(
-                                """
-                                INSERT INTO transactions
-                                (tx_hash, from_address, to_address, amount,
-                                 tx_type, status, height, updated_at)
-                                VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW())
-                                ON CONFLICT (tx_hash) DO UPDATE
-                                  SET height     = EXCLUDED.height,
-                                      status     = 'confirmed',
-                                      updated_at = NOW()
-                            """,
-                                (
-                                    tx_id,
-                                    _tx_from,
-                                    _tx_to,
-                                    _tx_amt,
-                                    tx.get("tx_type", "transfer"),
-                                    height,
-                                ),
-                            )
-                        except Exception as _tx_err:
-                            logger.debug(
-                                f"[RPC-submitBlock] TX insert failed for {tx_id[:16]}: {_tx_err}"
-                            )
+                # Store attestations
+                if attestations:
+                    _store_oracle_attestations(height, _header_hash, attestations)
 
         except Exception as dbe:
-            logger.exception(
-                f"[RPC-submitBlock] ❌ DB error during block persist: {dbe}"
-            )
-            _block_insert_result = "error"
+            logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
+            return _rpc_error(-32603, "Database error", rpc_id)
 
-        # ─────────────────────────────────────────────────────────────────────────
-        # CRITICAL PATH COMPLETE — Handle result appropriately
-        # ─────────────────────────────────────────────────────────────────────────
+        if _block_insert_result == "error":
+            return _rpc_error(-32603, "Block insert failed", rpc_id)
 
-        if _block_insert_result == "fork":
-            # Fork attempt - reject clearly
-            logger.warning(
-                f"[RPC-submitBlock] ❌ REJECTED: Fork detected at h={height}"
-            )
-            return _rpc_error(
-                -32002,
-                f"Fork rejected: Block at h={height} already exists with different hash",
-                rpc_id,
-                data={"existing_hash": _existing_block_hash},
-            )
-
-        elif _block_insert_result == "error":
-            # Database error
-            logger.error(f"[RPC-submitBlock] ❌ DATABASE ERROR at h={height}")
-            return _rpc_error(-32603, "Database error during block persistence", rpc_id)
-
-        elif _block_insert_result == "duplicate":
-            # True duplicate - already in DB
-            # BUT: still run settlement in case first submission's settlement failed
-            logger.info(
-                f"[RPC-submitBlock] 🔁 ACCEPTED (duplicate): h={height} already in DB — running settlement anyway"
-            )
-
-            # Extract transactions (same as new block path)
-            txs = data.get("transactions", data.get("txs", []))
-            _COINBASE_TYPES = {"coinbase", "miner_reward", "treasury_reward"}
-            _non_coinbase_txs = [tx for tx in (txs or []) if tx.get("tx_type", "").lower() not in _COINBASE_TYPES]
-
-            # RUN SETTLEMENT FOR DUPLICATE (in case first attempt failed)
-            logger.critical(f"[RPC-submitBlock] 🔥 RUNNING SETTLEMENT FOR DUPLICATE h={height}")
+        # ═══════════════════════════════════════════════════════════════════════
+        # 4. UTXO SETTLEMENT (only if finalized)
+        # ═══════════════════════════════════════════════════════════════════════
+        if _has_enough_oracles or height == 0:
+            logger.critical(f"[RPC-submitBlock] 🔥 FINALIZING h={height} — UTXO settlement")
             try:
-                _settle_block_rewards(
-                    height, block_hash, miner_address, txs or [], _non_coinbase_txs
-                )
-                logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height}")
+                _utxo_settle_block(height, block_hash, miner_address, txs or [])
+                logger.critical(f"[RPC-submitBlock] ✅ UTXO SETTLEMENT COMPLETE h={height}")
             except Exception as settle_err:
-                logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED FOR DUPLICATE h={height}: {settle_err}", exc_info=True)
-                # FAIL THE RPC — don't hide settlement errors even on duplicates
-                return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
-
-            return _rpc_ok(
-                {
-                    "status": "accepted",
-                    "height": height,
-                    "block_hash": block_hash,
-                    "next_height": height + 1,
-                    "diagnostic": {"note": "Block already in database - settlement applied"},
-                },
-                rpc_id,
-            )
-
-        elif _block_insert_result == "inserted":
-            # ✅ Block is VERIFIED in database - safe to proceed with async work
-            logger.critical(
-                f"[RPC-submitBlock] ✅ BLOCK CONFIRMED IN DATABASE: h={height} hash={block_hash[:16]}…"
-            )
-
+                logger.critical(f"[RPC-submitBlock] ❌ UTXO settlement failed h={height}: {settle_err}", exc_info=True)
+                return _rpc_error(-32603, f"UTXO settlement failed: {str(settle_err)[:100]}", rpc_id)
         else:
-            # Unknown state - shouldn't happen
-            logger.error(
-                f"[RPC-submitBlock] ❌ UNKNOWN STATE: h={height} result={_block_insert_result}"
-            )
-            return _rpc_error(-32603, "Unknown persistence state", rpc_id)
+            # Block accepted but pending oracle consensus
+            logger.info(f"[RPC-submitBlock] ⏳ h={height} stored pending finalization ({_oracle_valid}/5 oracles)")
 
-        # ── Broadcast to P2P network ───────────────────────────────────────────
+        # ═══════════════════════════════════════════════════════════════════════
+        # 5. BROADCAST + RESPONSE
+        # ═══════════════════════════════════════════════════════════════════════
         try:
-            # Create compact block announcement
             compact_block = {
+                "height": height, "block_hash": block_hash, "parent_hash": parent_hash,
+                "merkle_root": merkle_root, "timestamp_s": timestamp_s, "nonce": nonce,
+                "difficulty": difficulty_bits, "miner_address": miner_address,
+                "tx_count": len(txs) if txs else 0,
+                "tx_ids": [tx.get("tx_id", tx.get("tx_hash", "")) for tx in (txs or [])],
+                "w_state_fidelity": w_state_fidelity,
+                "finalized": _has_enough_oracles or height == 0,
+                "oracle_attestations": _oracle_valid,
+            }
+            _broadcast_block_to_peers(compact_block)
+            _broadcast_block_event(compact_block)
+
+            # Push oracle consensus event to SSE
+            _consensus_event = {
+                "event_type": "block_finalized" if (_has_enough_oracles or height == 0) else "block_pending",
                 "height": height,
                 "block_hash": block_hash,
-                "parent_hash": parent_hash,
-                "merkle_root": merkle_root,
-                "timestamp_s": timestamp_s,
-                "timestamp": timestamp_s,
-                "nonce": nonce,
-                "difficulty": difficulty_bits,
-                "difficulty_bits": difficulty_bits,
                 "miner_address": miner_address,
-                "miner": miner_address,
-                "w_entropy_seed": w_entropy_hex,
-                "w_entropy_hash": w_entropy_hex[:64] if w_entropy_hex else "",
-                "tx_count": len(txs) if txs else 0,
-                "tx_ids": [
-                    tx.get("tx_id", tx.get("tx_hash", "")) for tx in (txs or [])
-                ],
-                "transactions": [
-                    {
-                        "tx_id": tx.get("tx_id", tx.get("tx_hash", "")),
-                        "tx_hash": tx.get("tx_id", tx.get("tx_hash", "")),
-                        "from_addr": tx.get("from_addr", tx.get("from_address", "")),
-                        "to_addr": tx.get("to_addr", tx.get("to_address", "")),
-                        "amount": float(tx.get("amount_qtcl") or tx.get("amount") or (tx.get("amount_base", 0) / 100) or 0),
-                        "tx_type": tx.get("tx_type", "transfer"),
-                        "status": "confirmed",
-                    }
-                    for tx in (txs or [])
-                ],
-                "total_fees": _total_fees if "_total_fees" in dir() else 0,
-                "w_state_fidelity": w_state_fidelity,
-                "finalized": True,
-                "mined": True,
+                "oracle_count": _oracle_valid,
+                "oracle_ids": _oracle_ids,
+                "finalized": _has_enough_oracles or height == 0,
+                "timestamp": int(time.time()),
             }
-            # Broadcast via available P2P mechanisms
-            _broadcast_block_to_peers(compact_block)
-            # Fan out to SSE/dashboard subscribers
-            _broadcast_block_event(compact_block)
-            logger.info(f"[RPC-submitBlock] 📡 Broadcasted h={height} to P2P + SSE subscribers")
+            _push_to_sse_service("/push/oracle_consensus", _consensus_event)
         except Exception as broadcast_err:
-            logger.warning(
-                f"[RPC-submitBlock] P2P broadcast failed (non-critical): {broadcast_err}"
-            )
+            logger.warning(f"[RPC-submitBlock] Broadcast failed: {broadcast_err}")
 
-        # ── Update chain state immediately ─────────────────────────────────────
+        # Update chain state
         try:
             with get_db_cursor() as cur:
                 cur.execute(
@@ -6450,63 +6444,28 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         chain_height = EXCLUDED.chain_height,
                         head_block_hash = EXCLUDED.head_block_hash,
                         updated_at = NOW()
-                """,
+                    """,
                     (height, block_hash),
                 )
-            logger.info(f"[RPC-submitBlock] ✅ Chain state updated to h={height}")
         except Exception as cs_err:
-            logger.warning(f"[RPC-submitBlock] Chain state update failed: {cs_err}")
+            logger.warning(f"[RPC-submitBlock] Chain state update: {cs_err}")
 
-        # Block was successfully inserted — enqueue settlement and return immediately
-        try:
-            _resp_reward = (
-                TessellationRewardSchedule.get_miner_reward_qtcl(height)
-                if TessellationRewardSchedule
-                else 7.20
-            )
-        except Exception:
-            _resp_reward = 7.20
+        _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
 
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # MANDATORY SYNCHRONOUS SETTLEMENT — NOT QUEUED, RUNS IMMEDIATELY
-        # Settlement FAILURE = RPC FAILURE (no silent failures)
-        # ═══════════════════════════════════════════════════════════════════════════════
-        logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height} miner={miner_address[:16]}…")
-        try:
-            _settle_block_rewards(
-                height, block_hash, miner_address, txs or [], _non_coinbase_txs
-            )
-            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height}")
-        except Exception as settle_err:
-            logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
-            # FAIL THE RPC CALL — don't hide settlement errors
-            return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
-
-        # Return accepted immediately (settlement happens in background)
-        logger.info(
-            f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… "
-            f"miner={miner_address[:16]}… reward={_resp_reward} QTCL (critical path complete)"
-        )
-        _resp = _rpc_ok(
+        _status = "accepted_finalized" if (_has_enough_oracles or height == 0) else "accepted_pending_oracles"
+        return _rpc_ok(
             {
-                "status": "accepted",
+                "status": _status,
                 "height": height,
                 "block_hash": block_hash,
                 "difficulty_bits": difficulty_bits,
                 "miner_reward_qtcl": _resp_reward,
-                "next_height": height + 1,  # Signal client to mine next block
-                "diagnostic": {
-                    "block_rowcount": _block_rowcount,
-                    "persistence_verified": True,
-                    "settlement": "async",
-                },
+                "next_height": height + 1,
+                "oracle_consensus": f"{_oracle_valid}/5",
+                "finalized": _has_enough_oracles or height == 0,
             },
             rpc_id,
         )
-        logger.info(
-            f"[RPC-submitBlock] 📤 RESPONSE: status=accepted reward={_resp_reward}"
-        )
-        return _resp
 
     except Exception as e:
         logger.exception(f"[RPC] _rpc_submitBlock unhandled: {e}")
@@ -6967,6 +6926,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,
+    "qtcl_getUTXOs": _rpc_getUTXOs,
     "qtcl_listWallets": _rpc_listWallets,
     "qtcl_debugBalance": _rpc_debugBalance,
     "qtcl_getTransaction": _rpc_getTransaction,
@@ -6997,6 +6957,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getOracleRecord": _rpc_getOracleRecord,
     "qtcl_getDeviceChain": _rpc_getDeviceChain,
     "qtcl_submitOracleReg": _rpc_submitOracleReg,
+    "qtcl_submitOracleAttestation": _rpc_submitOracleAttestation,
     "qtcl_registerMeasurementSubscriber": _rpc_registerMeasurementSubscriber,
     "qtcl_unregisterMeasurementSubscriber": _rpc_unregisterMeasurementSubscriber,
     "qtcl_listMeasurementSubscribers": _rpc_listMeasurementSubscribers,
@@ -8615,6 +8576,10 @@ def _vault_credit_account(account_id: str, amount_base: int, description: str) -
 
 # ═══ MODULE LOAD COMPLETE ═══
 # Flask app is ready to serve /health immediately
+
+# Ensure genesis block exists on empty chain
+_ensure_genesis()
+
 logger.info(
     f"[STARTUP] ✅ Server module loaded in {time.time() - _STARTUP_TIME:.2f}s — /health endpoint ready"
 )

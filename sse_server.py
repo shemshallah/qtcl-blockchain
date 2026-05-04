@@ -177,6 +177,7 @@ class SSEChannel:
 _snapshot_channel = SSEChannel("snapshot")
 _blocks_channel = SSEChannel("blocks")
 _metrics_channel = SSEChannel("metrics")
+_oracle_consensus_channel = SSEChannel("oracle_consensus")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -192,14 +193,16 @@ def _cleanup_worker():
             total_removed += _snapshot_channel.cleanup_stale(max_age=60.0)
             total_removed += _blocks_channel.cleanup_stale(max_age=60.0)
             total_removed += _metrics_channel.cleanup_stale(max_age=60.0)
+            total_removed += _oracle_consensus_channel.cleanup_stale(max_age=60.0)
             
             if total_removed > 0:
                 snap_total, _ = _snapshot_channel.get_client_counts()
                 block_total, _ = _blocks_channel.get_client_counts()
                 metric_total, _ = _metrics_channel.get_client_counts()
+                consensus_total, _ = _oracle_consensus_channel.get_client_counts()
                 logger.info(
                     f"[SSE-CLEANUP] Removed {total_removed} stale connections. "
-                    f"Current: snapshot={snap_total}, blocks={block_total}, metrics={metric_total}"
+                    f"Current: snapshot={snap_total}, blocks={block_total}, metrics={metric_total}, consensus={consensus_total}"
                 )
         except Exception as e:
             logger.error(f"[SSE-CLEANUP] Error: {e}")
@@ -365,6 +368,11 @@ def _fan_out_metric(payload: dict) -> int:
     return _metrics_channel.fan_out(payload)
 
 
+def _fan_out_oracle_consensus(payload: dict) -> int:
+    """Fan-out oracle consensus payload to all connected /rpc/oracle/consensus clients."""
+    return _oracle_consensus_channel.fan_out(payload)
+
+
 @app.route("/push/snapshot", methods=["POST"])
 def push_snapshot():
     """Internal: main server pushes snapshot frame, fan-out to all /rpc/oracle/snapshot clients."""
@@ -409,6 +417,41 @@ def push_metric():
         return {"error": str(e)}, 500
 
 
+@app.route("/push/oracle_consensus", methods=["POST"])
+def push_oracle_consensus():
+    """Internal: oracle pushes consensus event, fan-out to all /rpc/oracle/consensus clients."""
+    try:
+        payload = request.get_json()
+        if not payload:
+            return {"error": "No payload"}, 400
+        n = _fan_out_oracle_consensus(payload)
+        logger.debug(f"[SSE] /push/oracle_consensus fan-out to {n} clients")
+        return {"status": "ok", "clients": n}, 200
+    except Exception as e:
+        logger.error(f"[SSE] /push/oracle_consensus error: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route("/rpc/oracle/consensus", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_consensus():
+    """SSE stream: Real-time oracle consensus events (attestations, finalizations)."""
+    if request.method == "OPTIONS":
+        return "", 204
+
+    client_ip = _get_client_ip()
+    client = _oracle_consensus_channel.connect(client_ip)
+
+    return Response(
+        _sse_generator(_oracle_consensus_channel, client),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -420,6 +463,7 @@ def health():
     snap_total, snap_per_ip = _snapshot_channel.get_client_counts()
     block_total, block_per_ip = _blocks_channel.get_client_counts()
     metric_total, metric_per_ip = _metrics_channel.get_client_counts()
+    consensus_total, consensus_per_ip = _oracle_consensus_channel.get_client_counts()
     
     return {
         "status": "ok",
@@ -427,6 +471,7 @@ def health():
         "snapshot_clients": snap_total,
         "blocks_clients": block_total,
         "metrics_clients": metric_total,
+        "consensus_clients": consensus_total,
         "limits": {
             "max_per_ip": MAX_CONNECTIONS_PER_IP,
             "max_total": MAX_TOTAL_CONNECTIONS,
@@ -434,6 +479,7 @@ def health():
         "top_ips": {
             "snapshot": dict(sorted(snap_per_ip.items(), key=lambda x: -x[1])[:5]),
             "blocks": dict(sorted(block_per_ip.items(), key=lambda x: -x[1])[:5]),
+            "consensus": dict(sorted(consensus_per_ip.items(), key=lambda x: -x[1])[:5]),
         },
     }, 200
 
