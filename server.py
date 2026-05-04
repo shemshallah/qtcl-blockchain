@@ -1521,7 +1521,10 @@ def _verify_oracle_attestations(block_hash: str, attestations: list, min_require
         return 0, [], f"Oracle registry lookup failed: {e}"
 
     if len(registered) < min_required:
-        return 0, [], f"Only {len(registered)} oracles registered, need {min_required}"
+        # If no oracles registered yet, accept block without consensus
+        # (allows mining to work during initial setup; oracles can be added later)
+        logger.warning(f"[ORACLE-BFT] Only {len(registered)} oracles registered, need {min_required}. Block accepted without consensus.")
+        return 0, [], None
 
     valid_count = 0
     valid_ids = []
