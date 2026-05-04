@@ -984,23 +984,61 @@ threading.Thread(
 def _ensure_wallet_addresses_table() -> None:
     """Ensure wallet_addresses table exists at startup (run once, not per-request).
 
-    The _rpc_submitBlock handler previously called CREATE TABLE IF NOT EXISTS
-    on every block submission. This DDL is now run once at startup to keep
-    the critical path fast.
+    Canonical schema — MUST match qtcl_db_builder.py exactly.
+    Do NOT deviate; settlement INSERTs depend on these columns.
     """
     try:
         with get_db_cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS wallet_addresses (
-                    address VARCHAR(128) PRIMARY KEY,
-                    wallet_fingerprint VARCHAR(64),
-                    public_key TEXT,
-                    balance NUMERIC(30,0) DEFAULT 0,
-                    transaction_count INTEGER DEFAULT 0,
-                    address_type VARCHAR(20) DEFAULT 'standard',
-                    last_updated TIMESTAMP DEFAULT NOW()
+                    address              VARCHAR(255) PRIMARY KEY,
+                    wallet_fingerprint   VARCHAR(64)  NOT NULL,
+                    derivation_path      VARCHAR(100),
+                    account_index        INT,
+                    change_index         INT,
+                    address_index        INT,
+                    public_key           VARCHAR(255) NOT NULL,
+                    address_type         VARCHAR(50)  DEFAULT 'receiving',
+                    is_watching_only     BOOLEAN      DEFAULT FALSE,
+                    is_cold_storage      BOOLEAN      DEFAULT FALSE,
+                    balance              NUMERIC(30,0) DEFAULT 0,
+                    balance_updated_at   TIMESTAMP WITH TIME ZONE,
+                    balance_at_height    BIGINT,
+                    first_used_at        TIMESTAMP WITH TIME ZONE,
+                    last_used_at         TIMESTAMP WITH TIME ZONE,
+                    transaction_count    INT          DEFAULT 0,
+                    label                VARCHAR(255),
+                    notes                TEXT,
+                    created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    UNIQUE(wallet_fingerprint, derivation_path)
                 )
             """)
+            # Gracefully add any missing columns if an older schema exists
+            _WALLET_COLUMNS = {
+                "derivation_path":    "VARCHAR(100)",
+                "account_index":      "INT",
+                "change_index":       "INT",
+                "address_index":      "INT",
+                "address_type":       "VARCHAR(50) DEFAULT 'receiving'",
+                "is_watching_only":   "BOOLEAN DEFAULT FALSE",
+                "is_cold_storage":    "BOOLEAN DEFAULT FALSE",
+                "balance_updated_at": "TIMESTAMP WITH TIME ZONE",
+                "balance_at_height":  "BIGINT",
+                "first_used_at":      "TIMESTAMP WITH TIME ZONE",
+                "last_used_at":       "TIMESTAMP WITH TIME ZONE",
+                "label":              "VARCHAR(255)",
+                "notes":              "TEXT",
+                "created_at":         "TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+                "updated_at":         "TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+            }
+            for col, dtype in _WALLET_COLUMNS.items():
+                try:
+                    cur.execute(
+                        f"ALTER TABLE wallet_addresses ADD COLUMN IF NOT EXISTS {col} {dtype}"
+                    )
+                except Exception:
+                    pass
         logger.info("[STARTUP] ✅ wallet_addresses table ready")
     except Exception as e:
         logger.warning(f"[STARTUP] ⚠️  wallet_addresses DDL: {e}")
@@ -1271,15 +1309,15 @@ def _settle_block_rewards(
             # MINER REWARD — MANDATORY, ALWAYS EXECUTED
             _miner_sql = """
             INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
             VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
             ON CONFLICT (address) DO UPDATE SET
-                balance = wallet_addresses.balance + %s,
+                balance = wallet_addresses.balance + EXCLUDED.balance,
                 transaction_count = wallet_addresses.transaction_count + 1,
                 address_type = 'miner',
-                last_updated = NOW()
+                updated_at = NOW()
             """
-            cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
+            cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base))
             _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
 
             # VERIFY MINER WALLET WAS UPDATED
@@ -1291,15 +1329,15 @@ def _settle_block_rewards(
             # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
             _treasury_sql = """
             INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
             VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
             ON CONFLICT (address) DO UPDATE SET
-                balance = wallet_addresses.balance + %s,
+                balance = wallet_addresses.balance + EXCLUDED.balance,
                 transaction_count = wallet_addresses.transaction_count + 1,
                 address_type = 'treasury',
-                last_updated = NOW()
+                updated_at = NOW()
             """
-            cur.execute(_treasury_sql, (_treasury_addr, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
+            cur.execute(_treasury_sql, (_treasury_addr, treasury_fp, treasury_fp, treasury_reward_base))
             _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {_treasury_addr[:16]}… += {treasury_reward_base/100:.2f} QTCL")
 
             # VERIFY TREASURY WALLET WAS UPDATED
@@ -6172,7 +6210,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 )
                 logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height}")
             except Exception as settle_err:
-                logger.critical(f"[RPC-submitBlock] ⚠️  Settlement for duplicate failed: {settle_err}")
+                logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED FOR DUPLICATE h={height}: {settle_err}", exc_info=True)
+                # FAIL THE RPC — don't hide settlement errors even on duplicates
+                return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
 
             return _rpc_ok(
                 {
@@ -6180,7 +6220,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     "height": height,
                     "block_hash": block_hash,
                     "next_height": height + 1,
-                    "diagnostic": {"note": "Block already in database - settlement may have been applied"},
+                    "diagnostic": {"note": "Block already in database - settlement applied"},
                 },
                 rpc_id,
             )
