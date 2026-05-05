@@ -106,7 +106,7 @@ MCP_TOOLS = [
     },
     {
         "name": "qtcl_get_balance",
-        "description": "Check the QTCL balance of any address. Returns confirmed balance, pending balance, and transaction count. Amounts are in QTCL (1 QTCL = 100 base units). Use this before sending transactions to verify sufficient funds.",
+        "description": "Check the QTCL balance of any address using the Bitcoin-style UTXO set. Returns confirmed balance (sum of unspent outputs), UTXO count, and a list of unspent transaction outputs. Amounts are in QTCL (1 QTCL = 100 base units / qsat). Use this before sending transactions to verify sufficient funds.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -118,11 +118,29 @@ MCP_TOOLS = [
             "required": ["address"]
         }
     },
+    {
+        "name": "qtcl_get_utxos",
+        "description": "Get unspent transaction outputs (UTXOs) for an address. QTCL uses a Bitcoin-style UTXO model — each output is an individually spendable coin. Returns tx_hash, output_index, and amount_base for each unspent output. Use this to select inputs when building transactions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string",
+                    "description": "64-character hex QTCL address"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max UTXOs to return (default 1000)"
+                }
+            },
+            "required": ["address"]
+        }
+    },
 
     # ── Transactions ──
     {
         "name": "qtcl_send_transaction",
-        "description": "Send QTCL from one address to another. Flat fee of 1 qsat per operation (no variable gas). Transactions settle in the next block (~18 seconds). Post-quantum signatures ensure the transaction cannot be forged even by a quantum computer. Returns the transaction hash for tracking.",
+        "description": "Send QTCL from one address to another using the UTXO model. Flat fee of 1 qsat per operation (no variable gas). Transactions reference unspent outputs as inputs and create new outputs for recipient and change. Post-quantum Schnorr-Γ signatures ensure transactions cannot be forged even by quantum computers. Returns the transaction hash for tracking. NOTE: The agent must provide the Schnorr-Γ signature and public_key, or use qtcl_sign_and_submit_tx if the MCP server has wallet access.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -140,7 +158,19 @@ MCP_TOOLS = [
                 },
                 "memo": {
                     "type": "string",
-                    "description": "Optional memo/reference (max 256 chars). Useful for invoice IDs, service references, or agent coordination messages."
+                    "description": "Optional memo/reference (max 256 chars)."
+                },
+                "signature": {
+                    "type": "string",
+                    "description": "Schnorr-Γ signature JSON string (required unless using qtcl_sign_and_submit_tx)"
+                },
+                "public_key": {
+                    "type": "string",
+                    "description": "Sender's HypΓ public key hex (required unless using qtcl_sign_and_submit_tx)"
+                },
+                "nonce": {
+                    "type": "integer",
+                    "description": "Transaction nonce (auto-assigned if omitted)"
                 }
             },
             "required": ["from_address", "to_address", "amount"]
@@ -281,22 +311,35 @@ def _handle_tool_call(tool_name: str, arguments: dict) -> dict:
             "public_key": public_key,
             "label": arguments.get("label", ""),
             "created_at": time.time(),
-            "note": "Post-quantum secured with HypΓ (SHA3-256 + Schnorr-Γ over PSL(2,Z[i]))"
+            "note": "Post-quantum secured with HypΓ (SHA3-256 + Schnorr-Γ over PSL(2,R))"
         }
 
     elif tool_name == "qtcl_get_balance":
         result = qtcl_rpc("qtcl_getBalance", [arguments["address"]])
         return result
 
+    elif tool_name == "qtcl_get_utxos":
+        params = {"address": arguments["address"]}
+        if arguments.get("limit"):
+            params["limit"] = arguments["limit"]
+        result = qtcl_rpc("qtcl_getUTXOs", [params])
+        return result
+
     elif tool_name == "qtcl_send_transaction":
         params = {
-            "from": arguments["from_address"],
-            "to": arguments["to_address"],
-            "amount": int(arguments["amount"] * 100),  # Convert QTCL to base units
+            "from_address": arguments["from_address"],
+            "to_address": arguments["to_address"],
+            "amount": arguments["amount"],  # Server auto-converts QTCL <-> base units
         }
         if arguments.get("memo"):
             params["memo"] = arguments["memo"]
-        result = qtcl_rpc("qtcl_submitTransaction", params)
+        if arguments.get("signature"):
+            params["signature"] = arguments["signature"]
+        if arguments.get("public_key"):
+            params["public_key"] = arguments["public_key"]
+        if arguments.get("nonce") is not None:
+            params["nonce"] = arguments["nonce"]
+        result = qtcl_rpc("qtcl_submitTransaction", [params])
         return result
 
     elif tool_name == "qtcl_get_transaction":
