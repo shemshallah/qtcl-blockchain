@@ -1,34 +1,38 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║               QTCL MCP SERVER — Agent-Native Blockchain Access             ║
+║               QTCL MCP SERVER v2.1 — Agent-Native Blockchain Access        ║
 ║                                                                            ║
-║  Model Context Protocol (MCP) server exposing the Quantum Temporal         ║
-║  Coherence Ledger as callable tools for any AI agent.                      ║
+║  Transport:  Streamable HTTP (MCP 2024-11-05 / 2025-03-26 compatible)      ║
+║  Endpoint:   POST  https://qtcl-blockchain.koyeb.app/mcp                   ║
+║  Health:     GET   https://qtcl-blockchain.koyeb.app/mcp/health            ║
 ║                                                                            ║
-║  Any MCP-compatible system (Claude, GPT, Cursor, open-source agents)       ║
-║  can connect and transact on QTCL with zero integration code.              ║
+║  Key generation: calls hlwe.hyp_engine.HypGammaEngine directly (in-proc)  ║
+║  or falls back to qtcl_hyp_generateKeypair RPC if not in server context.   ║
 ║                                                                            ║
-║  Transport: SSE (Server-Sent Events) — standard MCP transport              ║
-║  Protocol:  MCP 2024-11-05                                                 ║
-║  Endpoint:  https://your-koyeb-url.app/mcp/sse                             ║
-║                                                                            ║
-║  Deploy: Add to your Koyeb instance alongside server.py                    ║
-║  Usage:  Point any MCP client at the /mcp/sse endpoint                     ║
+║  Changes from v2.0:                                                        ║
+║    - qtcl_create_wallet: calls real HypGammaEngine from hlwe package,      ║
+║      NOT random hashes. Falls back to HTTP RPC if engine unavailable.      ║
+║    - qtcl_sign_message: NEW tool — agents can sign arbitrary messages       ║
+║      with a HypΓ private key (needed to authorize transactions).           ║
+║    - Fixed kp.timestamp bug: HypKeyPair NamedTuple has no timestamp field, ║
+║      we inject created_at ourselves from time.time().                      ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
+from __future__ import annotations
+
 import os
-import sys
 import json
 import time
 import uuid
 import queue
 import logging
-import hashlib
-import secrets
 import threading
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
 from flask import Flask, Response, request, jsonify
 
 logger = logging.getLogger(__name__)
@@ -37,38 +41,75 @@ logger = logging.getLogger(__name__)
 # §1  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-QTCL_RPC_URL = os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
-MCP_SERVER_NAME = "qtcl-blockchain"
-MCP_SERVER_VERSION = "1.0.0"
+QTCL_RPC_URL         = os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
+MCP_SERVER_NAME      = "qtcl-blockchain"
+MCP_SERVER_VERSION   = "2.1.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §2  RPC CLIENT — Talks to the QTCL server
+# §2  HypΓ ENGINE ACCESS
+#
+#  Priority:
+#    1. Direct in-process: from hlwe.hyp_engine import HypGammaEngine
+#       (always available when running as a Blueprint on server.py)
+#    2. HTTP RPC fallback: qtcl_hyp_generateKeypair / qtcl_hyp_signMessage
+#       (used if standalone or if hlwe package unavailable)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_engine        = None
+_engine_lock   = threading.Lock()
+_engine_failed = False
+
+
+def _get_engine():
+    """Return HypGammaEngine singleton; None if hlwe package unavailable."""
+    global _engine, _engine_failed
+    if _engine is not None:
+        return _engine
+    if _engine_failed:
+        return None
+    with _engine_lock:
+        if _engine is not None:
+            return _engine
+        if _engine_failed:
+            return None
+        try:
+            from hlwe.hyp_engine import HypGammaEngine  # package path on Koyeb
+            _engine = HypGammaEngine()
+            logger.info("[MCP] ✅ HypΓ engine loaded (hlwe.hyp_engine)")
+            return _engine
+        except Exception as e:
+            logger.warning(f"[MCP] hlwe.hyp_engine unavailable ({e}); using RPC fallback")
+            _engine_failed = True
+            return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §3  HTTP RPC CLIENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import urllib.request
 
-_rpc_id_counter = 0
-_rpc_lock = threading.Lock()
+_rpc_counter = 0
+_rpc_lock    = threading.Lock()
 
 
-def _next_rpc_id():
-    global _rpc_id_counter
+def _next_id() -> int:
+    global _rpc_counter
     with _rpc_lock:
-        _rpc_id_counter += 1
-        return _rpc_id_counter
+        _rpc_counter += 1
+        return _rpc_counter
 
 
-def qtcl_rpc(method: str, params=None) -> dict:
-    """Call the QTCL JSON-RPC endpoint."""
+def qtcl_rpc(method: str, params=None) -> Any:
     payload = {
         "jsonrpc": "2.0",
-        "method": method,
-        "params": params or [],
-        "id": _next_rpc_id(),
+        "method":  method,
+        "params":  params if params is not None else [],
+        "id":      _next_id(),
     }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
+    data = json.dumps(payload).encode()
+    req  = urllib.request.Request(
         QTCL_RPC_URL,
         data=data,
         headers={"Content-Type": "application/json"},
@@ -76,424 +117,434 @@ def qtcl_rpc(method: str, params=None) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            if "error" in result:
-                raise Exception(result["error"].get("message", "RPC error"))
-            return result.get("result", result)
+            body = json.loads(resp.read().decode())
+        if "error" in body:
+            raise RuntimeError(body["error"].get("message", "RPC error"))
+        return body.get("result", body)
+    except RuntimeError:
+        raise
     except Exception as e:
-        raise Exception(f"QTCL RPC failed: {e}")
+        raise RuntimeError(f"QTCL RPC '{method}' failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §3  MCP TOOL DEFINITIONS — What agents can do with QTCL
+# §4  TOOL DEFINITIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MCP_TOOLS = [
-    # ── Wallet ──
+MCP_TOOLS: List[Dict] = [
+
     {
         "name": "qtcl_create_wallet",
-        "description": "Create a new QTCL wallet. Returns a post-quantum secure address (64-char hex) and public key. The agent can use this address to receive QTCL, submit transactions, and participate in the quantum lattice economy. Wallets are secured with HypΓ (hyperbolic gamma) post-quantum cryptography — resistant to both classical and quantum attacks.",
+        "description": (
+            "Create a new QTCL wallet backed by a real HypΓ post-quantum keypair "
+            "(Schnorr-Γ over PSL(2,R), 512-step random walk, SHA3-256² address). "
+            "Returns private_key, public_key, address, and created_at. "
+            "Store private_key securely — the server does NOT retain it."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "label": {
-                    "type": "string",
-                    "description": "Optional human-readable label for the wallet (e.g. 'agent-payments', 'escrow-fund')"
-                }
+                "label": {"type": "string", "description": "Optional label (e.g. 'agent-payments')"}
             },
             "required": []
         }
     },
     {
-        "name": "qtcl_get_balance",
-        "description": "Check the QTCL balance of any address using the Bitcoin-style UTXO set. Returns confirmed balance (sum of unspent outputs), UTXO count, and a list of unspent transaction outputs. Amounts are in QTCL (1 QTCL = 100 base units / qsat). Use this before sending transactions to verify sufficient funds.",
+        "name": "qtcl_sign_message",
+        "description": (
+            "Sign a 32-byte message hash with a HypΓ private key using Schnorr-Γ. "
+            "Required to authorize transactions: SHA3-256 hash your tx data, pass the "
+            "32-byte result as message_hex (64 hex chars), get back a signature dict "
+            "to include in qtcl_send_transaction."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "address": {
+                "message_hex": {
                     "type": "string",
-                    "description": "64-character hex QTCL address to check"
+                    "description": "SHA3-256 hash of the message, hex-encoded (exactly 64 hex chars = 32 bytes)"
+                },
+                "private_key": {
+                    "type": "string",
+                    "description": "HypΓ private key from qtcl_create_wallet"
                 }
+            },
+            "required": ["message_hex", "private_key"]
+        }
+    },
+    {
+        "name": "qtcl_get_balance",
+        "description": "Check QTCL balance for any address. Returns balance, UTXO count, and UTXO list. 1 QTCL = 100 qsat.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "string", "description": "64-char hex QTCL address"}
             },
             "required": ["address"]
         }
     },
     {
         "name": "qtcl_get_utxos",
-        "description": "Get unspent transaction outputs (UTXOs) for an address. QTCL uses a Bitcoin-style UTXO model — each output is an individually spendable coin. Returns tx_hash, output_index, and amount_base for each unspent output. Use this to select inputs when building transactions.",
+        "description": "List unspent transaction outputs (UTXOs) for an address. Returns tx_hash, output_index, amount_base per coin.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "address": {
-                    "type": "string",
-                    "description": "64-character hex QTCL address"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max UTXOs to return (default 1000)"
-                }
+                "address": {"type": "string", "description": "64-char hex QTCL address"},
+                "limit":   {"type": "integer", "description": "Max UTXOs (default 1000)"}
             },
             "required": ["address"]
         }
     },
-
-    # ── Transactions ──
     {
         "name": "qtcl_send_transaction",
-        "description": "Send QTCL from one address to another using the UTXO model. Flat fee of 1 qsat per operation (no variable gas). Transactions reference unspent outputs as inputs and create new outputs for recipient and change. Post-quantum Schnorr-Γ signatures ensure transactions cannot be forged even by quantum computers. Returns the transaction hash for tracking. NOTE: The agent must provide the Schnorr-Γ signature and public_key, or use qtcl_sign_and_submit_tx if the MCP server has wallet access.",
+        "description": (
+            "Submit a signed UTXO transaction. Flat fee: 1 qsat. ~18s finality. "
+            "Provide signature + public_key from qtcl_sign_message / qtcl_create_wallet."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "from_address": {
-                    "type": "string",
-                    "description": "Sender's 64-char hex address"
-                },
-                "to_address": {
-                    "type": "string",
-                    "description": "Recipient's 64-char hex address"
-                },
-                "amount": {
-                    "type": "number",
-                    "description": "Amount in QTCL to send (e.g. 1.5 for 1.5 QTCL)"
-                },
-                "memo": {
-                    "type": "string",
-                    "description": "Optional memo/reference (max 256 chars)."
-                },
-                "signature": {
-                    "type": "string",
-                    "description": "Schnorr-Γ signature JSON string (required unless using qtcl_sign_and_submit_tx)"
-                },
-                "public_key": {
-                    "type": "string",
-                    "description": "Sender's HypΓ public key hex (required unless using qtcl_sign_and_submit_tx)"
-                },
-                "nonce": {
-                    "type": "integer",
-                    "description": "Transaction nonce (auto-assigned if omitted)"
-                }
+                "from_address": {"type": "string"},
+                "to_address":   {"type": "string"},
+                "amount":       {"type": "number",  "description": "Amount in QTCL"},
+                "memo":         {"type": "string",  "description": "Optional memo, max 256 chars"},
+                "signature":    {"type": "string",  "description": "Schnorr-Γ signature hex"},
+                "public_key":   {"type": "string",  "description": "HypΓ public key hex"},
+                "nonce":        {"type": "integer"}
             },
             "required": ["from_address", "to_address", "amount"]
         }
     },
     {
         "name": "qtcl_get_transaction",
-        "description": "Look up a transaction by its hash. Returns sender, recipient, amount, block height, confirmation count, timestamp, and memo. Use this to verify payment receipt or track transaction status.",
+        "description": "Look up a transaction by hash.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "tx_hash": {
-                    "type": "string",
-                    "description": "Transaction hash to look up"
-                }
-            },
+            "properties": {"tx_hash": {"type": "string"}},
             "required": ["tx_hash"]
         }
     },
-
-    # ── Chain State ──
     {
         "name": "qtcl_get_chain_info",
-        "description": "Get current QTCL blockchain state: chain height, latest block hash, network hashrate, active miners, mempool depth, and oracle consensus status. Useful for monitoring network health or waiting for confirmations.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
+        "description": "Current blockchain state: height, latest hash, mempool depth, oracle status, system health.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "qtcl_get_block",
-        "description": "Get block details by height or hash. Returns block header, transaction list, miner address, reward amount, and quantum coherence metrics. Useful for auditing specific blocks or verifying transaction inclusion.",
+        "description": "Block by height or hash. Omit both params for latest block.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "height": {
-                    "type": "integer",
-                    "description": "Block height (number)"
-                },
-                "hash": {
-                    "type": "string",
-                    "description": "Block hash (alternative to height)"
-                }
+                "height": {"type": "integer"},
+                "hash":   {"type": "string"}
             },
             "required": []
         }
     },
     {
         "name": "qtcl_get_recent_transactions",
-        "description": "Get recent transactions, optionally filtered by address. Returns up to 50 transactions sorted by timestamp descending. Each entry includes hash, from, to, amount, block height, and timestamp.",
+        "description": "Recent transactions, optionally filtered by address. Up to 50, newest first.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "address": {
-                    "type": "string",
-                    "description": "Optional: filter transactions involving this address"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max results (1-50, default 20)"
-                }
+                "address":  {"type": "string"},
+                "per_page": {"type": "integer", "description": "Max results 1-50 (default 20)"}
             },
             "required": []
         }
     },
-
-    # ── Quantum Metrics (unique to QTCL) ──
     {
         "name": "qtcl_get_quantum_metrics",
-        "description": "Get live quantum coherence metrics from the QTCL oracle network. Returns W-state fidelity, entanglement witness value, density matrix snapshot dimensions, oracle consensus round, and lattice coherence score. These metrics reflect the real-time quantum state of the network and are unique to QTCL — no other blockchain has them.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
+        "description": (
+            "Live quantum coherence metrics: W-state fidelity (>=0.75), "
+            "entanglement witness, oracle consensus round, Mermin test, "
+            "kappa=0.11 non-Markovian coherence score."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
     },
-
-    # ── Oracle Network ──
     {
         "name": "qtcl_get_oracle_registry",
-        "description": "List registered quantum oracles on the QTCL network. Each oracle runs an independent quantum simulator and participates in Byzantine consensus (3-of-5 majority voting). Returns oracle addresses, public keys, stake amounts, uptime, and last heartbeat.",
+        "description": "List registered quantum oracles (5-oracle Byzantine consensus, 3-of-5 majority).",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Max results (default 10)"
-                }
-            },
+            "properties": {"limit": {"type": "integer", "description": "Max results (default 10)"}},
             "required": []
         }
     },
-
-    # ── Network ──
     {
         "name": "qtcl_get_peers",
-        "description": "List active peers on the QTCL network. Returns peer addresses, node IDs, connection times, and NAT types. Useful for network topology analysis or finding peers to connect to.",
+        "description": "List active P2P peers (Kademlia DHT).",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Max peers to return (default 20)"
-                }
-            },
+            "properties": {"limit": {"type": "integer", "description": "Max peers (default 20)"}},
             "required": []
         }
     },
-
-    # ── Price ──
     {
         "name": "qtcl_get_price",
-        "description": "Get the current QTCL/USD price from the Pyth Network oracle feed. Returns price, confidence interval, and last update timestamp. Useful for converting between QTCL and fiat values.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
+        "description": "QTCL/USD price from Pyth Network oracle feed.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
     },
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §4  TOOL HANDLERS — Execute agent requests against QTCL
+# §5  TOOL HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _wallet_create_direct(label: str) -> dict:
+    """
+    Generate real HypΓ keypair using the in-process engine.
 
-def _handle_tool_call(tool_name: str, arguments: dict) -> dict:
-    """Route a tool call to the appropriate QTCL RPC method."""
+    HypKeyPair = NamedTuple(private_key, public_key, address)
+    Note: no timestamp field — server.py has a bug accessing kp.timestamp.
+    We inject created_at ourselves.
+    """
+    engine = _get_engine()
+    if engine is None:
+        raise RuntimeError("HypΓ engine not available in-process")
+
+    kp = engine.generate_keypair()
+    # kp.private_key : 512-char string of digits 0-3 (walk indices)
+    # kp.public_key  : hex-encoded PSL(2,R) matrix (~1200+ chars)
+    # kp.address     : 64-char hex SHA3-256^2 of public key bytes
+    result: dict = {
+        "private_key": kp.private_key,
+        "public_key":  kp.public_key,
+        "address":     kp.address,
+        "created_at":  datetime.now(timezone.utc).isoformat(),
+        "crypto":      "HypΓ Schnorr-Γ / PSL(2,R) | 512-step walk | SHA3-256² address",
+    }
+    if label:
+        result["label"] = label
+    return result
+
+
+def _wallet_create_rpc(label: str) -> dict:
+    """
+    Generate keypair via HTTP RPC.
+
+    server.py's qtcl_hyp_generateKeypair tries kp.timestamp which raises
+    AttributeError (HypKeyPair has no timestamp field). If the bug is still
+    present, the RPC will return an error — we surface it clearly.
+    """
+    result = qtcl_rpc("qtcl_hyp_generateKeypair", {})
+    if isinstance(result, dict) and "error" in result:
+        raise RuntimeError(f"qtcl_hyp_generateKeypair error: {result['error']}")
+    # Normalise timestamp field: server may or may not have the bug fixed
+    if "created_at" not in result:
+        result["created_at"] = result.pop("timestamp", datetime.now(timezone.utc).isoformat())
+    result.setdefault("crypto", "HypΓ Schnorr-Γ / PSL(2,R) | 512-step walk | SHA3-256² address")
+    if label:
+        result["label"] = label
+    return result
+
+
+def _sign_direct(message_hex: str, private_key: str) -> dict:
+    """Sign via in-process engine."""
+    engine = _get_engine()
+    if engine is None:
+        raise RuntimeError("HypΓ engine not available in-process")
+
+    msg_bytes = bytes.fromhex(message_hex)
+    if len(msg_bytes) != 32:
+        raise ValueError(f"message_hex must be 32 bytes; got {len(msg_bytes)}")
+
+    sig = engine.sign_hash(msg_bytes, private_key)
+    # sig is a dict with keys: signature, challenge, auth_tag, timestamp, ...
+    return {
+        "signature": sig["signature"],
+        "challenge": sig["challenge"],
+        "auth_tag":  sig.get("auth_tag", sig["challenge"]),
+        "timestamp": sig.get("timestamp", datetime.now(timezone.utc).isoformat()),
+    }
+
+
+def _sign_rpc(message_hex: str, private_key: str) -> dict:
+    """Sign via HTTP RPC fallback."""
+    result = qtcl_rpc("qtcl_hyp_signMessage", {
+        "message":     message_hex,
+        "private_key": private_key,
+    })
+    return {
+        "signature": result["signature"],
+        "challenge": result["challenge"],
+        "auth_tag":  result.get("auth_tag", result["challenge"]),
+        "timestamp": result.get("timestamp", datetime.now(timezone.utc).isoformat()),
+    }
+
+
+def _handle_tool_call(tool_name: str, arguments: dict) -> Any:
+
+    # ── Wallet / crypto ─────────────────────────────────────────────────────
 
     if tool_name == "qtcl_create_wallet":
-        # Generate a new HypΓ keypair
-        address = hashlib.sha3_256(secrets.token_bytes(64)).hexdigest()
-        public_key = hashlib.sha3_256(secrets.token_bytes(32)).hexdigest()
-        return {
-            "address": address,
-            "public_key": public_key,
-            "label": arguments.get("label", ""),
-            "created_at": time.time(),
-            "note": "Post-quantum secured with HypΓ (SHA3-256 + Schnorr-Γ over PSL(2,R))"
-        }
+        label = arguments.get("label", "")
+        try:
+            return _wallet_create_direct(label)
+        except Exception as e:
+            logger.warning(f"[MCP] Direct keygen failed ({e}), trying RPC")
+            return _wallet_create_rpc(label)
+
+    elif tool_name == "qtcl_sign_message":
+        msg_hex = arguments.get("message_hex", "").strip()
+        priv    = arguments.get("private_key", "").strip()
+        if not msg_hex or not priv:
+            raise ValueError("message_hex and private_key are required")
+        if len(msg_hex) != 64:
+            raise ValueError(
+                f"message_hex must be 64 hex chars (32-byte SHA3-256); got {len(msg_hex)}"
+            )
+        try:
+            return _sign_direct(msg_hex, priv)
+        except Exception as e:
+            logger.warning(f"[MCP] Direct sign failed ({e}), trying RPC")
+            return _sign_rpc(msg_hex, priv)
+
+    # ── Chain queries ────────────────────────────────────────────────────────
 
     elif tool_name == "qtcl_get_balance":
-        result = qtcl_rpc("qtcl_getBalance", [arguments["address"]])
-        return result
+        return qtcl_rpc("qtcl_getBalance", [arguments["address"]])
 
     elif tool_name == "qtcl_get_utxos":
-        params = {"address": arguments["address"]}
+        p: dict = {"address": arguments["address"]}
         if arguments.get("limit"):
-            params["limit"] = arguments["limit"]
-        result = qtcl_rpc("qtcl_getUTXOs", [params])
-        return result
+            p["limit"] = int(arguments["limit"])
+        return qtcl_rpc("qtcl_getUTXOs", [p])
 
     elif tool_name == "qtcl_send_transaction":
-        params = {
+        p = {
             "from_address": arguments["from_address"],
-            "to_address": arguments["to_address"],
-            "amount": arguments["amount"],  # Server auto-converts QTCL <-> base units
+            "to_address":   arguments["to_address"],
+            "amount":       arguments["amount"],
         }
-        if arguments.get("memo"):
-            params["memo"] = arguments["memo"]
-        if arguments.get("signature"):
-            params["signature"] = arguments["signature"]
-        if arguments.get("public_key"):
-            params["public_key"] = arguments["public_key"]
-        if arguments.get("nonce") is not None:
-            params["nonce"] = arguments["nonce"]
-        result = qtcl_rpc("qtcl_submitTransaction", [params])
-        return result
+        for k in ("memo", "signature", "public_key", "nonce"):
+            if arguments.get(k) is not None:
+                p[k] = arguments[k]
+        return qtcl_rpc("qtcl_submitTransaction", [p])
 
     elif tool_name == "qtcl_get_transaction":
-        result = qtcl_rpc("qtcl_getTransaction", [arguments["tx_hash"]])
-        return result
+        return qtcl_rpc("qtcl_getTransaction", [arguments["tx_hash"]])
 
     elif tool_name == "qtcl_get_chain_info":
-        height = qtcl_rpc("qtcl_getBlockHeight")
-        mempool = qtcl_rpc("qtcl_getMempoolStats")
-        health = qtcl_rpc("qtcl_getHealth")
         return {
-            "chain": height,
-            "mempool": mempool,
-            "health": health,
+            "chain":   qtcl_rpc("qtcl_getBlockHeight"),
+            "mempool": qtcl_rpc("qtcl_getMempoolStats"),
+            "health":  qtcl_rpc("qtcl_getHealth"),
         }
 
     elif tool_name == "qtcl_get_block":
         if "height" in arguments:
-            result = qtcl_rpc("qtcl_getBlock", [arguments["height"]])
+            key = arguments["height"]
         elif "hash" in arguments:
-            result = qtcl_rpc("qtcl_getBlock", [arguments["hash"]])
+            key = arguments["hash"]
         else:
-            height = qtcl_rpc("qtcl_getBlockHeight")
-            result = qtcl_rpc("qtcl_getBlock", [height.get("height", 0)])
-        return result
+            tip = qtcl_rpc("qtcl_getBlockHeight")
+            key = tip.get("height", 0) if isinstance(tip, dict) else tip
+        return qtcl_rpc("qtcl_getBlock", [key])
 
     elif tool_name == "qtcl_get_recent_transactions":
-        params = {}
+        p = {
+            "page":     0,
+            "per_page": min(int(arguments.get("per_page", 20)), 50),
+        }
         if arguments.get("address"):
-            params["address"] = arguments["address"]
-        params["limit"] = min(arguments.get("limit", 20), 50)
-        result = qtcl_rpc("qtcl_getTransactions", params)
-        return result
+            p["address"] = arguments["address"]
+        return qtcl_rpc("qtcl_getTransactions", p)
 
     elif tool_name == "qtcl_get_quantum_metrics":
-        result = qtcl_rpc("qtcl_getQuantumMetrics")
-        return result
+        return qtcl_rpc("qtcl_getQuantumMetrics")
 
     elif tool_name == "qtcl_get_oracle_registry":
-        limit = arguments.get("limit", 10)
-        result = qtcl_rpc("qtcl_getOracleRegistry", {"limit": limit})
-        return result
+        return qtcl_rpc("qtcl_getOracleRegistry", {"limit": arguments.get("limit", 10)})
 
     elif tool_name == "qtcl_get_peers":
-        limit = arguments.get("limit", 20)
-        result = qtcl_rpc("qtcl_getPeers", [limit])
-        return result
+        return qtcl_rpc("qtcl_getPeers", [arguments.get("limit", 20)])
 
     elif tool_name == "qtcl_get_price":
-        result = qtcl_rpc("qtcl_getPythPrice")
-        return result
+        return qtcl_rpc("qtcl_getPythPrice")
 
     else:
         raise ValueError(f"Unknown tool: {tool_name}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §5  MCP PROTOCOL HANDLER — JSON-RPC over SSE
+# §6  MCP PROTOCOL DISPATCHER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _ok(msg_id: Any, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
-def _mcp_response(id: Any, result: dict) -> dict:
-    return {"jsonrpc": "2.0", "id": id, "result": result}
-
-
-def _mcp_error(id: Any, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}
+def _err(msg_id: Any, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
-def handle_mcp_message(msg: dict) -> dict:
-    """Process a single MCP JSON-RPC message."""
+def handle_mcp_message(msg: dict) -> Optional[dict]:
     method = msg.get("method", "")
     msg_id = msg.get("id")
     params = msg.get("params", {})
 
-    # ── initialize ──
     if method == "initialize":
-        return _mcp_response(msg_id, {
+        return _ok(msg_id, {
             "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": {
-                "tools": {"listChanged": False},
-            },
-            "serverInfo": {
-                "name": MCP_SERVER_NAME,
-                "version": MCP_SERVER_VERSION,
-            }
+            "capabilities":    {"tools": {"listChanged": False}},
+            "serverInfo":      {"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION},
         })
 
-    # ── notifications (no response needed) ──
-    if method == "notifications/initialized":
-        return None  # No response for notifications
+    if method.startswith("notifications/"):
+        return None
 
-    # ── tools/list ──
+    if method == "ping":
+        return _ok(msg_id, {})
+
     if method == "tools/list":
-        return _mcp_response(msg_id, {"tools": MCP_TOOLS})
+        return _ok(msg_id, {"tools": MCP_TOOLS})
 
-    # ── tools/call ──
     if method == "tools/call":
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
         try:
             result = _handle_tool_call(tool_name, arguments)
-            return _mcp_response(msg_id, {
-                "content": [
-                    {"type": "text", "text": json.dumps(result, indent=2, default=str)}
-                ]
+            return _ok(msg_id, {
+                "content": [{"type": "text", "text": json.dumps(result, indent=2, default=str)}]
             })
         except Exception as e:
-            return _mcp_response(msg_id, {
-                "content": [
-                    {"type": "text", "text": f"Error: {str(e)}"}
-                ],
-                "isError": True
+            logger.error(f"[MCP] tool error ({tool_name}): {e}", exc_info=True)
+            return _ok(msg_id, {
+                "content": [{"type": "text", "text": f"Error: {e}"}],
+                "isError": True,
             })
 
-    # ── ping ──
-    if method == "ping":
-        return _mcp_response(msg_id, {})
-
-    return _mcp_error(msg_id, -32601, f"Method not found: {method}")
+    return _err(msg_id, -32601, f"Method not found: {method}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §6  FLASK ROUTES — SSE Transport for MCP
+# §7  STREAMABLE HTTP TRANSPORT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-mcp_app = Flask(__name__)
-
-# Per-session message queues for SSE
 _sessions: Dict[str, queue.Queue] = {}
 _sessions_lock = threading.Lock()
 
 
-@mcp_app.route("/mcp/sse", methods=["GET"])
-def mcp_sse():
-    """SSE endpoint — MCP clients connect here for the event stream."""
-    session_id = str(uuid.uuid4())
-    session_queue = queue.Queue(maxsize=100)
+def _cors() -> dict:
+    return {
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id, Authorization",
+    }
 
+
+def _sse_stream(session_id: str) -> Response:
+    q: queue.Queue = queue.Queue(maxsize=100)
     with _sessions_lock:
-        _sessions[session_id] = session_queue
+        _sessions[session_id] = q
 
-    logger.info(f"[MCP] Client connected: session={session_id[:8]}...")
-
-    # Send the endpoint event — tells the client where to POST messages
-    def event_stream():
-        # First event: tell client the message endpoint
-        endpoint_url = f"/mcp/message?session_id={session_id}"
-        yield f"event: endpoint\ndata: {endpoint_url}\n\n"
-
+    def generate():
+        yield f"event: endpoint\ndata: /mcp\n\n"
         try:
             while True:
                 try:
-                    msg = session_queue.get(timeout=30.0)
+                    msg = q.get(timeout=25.0)
                     if msg is None:
                         break
                     yield f"event: message\ndata: {json.dumps(msg)}\n\n"
@@ -504,114 +555,146 @@ def mcp_sse():
         finally:
             with _sessions_lock:
                 _sessions.pop(session_id, None)
-            logger.info(f"[MCP] Client disconnected: session={session_id[:8]}...")
 
-    return Response(
-        event_stream(),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-        },
-    )
-
-
-@mcp_app.route("/mcp/message", methods=["POST"])
-def mcp_message():
-    """Message endpoint — MCP clients POST JSON-RPC messages here."""
-    session_id = request.args.get("session_id", "")
-
-    with _sessions_lock:
-        session_queue = _sessions.get(session_id)
-
-    if not session_queue:
-        return jsonify({"error": "Invalid session"}), 400
-
-    try:
-        msg = request.get_json()
-        if not msg:
-            return jsonify({"error": "No JSON body"}), 400
-
-        response = handle_mcp_message(msg)
-
-        if response is not None:
-            # Push response to the SSE stream
-            try:
-                session_queue.put_nowait(response)
-            except queue.Full:
-                session_queue.get_nowait()
-                session_queue.put_nowait(response)
-
-        return "", 202
-
-    except Exception as e:
-        logger.error(f"[MCP] Message error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@mcp_app.route("/mcp/health", methods=["GET"])
-def mcp_health():
-    """Health check for the MCP server."""
-    with _sessions_lock:
-        n_sessions = len(_sessions)
-    return jsonify({
-        "status": "ok",
-        "server": MCP_SERVER_NAME,
-        "version": MCP_SERVER_VERSION,
-        "protocol": MCP_PROTOCOL_VERSION,
-        "active_sessions": n_sessions,
-        "tools": len(MCP_TOOLS),
+    return Response(generate(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "Connection":    "keep-alive",
+        "X-Accel-Buffering": "no",
+        **_cors(),
     })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §7  INTEGRATION — Register MCP routes with main Flask app
+# §8  FLASK BLUEPRINT
 # ═══════════════════════════════════════════════════════════════════════════════
-
-
-def register_mcp_routes(app):
-    """Register MCP endpoints on the main QTCL server Flask app.
-
-    Call this from server.py:
-        from qtcl_mcp_server import register_mcp_routes
-        register_mcp_routes(app)
-
-    Then any MCP client can connect to:
-        https://your-koyeb-url.app/mcp/sse
-    """
-    app.register_blueprint(_create_mcp_blueprint())
-    logger.info(f"[MCP] ✅ QTCL MCP server registered — {len(MCP_TOOLS)} tools available")
-    logger.info(f"[MCP]    Endpoint: /mcp/sse")
-    logger.info(f"[MCP]    Protocol: {MCP_PROTOCOL_VERSION}")
-
 
 def _create_mcp_blueprint():
     from flask import Blueprint
     bp = Blueprint("mcp", __name__)
 
-    bp.add_url_rule("/mcp/sse", "mcp_sse", mcp_sse)
-    bp.add_url_rule("/mcp/message", "mcp_message", mcp_message, methods=["POST"])
-    bp.add_url_rule("/mcp/health", "mcp_health", mcp_health)
+    @bp.route("/mcp", methods=["OPTIONS"])
+    @bp.route("/mcp/sse", methods=["OPTIONS"])
+    def mcp_options():
+        return Response("", status=204, headers=_cors())
+
+    @bp.route("/mcp", methods=["GET"])
+    def mcp_get():
+        sid = request.headers.get("Mcp-Session-Id") or str(uuid.uuid4())
+        logger.info(f"[MCP] SSE connect sid={sid[:8]}")
+        return _sse_stream(sid)
+
+    @bp.route("/mcp", methods=["POST"])
+    def mcp_post():
+        try:
+            msg = request.get_json(force=True, silent=True)
+            if not msg:
+                return jsonify(_err(None, -32700, "Parse error")), 400
+        except Exception:
+            return jsonify(_err(None, -32700, "Parse error")), 400
+
+        response   = handle_mcp_message(msg)
+        is_init    = msg.get("method") == "initialize"
+        sid        = request.headers.get("Mcp-Session-Id")
+        if not sid and is_init:
+            sid = str(uuid.uuid4())
+
+        resp_headers = {**_cors()}
+        if sid:
+            resp_headers["Mcp-Session-Id"] = sid
+
+        if response is None:
+            return Response("", status=202, headers=resp_headers)
+
+        if "text/event-stream" in request.headers.get("Accept", ""):
+            resp_headers.update({"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+            return Response(
+                f"event: message\ndata: {json.dumps(response)}\n\n",
+                status=200, headers=resp_headers
+            )
+
+        resp_headers["Content-Type"] = "application/json"
+        return Response(json.dumps(response), status=200, headers=resp_headers)
+
+    @bp.route("/mcp/health", methods=["GET"])
+    def mcp_health():
+        engine_ok = _get_engine() is not None
+        with _sessions_lock:
+            n = len(_sessions)
+        return jsonify({
+            "status":          "ok",
+            "server":          MCP_SERVER_NAME,
+            "version":         MCP_SERVER_VERSION,
+            "protocol":        MCP_PROTOCOL_VERSION,
+            "transport":       "streamable-http",
+            "hyp_engine":      "in-process" if engine_ok else "rpc-fallback",
+            "active_sessions": n,
+            "tools":           len(MCP_TOOLS),
+        })
+
+    # ── Legacy SSE / message endpoints (backwards compat) ──────────────────
+    @bp.route("/mcp/sse", methods=["GET"])
+    def mcp_sse_legacy():
+        sid = str(uuid.uuid4())
+        return _sse_stream(sid)
+
+    @bp.route("/mcp/message", methods=["POST"])
+    def mcp_message_legacy():
+        sid = request.args.get("session_id", "")
+        with _sessions_lock:
+            q = _sessions.get(sid)
+        if not q:
+            return jsonify({"error": "Invalid or expired session"}), 400
+        try:
+            msg = request.get_json(force=True, silent=True)
+            if not msg:
+                return jsonify({"error": "No JSON body"}), 400
+            response = handle_mcp_message(msg)
+            if response is not None:
+                try:
+                    q.put_nowait(response)
+                except queue.Full:
+                    q.get_nowait()
+                    q.put_nowait(response)
+            return "", 202
+        except Exception as e:
+            logger.error(f"[MCP] Legacy message error: {e}")
+            return jsonify({"error": str(e)}), 500
 
     return bp
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §8  STANDALONE MODE
+# §9  PUBLIC API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def register_mcp_routes(app):
+    """Register MCP endpoints on the main QTCL Flask app. Call from server.py."""
+    app.register_blueprint(_create_mcp_blueprint())
+    engine_status = "in-process ✅" if _get_engine() is not None else "rpc-fallback ⚠️"
+    logger.info(f"[MCP] ✅ QTCL MCP server v{MCP_SERVER_VERSION} registered — {len(MCP_TOOLS)} tools")
+    logger.info(f"[MCP]    Transport  : Streamable HTTP")
+    logger.info(f"[MCP]    Protocol   : {MCP_PROTOCOL_VERSION}")
+    logger.info(f"[MCP]    HypΓ       : {engine_status}")
+    logger.info(f"[MCP]    Primary    : /mcp")
+    logger.info(f"[MCP]    Legacy SSE : /mcp/sse")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §10  STANDALONE MODE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    import sys
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logger.info("╔══════════════════════════════════════════════════════════════╗")
-    logger.info("║          QTCL MCP SERVER — Agent-Native Blockchain          ║")
+    logger.info("║    QTCL MCP SERVER v2.1 — Streamable HTTP + HypΓ Engine     ║")
     logger.info("╚══════════════════════════════════════════════════════════════╝")
-    logger.info(f"  Tools:    {len(MCP_TOOLS)}")
-    logger.info(f"  Protocol: {MCP_PROTOCOL_VERSION}")
-    logger.info(f"  RPC URL:  {QTCL_RPC_URL}")
-    logger.info(f"  Endpoint: http://0.0.0.0:8002/mcp/sse")
-    logger.info("")
-
     port = int(os.environ.get("MCP_PORT", 8002))
-    mcp_app.run(host="0.0.0.0", port=port, debug=False)
+    logger.info(f"  Tools    : {len(MCP_TOOLS)}")
+    logger.info(f"  Protocol : {MCP_PROTOCOL_VERSION}")
+    logger.info(f"  RPC URL  : {QTCL_RPC_URL}")
+    logger.info(f"  Endpoint : http://0.0.0.0:{port}/mcp")
+
+    standalone = Flask(__name__)
+    standalone.register_blueprint(_create_mcp_blueprint())
+    standalone.run(host="0.0.0.0", port=port, debug=False)
