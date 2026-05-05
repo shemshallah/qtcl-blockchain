@@ -3266,7 +3266,7 @@ def _lazy_ensure_oracle_registry():
                     peer_count      INTEGER       NOT NULL DEFAULT 0,
                     wallet_address  VARCHAR(128)  NOT NULL DEFAULT '',
                     oracle_pub_key  TEXT          NOT NULL DEFAULT '',
-                    cert_sig        VARCHAR(128)  NOT NULL DEFAULT '',
+                    cert_sig        TEXT          NOT NULL DEFAULT '',
                     mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
                     ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
                     reg_tx_hash     VARCHAR(64)   NOT NULL DEFAULT '',
@@ -3278,7 +3278,7 @@ def _lazy_ensure_oracle_registry():
             for col, dtype in [
                 ("wallet_address", "VARCHAR(128) DEFAULT ''"),
                 ("oracle_pub_key", "TEXT DEFAULT ''"),
-                ("cert_sig", "VARCHAR(128) DEFAULT ''"),
+                ("cert_sig", "TEXT DEFAULT ''"),
                 ("mode", "VARCHAR(32) DEFAULT 'full'"),
                 ("ip_hint", "VARCHAR(256) DEFAULT ''"),
                 ("reg_tx_hash", "VARCHAR(64) DEFAULT ''"),

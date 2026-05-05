@@ -796,6 +796,30 @@ CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks(block_hash);
 CREATE INDEX IF NOT EXISTS idx_blocks_parent ON blocks(parent_hash);
 CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
 
+-- TABLE: oracle_attestations
+-- BFT consensus: each block needs >=3 valid oracle signatures to finalize
+CREATE TABLE oracle_attestations (
+    attestation_id BIGSERIAL PRIMARY KEY,
+    block_height BIGINT NOT NULL,
+    block_hash VARCHAR(255) NOT NULL,
+    oracle_id VARCHAR(255) NOT NULL,
+    oracle_address VARCHAR(255) NOT NULL,
+    w_state_fidelity NUMERIC(5,4) DEFAULT 0.0,
+    attestation_signature JSONB NOT NULL,
+    attestation_timestamp BIGINT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(block_height, oracle_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ora_att_block_height ON oracle_attestations(block_height);
+CREATE INDEX IF NOT EXISTS idx_ora_att_block_hash ON oracle_attestations(block_hash);
+CREATE INDEX IF NOT EXISTS idx_ora_att_oracle ON oracle_attestations(oracle_id);
+
+-- UTXO indexes (critical for performance)
+CREATE INDEX IF NOT EXISTS idx_utxo_address ON address_utxos(address);
+CREATE INDEX IF NOT EXISTS idx_utxo_unspent ON address_utxos(address, spent) WHERE spent = FALSE;
+CREATE INDEX IF NOT EXISTS idx_utxo_tx ON address_utxos(tx_hash, output_index);
+
 -- TABLE: chain_reorganizations
 CREATE TABLE chain_reorganizations (
     reorg_id BIGSERIAL PRIMARY KEY,
@@ -1101,7 +1125,7 @@ CREATE TABLE oracle_registry (
     -- ── ON-CHAIN IDENTITY COLUMNS (oracle_reg TX pipeline) ─────────────────
     wallet_address  VARCHAR(128)  NOT NULL DEFAULT '',
     oracle_pub_key  TEXT          NOT NULL DEFAULT '',
-    cert_sig        VARCHAR(128)  NOT NULL DEFAULT '',
+    cert_sig        TEXT          NOT NULL DEFAULT '',
     cert_auth_tag   VARCHAR(128)  NOT NULL DEFAULT '',
     mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
     ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
@@ -1976,7 +2000,7 @@ class QuantumTemporalCoherenceLedgerServer:
             migrations = [
                 "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS wallet_address  VARCHAR(128) NOT NULL DEFAULT ''",
                 "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_pub_key  TEXT         NOT NULL DEFAULT ''",
-                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_sig        VARCHAR(128) NOT NULL DEFAULT ''",
+                "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_sig        TEXT         NOT NULL DEFAULT ''",
                 "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_auth_tag   VARCHAR(128) NOT NULL DEFAULT ''",
                 "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS mode            VARCHAR(32)  NOT NULL DEFAULT 'full'",
                 "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS ip_hint         VARCHAR(256) NOT NULL DEFAULT ''",
