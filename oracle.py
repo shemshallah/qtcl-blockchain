@@ -124,6 +124,9 @@ class QuantumInformationMetrics:
     def w3_fidelity(dm: np.ndarray) -> float:
         return float(np.real(np.trace(dm @ _W_IDEAL_DM)))
 
+    # Alias for backward compatibility
+    state_fidelity = w3_fidelity
+
     @staticmethod
     def von_neumann_entropy(dm: np.ndarray) -> float:
         try:
@@ -137,6 +140,9 @@ class QuantumInformationMetrics:
     def coherence_l1(dm: np.ndarray) -> float:
         off_diag = np.sum(np.abs(dm - np.diag(np.diag(dm))))
         return float(off_diag / 7.0)
+
+    # Alias for backward compatibility
+    coherence_l1_norm = coherence_l1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
