@@ -1687,7 +1687,8 @@ def _auto_generate_oracle_attestations(height: int, block_hash: str, header_hash
                         try:
                             _utxo_settle_block(height, _stored_hash, _miner, _txs)
                         except Exception as _settle_err:
-                            logger.warning(f"[AUTO-CONSENSUS] UTXO settlement failed for h={height}: {_settle_err}")
+                            logger.critical(f"[AUTO-CONSENSUS] ❌ UTXO settlement failed for h={height}: {_settle_err}")
+                            return
                         cur.execute(
                             "UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s",
                             (int(time.time()), height),
@@ -5867,12 +5868,18 @@ def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
     try:
         engine = _init_hlwe_engine()
         kp = engine.generate_keypair()
+        # HypKeyPair = NamedTuple(private_key, public_key, address)
+        # There is NO timestamp field — injecting created_at from datetime.
         return _rpc_ok(
             {
                 "private_key": kp.private_key,
-                "public_key": kp.public_key,
-                "address": kp.address,
-                "timestamp": kp.timestamp,
+                "public_key":  kp.public_key,
+                "address":     kp.address,
+                "created_at":  datetime.now(timezone.utc).isoformat(),
+                "crypto": (
+                    "HypΓ Schnorr-Γ / PSL(2,R) | "
+                    "512-step walk | SHA3-256² address"
+                ),
             },
             rpc_id,
         )
@@ -6458,6 +6465,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ═══════════════════════════════════════════════════════════════════════
         _block_insert_result = None
         _existing_block_hash = None
+        _db_attest_count = 0
 
         _db_finalized = False
         try:
@@ -6625,6 +6633,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # else: duplicate and already finalized — nothing to do, _is_finalized already True
 
+        # For duplicate finalized blocks, use DB attestation count instead of submitted count (0)
+        if _block_insert_result == "duplicate" and _db_finalized:
+            _db_attest_count = _count_oracle_attestations(height)
+            if _db_attest_count > 0:
+                _oracle_valid = _db_attest_count
+
         # ═══════════════════════════════════════════════════════════════════════
         # 5. BROADCAST + RESPONSE
         # ═══════════════════════════════════════════════════════════════════════
@@ -6638,19 +6652,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "w_state_fidelity": w_state_fidelity,
                 "finalized": _is_finalized,
                 "oracle_attestations": _oracle_valid,
-            }
-            _broadcast_block_to_peers(compact_block)
-            _broadcast_block_event(compact_block)
-
-            # Push oracle consensus event to SSE
-            _consensus_event = {
-                "event_type": "block_finalized" if _is_finalized else "block_pending",
-                "height": height,
-                "block_hash": block_hash,
-                "miner_address": miner_address,
-                "oracle_count": _oracle_valid,
-                "finalized": _is_finalized,
-                "timestamp": int(time.time()),
             }
             _broadcast_block_to_peers(compact_block)
             _broadcast_block_event(compact_block)
