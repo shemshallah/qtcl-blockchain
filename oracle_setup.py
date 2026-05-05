@@ -91,7 +91,7 @@ def _ensure_oracle_registry_table(cur):
             mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
             ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
             reg_tx_hash     VARCHAR(64)   NOT NULL DEFAULT '',
-            registered_at   TIMESTAMPTZ   DEFAULT NOW(),
+            registered_at   BIGINT        DEFAULT 0,
             created_at      TIMESTAMPTZ   DEFAULT NOW()
         )
     """)
@@ -104,7 +104,7 @@ def _ensure_oracle_registry_table(cur):
         ("mode", "VARCHAR(32) DEFAULT 'full'"),
         ("ip_hint", "VARCHAR(256) DEFAULT ''"),
         ("reg_tx_hash", "VARCHAR(64) DEFAULT ''"),
-        ("registered_at", "TIMESTAMPTZ DEFAULT NOW()"),
+        ("registered_at", "BIGINT DEFAULT 0"),
     ]:
         cur.execute(
             f"ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS {col} {dtype}"
@@ -144,14 +144,14 @@ def _insert_oracle(cur, creds: dict):
     cur.execute("""
         INSERT INTO oracle_registry
         (oracle_id, oracle_address, oracle_pub_key, cert_sig, mode, is_primary, registered_at)
-        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+        VALUES (%s, %s, %s, %s, %s, %s, EXTRACT(EPOCH FROM NOW())::bigint)
         ON CONFLICT (oracle_id) DO UPDATE SET
             oracle_address = EXCLUDED.oracle_address,
             oracle_pub_key = EXCLUDED.oracle_pub_key,
             cert_sig       = EXCLUDED.cert_sig,
             mode           = EXCLUDED.mode,
             is_primary     = EXCLUDED.is_primary,
-            registered_at  = NOW()
+            registered_at  = EXTRACT(EPOCH FROM NOW())::bigint
     """, (
         creds["oracle_id"],
         creds["oracle_address"],

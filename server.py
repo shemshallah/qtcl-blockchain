@@ -397,6 +397,18 @@ if not logging.getLogger().hasHandlers():
 
 logger = logging.getLogger(__name__)
 
+
+def _iso(v):
+    """Normalise a timestamp value (datetime, int epoch, float epoch, None) → ISO-8601 string."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    return str(v)
+
+
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # DISTRIBUTED HASH TABLE (DHT) — KADEMLIA-BASED PEER DISCOVERY
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -3258,7 +3270,7 @@ def _lazy_ensure_oracle_registry():
                     mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
                     ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
                     reg_tx_hash     VARCHAR(64)   NOT NULL DEFAULT '',
-                    registered_at   TIMESTAMPTZ   DEFAULT NOW(),
+                    registered_at   BIGINT        DEFAULT 0,
                     created_at      TIMESTAMPTZ   DEFAULT NOW()
                 )
             """)
@@ -3270,7 +3282,7 @@ def _lazy_ensure_oracle_registry():
                 ("mode", "VARCHAR(32) DEFAULT 'full'"),
                 ("ip_hint", "VARCHAR(256) DEFAULT ''"),
                 ("reg_tx_hash", "VARCHAR(64) DEFAULT ''"),
-                ("registered_at", "TIMESTAMPTZ DEFAULT NOW()"),
+                ("registered_at", "BIGINT DEFAULT 0"),
             ]:
                 try:
                     cur.execute(
