@@ -124,8 +124,21 @@ class QuantumInformationMetrics:
     def w3_fidelity(dm: np.ndarray) -> float:
         return float(np.real(np.trace(dm @ _W_IDEAL_DM)))
 
-    # Alias for backward compatibility
-    state_fidelity = w3_fidelity
+    @staticmethod
+    def state_fidelity(rho1: np.ndarray, rho2: np.ndarray) -> float:
+        """F(ρ₁,ρ₂) = Tr(√(√ρ₁·ρ₂·√ρ₁))² — Uhlmann–Jozsa fidelity."""
+        try:
+            if rho1 is None or rho2 is None:
+                return 0.0
+            ev, ec = np.linalg.eigh(rho1)
+            ev = np.maximum(ev, 0.0)
+            sqrt_rho1 = ec @ np.diag(np.sqrt(ev)) @ ec.conj().T
+            product = sqrt_rho1 @ rho2 @ sqrt_rho1
+            ep = np.linalg.eigvalsh(product)
+            ep = np.maximum(ep, 0.0)
+            return float(min(1.0, max(0.0, float(np.sum(np.sqrt(ep))) ** 2)))
+        except Exception:
+            return 0.0
 
     @staticmethod
     def von_neumann_entropy(dm: np.ndarray) -> float:
