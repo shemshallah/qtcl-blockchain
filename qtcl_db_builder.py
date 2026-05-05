@@ -734,7 +734,8 @@ CREATE TABLE address_utxos (
     spent_at_height BIGINT,
     spent_in_tx_hash VARCHAR(255),
     created_at_height BIGINT,
-    created_at_timestamp BIGINT
+    created_at_timestamp BIGINT,
+    CONSTRAINT unique_tx_output UNIQUE (tx_hash, output_index)
 );
 
 -- TABLE: audit_logs

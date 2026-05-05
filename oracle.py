@@ -961,11 +961,31 @@ class _LazyCluster:
         return cls._instance
 
 
+def _try_http_snapshot():
+    """Try to fetch consensus from standalone oracle server on :9092."""
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:9092/status", method="GET", timeout=3)
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode())
+                return data.get("result", {}).get("quantum_consensus")
+    except Exception:
+        pass
+    return None
+
+
 class _MinimalOracleFacade:
     """Minimal facade with the methods server.py calls on ORACLE."""
     def get_latest_snapshot(self):
+        snap = _try_http_snapshot()
+        if snap:
+            return snap
         return _LazyCluster.get().reach_consensus()
     def get_latest_density_matrix(self):
+        snap = _try_http_snapshot()
+        if snap:
+            return snap
         return _LazyCluster.get().reach_consensus()
 
 
@@ -975,8 +995,14 @@ class _MinimalWStateManagerFacade:
         logger.info("[ORACLE] WStateManager.start() (noop in standalone mode)")
         return True
     def get_latest_snapshot(self):
+        snap = _try_http_snapshot()
+        if snap:
+            return snap
         return _LazyCluster.get().reach_consensus()
     def get_latest_density_matrix(self):
+        snap = _try_http_snapshot()
+        if snap:
+            return snap
         return _LazyCluster.get().reach_consensus()
     def stop(self):
         pass
