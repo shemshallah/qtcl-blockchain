@@ -1220,6 +1220,30 @@ except ImportError:
         def mutual_information(dm):
             return 0.0
 
+        @staticmethod
+        def coherence_renyi(dm):
+            return QuantumInformationMetrics.coherence_l1_norm(dm)
+
+        @staticmethod
+        def coherence_geometric(dm):
+            return QuantumInformationMetrics.coherence_l1_norm(dm)
+
+        @staticmethod
+        def w_state_strength(dm, counts=None):
+            return QuantumInformationMetrics.purity(dm)
+
+        @staticmethod
+        def phase_coherence(dm):
+            return QuantumInformationMetrics.coherence_l1_norm(dm)
+
+        @staticmethod
+        def entanglement_witness(dm):
+            return 0.0
+
+        @staticmethod
+        def trace_purity(dm):
+            return QuantumInformationMetrics.purity(dm)
+
 
 QUANTUM_METRICS = QuantumInformationMetrics()
 
@@ -1923,7 +1947,7 @@ class QuantumLatticeController:
         # Quantum state — NATIVE 64³ 3D DENSITY TENSOR (NOT 256×256)
         # 64×64×64 spatial-temporal field representation of quantum coherence
         # Initialized as coherent 3D W-state with Gaussian envelope
-        _DIM = 64  # 64³ = 262,144 elements (native 3D quantum field)
+        _DIM = 16  # 16³ = 4,096 elements — streamed to oracle as quantum_field_16x16x16
 
         # Initialize 64³ density tensor — SERVER LATTICE (GROUND TRUTH)
         # Streamed to all clients via SSE /rpc/oracle/snapshot
@@ -1933,16 +1957,16 @@ class QuantumLatticeController:
         # Multi-mode coherent quantum state (superposition of spatial W-state modes)
         _num_modes = 8
         for _m in range(_num_modes):
-            _cx = 16 + _m * 4
-            _cy = 16 + _m * 4
-            _cz = 32
+            _cx = _DIM // 2 + _m * 1
+            _cy = _DIM // 2 + _m * 1
+            _cz = _DIM // 2
 
             for i in range(_DIM):
                 for j in range(_DIM):
                     for k in range(_DIM):
-                        _dx = (i - _cx) / 20.0
-                        _dy = (j - _cy) / 20.0
-                        _dz = (k - _cz) / 20.0
+                        _dx = (i - _cx) / (_DIM / 3.2)
+                        _dy = (j - _cy) / (_DIM / 3.2)
+                        _dz = (k - _cz) / (_DIM / 3.2)
                         _r2 = _dx * _dx + _dy * _dy + _dz * _dz
                         _envelope = np.exp(-_r2 / 2.0)
                         _phase = 2 * np.pi * _m / _num_modes
@@ -1957,6 +1981,13 @@ class QuantumLatticeController:
 
         # Store target for fidelity (clients measure against this)
         self._w8_target = self.current_density_matrix.copy()
+        # 2D projection used by metrics that require 2D matrices
+        _tgt2d = np.sum(self._w8_target, axis=2)
+        _tgt2d = 0.5 * (_tgt2d + _tgt2d.conj().T)
+        _tr = float(np.real(np.trace(_tgt2d)))
+        if _tr > 1e-12:
+            _tgt2d /= _tr
+        self._w8_target_2d = _tgt2d
         self.w_state_strength = 0.8
         self.coherence = 0.9
         self.fidelity = 0.99
@@ -2280,53 +2311,33 @@ class QuantumLatticeController:
                     self.current_density_matrix, CYCLE_TIME_NS / 1e9
                 )
 
-                # Compute quantum metrics
-                # FIX: normalise L1-coherence to [0,1] so LATTICE.coherence is always
-                # a physically meaningful [0,1] metric (max for 256-dim = 255).
-                _raw_coh = QuantumInformationMetrics.coherence_l1_norm(
-                    self.current_density_matrix
-                )
-                # W8-COHERENCE FIX: the W8 state lives in the 8-state single-excitation
-                # subspace {|1>,|2>,|4>,...,|128>}.  Its max L1 off-diagonal sum is
-                # k*(k-1)/k = k-1 = 7  (not 255, which is the max for a fully-coherent
-                # 256-dim state like |+>^8).  Dividing by 255 gives ~0.022 for a healthy
-                # W-state instead of the correct ~0.82; dividing by 7 gives C ≈ F.
-                _W8_COHERENCE_MAX = 7.0  # = n_excitation_states - 1 = 8 - 1
-                self.coherence = float(np.clip(_raw_coh / _W8_COHERENCE_MAX, 0.0, 1.0))
+                # Project 3D spatial field → 2D density matrix for metrics
+                dm_2d = np.sum(self.current_density_matrix, axis=2)
+                dm_2d = 0.5 * (dm_2d + dm_2d.conj().T)
+                _tr2d = float(np.real(np.trace(dm_2d)))
+                if _tr2d > 1e-12:
+                    dm_2d /= _tr2d
 
-                # FIX: fidelity reference must be |W_8><W_8|, NOT the maximally-mixed
-                # state I/256.  F(rho, I/256) measures how close we are to THERMAL
-                # DEATH — it starts at ~0.36 for the W-state init and can only decrease.
-                # F(rho, W8) correctly measures how much W-state character we preserve.
+                # Compute quantum metrics on 2D projection
+                _dim = dm_2d.shape[0]
+                _raw_coh = QuantumInformationMetrics.coherence_l1_norm(dm_2d)
+                _COH_MAX = max(1.0, _dim - 1.0)
+                self.coherence = float(np.clip(_raw_coh / _COH_MAX, 0.0, 1.0))
+
                 self.fidelity = QuantumInformationMetrics.state_fidelity(
-                    self.current_density_matrix,
-                    self._w8_target,  # ← W-state target, not maximally-mixed
+                    dm_2d, self._w8_target_2d
                 )
-
-                # ══════════════════════════════════════════════════════════════════════════
-                # 🔬 SIGMA RESURRECTION PROTOCOL: W-State Revival + Non-Markovian Bursts
-                # ══════════════════════════════════════════════════════════════════════════
-                # ══════════════════════════════════════════════════════════════════════════
-                # 🔬 NATURAL QUANTUM EVOLUTION — QRNG + Non-Markovian Bath ONLY
-                # ══════════════════════════════════════════════════════════════════════════
-                # NO artificial injection. Pure AER simulation with:
-                # - Stochastic QRNG channels (per-call entropy)
-                # - Non-Markovian noise bath (κ=0.35, T1/T2 realistic)
-                # - Kraus operator decoherence
-                # Natural revivals emerge from quantum memory, not tuning.
 
                 fidelity_pre = self.fidelity
                 coherence_pre = self.coherence
 
                 fidelity_post_evolution = QuantumInformationMetrics.state_fidelity(
-                    self.current_density_matrix, self._w8_target
+                    dm_2d, self._w8_target_2d
                 )
                 coherence_post_evolution = float(
                     np.clip(
-                        QuantumInformationMetrics.coherence_l1_norm(
-                            self.current_density_matrix
-                        )
-                        / 7.0,
+                        QuantumInformationMetrics.coherence_l1_norm(dm_2d)
+                        / _COH_MAX,
                         0.0,
                         1.0,
                     )
@@ -2337,11 +2348,9 @@ class QuantumLatticeController:
                 self.w_state_strength = min(
                     1.0,
                     self.coherence
-                    * QuantumInformationMetrics.purity(self.current_density_matrix),
+                    * QuantumInformationMetrics.purity(dm_2d),
                 )
-                entropy = QuantumInformationMetrics.von_neumann_entropy(
-                    self.current_density_matrix
-                )
+                entropy = QuantumInformationMetrics.von_neumann_entropy(dm_2d)
 
                 # ════════════════════════════════════════════════════════════════
                 # σ-REVIVAL PULSE (Floquet resonance — period-8 identity on W8)
@@ -2379,13 +2388,16 @@ class QuantumLatticeController:
                         self.current_density_matrix = (
                             _ec @ np.diag(_ev) @ _ec.conj().T
                         ).astype(np.complex128)
-                    # Recompute metrics after revival pulse + pump
-                    _raw_coh_r = QuantumInformationMetrics.coherence_l1_norm(
-                        self.current_density_matrix
-                    )
-                    self.coherence = float(np.clip(_raw_coh_r / 7.0, 0.0, 1.0))
+                    # Recompute metrics after revival pulse + pump (use 2D projection)
+                    dm_2d_post = np.sum(self.current_density_matrix, axis=2)
+                    dm_2d_post = 0.5 * (dm_2d_post + dm_2d_post.conj().T)
+                    _tr_post = float(np.real(np.trace(dm_2d_post)))
+                    if _tr_post > 1e-12:
+                        dm_2d_post /= _tr_post
+                    _raw_coh_r = QuantumInformationMetrics.coherence_l1_norm(dm_2d_post)
+                    self.coherence = float(np.clip(_raw_coh_r / _COH_MAX, 0.0, 1.0))
                     self.fidelity = QuantumInformationMetrics.state_fidelity(
-                        self.current_density_matrix, self._w8_target
+                        dm_2d_post, self._w8_target_2d
                     )
                     # Log only every 50 revival events to reduce spam
                     if self.cycle_count % 50 == 0:
@@ -2395,9 +2407,7 @@ class QuantumLatticeController:
                             f"C={coherence_post_evolution:.4f}→{self.coherence:.4f} | "
                             f"pump_α={_pump_alpha:.3f} | Δf={self.fidelity - fidelity_post_evolution:+.4f}"
                         )
-                    entropy = QuantumInformationMetrics.von_neumann_entropy(
-                        self.current_density_matrix
-                    )
+                    entropy = QuantumInformationMetrics.von_neumann_entropy(dm_2d_post)
 
                 # 🔍 ENTANGLEMENT REVIVAL DETECTION (Non-Markovian signature)
                 # Track coherence peaks: when C(t) > C(t-1) after decay → revival detected
@@ -2625,29 +2635,13 @@ class QuantumLatticeController:
     def _apply_sigma_revival_unitary(self, rho: np.ndarray) -> np.ndarray:
         """
         Apply σ-revival pulse via target-aligned Hamiltonian drive on the W8 subspace.
-
-        Physical mechanism (Floquet resonance, σ-language validated):
-          F(σ) = cos²(πσ/8) → F(σ=8k) = 1.0.  At period-8 resonance the drive
-          Hamiltonian H_drive = i[ρ_target, ρ] (restricted to W8 subspace) has zero
-          commutator with the target — this is the Riemannian gradient of fidelity on
-          the unitary manifold (Khaneja-Glaser optimal control).  On hardware this is
-          implemented as a shaped microwave pulse tuned to the qubit transition; here
-          it is the mathematically equivalent matrix-exponential gate.
-
-        NOT state injection (rho ← α·ρ_target + (1-α)·ρ):
-          U is constructed from the current state and target — it is a valid unitary
-          transformation.  The QRNG seed adds controlled stochasticity to the pulse
-          angle (±5% jitter), matching real hardware pulse-amplitude noise.
-
-        Mechanism:
-          1. Extract W8 subspace (8×8 block at indices {1,2,4,8,16,32,64,128}).
-          2. Build generator G = i(ρ_t - ρ_c) on that subspace (antisymmetric → Hermitian G).
-          3. Apply U_8 = expm(-i·θ·G) with θ = REVIVAL_STRENGTH·(1 + 0.05·ξ), ξ~QRNG.
-          4. Embed U_8 into 256×256 (identity outside W8 subspace).
-          5. ρ' = U·ρ·U†, enforced valid DM.
+        Skipped for small lattices (< 129 spatial points) where W8 indices are OOB.
         """
         _W8_IDX = [1 << k for k in range(8)]  # [1,2,4,8,16,32,64,128]
         dim = rho.shape[0]
+        if dim < 129:
+            # Lattice too small for W8 subspace — skip revival, return as-is
+            return rho
         try:
             # ── 1. Extract 8×8 W8-subspace blocks from current rho and target ──
             rho_sub = np.array(

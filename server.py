@@ -1260,7 +1260,7 @@ def _utxo_settle_block(
             for tx in txs:
                 tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
                 if not tx_id:
-                    continue
+                    tx_id = hashlib.sha3_256(json.dumps(tx, sort_keys=True).encode()).hexdigest()
                 tx_type = tx.get("tx_type", "transfer")
                 _ins_json = json.dumps(tx.get("inputs", []), default=str)
                 _outs_json = json.dumps(tx.get("outputs", []), default=str)
@@ -1290,6 +1290,8 @@ def _utxo_settle_block(
             # ── Spend inputs + create outputs for every TX ──
             for tx in txs:
                 tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+                if not tx_id:
+                    tx_id = hashlib.sha3_256(json.dumps(tx, sort_keys=True).encode()).hexdigest()
                 tx_type = tx.get("tx_type", "").lower()
                 inputs = tx.get("inputs", [])
                 outputs = tx.get("outputs", [])
@@ -1671,13 +1673,16 @@ def _auto_generate_oracle_attestations(height: int, block_hash: str, header_hash
                         tx_rows = cur.fetchall()
                         _txs = []
                         for tr in tx_rows:
+                            _meta = tr[5] if isinstance(tr[5], dict) else json.loads(tr[5] or "{}")
                             _txs.append({
                                 "tx_id": tr[0],
                                 "from_address": tr[1],
                                 "to_address": tr[2],
                                 "amount": tr[3],
                                 "tx_type": tr[4],
-                                "metadata": tr[5] if isinstance(tr[5], dict) else json.loads(tr[5] or "{}"),
+                                "metadata": _meta,
+                                "inputs": _meta.get("inputs", []),
+                                "outputs": _meta.get("outputs", []),
                             })
                         try:
                             _utxo_settle_block(height, _stored_hash, _miner, _txs)
@@ -6494,6 +6499,37 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     _verify_row = cur.fetchone()
                     _block_insert_result = "inserted" if (_verify_row and _verify_row[0] == block_hash) else "error"
 
+                # Store transactions immediately so they're available for later settlement
+                if _block_insert_result == "inserted" and txs:
+                    for tx in txs:
+                        tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+                        if not tx_id:
+                            # Auto-generate deterministic tx_hash from content
+                            tx_id = hashlib.sha3_256(json.dumps(tx, sort_keys=True).encode()).hexdigest()
+                        tx_type = tx.get("tx_type", "transfer")
+                        cur.execute(
+                            """
+                            INSERT INTO transactions
+                            (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, metadata, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, %s, %s, NOW())
+                            ON CONFLICT (tx_hash) DO UPDATE SET
+                                height = EXCLUDED.height,
+                                block_hash = EXCLUDED.block_hash,
+                                status = 'confirmed',
+                                updated_at = NOW()
+                            """,
+                            (
+                                tx_id,
+                                tx.get("from_address", ""),
+                                tx.get("to_address", ""),
+                                tx.get("amount", 0),
+                                tx_type,
+                                height,
+                                block_hash,
+                                json.dumps({"inputs": tx.get("inputs", []), "outputs": tx.get("outputs", [])}),
+                            ),
+                        )
+
                 # Store attestations
                 if attestations:
                     _store_oracle_attestations(height, _header_hash, attestations)
@@ -6526,42 +6562,51 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             if _db_attest_count >= 3:
                 logger.critical(f"[RPC-submitBlock] 🔥 FINALIZING duplicate h={height} — {_db_attest_count} attestations in DB")
                 try:
+                    # Atomic re-check: another thread may have finalized since we entered this branch
                     with get_db_cursor() as cur:
-                        cur.execute("SELECT miner_address FROM blocks WHERE height = %s", (height,))
-                        _miner_row = cur.fetchone()
-                        _db_miner = _miner_row[0] if _miner_row else miner_address
-                        cur.execute(
-                            "SELECT tx_hash, from_address, to_address, amount, tx_type, metadata FROM transactions WHERE block_hash = %s",
-                            (block_hash,),
-                        )
-                        _tx_rows = cur.fetchall()
-                        _db_txs = []
-                        for tr in _tx_rows:
-                            _db_txs.append({
-                                "tx_id": tr[0],
-                                "from_address": tr[1],
-                                "to_address": tr[2],
-                                "amount": tr[3],
-                                "tx_type": tr[4],
-                                "metadata": tr[5] if isinstance(tr[5], dict) else json.loads(tr[5] or "{}"),
+                        cur.execute("SELECT finalized, miner_address FROM blocks WHERE height = %s", (height,))
+                        _row = cur.fetchone()
+                        if not _row:
+                            raise RuntimeError("Block vanished during finalize")
+                        if _row[0]:
+                            logger.info(f"[RPC-submitBlock] h={height} already finalized by another thread")
+                            _is_finalized = True
+                        else:
+                            _db_miner = _row[1] or miner_address
+                            cur.execute(
+                                "SELECT tx_hash, from_address, to_address, amount, tx_type, metadata FROM transactions WHERE block_hash = %s",
+                                (block_hash,),
+                            )
+                            _tx_rows = cur.fetchall()
+                            _db_txs = []
+                            for tr in _tx_rows:
+                                _meta = tr[5] if isinstance(tr[5], dict) else json.loads(tr[5] or "{}")
+                                _db_txs.append({
+                                    "tx_id": tr[0],
+                                    "from_address": tr[1],
+                                    "to_address": tr[2],
+                                    "amount": tr[3],
+                                    "tx_type": tr[4],
+                                    "metadata": _meta,
+                                    "inputs": _meta.get("inputs", []),
+                                    "outputs": _meta.get("outputs", []),
+                                })
+                            _utxo_settle_block(height, block_hash, _db_miner, _db_txs)
+                            cur.execute(
+                                "UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s",
+                                (int(time.time()), height),
+                            )
+                            _is_finalized = True
+                            logger.critical(f"[RPC-submitBlock] ✅ DUPLICATE BLOCK FINALIZED h={height}")
+                            _push_to_sse_service("/push/oracle_consensus", {
+                                "event_type": "block_finalized",
+                                "height": height,
+                                "block_hash": block_hash,
+                                "miner_address": _db_miner,
+                                "oracle_count": _db_attest_count,
+                                "finalized": True,
+                                "timestamp": int(time.time()),
                             })
-                    _utxo_settle_block(height, block_hash, _db_miner, _db_txs)
-                    with get_db_cursor() as cur:
-                        cur.execute(
-                            "UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s",
-                            (int(time.time()), height),
-                        )
-                    _is_finalized = True
-                    logger.critical(f"[RPC-submitBlock] ✅ DUPLICATE BLOCK FINALIZED h={height}")
-                    _push_to_sse_service("/push/oracle_consensus", {
-                        "event_type": "block_finalized",
-                        "height": height,
-                        "block_hash": block_hash,
-                        "miner_address": _db_miner,
-                        "oracle_count": _db_attest_count,
-                        "finalized": True,
-                        "timestamp": int(time.time()),
-                    })
                 except Exception as dup_err:
                     logger.critical(f"[RPC-submitBlock] ❌ Duplicate finalization failed h={height}: {dup_err}", exc_info=True)
             else:

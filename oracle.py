@@ -1948,28 +1948,14 @@ class OracleNode:
         lattice: Optional[Any] = None,
     ) -> Optional[BlockFieldReading]:
         """
-        Oracle measurement of the lattice W-state.
-
-        Each oracle independently propagates lattice.current_density_matrix through
-        its own AER simulator (distinct QRNG-seeded κ/T1/T2 noise rates from _init_aer).
-        That IS the per-oracle noise — no additional oracle-side channels applied.
-
-        Pipeline:
-          1. Snapshot lattice.current_density_matrix (256×256)
-          2. Load into 8-qubit AER circuit with id gates (fires Kraus operators)
-          3. Per-oracle QRNG seed + sigma_offset → distinct noise realisation per node
-          4. Fidelity  = Tr(evolved_8q @ w8_target)  — full 8-qubit comparison
-          5. Coherence = L1_offdiag over W8 subspace / 7.0  — correct normalisation
-          6. oracle_dm_3q = partial_trace(evolved, keep qubits 0-2) for Mermin only
+        Oracle measurement — adaptive to any lattice DM shape (16³, 64³, 256×256, etc).
+        Projects 3D spatial field → 2D density matrix, adds per-node noise, returns metrics.
         """
-        if not QISKIT_AVAILABLE or self.aer is None:
-            return None
         try:
             _lat = lattice
             if _lat is None:
                 try:
                     from globals import get_lattice as _glf
-
                     _lat = _glf()
                 except Exception:
                     pass
@@ -1979,57 +1965,60 @@ class OracleNode:
             lattice_dm = getattr(_lat, "current_density_matrix", None)
             if lattice_dm is None or not hasattr(lattice_dm, "shape"):
                 return None
-            if lattice_dm.shape != (256, 256):
+
+            # ── ADAPTIVE SHAPE HANDLING ────────────────────────────────────────
+            if lattice_dm.ndim == 3:
+                # 3D spatial tensor (e.g. 16³ or 64³) → project to 2D
+                dm_2d = np.sum(lattice_dm, axis=2)
+            elif lattice_dm.ndim == 2:
+                dm_2d = lattice_dm.copy()
+            else:
                 return None
 
-            # Enforce valid density matrix
-            lattice_dm = lattice_dm.copy()
-            tr = float(np.real(np.trace(lattice_dm)))
+            # Hermitianize + trace-normalize
+            dm_2d = 0.5 * (dm_2d + dm_2d.conj().T)
+            tr = float(np.real(np.trace(dm_2d)))
             if tr > 1e-12:
-                lattice_dm /= tr
-            lattice_dm = 0.5 * (lattice_dm + lattice_dm.conj().T)
+                dm_2d /= tr
 
-            # ── AER circuit: id gates so the Kraus noise model fires ──────────
-            # Each oracle node has distinct κ/T1/T2 from _init_aer (QRNG-seeded).
-            # The per-oracle seed below further differentiates the noise realisation.
-            aer_start = time.time_ns()
-
-            # USE C LAYER WHEN AVAILABLE - bypasses GIL, much faster
-            # Force C layer - no AER fallback
-            _c_available = (
-                _OC_OK
-                and _OC_LIB is not None
-                and hasattr(_OC_LIB, "qtcl_oracle_measure")
+            # Per-oracle noise: each node perturbs the shared DM slightly
+            # (replaces the old AER-based independent noise realisation)
+            _rng = np.random.default_rng(
+                seed=(self.oracle_id * 7919) + (int(time.time() * 1000) % 10000)
             )
-            if not _c_available:
-                evolved = lattice_dm.copy()
-            else:
-                try:
-                    # Use C Lindblad solver - bypasses GIL, ~100x faster
-                    evolved = _c_oracle_measure(
-                        lattice_dm, self.kappa, self.T1, self.T2
-                    )
-                except Exception as _e:
-                    # Emergency fallback - use simple identity (no evolution)
-                    evolved = lattice_dm.copy()
+            _noise = (_rng.random(dm_2d.shape) - 0.5) + 1j * (_rng.random(dm_2d.shape) - 0.5)
+            _noise *= 0.02 * (self.kappa + self.T1 + self.T2)  # scale by node noise params
+            evolved = dm_2d + _noise
+            evolved = 0.5 * (evolved + evolved.conj().T)
+            ev_tr = float(np.real(np.trace(evolved)))
+            if ev_tr > 1e-12:
+                evolved /= ev_tr
+            # Clip negative eigenvalues
+            _eigvals, _eigvecs = np.linalg.eigh(evolved)
+            _eigvals = np.clip(_eigvals, 0.0, None)
+            _eigvals /= np.sum(_eigvals)
+            evolved = _eigvecs @ np.diag(_eigvals) @ _eigvecs.conj().T
 
-            # ── Fidelity: Tr(evolved_8q @ w8_target) — full 8-qubit ──────────
-            w8_target = getattr(_lat, "_w8_target", None)
-            if w8_target is None:
-                w8_target = np.zeros((256, 256), dtype=np.complex128)
-                for _i in [1 << k for k in range(8)]:
-                    for _j in [1 << k for k in range(8)]:
-                        w8_target[_i, _j] = 1.0 / 8.0
-            fidelity = float(min(1.0, max(0.0, np.real(np.trace(evolved @ w8_target)))))
+            # ── Metrics on the 2D matrix ──────────────────────────────────────
+            dim = evolved.shape[0]
 
-            # ── Coherence: L1 off-diagonal / 7.0 (W8 subspace normalisation) ─
-            _w8_idx = [1 << k for k in range(8)]
+            # Fidelity vs ideal W-state on available subspace
+            w_target = np.zeros_like(evolved)
+            _excited = [1 << k for k in range(int(np.log2(dim)))] if dim >= 2 else [1]
+            _excited = [i for i in _excited if i < dim]
+            if len(_excited) >= 2:
+                for _i in _excited:
+                    for _j in _excited:
+                        w_target[_i, _j] = 1.0 / len(_excited)
+            fidelity = float(min(1.0, max(0.0, np.real(np.trace(evolved @ w_target)))))
+
+            # Coherence: L1 off-diagonal / (dim-1) for normalisation to [0,1]
             coh_raw = sum(
-                abs(evolved[i, j]) for i in _w8_idx for j in _w8_idx if i != j
+                abs(evolved[i, j]) for i in range(dim) for j in range(dim) if i != j
             )
-            coherence = float(min(1.0, coh_raw / 7.0))
+            coherence = float(min(1.0, coh_raw / max(1.0, dim - 1.0)))
 
-            # ── Entropy: full 8-qubit von-Neumann ─────────────────────────────
+            # Entropy
             ev_e = np.maximum(np.linalg.eigvalsh(evolved), 1e-15)
             entropy = float(-np.sum(ev_e * np.log2(ev_e)))
 
@@ -2038,54 +2027,27 @@ class OracleNode:
                 self.last_fidelity = fidelity
                 self.measurement_count += 1
 
-            # ── oracle_dm_3q: W3 subspace from top-left 8×8 block ────────────
-            # Partial-tracing |W_8> to 3 qubits gives (3/8)|W_3><W_3| + (5/8)|000><000|
-            # (purity=0.53, Mermin M≈1.14 — always classical, never violates).
-            # The top-left 8×8 subblock ρ[0:8, 0:8] is the projection onto the
-            # subspace where qubits 3-7 are all zero, which for |W_8> is exactly
-            # proportional to |W_3><W_3| (purity=1.0, Mermin M≈3.046). ✓
-            sub_8x8 = evolved[0:8, 0:8].copy()
-            sub_tr = float(np.real(np.trace(sub_8x8)))
+            # ── oracle_dm_3q: top-left 8×8 (or smaller) subblock ──────────────
+            _sub_sz = min(8, dim)
+            sub = evolved[:_sub_sz, :_sub_sz].copy()
+            sub_tr = float(np.real(np.trace(sub)))
             if sub_tr > 1e-12:
-                sub_8x8 /= sub_tr
-            sub_8x8 = 0.5 * (sub_8x8 + sub_8x8.conj().T)
-            oracle_dm_3q = _oracle_enforce_dm(sub_8x8, label="oracle_w3_subspace")
+                sub /= sub_tr
+            sub = 0.5 * (sub + sub.conj().T)
+            oracle_dm_3q = _oracle_enforce_dm(sub, label="oracle_w3_subspace")
 
-            # ── pq0 / IV / V: W3 inter-leg cross-coherences ──────────────────────
-            #
-            # WHY _single_q_coh was wrong:
-            #   For ideal |W_3⟩ = (|001⟩+|010⟩+|100⟩)/√3, the single-qubit reduced
-            #   DMs are DIAGONAL: ρ_q0 = diag(2/3, 1/3).  Off-diagonal elements
-            #   ρ_q0[0,1] = 0 identically — _single_q_coh always returned 0.
-            #
-            # WHY _w3_leg_coherence is correct:
-            #   The W3 entanglement lives in the THREE inter-leg off-diagonals:
-            #     ρ[1,2]  ←  ⟨001|ρ|010⟩ = 1/3   (leg 0-1 pair)
-            #     ρ[1,4]  ←  ⟨001|ρ|100⟩ = 1/3   (leg 0-2 pair)
-            #     ρ[2,4]  ←  ⟨010|ρ|100⟩ = 1/3   (leg 1-2 pair)
-            #   These are exactly the coherences Mermin is sensitive to.
-            #   Normalising by 1/3 gives 1.0 for ideal W3, 0 for maximally mixed.
-            #   This is what pq0_oracle/IV/V SHOULD measure.
-            #
-            # Map:  pq0_oracle ↔ leg-01 pair (|001⟩↔|010⟩)  → ρ[1,2]
-            #        pq0_IV    ↔ leg-02 pair (|001⟩↔|100⟩)  → ρ[1,4]
-            #        pq0_V     ↔ leg-12 pair (|010⟩↔|100⟩)  → ρ[2,4]
-            _W3_NORM = 1.0 / 3.0  # ideal W3 inter-leg coherence magnitude
-
-            def _w3_leg_coherence(rho8: np.ndarray, i_idx: int, j_idx: int) -> float:
-                """
-                Normalised W3 inter-leg coherence: |ρ[i,j]| / (1/3).
-                Returns 1.0 for ideal |W_3⟩, 0 for maximally mixed.
-                """
+            # ── pq0 / IV / V: inter-leg coherences on the subblock ────────────
+            _W3_NORM = 1.0 / 3.0
+            def _w3_leg_coherence(rho, i_idx, j_idx):
                 try:
-                    raw = 0.5 * (abs(rho8[i_idx, j_idx]) + abs(rho8[j_idx, i_idx]))
+                    raw = 0.5 * (abs(rho[i_idx, j_idx]) + abs(rho[j_idx, i_idx]))
                     return float(min(1.0, raw / _W3_NORM))
                 except Exception:
                     return 0.0
 
-            pq0_coh = _w3_leg_coherence(oracle_dm_3q, 1, 2)  # leg |001⟩↔|010⟩
-            pqIV_coh = _w3_leg_coherence(oracle_dm_3q, 1, 4)  # leg |001⟩↔|100⟩
-            pqV_coh = _w3_leg_coherence(oracle_dm_3q, 2, 4)  # leg |010⟩↔|100⟩
+            pq0_coh = _w3_leg_coherence(oracle_dm_3q, 1, 2) if _sub_sz > 2 else 0.0
+            pqIV_coh = _w3_leg_coherence(oracle_dm_3q, 1, 4) if _sub_sz > 4 else 0.0
+            pqV_coh = _w3_leg_coherence(oracle_dm_3q, 2, 4) if _sub_sz > 4 else 0.0
 
             return BlockFieldReading(
                 oracle_id=self.oracle_id,
@@ -2496,20 +2458,12 @@ class OracleWStateManager:
             return None
 
         cdm = getattr(LATTICE, "current_density_matrix", None)
-        if cdm is None or not hasattr(cdm, "shape") or cdm.shape != (256, 256):
-            logger.debug("[ORACLE CLUSTER] Lattice DM not ready (shape check failed)")
+        if cdm is None or not hasattr(cdm, "shape"):
+            logger.debug("[ORACLE CLUSTER] Lattice DM not ready (missing or no shape)")
             return None
 
-        # ── Step 1B: Lightweight normalize shared_pq0 ────────────────────────
-        # The lattice already enforces a valid DM in apply_memory_effect.
-        # Full eigh on 256×256 (O(n³)=16M ops) was the 18s bottleneck.
-        # Just hermitianize + trace-normalize — fast, sufficient.
-        cdm_copy = cdm.copy()
-        cdm_copy = 0.5 * (cdm_copy + cdm_copy.conj().T)
-        _tr = float(np.real(np.trace(cdm_copy)))
-        if _tr > 1e-12:
-            cdm_copy /= _tr
-        shared_pq0 = cdm_copy
+        # measure_block_field now handles 3D tensors natively — no 256×256 conversion.
+        shared_pq0 = None
 
         # ── Step 2: Block-field state ─────────────────────────────────────────
         with self._pq_lock:
@@ -2960,7 +2914,7 @@ class OracleWStateManager:
                         "density_matrix_imag": getattr(
                             snapshot, "_dm_im_list", [0.0] * 64
                         ),
-                        "w_state_hex": snapshot.w_state_hex or "",
+                        "w_state_hex": getattr(snapshot, "w_state_hex", "") or "",
                         "w_state_fidelity": snapshot.w_state_fidelity,
                         "purity": snapshot.purity,
                         "coherence_l1": snapshot.coherence_l1,
