@@ -1251,6 +1251,9 @@ def _utxo_settle_block(
     _settle_log = logging.getLogger("SETTLE")
     _settle_log.critical(f"🔥 [UTXO-SETTLE] h={height} block_hash={block_hash[:16]}…")
 
+    # Ensure dependent tables exist before attempting settlement
+    _lazy_ensure_chain_state()
+
     try:
         with get_db_cursor() as cur:
             # ── Insert / update transactions table ──
@@ -1356,19 +1359,22 @@ def _utxo_settle_block(
                 (int(time.time()), height),
             )
 
-            # ── Update chain state ──
-            cur.execute(
-                """
-                INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
-                VALUES (1, %s, %s, 0.0, NOW())
-                ON CONFLICT (state_id) DO UPDATE SET
-                    chain_height = EXCLUDED.chain_height,
-                    head_block_hash = EXCLUDED.head_block_hash,
-                    latest_coherence = EXCLUDED.latest_coherence,
-                    updated_at = NOW()
-                """,
-                (height, block_hash),
-            )
+            # ── Update chain state (best-effort; don't fail settlement if table missing) ──
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
+                    VALUES (1, %s, %s, 0.0, NOW())
+                    ON CONFLICT (state_id) DO UPDATE SET
+                        chain_height = EXCLUDED.chain_height,
+                        head_block_hash = EXCLUDED.head_block_hash,
+                        latest_coherence = EXCLUDED.latest_coherence,
+                        updated_at = NOW()
+                    """,
+                    (height, block_hash),
+                )
+            except Exception as _cs_err:
+                _settle_log.warning(f"[UTXO-SETTLE] chain_state update skipped: {_cs_err}")
 
         _settle_log.critical(
             f"[UTXO-SETTLE] ✅ h={height}: {len(txs)} txs settled, UTXOs created+spent atomically"
@@ -1673,7 +1679,10 @@ def _auto_generate_oracle_attestations(height: int, block_hash: str, header_hash
                                 "tx_type": tr[4],
                                 "metadata": tr[5] if isinstance(tr[5], dict) else json.loads(tr[5] or "{}"),
                             })
-                        _utxo_settle_block(height, _stored_hash, _miner, _txs)
+                        try:
+                            _utxo_settle_block(height, _stored_hash, _miner, _txs)
+                        except Exception as _settle_err:
+                            logger.warning(f"[AUTO-CONSENSUS] UTXO settlement failed for h={height}: {_settle_err}")
                         cur.execute(
                             "UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s",
                             (int(time.time()), height),
@@ -6445,13 +6454,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _block_insert_result = None
         _existing_block_hash = None
 
+        _db_finalized = False
         try:
             with get_db_cursor() as cur:
-                cur.execute("SELECT block_hash FROM blocks WHERE height = %s", (height,))
+                cur.execute("SELECT block_hash, finalized FROM blocks WHERE height = %s", (height,))
                 _existing_row = cur.fetchone()
 
                 if _existing_row:
                     _existing_block_hash = _existing_row[0]
+                    _db_finalized = bool(_existing_row[1])
                     if _existing_block_hash == block_hash:
                         _block_insert_result = "duplicate"
                     else:
@@ -6497,7 +6508,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ═══════════════════════════════════════════════════════════════════════
         # 4. UTXO SETTLEMENT (only if finalized)
         # ═══════════════════════════════════════════════════════════════════════
-        if _has_enough_oracles or height == 0:
+        _is_finalized = _has_enough_oracles or height == 0 or _db_finalized
+
+        if _block_insert_result == "inserted" and _is_finalized:
+            # New block submitted with enough oracle attestations — finalize immediately
             logger.critical(f"[RPC-submitBlock] 🔥 FINALIZING h={height} — UTXO settlement")
             try:
                 _utxo_settle_block(height, block_hash, miner_address, txs or [])
@@ -6505,17 +6519,66 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             except Exception as settle_err:
                 logger.critical(f"[RPC-submitBlock] ❌ UTXO settlement failed h={height}: {settle_err}", exc_info=True)
                 return _rpc_error(-32603, f"UTXO settlement failed: {str(settle_err)[:100]}", rpc_id)
-        else:
+
+        elif _block_insert_result == "duplicate" and not _db_finalized:
+            # Duplicate block may already have enough DB attestations — finalize it now
+            _db_attest_count = _count_oracle_attestations(height)
+            if _db_attest_count >= 3:
+                logger.critical(f"[RPC-submitBlock] 🔥 FINALIZING duplicate h={height} — {_db_attest_count} attestations in DB")
+                try:
+                    with get_db_cursor() as cur:
+                        cur.execute("SELECT miner_address FROM blocks WHERE height = %s", (height,))
+                        _miner_row = cur.fetchone()
+                        _db_miner = _miner_row[0] if _miner_row else miner_address
+                        cur.execute(
+                            "SELECT tx_hash, from_address, to_address, amount, tx_type, metadata FROM transactions WHERE block_hash = %s",
+                            (block_hash,),
+                        )
+                        _tx_rows = cur.fetchall()
+                        _db_txs = []
+                        for tr in _tx_rows:
+                            _db_txs.append({
+                                "tx_id": tr[0],
+                                "from_address": tr[1],
+                                "to_address": tr[2],
+                                "amount": tr[3],
+                                "tx_type": tr[4],
+                                "metadata": tr[5] if isinstance(tr[5], dict) else json.loads(tr[5] or "{}"),
+                            })
+                    _utxo_settle_block(height, block_hash, _db_miner, _db_txs)
+                    with get_db_cursor() as cur:
+                        cur.execute(
+                            "UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s",
+                            (int(time.time()), height),
+                        )
+                    _is_finalized = True
+                    logger.critical(f"[RPC-submitBlock] ✅ DUPLICATE BLOCK FINALIZED h={height}")
+                    _push_to_sse_service("/push/oracle_consensus", {
+                        "event_type": "block_finalized",
+                        "height": height,
+                        "block_hash": block_hash,
+                        "miner_address": _db_miner,
+                        "oracle_count": _db_attest_count,
+                        "finalized": True,
+                        "timestamp": int(time.time()),
+                    })
+                except Exception as dup_err:
+                    logger.critical(f"[RPC-submitBlock] ❌ Duplicate finalization failed h={height}: {dup_err}", exc_info=True)
+            else:
+                logger.info(f"[RPC-submitBlock] ⏳ duplicate h={height} still pending ({_db_attest_count}/5 attestations)")
+
+        elif _block_insert_result == "inserted" and not _is_finalized:
             # Block accepted but pending oracle consensus
             logger.info(f"[RPC-submitBlock] ⏳ h={height} stored pending finalization ({_oracle_valid}/5 oracles)")
             # ── AUTO-CONSENSUS: spawn background thread to generate oracle attestations ──
-            if _block_insert_result == "inserted":
-                threading.Thread(
-                    target=_auto_generate_oracle_attestations,
-                    args=(height, block_hash, _header_hash, w_state_fidelity),
-                    daemon=True,
-                    name=f"AutoConsensus-h{height}",
-                ).start()
+            threading.Thread(
+                target=_auto_generate_oracle_attestations,
+                args=(height, block_hash, _header_hash, w_state_fidelity),
+                daemon=True,
+                name=f"AutoConsensus-h{height}",
+            ).start()
+
+        # else: duplicate and already finalized — nothing to do, _is_finalized already True
 
         # ═══════════════════════════════════════════════════════════════════════
         # 5. BROADCAST + RESPONSE
@@ -6528,7 +6591,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "tx_count": len(txs) if txs else 0,
                 "tx_ids": [tx.get("tx_id", tx.get("tx_hash", "")) for tx in (txs or [])],
                 "w_state_fidelity": w_state_fidelity,
-                "finalized": _has_enough_oracles or height == 0,
+                "finalized": _is_finalized,
                 "oracle_attestations": _oracle_valid,
             }
             _broadcast_block_to_peers(compact_block)
@@ -6536,13 +6599,26 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             # Push oracle consensus event to SSE
             _consensus_event = {
-                "event_type": "block_finalized" if (_has_enough_oracles or height == 0) else "block_pending",
+                "event_type": "block_finalized" if _is_finalized else "block_pending",
+                "height": height,
+                "block_hash": block_hash,
+                "miner_address": miner_address,
+                "oracle_count": _oracle_valid,
+                "finalized": _is_finalized,
+                "timestamp": int(time.time()),
+            }
+            _broadcast_block_to_peers(compact_block)
+            _broadcast_block_event(compact_block)
+
+            # Push oracle consensus event to SSE
+            _consensus_event = {
+                "event_type": "block_finalized" if _is_finalized else "block_pending",
                 "height": height,
                 "block_hash": block_hash,
                 "miner_address": miner_address,
                 "oracle_count": _oracle_valid,
                 "oracle_ids": _oracle_ids,
-                "finalized": _has_enough_oracles or height == 0,
+                "finalized": _is_finalized,
                 "timestamp": int(time.time()),
             }
             _push_to_sse_service("/push/oracle_consensus", _consensus_event)
@@ -6568,7 +6644,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
 
-        _status = "accepted_finalized" if (_has_enough_oracles or height == 0) else "accepted_pending_oracles"
+        _status = "accepted_finalized" if _is_finalized else "accepted_pending_oracles"
         return _rpc_ok(
             {
                 "status": _status,
@@ -6578,7 +6654,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "miner_reward_qtcl": _resp_reward,
                 "next_height": height + 1,
                 "oracle_consensus": f"{_oracle_valid}/5",
-                "finalized": _has_enough_oracles or height == 0,
+                "finalized": _is_finalized,
             },
             rpc_id,
         )
@@ -6613,7 +6689,13 @@ def _broadcast_block_to_peers(compact_block: dict) -> int:
             try:
                 if not external_addr or ":" not in external_addr:
                     continue
-                host, port = external_addr.rsplit(":", 1)
+                # Strip any scheme prefix so we can rebuild a clean HTTP URL
+                _addr_clean = external_addr
+                if _addr_clean.startswith("http://"):
+                    _addr_clean = _addr_clean[7:]
+                elif _addr_clean.startswith("https://"):
+                    _addr_clean = _addr_clean[8:]
+                host, port = _addr_clean.rsplit(":", 1)
                 gossip_url = f"http://{host}:{port}/p2p/gossip"
 
                 # Send the block as event type 10 (BLOCK_SOLVED_SERVER)
@@ -6624,14 +6706,14 @@ def _broadcast_block_to_peers(compact_block: dict) -> int:
                 }
 
                 # Non-blocking broadcast - don't wait for response
-                import threading
+                def _send_gossip(url: str, pl: dict):
+                    try:
+                        requests.post(url, json=pl, timeout=2)
+                    except Exception:
+                        pass  # Silently drop failed peer broadcasts
 
                 threading.Thread(
-                    target=lambda url, pl: (
-                        requests.post(url, json=pl, timeout=2)
-                        if "requests" in globals()
-                        else None
-                    ),
+                    target=_send_gossip,
                     args=(gossip_url, payload),
                     daemon=True,
                     name=f"Broadcast-{node_id[:8]}",
