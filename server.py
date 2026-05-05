@@ -936,26 +936,34 @@ def _deferred_oracle_init() -> None:
     NOTE: Do NOT start the measurement stream here — wait for LATTICE initialization.
     """
     global ORACLE, ORACLE_W_STATE_MANAGER, ORACLE_AVAILABLE
-    _ora_deadline = time.time() + 40.0  # 40 second timeout for QRNG/oracle init
+    _ora_deadline = time.time() + 40.0
     try:
-        logger.debug(
-            "[ORACLE] 🔄 Starting oracle initialization (timeout=40s, QRNG may wait 16-28s)..."
-        )
+        logger.debug("[ORACLE] 🔄 Checking for standalone oracle server on :9092...")
 
-        # Check deadline before import
+        # ── TRY STANDALONE ORACLE SERVER FIRST ──
+        try:
+            import urllib.request
+            req = urllib.request.Request("http://localhost:9092/health", method="GET", timeout=2)
+            resp = urllib.request.urlopen(req, timeout=2)
+            if resp.status == 200:
+                ORACLE_AVAILABLE = True
+                logger.info("[ORACLE] ✅ Standalone oracle server detected on :9092")
+                _ORACLE_INIT_EVENT.set()
+                return
+        except Exception:
+            pass
+
+        # ── FALLBACK: import oracle.py directly ──
         if time.time() > _ora_deadline:
             logger.warning("[ORACLE] ⚠️  Timeout before import — skipping oracle")
             ORACLE_AVAILABLE = False
             return
 
         from oracle import ORACLE as _o, ORACLE_W_STATE_MANAGER as _owsm
-
         ORACLE = _o
         ORACLE_W_STATE_MANAGER = _owsm
         ORACLE_AVAILABLE = True
-        logger.info("[ORACLE] ✅ Oracle engine initialised")
-        # ⚠️  WAIT for LATTICE before starting measurement stream
-        # _deferred_lattice_init will call ORACLE_W_STATE_MANAGER.start() after set_lattice()
+        logger.info("[ORACLE] ✅ Oracle engine initialised (inline mode)")
 
     except ImportError as _ie:
         logger.warning(f"[ORACLE] ⚠️  Oracle import failed: {_ie}")
@@ -964,7 +972,7 @@ def _deferred_oracle_init() -> None:
         logger.warning(f"[ORACLE] ⚠️  Oracle init error: {_ex}")
         ORACLE_AVAILABLE = False
     finally:
-        _ORACLE_INIT_EVENT.set()  # unblock main thread even if oracle failed
+        _ORACLE_INIT_EVENT.set()
 
 
 threading.Thread(
@@ -1598,15 +1606,21 @@ def _verify_oracle_attestations(block_hash: str, attestations: list, min_require
 
 
 # ── In-memory attestation cache (survives DB outages) ────────────────────────
-_ATTESTATION_CACHE: Dict[int, List[dict]] = {}
+_ATTESTATION_CACHE: Dict[int, Dict[str, dict]] = {}
 _ATTESTATION_CACHE_LOCK = threading.Lock()
 
 
 def _store_oracle_attestations(height: int, block_hash: str, attestations: list) -> None:
-    """Persist oracle attestations to DB AND in-memory cache."""
-    # Always update in-memory cache first (never fails)
+    """Persist oracle attestations to DB AND in-memory cache. APPENDS, never overwrites."""
+    # Always update in-memory cache first (never fails) — keyed by oracle_id for dedup
     with _ATTESTATION_CACHE_LOCK:
-        _ATTESTATION_CACHE[height] = attestations
+        if height not in _ATTESTATION_CACHE:
+            _ATTESTATION_CACHE[height] = {}
+        for att in attestations:
+            oid = att.get("oracle_id", "")
+            if oid:
+                _ATTESTATION_CACHE[height][oid] = att
+        _mem_count = len(_ATTESTATION_CACHE[height])
     # Best-effort DB persist
     try:
         with get_db_cursor() as cur:
@@ -1625,8 +1639,9 @@ def _store_oracle_attestations(height: int, block_hash: str, attestations: list)
                     """,
                     (height, block_hash, oid, oaddr, fidelity, sig, ts),
                 )
+        logger.debug(f"[ATTESTATION-STORE] h={height} stored {len(attestations)} attestations (memory={_mem_count})")
     except Exception as e:
-        logger.debug(f"[ATTESTATION-STORE] DB persist skipped for h={height}: {e}")
+        logger.warning(f"[ATTESTATION-STORE] DB persist skipped for h={height}: {e} — using memory cache only")
 
 
 def _count_oracle_attestations(height: int) -> int:
@@ -1646,232 +1661,184 @@ def _count_oracle_attestations(height: int) -> int:
         return 0
 
 
-
-# ═════════════════════════════════════════════════════════════════════════════════
-# ORACLE CONSENSUS QUEUE — Cathedral Consensus Engine
-# ═════════════════════════════════════════════════════════════════════════════════
-
-class OracleConsensusQueue:
-    """Single-threaded FIFO queue for oracle consensus processing."""
-
-    def __init__(self, settle_fn, push_sse_fn, count_attestations_fn,
-                 store_attestations_fn, generate_attestations_fn):
-        self._queue = _queue_mod2.PriorityQueue()
-        self._lock = threading.Lock()
-        self._current_height: int = 0
-        self._processed: set = set()
-        self._settle = settle_fn
-        self._push_sse = push_sse_fn
-        self._count = count_attestations_fn
-        self._store = store_attestations_fn
-        self._generate = generate_attestations_fn
-        self._worker_thread = threading.Thread(target=self._worker, daemon=True, name="OracleConsensusWorker")
-        self._worker_thread.start()
-        self._recover_pending_from_db()
-        logger.info("[ORACLE-QUEUE] ✅ Consensus queue worker started")
-
-    def _recover_pending_from_db(self):
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("SELECT height, block_hash FROM oracle_consensus_queue WHERE status = 'pending' ORDER BY height")
-                rows = cur.fetchall()
-                for row in rows:
-                    h, bh = row
-                    if h not in self._processed:
-                        self._queue.put((h, bh, "", 0.0, "", []))
-                        logger.info(f"[ORACLE-QUEUE] 🔄 Recovered pending h={h} from DB")
-        except Exception as e:
-            logger.warning(f"[ORACLE-QUEUE] DB recovery skipped: {e}")
-
-    def submit(self, height: int, block_hash: str, header_hash: str,
-               w_state_fidelity: float, miner_address: str, txs: list):
-        with self._lock:
-            if height in self._processed:
-                logger.info(f"[ORACLE-QUEUE] h={height} already finalized, skipping")
-                return
-        try:
-            with get_db_cursor() as cur:
-                cur.execute(
-                    "INSERT INTO oracle_consensus_queue (height, block_hash, status, created_at) VALUES (%s, %s, 'pending', NOW()) ON CONFLICT (height) DO NOTHING",
-                    (height, block_hash),
-                )
-        except Exception as e:
-            logger.debug(f"[ORACLE-QUEUE] DB persist skipped: {e}")
-        self._queue.put((height, block_hash, header_hash, w_state_fidelity, miner_address, txs))
-        logger.info(f"[ORACLE-QUEUE] h={height} enqueued (queue_size={self._queue.qsize()})")
-
-    def _worker(self):
-        """
-        Autonomous oracle consensus agent.
-        Processes blocks FIFO. Generates attestations, counts them (internal + external),
-        and finalizes when threshold reached. Re-queues on failure. Never loses a block.
-        """
-        while True:
-            try:
-                item = self._queue.get(timeout=5.0)
-            except _queue_mod2.Empty:
-                continue
-            height, block_hash, header_hash, w_fid, miner_addr, txs = item
-            with self._lock:
-                if height in self._processed:
-                    continue
-                self._current_height = height
-
-            _start_ts = time.time()
-            logger.info(f"[ORACLE-QUEUE] 🔮 Processing h={height} — generating attestations")
-
-            try:
-                # Step 1: Generate internal attestations (auto-oracles)
-                self._generate(height, block_hash, header_hash, w_fid)
-
-                # Step 2: Count ALL attestations (internal + external client oracles)
-                count = self._count(height)
-                logger.info(f"[ORACLE-QUEUE] h={height} attestations: {count}/5")
-
-                # Step 3: Push pending status (so clients know we're working)
-                self._push_sse("/push/oracle_consensus", {
-                    "event_type": "block_pending",
-                    "height": height,
-                    "block_hash": block_hash,
-                    "miner_address": miner_addr,
-                    "oracle_count": count,
-                    "finalized": False,
-                    "timestamp": int(time.time()),
-                })
-
-                if count >= 3:
-                    # FINALIZE
-                    logger.critical(f"[ORACLE-QUEUE] 🔥 h={height} reached {count}/5 — SETTLING UTXO")
-                    self._settle(height, block_hash, miner_addr, txs)
-                    self._push_sse("/push/oracle_consensus", {
-                        "event_type": "block_finalized",
-                        "height": height,
-                        "block_hash": block_hash,
-                        "miner_address": miner_addr,
-                        "oracle_count": count,
-                        "finalized": True,
-                        "timestamp": int(time.time()),
-                    })
-                    with self._lock:
-                        self._processed.add(height)
-                        self._current_height = 0
-                    try:
-                        with get_db_cursor() as cur:
-                            cur.execute(
-                                "UPDATE oracle_consensus_queue SET status = 'finalized', finalized_at = NOW() WHERE height = %s",
-                                (height,),
-                            )
-                    except Exception as e:
-                        logger.debug(f"[ORACLE-QUEUE] DB finalize update skipped: {e}")
-                    logger.critical(f"[ORACLE-QUEUE] ✅ h={height} FINALIZED in {time.time()-_start_ts:.2f}s — queue advancing")
-                else:
-                    # Not enough attestations yet — re-queue with backoff
-                    _elapsed = time.time() - _start_ts
-                    _backoff = max(2.0, 5.0 - _elapsed)
-                    time.sleep(_backoff)
-                    if height not in self._processed:
-                        self._queue.put(item)
-                        logger.debug(f"[ORACLE-QUEUE] 🔄 h={height} re-queued ({count}/5 attestations)")
-            except Exception as e:
-                logger.error(f"[ORACLE-QUEUE] ❌ h={height} worker error: {e}", exc_info=True)
-                time.sleep(1.0)
-                if height not in self._processed:
-                    self._queue.put(item)
-                    logger.info(f"[ORACLE-QUEUE] 🔄 h={height} re-queued after error")
-
-    def snapshot(self) -> dict:
-        return {
-            "current_height": self._current_height,
-            "queue_size": self._queue.qsize(),
-            "processed_count": len(self._processed),
-        }
+def _get_attestations_for_block(height: int) -> List[dict]:
+    """Return all attestations for a block height."""
+    with _ATTESTATION_CACHE_LOCK:
+        cached = _ATTESTATION_CACHE.get(height)
+        if cached is not None:
+            return list(cached.values())
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT oracle_id, oracle_address, block_hash, attestation_signature, w_state_fidelity, attestation_timestamp FROM oracle_attestations WHERE block_height = %s", (height,))
+            rows = cur.fetchall()
+            return [{
+                "oracle_id": r[0], "oracle_address": r[1], "block_hash": r[2],
+                "signature": json.loads(r[3]) if r[3] else {}, "w_state_fidelity": float(r[4] or 0),
+                "timestamp": int(r[5] or 0),
+            } for r in rows]
+    except Exception:
+        return []
 
 
-_ORACLE_CONSENSUS_QUEUE: Optional[OracleConsensusQueue] = None
+
 _SUBMIT_RATE_LIMITS: Dict[Tuple[int, str], List[float]] = {}
 
-def _get_oracle_queue() -> OracleConsensusQueue:
-    global _ORACLE_CONSENSUS_QUEUE
-    if _ORACLE_CONSENSUS_QUEUE is None:
-        _ORACLE_CONSENSUS_QUEUE = OracleConsensusQueue(
-            settle_fn=_utxo_settle_block,
-            push_sse_fn=_push_to_sse_service,
-            count_attestations_fn=_count_oracle_attestations,
-            store_attestations_fn=_store_oracle_attestations,
-            generate_attestations_fn=_auto_generate_oracle_attestations,
-        )
-    return _ORACLE_CONSENSUS_QUEUE
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# ORACLE SERVER BRIDGE — Delegates to standalone oracle.py on :9092
+# ═════════════════════════════════════════════════════════════════════════════════
+
+_ORACLE_BRIDGE_URL = os.environ.get("ORACLE_BRIDGE_URL", "http://localhost:9092")
 
 
-def _auto_generate_oracle_attestations(height: int, block_hash: str, header_hash: str, w_state_fidelity: float = 0.0) -> None:
-    """
-    Automatically generate oracle attestations for a pending block.
+class _OracleBridge:
+    """Lightweight bridge to standalone oracle server. Forwards submissions and polls for finalized blocks."""
 
-    This function ALWAYS creates attestations — even if the DB is completely down.
-    Attestations are stored in an in-memory cache first, then best-effort DB persist.
-    The OracleConsensusQueue worker will count them from memory and finalize the block.
-    """
-    registered: list = []
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._processed: set = set()
+        self._current_height = 0
+        self._poller = threading.Thread(target=self._poll_loop, daemon=True, name="OracleBridgePoller")
+        self._poller.start()
+        logger.info("[ORACLE-BRIDGE] ✅ Bridge to standalone oracle server started")
 
-    # Try to fetch real oracles from DB
-    try:
-        _lazy_ensure_chain_state()
-        _lazy_ensure_oracle_registry()
-        with get_db_cursor() as cur:
-            cur.execute("SELECT oracle_id, oracle_address, oracle_pub_key, mode FROM oracle_registry WHERE mode IN ('full', 'primary')")
-            registered = cur.fetchall()
-    except Exception as _db_err:
-        logger.debug(f"[AUTO-CONSENSUS] DB oracle fetch failed for h={height}: {_db_err}")
+    def _request(self, endpoint: str, payload: dict, timeout: float = 5.0) -> Optional[dict]:
+        try:
+            req = urllib.request.Request(
+                f"{_ORACLE_BRIDGE_URL}{endpoint}",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read().decode())
+        except Exception as e:
+            logger.debug(f"[ORACLE-BRIDGE] Request to {endpoint} failed: {e}")
+        return None
 
-    # If no real oracles (or DB down), use deterministic defaults
-    if not registered:
-        logger.warning(f"[AUTO-CONSENSUS] No registered oracles; using deterministic defaults for h={height}")
-        registered = []
-        for i in range(1, 6):
-            oid = f"auto-oracle-{i}"
-            oaddr = hashlib.sha3_256(f"oracle-{i}".encode()).hexdigest()[:40]
-            registered.append((oid, oaddr, "", "full"))
-        # Best-effort seed to DB
+    def submit_block(self, height: int, block_hash: str, header_hash: str,
+                     w_state_fidelity: float, miner_address: str, txs: list):
+        result = self._request("/rpc", {
+            "jsonrpc": "2.0",
+            "method": "qtcl_submitBlock",
+            "params": {
+                "height": height,
+                "block_hash": block_hash,
+                "parent_hash": "",
+                "nonce": 0,
+                "difficulty": 1,
+                "timestamp": int(time.time()),
+                "transactions": txs,
+                "miner_address": miner_address,
+            },
+            "id": 1,
+        })
+        if result and result.get("jsonrpc") == "2.0":
+            logger.info(f"[ORACLE-BRIDGE] h={height} submitted to oracle server")
+        else:
+            logger.warning(f"[ORACLE-BRIDGE] h={height} oracle server submission failed")
+
+    def submit_attestation(self, attestation: dict) -> Optional[dict]:
+        return self._request("/rpc", {
+            "jsonrpc": "2.0",
+            "method": "qtcl_submitOracleAttestation",
+            "params": attestation,
+            "id": 1,
+        })
+
+    def _poll_loop(self):
+        """Poll oracle server for finalized blocks and trigger UTXO settlement."""
+        while True:
+            time.sleep(5.0)
+            try:
+                req = urllib.request.Request(f"{_ORACLE_BRIDGE_URL}/status", method="GET")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = json.loads(resp.read().decode())
+                    cache = data.get("result", {}).get("cache", {})
+                    pending = cache.get("pending", 0)
+                    finalized = cache.get("finalized", 0)
+                    # If there are pending blocks, check each one
+                    if pending > 0:
+                        self._check_pending_blocks()
+            except Exception:
+                pass
+
+    def _check_pending_blocks(self):
+        """Query oracle server for block statuses and settle finalized ones."""
         try:
             with get_db_cursor() as cur:
-                for oid, oaddr, _, _ in registered:
-                    cur.execute(
-                        """
-                        INSERT INTO oracle_registry (oracle_id, oracle_address, oracle_pub_key, mode, registered_at)
-                        VALUES (%s, %s, %s, 'full', %s)
-                        ON CONFLICT (oracle_id) DO NOTHING
-                        """,
-                        (oid, oaddr, "", int(time.time())),
-                    )
-        except Exception:
-            pass
-        logger.info(f"[AUTO-CONSENSUS] Using {len(registered)} default oracles for h={height}")
+                cur.execute("SELECT height, block_hash, miner_address FROM blocks WHERE finalized = FALSE ORDER BY height LIMIT 20")
+                rows = cur.fetchall()
+                for row in rows:
+                    height, block_hash, miner_address = row
+                    if height in self._processed:
+                        continue
+                    result = self._request("/rpc", {
+                        "jsonrpc": "2.0",
+                        "method": "qtcl_getBlockStatus",
+                        "params": {"height": height},
+                        "id": 1,
+                    })
+                    if not result:
+                        continue
+                    res = result.get("result", {})
+                    if res.get("status") == "FINALIZED":
+                        # Get transactions for settlement
+                        cur.execute("SELECT tx_hash, from_address, to_address, amount, tx_type, metadata FROM transactions WHERE block_hash = %s", (block_hash,))
+                        tx_rows = cur.fetchall()
+                        _db_txs = []
+                        for tr in tx_rows:
+                            _meta = tr[5] if isinstance(tr[5], dict) else json.loads(tr[5] or "{}")
+                            _db_txs.append({
+                                "tx_id": tr[0], "from_address": tr[1], "to_address": tr[2],
+                                "amount": tr[3], "tx_type": tr[4], "metadata": _meta,
+                                "inputs": _meta.get("inputs", []), "outputs": _meta.get("outputs", []),
+                            })
+                        _utxo_settle_block(height, block_hash, miner_address or "", _db_txs)
+                        cur.execute("UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s", (int(time.time()), height))
+                        with self._lock:
+                            self._processed.add(height)
+                        _push_to_sse_service("/push/oracle_consensus", {
+                            "event_type": "block_finalized",
+                            "height": height,
+                            "block_hash": block_hash,
+                            "miner_address": miner_address or "",
+                            "oracle_count": res.get("attestation_count", 3),
+                            "finalized": True,
+                            "timestamp": int(time.time()),
+                        })
+                        logger.critical(f"[ORACLE-BRIDGE] 🔥 h={height} finalized by oracle server — UTXO settled")
+        except Exception as e:
+            logger.debug(f"[ORACLE-BRIDGE] Poll check error: {e}")
 
-    # Build attestation list
-    attestations = []
-    for r in registered:
-        oid, oaddr, opub, omode = r
-        _ts = int(time.time())
-        _sig = {
-            "signature": hashlib.sha3_256(f"{header_hash}:{oid}:{_ts}".encode()).hexdigest(),
-            "challenge": hashlib.sha3_256(f"{oid}:{header_hash}".encode()).hexdigest()[:64],
-            "auth_tag": hashlib.sha3_256(f"{oid}:{header_hash}".encode()).hexdigest()[:64],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        att = {
-            "oracle_id": oid,
-            "oracle_address": oaddr,
-            "block_hash": header_hash,
-            "signature": _sig,
-            "w_state_fidelity": w_state_fidelity,
-            "timestamp": _ts,
-        }
-        attestations.append(att)
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "current_height": self._current_height,
+                "queue_size": 0,
+                "processed_count": len(self._processed),
+            }
 
-    # Store to memory cache (guaranteed to succeed) + best-effort DB
-    _store_oracle_attestations(height, header_hash, attestations)
-    count = _count_oracle_attestations(height)
-    logger.info(f"[AUTO-CONSENSUS] h={height} now has {count}/{len(registered)} attestations (memory + DB)")
+
+_ORACLE_BRIDGE: Optional[_OracleBridge] = None
+_ORACLE_BRIDGE_LOCK = threading.Lock()
+
+
+def _get_oracle_bridge() -> _OracleBridge:
+    global _ORACLE_BRIDGE
+    if _ORACLE_BRIDGE is None:
+        with _ORACLE_BRIDGE_LOCK:
+            if _ORACLE_BRIDGE is None:
+                _ORACLE_BRIDGE = _OracleBridge()
+    return _ORACLE_BRIDGE
+
+
+# Keep legacy alias for existing callers
+def _get_oracle_queue():
+    return _get_oracle_bridge()
 
 
 def _create_genesis_block() -> dict:
@@ -3521,49 +3488,54 @@ def _lazy_ensure_oracle_registry():
 
 
 def _lazy_ensure_chain_state():
-    """Ensure chain_state, oracle_consensus_queue, and wallets tables exist in Supabase."""
+    """Ensure chain_state, oracle_consensus_queue, wallets, and oracle_attestations tables exist.
+    ALWAYS checks for oracle_attestations specifically — never skips it."""
     global _SCHEMA_ENSURED_CHAIN_STATE
-    if _SCHEMA_ENSURED_CHAIN_STATE:
-        return
+    _need_chain_state = not _SCHEMA_ENSURED_CHAIN_STATE
+    _need_attestations = True  # always check
     try:
         with get_db_cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS chain_state (
-                    state_id         INTEGER PRIMARY KEY,
-                    chain_height     BIGINT      DEFAULT 0,
-                    head_block_hash  TEXT        DEFAULT '',
-                    latest_coherence NUMERIC(5,4) DEFAULT 0.9,
-                    updated_at       TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS oracle_consensus_queue (
-                    height       INTEGER PRIMARY KEY,
-                    block_hash   TEXT NOT NULL,
-                    status       TEXT DEFAULT 'pending',
-                    created_at   TIMESTAMPTZ DEFAULT NOW(),
-                    finalized_at TIMESTAMPTZ
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS wallets (
-                    address      TEXT PRIMARY KEY,
-                    token_balance NUMERIC(24,8) DEFAULT 0.0,
-                    updated_at   TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS oracle_attestations (
-                    block_height         BIGINT NOT NULL,
-                    block_hash           TEXT NOT NULL,
-                    oracle_id            VARCHAR(128) NOT NULL,
-                    oracle_address       VARCHAR(128) NOT NULL DEFAULT '',
-                    w_state_fidelity     NUMERIC(5,4) DEFAULT 0.0,
-                    attestation_signature TEXT NOT NULL DEFAULT '',
-                    attestation_timestamp BIGINT DEFAULT 0,
-                    PRIMARY KEY (block_height, oracle_id)
-                )
-            """)
+            if _need_chain_state:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS chain_state (
+                        state_id         INTEGER PRIMARY KEY,
+                        chain_height     BIGINT      DEFAULT 0,
+                        head_block_hash  TEXT        DEFAULT '',
+                        latest_coherence NUMERIC(5,4) DEFAULT 0.9,
+                        updated_at       TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS oracle_consensus_queue (
+                        height       INTEGER PRIMARY KEY,
+                        block_hash   TEXT NOT NULL,
+                        status       TEXT DEFAULT 'pending',
+                        created_at   TIMESTAMPTZ DEFAULT NOW(),
+                        finalized_at TIMESTAMPTZ
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS wallets (
+                        address      TEXT PRIMARY KEY,
+                        token_balance NUMERIC(24,8) DEFAULT 0.0,
+                        updated_at   TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+            # ALWAYS ensure oracle_attestations exists (even if other tables already existed)
+            if _need_attestations:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS oracle_attestations (
+                        block_height         BIGINT NOT NULL,
+                        block_hash           TEXT NOT NULL,
+                        oracle_id            VARCHAR(128) NOT NULL,
+                        oracle_address       VARCHAR(128) NOT NULL DEFAULT '',
+                        w_state_fidelity     NUMERIC(5,4) DEFAULT 0.0,
+                        attestation_signature TEXT NOT NULL DEFAULT '',
+                        attestation_timestamp BIGINT DEFAULT 0,
+                        PRIMARY KEY (block_height, oracle_id)
+                    )
+                """)
+                logger.info("[SCHEMA] ✅ oracle_attestations table ensured")
         _SCHEMA_ENSURED_CHAIN_STATE = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_chain_state failed: {e}")
@@ -6456,23 +6428,29 @@ def _rpc_submitOracleAttestation(params: Any, rpc_id: Any) -> dict:
         if att_ts > 0 and (_now - att_ts > 300 or att_ts > _now + 60):
             return _rpc_error(-32021, "Attestation timestamp invalid (stale or future)", rpc_id)
 
-        # Store attestation (memory cache first, then DB)
+        # Store attestation locally (memory cache first, then DB)
         _store_oracle_attestations(height, block_hash, [att])
         count = _count_oracle_attestations(height)
 
+        # Forward to standalone oracle server
+        try:
+            _bridge_res = _get_oracle_bridge().submit_attestation(att)
+            if _bridge_res and _bridge_res.get("result", {}).get("status") == "accepted":
+                logger.info(f"[ORACLE-ATTEST] 📡 h={height} oracle={oracle_id[:16]}… forwarded to oracle server")
+        except Exception as _bridge_err:
+            logger.debug(f"[ORACLE-ATTEST] Bridge forward failed: {_bridge_err}")
+
         logger.info(f"[ORACLE-ATTEST] 📡 h={height} oracle={oracle_id[:16]}… — total attestations: {count}/5")
 
-        # If threshold reached, trigger immediate finalization via queue
+        # If threshold reached, trigger immediate finalization
         if count >= 3:
             logger.critical(f"[ORACLE-ATTEST] 🔥 h={height} reached {count}/5 — triggering finalization")
-            # Check if block exists and not already finalized
             try:
                 with get_db_cursor() as cur:
                     cur.execute("SELECT finalized, miner_address FROM blocks WHERE height = %s", (height,))
                     row = cur.fetchone()
                     if row and not row[0]:
                         _miner = row[1] or oracle_address
-                        # Get transactions for this block
                         cur.execute("SELECT tx_hash, from_address, to_address, amount, tx_type, metadata FROM transactions WHERE block_hash = %s", (block_hash,))
                         tx_rows = cur.fetchall()
                         _db_txs = []
@@ -6503,6 +6481,7 @@ def _rpc_submitOracleAttestation(params: Any, rpc_id: Any) -> dict:
             "height": height,
             "oracle_count": count,
             "threshold_reached": count >= 3,
+            "block_hash": block_hash,
         }, rpc_id)
 
     except Exception as e:
@@ -6539,7 +6518,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         timestamp_s = int(hdr.get("timestamp", 0))
         nonce = int(hdr.get("nonce", 0))
         miner_address = str(hdr.get("miner_address", ""))
-        difficulty_bits = int(hdr.get("difficulty", 4))
+        # BLOCK_DIFFICULTY env var overrides header difficulty (for debugging / tuning)
+        _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
+        difficulty_bits = int(_env_diff) if _env_diff.isdigit() else int(hdr.get("difficulty", 4))
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
         # ── Rate limiting: max 3 submissions per height per miner within 60s ──
@@ -6804,15 +6785,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _store_oracle_attestations(height, _header_hash, attestations)
                 _oracle_valid = _count_oracle_attestations(height)
                 logger.info(f"[RPC-submitBlock] h={height} stored {_oracle_valid} client attestations")
-            # ── Enqueue for oracle consensus processing ──
-            _get_oracle_queue().submit(
-                height=height,
-                block_hash=block_hash,
-                header_hash=_header_hash,
-                w_state_fidelity=w_state_fidelity,
-                miner_address=miner_address,
-                txs=txs or [],
-            )
+            # ── Forward to standalone oracle server for consensus ──
+            try:
+                _get_oracle_bridge().submit_block(
+                    height=height,
+                    block_hash=block_hash,
+                    header_hash=_header_hash,
+                    w_state_fidelity=w_state_fidelity,
+                    miner_address=miner_address,
+                    txs=txs or [],
+                )
+            except Exception as _bridge_err:
+                logger.warning(f"[RPC-submitBlock] Oracle bridge error: {_bridge_err}")
 
         # else: duplicate and already finalized — nothing to do, _is_finalized already True
 
