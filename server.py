@@ -1732,7 +1732,7 @@ _SUBMIT_RATE_LIMITS: Dict[Tuple[int, str], List[float]] = {}
 # ORACLE SERVER BRIDGE — Delegates to standalone oracle.py on :9092
 # ═════════════════════════════════════════════════════════════════════════════════
 
-_ORACLE_BRIDGE_URL = os.environ.get("ORACLE_BRIDGE_URL", "http://localhost:9092")
+_ORACLE_BRIDGE_URL = os.environ.get("ORACLE_BRIDGE_URL", "http://127.0.0.1:9092")
 
 
 class _OracleBridge:
@@ -1778,10 +1778,10 @@ class _OracleBridge:
             },
             "id": 1,
         })
-        if result and result.get("jsonrpc") == "2.0":
+        if result and result.get("jsonrpc") == "2.0" and "error" not in result and "result" in result:
             logger.info(f"[ORACLE-BRIDGE] h={height} submitted to oracle server")
         else:
-            logger.warning(f"[ORACLE-BRIDGE] h={height} oracle server submission failed")
+            raise RuntimeError(f"h={height} oracle server submission failed: {result}")
 
     def submit_attestation(self, attestation: dict) -> Optional[dict]:
         return self._request("/rpc", {
