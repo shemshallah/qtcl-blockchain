@@ -255,7 +255,7 @@ class Attestation:
         }
 
 
-@dataclass  
+@dataclass
 class CachedBlock:
     """Block awaiting oracle consensus."""
     height: int
@@ -266,6 +266,7 @@ class CachedBlock:
     difficulty: int
     timestamp: int
     transactions: List[Dict[str, Any]]
+    merkle_root: str = ""
     status: BlockStatus = BlockStatus.PENDING
     attestations: Dict[str, Attestation] = field(default_factory=dict)
     first_seen: float = field(default_factory=time.time)
@@ -348,10 +349,13 @@ class AttestationCache:
             if existing:
                 if existing.block_hash == block_hash:
                     return existing  # duplicate
-                # Different hash at same height — check temporal ordering
+                # Different hash at same height — orphan the old one instead of overwriting
                 if existing.status == BlockStatus.FINALIZED:
                     logger.warning(f"[CACHE] h={height} already finalized with different hash")
                     return existing
+                else:
+                    existing.status = BlockStatus.ORPHANED
+                    logger.info(f"[CACHE] h={height} orphaned old block {existing.block_hash[:16]}… for new {block_hash[:16]}…")
             
             self._temporal.record_first_seen(height)
             self._total_submissions += 1
@@ -365,6 +369,7 @@ class AttestationCache:
                 difficulty=int(block_data.get("difficulty", BLOCK_DIFFICULTY)),
                 timestamp=int(block_data.get("timestamp", 0)),
                 transactions=block_data.get("transactions", []),
+                merkle_root=str(block_data.get("merkle_root", "")),
             )
             self._blocks[height] = block
             self._evict_old()
@@ -706,12 +711,15 @@ class ConsensusWorker(threading.Thread):
         logger.info("[CONSENSUS-WORKER] Started")
         while self._running:
             try:
-                block = self.cache.get_next_pending()
-                if not block:
+                pending = self.cache.get_pending_blocks()
+                if not pending:
                     time.sleep(0.5)
                     continue
                 
-                self._process_block(block)
+                for block in pending:
+                    if not self._running:
+                        break
+                    self._process_block(block)
             except Exception as e:
                 logger.error(f"[CONSENSUS-WORKER] Error: {e}", exc_info=True)
                 time.sleep(1.0)
@@ -726,9 +734,13 @@ class ConsensusWorker(threading.Thread):
         
         # Generate attestations if we haven't yet
         if block.attestation_count < len(self.cluster.nodes):
+            # Canonical header hash must match the blockchain server's computation
             header_hash = hashlib.sha3_256(json.dumps({
                 "height": block.height,
                 "parent_hash": block.parent_hash,
+                "merkle_root": block.merkle_root,
+                "timestamp": block.timestamp,
+                "difficulty": block.difficulty,
                 "nonce": block.nonce,
                 "miner_address": block.miner_address,
             }, sort_keys=True).encode()).hexdigest()
@@ -764,8 +776,8 @@ class ConsensusWorker(threading.Thread):
                 "timestamp": int(time.time()),
             })
         else:
-            # Re-check soon
-            time.sleep(2.0)
+            # Not enough attestations yet; will re-check on next worker loop
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -853,6 +865,12 @@ class OracleRequestHandler(BaseHTTPRequestHandler):
     def _handle_submit_attestation(self, params: Dict[str, Any], rpc_id: Any, cache: AttestationCache):
         if not cache:
             self._json_response(200, {"jsonrpc": "2.0", "error": {"code": -32603, "message": "Cache unavailable"}, "id": rpc_id})
+            return
+        
+        oracle_id = str(params.get("oracle_id", ""))
+        # Basic validation: reject empty or blatantly invalid oracle IDs
+        if not oracle_id or len(oracle_id) < 4:
+            self._json_response(200, {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid oracle_id"}, "id": rpc_id})
             return
         
         att = Attestation(
@@ -1032,6 +1050,29 @@ class _MinimalWStateManagerFacade:
 ORACLE = _MinimalOracleFacade()
 ORACLE_W_STATE_MANAGER = _MinimalWStateManagerFacade()
 PYTH_ORACLE = None  # Deprecated; kept for backward compatibility with health checks
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BROADCAST FACADE (server.py compatibility)
+# ═══════════════════════════════════════════════════════════════════════════════
+class _MeasurementBroadcaster:
+    """Stub broadcaster for qtcl_registerMeasurementSubscriber RPCs.
+    Real quantum measurement broadcast is handled via the SSE /stream endpoint."""
+    def register(self, subscriber_id: str, callback_url: str) -> bool:
+        logger.info(f"[BROADCASTER] register {subscriber_id} → {callback_url}")
+        return True
+    def unregister(self, subscriber_id: str) -> bool:
+        logger.info(f"[BROADCASTER] unregister {subscriber_id}")
+        return True
+    def list_subscribers(self) -> list:
+        return []
+    def broadcast(self, measurement: dict) -> int:
+        return 0
+
+
+def get_oracle_measurement_broadcaster():
+    """Return a measurement broadcaster compatible with server.py imports."""
+    return _MeasurementBroadcaster()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

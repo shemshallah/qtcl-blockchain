@@ -1801,19 +1801,22 @@ class _OracleBridge:
         return None
 
     def submit_block(self, height: int, block_hash: str, header_hash: str,
-                     w_state_fidelity: float, miner_address: str, txs: list):
+                     w_state_fidelity: float, miner_address: str, txs: list,
+                     parent_hash: str = "", nonce: int = 0, difficulty: int = 1,
+                     timestamp: int = 0, merkle_root: str = ""):
         result = self._request("/rpc", {
             "jsonrpc": "2.0",
             "method": "qtcl_submitBlock",
             "params": {
                 "height": height,
                 "block_hash": block_hash,
-                "parent_hash": "",
-                "nonce": 0,
-                "difficulty": 1,
-                "timestamp": int(time.time()),
+                "parent_hash": parent_hash,
+                "nonce": nonce,
+                "difficulty": difficulty,
+                "timestamp": timestamp or int(time.time()),
                 "transactions": txs,
                 "miner_address": miner_address,
+                "merkle_root": merkle_root,
             },
             "id": 1,
         })
@@ -3711,15 +3714,18 @@ def _lazy_ensure_peer_registry():
     if _SCHEMA_ENSURED_PEER_REGISTRY:
         return
     try:
-        # Step 1: Aggressive Rebuild if legacy schema detected
-        # We do this in a separate cursor to ensure it doesn't pollute the main one
+        # Step 1: Aggressive Rebuild if legacy schema detected (missing node_id OR has peer_id)
         with get_db_cursor() as cur:
             cur.execute("""
                 DO $$ 
                 BEGIN 
+                    -- Drop if it has the old peer_id column
                     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='peer_id') THEN
-                        -- If we have peer_id, we are on the legacy schema. 
-                        -- We drop it completely to ensure all constraints/NOT NULLs are cleared.
+                        DROP TABLE IF EXISTS peer_registry CASCADE;
+                    END IF;
+                    -- Also drop if it exists but is missing the node_id column (some other legacy variant)
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='peer_registry')
+                       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='node_id') THEN
                         DROP TABLE IF EXISTS peer_registry CASCADE;
                     END IF;
                 END $$;
@@ -6953,8 +6959,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _store_oracle_attestations(height, _header_hash, attestations)
                 _oracle_valid = _count_oracle_attestations(height)
                 logger.info(f"[RPC-submitBlock] h={height} stored {_oracle_valid} client attestations")
-            # ── Forward to standalone oracle server for consensus ──
-            _bridge_ok = False
+            # ── Forward to standalone oracle server for consensus (best-effort) ──
+            _oracle_bridge_ok = False
             try:
                 _get_oracle_bridge().submit_block(
                     height=height,
@@ -6963,34 +6969,39 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     w_state_fidelity=w_state_fidelity,
                     miner_address=miner_address,
                     txs=txs or [],
+                    parent_hash=parent_hash,
+                    nonce=nonce,
+                    difficulty=difficulty_bits,
+                    timestamp=timestamp_s,
+                    merkle_root=merkle_root,
                 )
-                _bridge_ok = True
+                _oracle_bridge_ok = True
             except Exception as _bridge_err:
-                logger.warning(f"[RPC-submitBlock] Oracle bridge error: {_bridge_err}")
-            # ── Fallback: auto-generate attestations locally if bridge failed ──
-            if not _bridge_ok:
+                logger.debug(f"[RPC-submitBlock] Oracle bridge error: {_bridge_err}")
+            # ── Only auto-generate attestations if the standalone oracle is unreachable ──
+            if not _oracle_bridge_ok:
                 _auto_generate_attestations_local(height, _header_hash, w_state_fidelity)
-                _oracle_valid = _count_oracle_attestations(height)
-                if _oracle_valid >= 3:
-                    logger.critical(f"[RPC-submitBlock] 🔥 h={height} auto-finalized locally ({_oracle_valid}/5)")
-                    _utxo_settle_block(height, block_hash, miner_address, txs or [])
-                    try:
-                        with get_db_cursor() as cur:
-                            cur.execute("UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s", (int(time.time()), height))
-                    except Exception:
-                        pass
-                    _is_finalized = True
-                    _oracle_ids = list(_ATTESTATION_CACHE.get(height, {}).keys())
-                    _push_to_sse_service("/push/oracle_consensus", {
-                        "event_type": "block_finalized",
-                        "height": height,
-                        "block_hash": block_hash,
-                        "miner_address": miner_address,
-                        "oracle_count": _oracle_valid,
-                        "oracle_ids": _oracle_ids,
-                        "finalized": True,
-                        "timestamp": int(time.time()),
-                    })
+            _oracle_valid = _count_oracle_attestations(height)
+            if _oracle_valid >= 3:
+                logger.critical(f"[RPC-submitBlock] 🔥 h={height} auto-finalized locally ({_oracle_valid}/5)")
+                _utxo_settle_block(height, block_hash, miner_address, txs or [])
+                try:
+                    with get_db_cursor() as cur:
+                        cur.execute("UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s", (int(time.time()), height))
+                except Exception:
+                    pass
+                _is_finalized = True
+                _oracle_ids = list(_ATTESTATION_CACHE.get(height, {}).keys())
+                _push_to_sse_service("/push/oracle_consensus", {
+                    "event_type": "block_finalized",
+                    "height": height,
+                    "block_hash": block_hash,
+                    "miner_address": miner_address,
+                    "oracle_count": _oracle_valid,
+                    "oracle_ids": _oracle_ids,
+                    "finalized": True,
+                    "timestamp": int(time.time()),
+                })
 
         # else: duplicate and already finalized — nothing to do, _is_finalized already True
 
