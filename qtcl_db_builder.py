@@ -2298,6 +2298,42 @@ class QuantumTemporalCoherenceLedgerServer:
         except Exception as e:
             logger.warning(f"[DB] Close warning: {e}")
 
+    def _create_genesis_block(self):
+        """Insert genesis block (height 0) into blocks table if not present."""
+        try:
+            cur = self.conn.cursor()
+            genesis_hash = hashlib.sha3_256(b"QTCL_GENESIS_2025").hexdigest()
+            coinbase_tx_hash = hashlib.sha3_256(b"QTCL_GENESIS_COINBASE").hexdigest()
+            cur.execute(
+                """
+                INSERT INTO blocks
+                (height, block_hash, parent_hash, merkle_root, timestamp,
+                 w_state_hash, oracle_w_state_hash, miner_address, nonce,
+                 difficulty, coherence_snapshot, fidelity_snapshot, tx_count,
+                 pq_curr, pq_last, finalized, finalized_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                ON CONFLICT (height) DO NOTHING
+                """,
+                (0, genesis_hash, "0" * 64, genesis_hash[:64], int(time.time()),
+                 genesis_hash[:64], genesis_hash[:64], "0" * 64, 0, 1,
+                 1.0, 1.0, 1, 0, 0, int(time.time())),
+            )
+            cur.execute(
+                """
+                INSERT INTO transactions
+                (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, metadata, updated_at)
+                VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, %s, %s, NOW())
+                ON CONFLICT (tx_hash) DO NOTHING
+                """,
+                (coinbase_tx_hash, "", "", 0, "coinbase", 0, genesis_hash,
+                 json.dumps({"inputs": [{"prev_tx_hash": "0" * 64, "prev_output_index": 0xFFFFFFFF}], "outputs": []})),
+            )
+            self.conn.commit()
+            logger.info(f"{CLR.OK}[GENESIS] Genesis block (height 0) inserted: {genesis_hash[:16]}...{CLR.E}")
+        except Exception as e:
+            logger.warning(f"{CLR.WARN}[GENESIS] Could not insert genesis block: {e}{CLR.E}")
+            self.conn.rollback()
+
     def rebuild_complete(self):
         logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}")
         logger.info(f"{CLR.HEADER}QTCL DATABASE BUILDER V6 — MODE: {self.db_mode.upper()}{CLR.E}")
@@ -2309,6 +2345,7 @@ class QuantumTemporalCoherenceLedgerServer:
             self.create_schema()
             self._migrate_oracle_registry_onchain()
             self.populate_tessellation()
+            self._create_genesis_block()
             total_elapsed = time.time() - total_start
             logger.info(f"{CLR.HEADER}{'='*80}{CLR.E}")
             logger.info(f"{CLR.OK}✓ BUILD COMPLETE — {total_elapsed/60:.1f} min — {self.db_mode.upper()}{CLR.E}")
