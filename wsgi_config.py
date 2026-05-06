@@ -90,6 +90,19 @@ def application(environ, start_response):
             b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server initializing, retry in 5s"},"id":null}'
         ]
 
+    # MCP endpoint — forward to full app (MCP 2025-06-18 streamable HTTP + legacy SSE)
+    if path == "/mcp" or path.startswith("/mcp/"):
+        if _full_app:
+            return _full_app(environ, start_response)
+        # MCP not ready — return proper JSON-RPC error
+        start_response(
+            "503 Service Unavailable",
+            [("Content-Type", "application/json"), ("Retry-After", "5")],
+        )
+        return [
+            b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"MCP server initializing, retry in 5s"},"id":null}'
+        ]
+
     # Standard timeout for other endpoints
     _load_done.wait(timeout=30)
 
