@@ -561,18 +561,49 @@ def _safe_vertex_name(name: Optional[str], max_len: int = 200) -> Optional[str]:
     return name[:max_len-9] + "_" + hash_suffix
 
 
+def _mpf_to_str(x) -> str:
+    """Fast mpf → string: ~20 significant digits is plenty for geometry.
+    Avoids the expensive high-precision str() that mp.dps=50 produces."""
+    return format(float(x), '.18e') if isinstance(x, (mpf, mpc)) else str(x)
+
+
 def poincare_midpoint(p1: HyperbolicPoint, p2: HyperbolicPoint) -> HyperbolicPoint:
     z1 = mpc(p1.x, p1.y)
     z2 = mpc(p2.x, p2.y)
     denominator = mpf(1) + conj(z1) * z2
     if abs(denominator) < mpf(10)**(-140):
-        # Use simple naming to avoid length issues
         fallback_name = "mid_fallback_p1" if abs(z1) < abs(z2) else "mid_fallback_p2"
         target_pt = p1 if abs(z1) < abs(z2) else p2
         return HyperbolicPoint(target_pt.x, target_pt.y, name=fallback_name)
     m = (z1 + z2) / denominator
-    # Use simple naming: just use a hash of coordinates instead of parent names
     return HyperbolicPoint(mre(m), mim(m), name="midpoint")
+
+
+# Midpoint identity cache: (id(p1), id(p2)) → HyperbolicPoint
+# Adjacent triangles share edges; without caching the same midpoint is
+# computed 4× per edge per level, wasting 75% of midpoint arithmetic.
+_MID_CACHE: dict = {}
+_MID_CACHE_HITS = 0
+
+
+def cached_midpoint(p1: HyperbolicPoint, p2: HyperbolicPoint) -> HyperbolicPoint:
+    """poincare_midpoint with identity-based memoisation.
+    Adjacent triangles share edges.  Without caching, every midpoint
+    is recomputed 4× — once per child triangle that references it."""
+    key = (id(p1), id(p2)) if id(p1) < id(p2) else (id(p2), id(p1))
+    if key in _MID_CACHE:
+        global _MID_CACHE_HITS
+        _MID_CACHE_HITS += 1
+        return _MID_CACHE[key]
+    result = poincare_midpoint(p1, p2)
+    _MID_CACHE[key] = result
+    return result
+
+
+def clear_mid_cache():
+    global _MID_CACHE, _MID_CACHE_HITS
+    _MID_CACHE.clear()
+    _MID_CACHE_HITS = 0
 
 
 def hyperbolic_angle_at_vertex(a: HyperbolicPoint, b: HyperbolicPoint, c: HyperbolicPoint) -> Any:
@@ -2024,18 +2055,19 @@ class QuantumTemporalCoherenceLedgerServer:
         logger.info(f"{CLR.OK}[MIGRATE] oracle_registry migration: {ok}/{len(migrations)} OK{CLR.E}")
 
     def _insert_triangles_batched(self, triangle_list):
-        """Batch-insert a list of HyperbolicTriangle objects, then free them."""
+        """Batch-insert a list of HyperbolicTriangle objects, then free them.
+        Caller manages commits — no per-batch commit (was the cause of hangs)."""
         total = len(triangle_list)
         if total == 0:
             return
-        BATCH = 2000
+        BATCH = 5000
         for i in range(0, total, BATCH):
             batch = triangle_list[i:i + BATCH]
             rows = [(
                 tri.triangle_id, tri.depth, None,
-                str(tri.v0.x), str(tri.v0.y), tri.v0.name,
-                str(tri.v1.x), str(tri.v1.y), tri.v1.name,
-                str(tri.v2.x), str(tri.v2.y), tri.v2.name
+                _mpf_to_str(tri.v0.x), _mpf_to_str(tri.v0.y), tri.v0.name,
+                _mpf_to_str(tri.v1.x), _mpf_to_str(tri.v1.y), tri.v1.name,
+                _mpf_to_str(tri.v2.x), _mpf_to_str(tri.v2.y), tri.v2.name
             ) for tri in batch]
             self._execute_values_compat(
                 """
@@ -2046,15 +2078,14 @@ class QuantumTemporalCoherenceLedgerServer:
                     v2_x, v2_y, v2_name
                 ) VALUES %s
                 """,
-                rows, page_size=500
+                rows, page_size=1000
             )
-        self._commit()
 
     def _insert_pseudoqubit_rows(self, rows):
-        """Batch-insert pseudoqubit row tuples."""
+        """Batch-insert pseudoqubit row tuples. Caller manages commits."""
         if not rows:
             return
-        BATCH = 5000
+        BATCH = 10000
         for i in range(0, len(rows), BATCH):
             self._execute_values_compat(
                 """
@@ -2063,9 +2094,8 @@ class QuantumTemporalCoherenceLedgerServer:
                     placement_type, phase_theta, coherence_measure
                 ) VALUES %s
                 """,
-                rows[i:i + BATCH], page_size=1000
+                rows[i:i + BATCH], page_size=2000
             )
-        self._commit()
 
     def populate_tessellation(self):
         """
@@ -2110,14 +2140,15 @@ class QuantumTemporalCoherenceLedgerServer:
                 current_level.append(tri)
             logger.info(f"{CLR.OK}[OCTAGON] Created 8 fundamental triangles{CLR.E}")
 
-            # Subdivide level by level
+            # Subdivide level by level — with midpoint cache + periodic commits
             final_level = []
+            clear_mid_cache()
             for level in range(1, depth + 1):
                 next_level = []
                 for parent in current_level:
-                    m01 = poincare_midpoint(parent.v0, parent.v1)
-                    m12 = poincare_midpoint(parent.v1, parent.v2)
-                    m20 = poincare_midpoint(parent.v2, parent.v0)
+                    m01 = cached_midpoint(parent.v0, parent.v1)
+                    m12 = cached_midpoint(parent.v1, parent.v2)
+                    m20 = cached_midpoint(parent.v2, parent.v0)
                     base_id = triangle_id_counter[0]
                     children = [
                         HyperbolicTriangle(base_id,     parent.v0, m01, m20, level, parent.triangle_id),
@@ -2131,18 +2162,25 @@ class QuantumTemporalCoherenceLedgerServer:
                 pct = (level / depth) * 100
                 filled = int(40 * level / depth)
                 bar = "█" * filled + "░" * (40 - filled)
-                logger.info(f"{CLR.C}[Tessellation] [{bar}] {pct:5.1f}% | Level {level}/{depth} | {len(next_level):,} new triangles{CLR.E}")
+                n_tris_this = len(next_level)
+                cache_hits = _MID_CACHE_HITS
+                logger.info(f"{CLR.C}[Tessellation] [{bar}] {pct:5.1f}% | L{level}/{depth} | {n_tris_this:,} Δ | cache hits: {cache_hits:,}{CLR.E}")
 
-                # Insert non-final levels to DB then discard
+                # Insert to DB, commit periodically (not after every batch)
+                self._insert_triangles_batched(next_level)
+                if level % 2 == 0 or level == depth:
+                    self._commit()
+                    logger.debug(f"[Tessellation] committed L{level} ({n_tris_this:,} triangles)")
+
+                # Clear midpoint cache each level (vertices change each level)
+                clear_mid_cache()
+
                 if level < depth:
-                    self._insert_triangles_batched(next_level)
                     current_level = next_level
                     next_level = None
                     gc.collect()
                 else:
-                    # Final level — keep for qubit placement
                     final_level = next_level
-                    self._insert_triangles_batched(final_level)
                     current_level = None
                     gc.collect()
 
@@ -2150,28 +2188,34 @@ class QuantumTemporalCoherenceLedgerServer:
             logger.info(f"{CLR.OK}[RECURSIVE] ✅ Complete: {n_tris:,} final-depth triangles{CLR.E}")
 
             # ── Phase 2: Place pseudoqubits in streaming chunks ──
-            # Process 500 triangles at a time → ~6500 qubit rows → insert → free
-            CHUNK = 500
+            # Process 1000 triangles at a time → ~13,000 qubit rows → insert → free
+            CHUNK = 1000
             total_qubits = 0
             qubit_id = 0
+            last_commit_qubits = 0
 
             _one = mpf(1)
             _three = mpf(3)
             _eps = mpf(10)**(-40)
             _clamp = _one - mpf(10)**(-10)
 
-            # Pre-compute barycentric grid weights
-            grid_weights = []
-            for i in range(1, 5):
-                for j in range(1, 5 - i):
-                    grid_weights.append((mpf(i)/mpf(5), mpf(j)/mpf(5)))
-            grid_weights = grid_weights[:6]
+            # Pre-compute barycentric grid weights as native floats
+            grid_weights = [(i/5.0, j/5.0) for i in range(1, 5) for j in range(1, 5 - i)][:6]
+
+            # Distance cache for this chunk — keys are (id_p1, id_p2) ordered
+            _dist_cache: dict = {}
+            def _cached_dist(p1, p2):
+                key = (id(p1), id(p2)) if id(p1) < id(p2) else (id(p2), id(p1))
+                if key not in _dist_cache:
+                    _dist_cache[key] = hyperbolic_distance(p1, p2)
+                return _dist_cache[key]
 
             logger.info(f"{CLR.QUANTUM}[QUBITS] Placing pseudoqubits (streaming, {CHUNK}/chunk)...{CLR.E}")
 
             for chunk_start in range(0, n_tris, CHUNK):
                 chunk = final_level[chunk_start:chunk_start + CHUNK]
                 rows = []
+                _dist_cache.clear()
 
                 for triangle in chunk:
                     tri_id = triangle.triangle_id
@@ -2181,13 +2225,13 @@ class QuantumTemporalCoherenceLedgerServer:
 
                     # 3 vertices
                     for vx, vy in ((v0x,v0y),(v1x,v1y),(v2x,v2y)):
-                        rows.append((qubit_id, tri_id, str(vx), str(vy), "vertex", 0.0, 1.0))
+                        rows.append((qubit_id, tri_id, _mpf_to_str(vx), _mpf_to_str(vy), "vertex", "0.0", "1.0"))
                         qubit_id += 1
 
-                    # Incenter
-                    a = hyperbolic_distance(triangle.v1, triangle.v2)
-                    b = hyperbolic_distance(triangle.v0, triangle.v2)
-                    c = hyperbolic_distance(triangle.v0, triangle.v1)
+                    # Incenter — using cached distances (3 calls instead of 3·n triangles)
+                    a = _cached_dist(triangle.v1, triangle.v2)
+                    b = _cached_dist(triangle.v0, triangle.v2)
+                    c = _cached_dist(triangle.v0, triangle.v1)
                     sa = sinh(a) if sinh(a) > _eps else _one
                     sb = sinh(b) if sinh(b) > _eps else _one
                     sc = sinh(c) if sinh(c) > _eps else _one
@@ -2198,7 +2242,7 @@ class QuantumTemporalCoherenceLedgerServer:
                         iy = (w0*v0y+w1*v1y+w2*v2y)/wt
                     else:
                         ix, iy = v0x, v0y
-                    rows.append((qubit_id, tri_id, str(ix), str(iy), "incenter", 0.0, 1.0))
+                    rows.append((qubit_id, tri_id, _mpf_to_str(ix), _mpf_to_str(iy), "incenter", "0.0", "1.0"))
                     qubit_id += 1
 
                     # Circumcenter
@@ -2211,31 +2255,36 @@ class QuantumTemporalCoherenceLedgerServer:
                     else:
                         ux = (v0x+v1x+v2x)/_three
                         uy = (v0y+v1y+v2y)/_three
-                    rows.append((qubit_id, tri_id, str(ux), str(uy), "circumcenter", 0.0, 1.0))
+                    rows.append((qubit_id, tri_id, _mpf_to_str(ux), _mpf_to_str(uy), "circumcenter", "0.0", "1.0"))
                     qubit_id += 1
 
                     # Orthocenter (centroid)
                     ox = (v0x+v1x+v2x)/_three
                     oy = (v0y+v1y+v2y)/_three
-                    rows.append((qubit_id, tri_id, str(ox), str(oy), "orthocenter", 0.0, 1.0))
+                    rows.append((qubit_id, tri_id, _mpf_to_str(ox), _mpf_to_str(oy), "orthocenter", "0.0", "1.0"))
                     qubit_id += 1
 
                     # 6 barycentric grid + 1 centroid = 7 geodesic
                     for lam1, lam2 in grid_weights:
-                        lam3 = _one-lam1-lam2
-                        gx = lam3*v0x+lam1*v1x+lam2*v2x
-                        gy = lam3*v0y+lam1*v1y+lam2*v2y
-                        r2 = gx**2+gy**2
+                        lam1f = mpf(lam1); lam2f = mpf(lam2)
+                        lam3 = _one - lam1f - lam2f
+                        gx = lam3*v0x + lam1f*v1x + lam2f*v2x
+                        gy = lam3*v0y + lam1f*v1y + lam2f*v2y
+                        r2 = gx**2 + gy**2
                         if r2 >= _clamp:
-                            s = _clamp/sqrt(r2); gx*=s; gy*=s
-                        rows.append((qubit_id, tri_id, str(gx), str(gy), "geodesic", 0.0, 1.0))
+                            s = _clamp / sqrt(r2); gx *= s; gy *= s
+                        rows.append((qubit_id, tri_id, _mpf_to_str(gx), _mpf_to_str(gy), "geodesic", "0.0", "1.0"))
                         qubit_id += 1
-                    rows.append((qubit_id, tri_id, str(ox), str(oy), "geodesic", 0.0, 1.0))
+                    rows.append((qubit_id, tri_id, _mpf_to_str(ox), _mpf_to_str(oy), "geodesic", "0.0", "1.0"))
                     qubit_id += 1
 
                 # Insert this chunk
                 self._insert_pseudoqubit_rows(rows)
                 total_qubits += len(rows)
+                # Commit every 50k qubits (not after every chunk)
+                if total_qubits - last_commit_qubits >= 50000:
+                    self._commit()
+                    last_commit_qubits = total_qubits
                 del rows
 
                 # Progress
