@@ -66,11 +66,12 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ═══ PRE-WARMED RPC THREAD POOL — shared across all dispatch calls ═══════════
-# Single 8-thread pool eliminates per-call ThreadPoolExecutor create/destroy churn.
+# Scales with CPU count to handle burst traffic from thousands of miners.
 # Fast (cache-read) methods run INLINE — never touch the pool.
 # Slow (DB/oracle) methods submit to pool with hard timeout.
+_RPC_MAX_WORKERS = max(16, (_os.cpu_count() or 4) * 4)
 _RPC_THREAD_POOL = _cf.ThreadPoolExecutor(
-    max_workers=8, thread_name_prefix="rpc_worker"
+    max_workers=_RPC_MAX_WORKERS, thread_name_prefix="rpc_worker"
 )
 
 # Methods that run directly in the request thread — all are lock-free cache reads
@@ -1289,13 +1290,16 @@ _tx_worker_daemon.start()
 
 
 def _utxo_settle_block(
-    height: int, block_hash: str, miner_address: str, txs: list
+    height: int, block_hash: str, miner_address: str, txs: list, cur=None
 ) -> None:
     """🔗 UTXO SETTLEMENT — Bitcoin-style atomic UTXO creation and spending.
 
     For every transaction in the block:
       • Coinbase: create new UTXOs for miner + treasury (no inputs spent)
       • Regular: mark referenced inputs as spent, create new output UTXOs
+
+    If `cur` is provided, operates inside the caller's transaction (atomic).
+    Otherwise opens its own cursor.
     """
     _settle_log = logging.getLogger("SETTLE")
     _settle_log.critical(f"🔥 [UTXO-SETTLE] h={height} block_hash={block_hash[:16]}…")
@@ -1303,154 +1307,150 @@ def _utxo_settle_block(
     # Ensure dependent tables exist before attempting settlement
     _lazy_ensure_chain_state()
 
-    try:
-        with get_db_cursor() as cur:
-            # ── Insert / update transactions table ──
-            for tx in txs:
-                tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
-                if not tx_id:
-                    tx_id = hashlib.sha3_256(json.dumps(tx, sort_keys=True).encode()).hexdigest()
-                tx_type = tx.get("tx_type", "transfer")
-                _ins_json = json.dumps(tx.get("inputs", []), default=str)
-                _outs_json = json.dumps(tx.get("outputs", []), default=str)
-                cur.execute(
-                    """
-                    INSERT INTO transactions
-                    (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, metadata, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, %s, %s, NOW())
-                    ON CONFLICT (tx_hash) DO UPDATE SET
-                        height = EXCLUDED.height,
-                        block_hash = EXCLUDED.block_hash,
-                        status = 'confirmed',
-                        updated_at = NOW()
-                    """,
-                    (
-                        tx_id,
-                        tx.get("from_address", ""),
-                        tx.get("to_address", ""),
-                        tx.get("amount", 0),
-                        tx_type,
-                        height,
-                        block_hash,
-                        json.dumps({"inputs": tx.get("inputs", []), "outputs": tx.get("outputs", [])}),
-                    ),
-                )
-
-            # ── Spend inputs + create outputs for every TX ──
-            for tx in txs:
-                tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
-                if not tx_id:
-                    tx_id = hashlib.sha3_256(json.dumps(tx, sort_keys=True).encode()).hexdigest()
-                tx_type = tx.get("tx_type", "").lower()
-                inputs = tx.get("inputs", [])
-                outputs = tx.get("outputs", [])
-
-                if tx_type in {"coinbase", "miner_reward", "treasury_reward"}:
-                    # Coinbase has no real inputs to spend
-                    pass
-                else:
-                    # Mark each input UTXO as spent
-                    for inp in inputs:
-                        prev_hash = inp.get("prev_tx_hash", "")
-                        prev_idx = inp.get("prev_output_index", 0)
-                        if prev_hash and prev_hash != "0" * 64:
-                            cur.execute(
-                                """
-                                UPDATE address_utxos
-                                SET spent = TRUE,
-                                    spent_at_height = %s,
-                                    spent_in_tx_hash = %s
-                                WHERE tx_hash = %s AND output_index = %s AND spent = FALSE
-                                """,
-                                (height, tx_id, prev_hash, prev_idx),
-                            )
-
-                # Create output UTXOs
-                def _upsert_utxo(addr, txh, oidx, amt, h):
-                    """Manual upsert — does not rely on unique constraint."""
-                    try:
-                        cur.execute(
-                            "SELECT 1 FROM address_utxos WHERE tx_hash = %s AND output_index = %s",
-                            (txh, oidx),
-                        )
-                        if not cur.fetchone():
-                            cur.execute(
-                                """
-                                INSERT INTO address_utxos
-                                (address, tx_hash, output_index, amount, spent, created_at_height, created_at_timestamp)
-                                VALUES (%s, %s, %s, %s, FALSE, %s, %s)
-                                """,
-                                (addr, txh, oidx, amt, h, int(time.time())),
-                            )
-                    except Exception as _utxo_err:
-                        logger.warning(f"[UTXO-SETTLE] upsert failed for {txh}:{oidx}: {_utxo_err}")
-
-                if outputs:
-                    # UTXO-format transaction: use provided outputs
-                    for out_idx, out in enumerate(outputs):
-                        out_addr = out.get("address", "")
-                        out_amt = int(out.get("amount_base", 0))
-                        if out_addr and out_amt > 0:
-                            _upsert_utxo(out_addr, tx_id, out_idx, out_amt, height)
-                else:
-                    # Legacy transaction (no outputs field): auto-create UTXO from to_addr/amount
-                    _to_addr = tx.get("to_addr") or tx.get("to_address", "")
-                    _amt = tx.get("amount")
-                    try:
-                        _amt_base = int(_amt * 100) if isinstance(_amt, float) else int(_amt)
-                    except (ValueError, TypeError):
-                        _amt_base = 0
-                    if _to_addr and _amt_base > 0:
-                        _upsert_utxo(_to_addr, tx_id, 0, _amt_base, height)
-
-            # ── Mark block finalized ──
+    def _do_settle(cur):
+        # ── Insert / update transactions table ──
+        for tx in txs:
+            tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+            if not tx_id:
+                tx_id = hashlib.sha3_256(json.dumps(tx, sort_keys=True).encode()).hexdigest()
+            tx_type = tx.get("tx_type", "transfer")
             cur.execute(
                 """
-                UPDATE blocks
-                SET finalized = TRUE, finalized_at = %s
-                WHERE height = %s
+                INSERT INTO transactions
+                (tx_hash, from_address, to_address, amount, tx_type, status, height, block_hash, metadata, updated_at)
+                VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, %s, %s, NOW())
+                ON CONFLICT (tx_hash) DO UPDATE SET
+                    height = EXCLUDED.height,
+                    block_hash = EXCLUDED.block_hash,
+                    status = 'confirmed',
+                    updated_at = NOW()
                 """,
-                (int(time.time()), height),
+                (
+                    tx_id,
+                    tx.get("from_address", ""),
+                    tx.get("to_address", ""),
+                    tx.get("amount", 0),
+                    tx_type,
+                    height,
+                    block_hash,
+                    json.dumps({"inputs": tx.get("inputs", []), "outputs": tx.get("outputs", [])}),
+                ),
             )
-            # ── Update wallets table balance ──
-            for tx in txs:
-                for out in tx.get("outputs", []):
-                    _addr = out.get("address", "")
-                    _amt = int(out.get("amount_base", 0))
-                    if _addr and _amt > 0:
+
+        # ── Spend inputs + create outputs for every TX ──
+        for tx in txs:
+            tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+            if not tx_id:
+                tx_id = hashlib.sha3_256(json.dumps(tx, sort_keys=True).encode()).hexdigest()
+            tx_type = tx.get("tx_type", "").lower()
+            inputs = tx.get("inputs", [])
+            outputs = tx.get("outputs", [])
+
+            if tx_type in {"coinbase", "miner_reward", "treasury_reward"}:
+                pass
+            else:
+                for inp in inputs:
+                    prev_hash = inp.get("prev_tx_hash", "")
+                    prev_idx = inp.get("prev_output_index", 0)
+                    if prev_hash and prev_hash != "0" * 64:
                         cur.execute(
                             """
-                            INSERT INTO wallets (address, token_balance, updated_at)
-                            VALUES (%s, %s, NOW())
-                            ON CONFLICT (address) DO UPDATE SET
-                                token_balance = wallets.token_balance + EXCLUDED.token_balance,
-                                updated_at = NOW()
+                            UPDATE address_utxos
+                            SET spent = TRUE,
+                                spent_at_height = %s,
+                                spent_in_tx_hash = %s
+                            WHERE tx_hash = %s AND output_index = %s AND spent = FALSE
                             """,
-                            (_addr, _amt),
+                            (height, tx_id, prev_hash, prev_idx),
                         )
-                        _settle_log.debug(f"[UTXO-SETTLE] Wallet {_addr[:16]}… balance +{_amt} base units")
 
-            # ── Update chain state (best-effort; don't fail settlement if table missing) ──
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
-                    VALUES (1, %s, %s, 0.0, NOW())
-                    ON CONFLICT (state_id) DO UPDATE SET
-                        chain_height = EXCLUDED.chain_height,
-                        head_block_hash = EXCLUDED.head_block_hash,
-                        latest_coherence = EXCLUDED.latest_coherence,
-                        updated_at = NOW()
-                    """,
-                    (height, block_hash),
-                )
-            except Exception as _cs_err:
-                _settle_log.warning(f"[UTXO-SETTLE] chain_state update skipped: {_cs_err}")
+            def _upsert_utxo(addr, txh, oidx, amt, h):
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM address_utxos WHERE tx_hash = %s AND output_index = %s",
+                        (txh, oidx),
+                    )
+                    if not cur.fetchone():
+                        cur.execute(
+                            """
+                            INSERT INTO address_utxos
+                            (address, tx_hash, output_index, amount, spent, created_at_height, created_at_timestamp)
+                            VALUES (%s, %s, %s, %s, FALSE, %s, %s)
+                            """,
+                            (addr, txh, oidx, amt, h, int(time.time())),
+                        )
+                except Exception as _utxo_err:
+                    logger.warning(f"[UTXO-SETTLE] upsert failed for {txh}:{oidx}: {_utxo_err}")
 
+            if outputs:
+                for out_idx, out in enumerate(outputs):
+                    out_addr = out.get("address", "")
+                    out_amt = int(out.get("amount_base", 0))
+                    if out_addr and out_amt > 0:
+                        _upsert_utxo(out_addr, tx_id, out_idx, out_amt, height)
+            else:
+                _to_addr = tx.get("to_addr") or tx.get("to_address", "")
+                _amt = tx.get("amount")
+                try:
+                    _amt_base = int(_amt * 100) if isinstance(_amt, float) else int(_amt)
+                except (ValueError, TypeError):
+                    _amt_base = 0
+                if _to_addr and _amt_base > 0:
+                    _upsert_utxo(_to_addr, tx_id, 0, _amt_base, height)
+
+        # ── Mark block finalized ──
+        cur.execute(
+            """
+            UPDATE blocks
+            SET finalized = TRUE, finalized_at = %s
+            WHERE height = %s
+            """,
+            (int(time.time()), height),
+        )
+        # ── Update wallets table balance ──
+        for tx in txs:
+            for out in tx.get("outputs", []):
+                _addr = out.get("address", "")
+                _amt = int(out.get("amount_base", 0))
+                if _addr and _amt > 0:
+                    cur.execute(
+                        """
+                        INSERT INTO wallets (address, token_balance, updated_at)
+                        VALUES (%s, %s, NOW())
+                        ON CONFLICT (address) DO UPDATE SET
+                            token_balance = wallets.token_balance + EXCLUDED.token_balance,
+                            updated_at = NOW()
+                        """,
+                        (_addr, _amt),
+                    )
+                    _settle_log.debug(f"[UTXO-SETTLE] Wallet {_addr[:16]}… balance +{_amt} base units")
+
+        # ── Update chain state (best-effort; don't fail settlement if table missing) ──
+        try:
+            cur.execute(
+                """
+                INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
+                VALUES (1, %s, %s, 0.0, NOW())
+                ON CONFLICT (state_id) DO UPDATE SET
+                    chain_height = EXCLUDED.chain_height,
+                    head_block_hash = EXCLUDED.head_block_hash,
+                    latest_coherence = EXCLUDED.latest_coherence,
+                    updated_at = NOW()
+                """,
+                (height, block_hash),
+            )
+        except Exception as _cs_err:
+            _settle_log.warning(f"[UTXO-SETTLE] chain_state update skipped: {_cs_err}")
+
+    try:
+        if cur is not None:
+            _do_settle(cur)
+        else:
+            with get_db_cursor() as cur:
+                _do_settle(cur)
         _settle_log.critical(
             f"[UTXO-SETTLE] ✅ h={height}: {len(txs)} txs settled, UTXOs created+spent atomically"
         )
-
     except Exception as err:
         _settle_log.error(f"[UTXO-SETTLE] ❌ h={height} settlement failed: {err}", exc_info=True)
         raise
@@ -1654,8 +1654,12 @@ _ATTESTATION_CACHE: Dict[int, Dict[str, dict]] = {}
 _ATTESTATION_CACHE_LOCK = threading.Lock()
 
 
-def _store_oracle_attestations(height: int, block_hash: str, attestations: list) -> None:
-    """Persist oracle attestations to DB AND in-memory cache. APPENDS, never overwrites."""
+def _store_oracle_attestations(height: int, block_hash: str, attestations: list, cur=None) -> None:
+    """Persist oracle attestations to DB AND in-memory cache. APPENDS, never overwrites.
+
+    If `cur` is provided, writes inside the caller's transaction.
+    Otherwise opens a new cursor.
+    """
     # Always update in-memory cache first (never fails) — keyed by oracle_id for dedup
     with _ATTESTATION_CACHE_LOCK:
         if height not in _ATTESTATION_CACHE:
@@ -1667,7 +1671,7 @@ def _store_oracle_attestations(height: int, block_hash: str, attestations: list)
         _mem_count = len(_ATTESTATION_CACHE[height])
     # Best-effort DB persist
     try:
-        with get_db_cursor() as cur:
+        def _persist(cur):
             for att in attestations:
                 oid = att.get("oracle_id", "")
                 oaddr = att.get("oracle_address", "")
@@ -1683,6 +1687,11 @@ def _store_oracle_attestations(height: int, block_hash: str, attestations: list)
                     """,
                     (height, block_hash, oid, oaddr, fidelity, sig, ts),
                 )
+        if cur is not None:
+            _persist(cur)
+        else:
+            with get_db_cursor() as cur:
+                _persist(cur)
         logger.debug(f"[ATTESTATION-STORE] h={height} stored {len(attestations)} attestations (memory={_mem_count})")
     except Exception as e:
         logger.warning(f"[ATTESTATION-STORE] DB persist skipped for h={height}: {e} — using memory cache only")
@@ -1726,6 +1735,36 @@ def _get_attestations_for_block(height: int) -> List[dict]:
 
 
 _SUBMIT_RATE_LIMITS: Dict[Tuple[int, str], List[float]] = {}
+
+# Idempotency cache for block submissions: key -> (result_json, timestamp)
+# TTL = 300 seconds. Prevents duplicate processing when clients retry.
+_IDEMPOTENCY_CACHE: Dict[str, Tuple[dict, float]] = {}
+_IDEMPOTENCY_LOCK = threading.Lock()
+_IDEMPOTENCY_TTL = 300.0
+
+
+def _check_idempotency(key: str) -> Optional[dict]:
+    """Return cached result if idempotency key was recently processed."""
+    if not key:
+        return None
+    with _IDEMPOTENCY_LOCK:
+        now = time.time()
+        # Expire old entries
+        expired = [k for k, (_, ts) in _IDEMPOTENCY_CACHE.items() if now - ts > _IDEMPOTENCY_TTL]
+        for k in expired:
+            del _IDEMPOTENCY_CACHE[k]
+        cached = _IDEMPOTENCY_CACHE.get(key)
+        if cached:
+            return cached[0]
+    return None
+
+
+def _store_idempotency(key: str, result: dict):
+    """Cache a successful submission result under an idempotency key."""
+    if not key:
+        return
+    with _IDEMPOTENCY_LOCK:
+        _IDEMPOTENCY_CACHE[key] = (result, time.time())
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -6648,6 +6687,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         difficulty_bits = int(_env_diff) if _env_diff.isdigit() else int(hdr.get("difficulty", 4))
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
+        # ── Idempotency: deduplicate retried submissions ──
+        _idempotency_key = str(data.get("idempotency_key", hdr.get("idempotency_key", "")))
+        _cached_result = _check_idempotency(_idempotency_key)
+        if _cached_result:
+            logger.info(f"[RPC-submitBlock] 📋 Idempotent return for h={height} key={_idempotency_key[:8]}…")
+            return _rpc_ok(_cached_result, rpc_id)
+
         # ── Rate limiting: max 3 submissions per height per miner within 60s ──
         _RATE_LIMIT_WINDOW_S = 60.0
         _RATE_LIMIT_MAX = 3
@@ -6752,7 +6798,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _db_finalized = False
         try:
             with get_db_cursor() as cur:
-                cur.execute("SELECT block_hash, finalized FROM blocks WHERE height = %s", (height,))
+                # SELECT FOR UPDATE prevents race conditions between concurrent submitBlock calls
+                cur.execute("SELECT block_hash, finalized FROM blocks WHERE height = %s FOR UPDATE", (height,))
                 _existing_row = cur.fetchone()
 
                 if _existing_row:
@@ -6794,7 +6841,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     for tx in txs:
                         tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
                         if not tx_id:
-                            # Auto-generate deterministic tx_hash from content
                             tx_id = hashlib.sha3_256(json.dumps(tx, sort_keys=True).encode()).hexdigest()
                         tx_type = tx.get("tx_type", "transfer")
                         cur.execute(
@@ -6820,9 +6866,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             ),
                         )
 
-                # Store attestations
+                # Store attestations inside the same transaction for atomicity
                 if attestations:
-                    _store_oracle_attestations(height, _header_hash, attestations)
+                    _store_oracle_attestations(height, _header_hash, attestations, cur=cur)
+
+                # ═══════════════════════════════════════════════════════════════════
+                # 4. ATOMIC UTXO SETTLEMENT (inside the same transaction)
+                # ═══════════════════════════════════════════════════════════════════
+                _is_finalized = _has_enough_oracles or height == 0 or _db_finalized
+                if _block_insert_result == "inserted" and _is_finalized:
+                    logger.critical(f"[RPC-submitBlock] 🔥 ATOMIC FINALIZE h={height}")
+                    _utxo_settle_block(height, block_hash, miner_address, txs or [], cur=cur)
+                    logger.critical(f"[RPC-submitBlock] ✅ ATOMIC SETTLEMENT COMPLETE h={height}")
 
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
@@ -6831,22 +6886,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         if _block_insert_result == "error":
             return _rpc_error(-32603, "Block insert failed", rpc_id)
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # 4. UTXO SETTLEMENT (only if finalized)
-        # ═══════════════════════════════════════════════════════════════════════
+        # For paths that didn't finalize inside the block-insert transaction
         _is_finalized = _has_enough_oracles or height == 0 or _db_finalized
 
-        if _block_insert_result == "inserted" and _is_finalized:
-            # New block submitted with enough oracle attestations — finalize immediately
-            logger.critical(f"[RPC-submitBlock] 🔥 FINALIZING h={height} — UTXO settlement")
-            try:
-                _utxo_settle_block(height, block_hash, miner_address, txs or [])
-                logger.critical(f"[RPC-submitBlock] ✅ UTXO SETTLEMENT COMPLETE h={height}")
-            except Exception as settle_err:
-                logger.critical(f"[RPC-submitBlock] ❌ UTXO settlement failed h={height}: {settle_err}", exc_info=True)
-                return _rpc_error(-32603, f"UTXO settlement failed: {str(settle_err)[:100]}", rpc_id)
-
-        elif _block_insert_result == "duplicate" and not _db_finalized:
+        if _block_insert_result == "duplicate" and not _db_finalized:
             # Duplicate block may already have enough DB attestations — finalize it now
             _db_attest_count = _count_oracle_attestations(height)
             if _db_attest_count >= 3:
@@ -7020,22 +7063,25 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _settlement_status = "settled" if _is_finalized else "pending"
         _est_finalize_s = 5.0 if _is_finalized else max(5.0, _queue_pos * 3.0)
 
-        return _rpc_ok(
-            {
-                "status": _status,
-                "height": height,
-                "block_hash": block_hash,
-                "difficulty_bits": difficulty_bits,
-                "miner_reward_qtcl": _resp_reward,
-                "next_height": height + 1,
-                "oracle_consensus": f"{_oracle_valid}/5",
-                "finalized": _is_finalized,
-                "oracle_queue_position": _queue_pos,
-                "settlement_status": _settlement_status,
-                "estimated_finalization_s": round(_est_finalize_s, 1),
-            },
-            rpc_id,
-        )
+        _result = {
+            "status": _status,
+            "height": height,
+            "block_hash": block_hash,
+            "difficulty_bits": difficulty_bits,
+            "miner_reward_qtcl": _resp_reward,
+            "next_height": height + 1,
+            "oracle_consensus": f"{_oracle_valid}/5",
+            "finalized": _is_finalized,
+            "oracle_queue_position": _queue_pos,
+            "settlement_status": _settlement_status,
+            "estimated_finalization_s": round(_est_finalize_s, 1),
+        }
+
+        # Cache result for idempotency (deduplicates retried submissions)
+        if _idempotency_key:
+            _store_idempotency(_idempotency_key, _result)
+
+        return _rpc_ok(_result, rpc_id)
 
     except Exception as e:
         logger.exception(f"[RPC] _rpc_submitBlock unhandled: {e}")
@@ -8218,6 +8264,26 @@ def rpc_health():
             "uptime_s": time.time() - _SERVER_START_TIME,
         }
     ), 200
+
+
+@app.route("/rpc/dbhealth", methods=["GET"])
+def rpc_dbhealth():
+    """GET /rpc/dbhealth — database pool status and connection metrics."""
+    pool_info = {}
+    try:
+        pool = db_pool.pool
+        if hasattr(pool, "minconn") and hasattr(pool, "maxconn"):
+            pool_info = {
+                "minconn": pool.minconn,
+                "maxconn": pool.maxconn,
+                "initialized": db_pool._initialized,
+                "http_mode": db_pool._http_mode,
+            }
+        else:
+            pool_info = {"mode": "direct", "initialized": db_pool._initialized}
+    except Exception as e:
+        pool_info = {"error": str(e)}
+    return jsonify({"db_pool": pool_info, "rpc_workers": _RPC_MAX_WORKERS, "ts": time.time()}), 200
 
 
 @app.route("/health", methods=["GET"])
