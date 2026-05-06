@@ -239,7 +239,6 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
 
     mcp = FastMCP(
         MCP_SERVER_NAME,
-        version=MCP_SERVER_VERSION,
         stateless_http=stateless,
         json_response=True,
     )

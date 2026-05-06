@@ -88,7 +88,6 @@ def _make_mcp_app(rpc_url: str) -> Optional[Any]:
 
     mcp = FastMCP(
         "qtcl-blockchain",
-        version="3.0.0",
         stateless_http=True,
         json_response=True,
     )
