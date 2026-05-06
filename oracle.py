@@ -516,51 +516,52 @@ class OracleNode:
             logger.warning(f"[ORACLE-NODE-{self.oracle_id}] AER init failed: {e}")
     
     def measure(self) -> Dict[str, Any]:
-        """Perform quantum measurement and return metrics."""
-        if not QISKIT_AVAILABLE or self.aer is None:
-            return self._classical_fallback()
-        
+        """Perform quantum measurement — computes W-state fidelity directly from
+        the internal density matrix, then evolves it through a stochastic channel.
+        No Qiskit circuit needed: the previous approach injected the DM into a
+        circuit and then re-applied W-state gates ON TOP, producing garbage fidelity
+        (~0.006) instead of the true W-state fidelity (~0.75+)."""
         try:
             with self._lock:
                 dm = self._dm
-            
-            # Build W-state circuit
-            qc = QuantumCircuit(NUM_QUBITS_WSTATE)
-            try:
-                qc.set_density_matrix(DensityMatrix(dm))
-            except Exception:
-                pass
-            qc.ry(_W_THETA_0, 0)
-            qc.cx(0, 1)
-            qc.ry(_W_THETA_1, 1)
-            qc.cx(1, 2)
-            qc.save_density_matrix()
-            
-            result = self.aer.run(qc).result()
-            raw_dm = result.data(0)["density_matrix"]
-            dm_array = np.array(DensityMatrix(raw_dm).data, dtype=complex)
-            
-            # Apply stochastic channel
-            dm_array = _oracle_stochastic_channel(dm_array, epsilon=0.03)
-            
-            # Compute metrics
-            F = QuantumInformationMetrics.w3_fidelity(dm_array)
+
+            # Compute fidelity directly from the density matrix against ideal W-state.
+            F = QuantumInformationMetrics.w3_fidelity(dm)
+
+            # Evolve DM through noise channel (simulates decoherence over time)
+            if QISKIT_AVAILABLE and self.aer is not None:
+                # Use AER with node's noise model for realistic evolution
+                try:
+                    qc = QuantumCircuit(NUM_QUBITS_WSTATE)
+                    qc.set_density_matrix(DensityMatrix(dm))
+                    qc.save_density_matrix()
+                    result = self.aer.run(qc).result()
+                    raw_dm = result.data(0)["density_matrix"]
+                    dm_evolved = np.array(DensityMatrix(raw_dm).data, dtype=complex)
+                except Exception:
+                    dm_evolved = _oracle_stochastic_channel(dm, epsilon=0.03)
+            else:
+                dm_evolved = _oracle_stochastic_channel(dm, epsilon=0.03)
+
+            # Recompute fidelity after evolution, revive if needed
+            F = QuantumInformationMetrics.w3_fidelity(dm_evolved)
             if F < 0.08:
-                dm_array, _, _ = _oracle_amplify_revival(dm_array, F)
-                F2 = QuantumInformationMetrics.w3_fidelity(dm_array)
-                if F2 < 0.10:
-                    dm_array, _, _ = _oracle_resurrect(dm_array, F2)
-            
-            purity = QuantumInformationMetrics.purity(dm_array)
-            entropy = QuantumInformationMetrics.von_neumann_entropy(dm_array)
-            coherence = QuantumInformationMetrics.coherence_l1(dm_array)
-            
+                dm_evolved, _, _ = _oracle_amplify_revival(dm_evolved, F)
+                F = QuantumInformationMetrics.w3_fidelity(dm_evolved)
+                if F < 0.10:
+                    dm_evolved, _, _ = _oracle_resurrect(dm_evolved, F)
+                    F = QuantumInformationMetrics.w3_fidelity(dm_evolved)
+
+            purity = QuantumInformationMetrics.purity(dm_evolved)
+            entropy = QuantumInformationMetrics.von_neumann_entropy(dm_evolved)
+            coherence = QuantumInformationMetrics.coherence_l1(dm_evolved)
+
             # Update internal state
             with self._lock:
-                self._dm = dm_array
+                self._dm = dm_evolved
                 self.last_fidelity = F
                 self.measurement_count += 1
-            
+
             return {
                 "fidelity": round(F, 6),
                 "purity": round(purity, 6),
@@ -1111,9 +1112,128 @@ def get_oracle_measurement_broadcaster():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# AUTO-SETUP ORACLES — if no oracles registered, generate 5 HypΓ keypairs
+# ═══════════════════════════════════════════════════════════════════════════════
+def _auto_setup_oracles():
+    """Check oracle_registry; if fewer than 5 oracles exist, auto-generate them.
+    Mirrors the logic formerly in oracle_setup.py — allows deleting that file."""
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+    except ImportError:
+        logger.warning("[ORACLE-SETUP] psycopg2 not available — skipping auto-setup")
+        return
+
+    dsn = os.environ.get("DATABASE_URL", "")
+    if not dsn:
+        logger.warning("[ORACLE-SETUP] DATABASE_URL not set — skipping auto-setup")
+        return
+
+    try:
+        conn = psycopg2.connect(dsn)
+        conn.autocommit = True
+        cur = conn.cursor()
+    except Exception as e:
+        logger.warning(f"[ORACLE-SETUP] DB connect failed: {e}")
+        return
+
+    try:
+        # Ensure table exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS oracle_registry (
+                oracle_id       VARCHAR(128)  PRIMARY KEY,
+                oracle_url      VARCHAR(512)  NOT NULL DEFAULT '',
+                oracle_address  VARCHAR(128)  NOT NULL DEFAULT '',
+                is_primary      BOOLEAN       NOT NULL DEFAULT FALSE,
+                last_seen       BIGINT        NOT NULL DEFAULT 0,
+                block_height    BIGINT        NOT NULL DEFAULT 0,
+                peer_count      INTEGER       NOT NULL DEFAULT 0,
+                wallet_address  VARCHAR(128)  NOT NULL DEFAULT '',
+                oracle_pub_key  TEXT          NOT NULL DEFAULT '',
+                cert_sig        TEXT          NOT NULL DEFAULT '',
+                mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
+                ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
+                reg_tx_hash     VARCHAR(64)   NOT NULL DEFAULT '',
+                registered_at   BIGINT        DEFAULT 0,
+                created_at      TIMESTAMPTZ   DEFAULT NOW()
+            )
+        """)
+        for col, dtype in [
+            ("wallet_address", "VARCHAR(128) DEFAULT ''"),
+            ("oracle_pub_key", "TEXT DEFAULT ''"),
+            ("cert_sig", "TEXT DEFAULT ''"),
+            ("mode", "VARCHAR(32) DEFAULT 'full'"),
+            ("ip_hint", "VARCHAR(256) DEFAULT ''"),
+            ("reg_tx_hash", "VARCHAR(64) DEFAULT ''"),
+            ("registered_at", "BIGINT DEFAULT 0"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS {col} {dtype}")
+            except Exception:
+                pass
+
+        # Count existing
+        cur.execute("SELECT COUNT(*) FROM oracle_registry WHERE mode IN ('full', 'primary')")
+        existing = cur.fetchone()[0]
+        if existing >= 5:
+            logger.info(f"[ORACLE-SETUP] {existing} oracles already registered — skipping setup")
+            return
+
+        # Generate 5 fresh keypairs
+        try:
+            _hlwe_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hlwe")
+            if _hlwe_dir not in sys.path:
+                sys.path.insert(0, _hlwe_dir)
+            from hlwe.hyp_engine import HypGammaEngine
+            engine = HypGammaEngine()
+        except Exception as e:
+            logger.warning(f"[ORACLE-SETUP] HypΓ engine unavailable: {e}")
+            return
+
+        NUM_ORACLES = 5
+        _ORACLE_ROLES_LOCAL = ["PRIMARY_LATTICE", "SECONDARY_LATTICE", "VALIDATION", "ARBITER", "METRICS"]
+
+        logger.info(f"[ORACLE-SETUP] Generating {NUM_ORACLES} oracle keypairs...")
+        for i in range(NUM_ORACLES):
+            kp = engine.generate_keypair()
+            oracle_id = f"oracle_{i + 1}"
+            binding = f"{oracle_id}|{kp.address}".encode()
+            binding_hash = hashlib.sha3_256(binding).digest()
+            cert_sig = engine.sign_hash(binding_hash, kp.private_key)
+
+            cur.execute("""
+                INSERT INTO oracle_registry
+                (oracle_id, oracle_address, oracle_pub_key, cert_sig, mode, is_primary, last_seen, registered_at)
+                VALUES (%s, %s, %s, %s, %s, %s, EXTRACT(EPOCH FROM NOW())::BIGINT, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                ON CONFLICT (oracle_id) DO UPDATE SET
+                    oracle_address = EXCLUDED.oracle_address,
+                    oracle_pub_key = EXCLUDED.oracle_pub_key,
+                    cert_sig       = EXCLUDED.cert_sig,
+                    mode           = EXCLUDED.mode,
+                    is_primary     = EXCLUDED.is_primary,
+                    last_seen      = EXTRACT(EPOCH FROM NOW())::BIGINT,
+                    registered_at  = EXTRACT(EPOCH FROM NOW())::BIGINT
+            """, (
+                oracle_id, kp.address, kp.public_key,
+                json.dumps(cert_sig, separators=(",", ":")),
+                "full", i == 0,
+            ))
+            logger.info(f"[ORACLE-SETUP]   ✅ {oracle_id}  addr={kp.address[:24]}…  role={_ORACLE_ROLES_LOCAL[i]}")
+        logger.info(f"[ORACLE-SETUP] ✅ {NUM_ORACLES} oracles auto-registered")
+    except Exception as e:
+        logger.warning(f"[ORACLE-SETUP] Failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
+    _auto_setup_oracles()
     server = OracleServer(ORACLE_HOST, ORACLE_PORT)
     try:
         logger.critical(f"[ORACLE-SERVER] 🚀 Serving on http://{ORACLE_HOST}:{ORACLE_PORT}")

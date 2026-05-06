@@ -8836,17 +8836,6 @@ def _build_snapshot_payload() -> dict:
 _latest_unified_snapshot = {}
 _snapshot_cache_lock = threading.RLock()
 
-# Removed: old SSE multiplexer infrastructure. SSE handled by external sse_server.py.
-# Removed: old 64³ snapshot generation. Clients fetch unified 16³ snapshots via RPC.
-
-# SSE snapshot endpoint removed — now handled by external sse_server.py
-# Main server pushes snapshots to SSE service via _push_to_sse_service()
-
-# Metrics SSE endpoint removed — now handled by external sse_server.py
-
-# Blocks SSE endpoints and infrastructure removed — now handled by external sse_server.py
-# Main server pushes blocks to SSE service via _push_to_sse_service()
-
 logger.info(
     "[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health"
 )
