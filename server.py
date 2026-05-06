@@ -1479,8 +1479,9 @@ def _utxo_settle_block(
                             (addr, txh, oidx, amt, h, _now_ts),
                         )
                         _affected_addrs.add(addr)
+                        _settle_log.debug(f"[UTXO] created {txh[:16]}:{oidx} addr={addr[:16]}… amt={amt}")
                 except Exception as _e:
-                    _settle_log.warning(f"[UTXO] upsert {txh}:{oidx}: {_e}")
+                    _settle_log.warning(f"[UTXO] upsert {txh[:16]}:{oidx}: {_e}")
 
             if outputs:
                 for out_idx, out in enumerate(outputs):
@@ -1530,48 +1531,51 @@ def _utxo_settle_block(
         except Exception:
             pass
 
-        # ── wallet_addresses + address_balance_history — UTXO-aware balance snapshots ──
-        for _addr in _affected_addrs:
-            try:
-                _fp = hashlib.sha3_256(_addr.encode()).hexdigest()[:64]
-                cur.execute(
-                    "SELECT COALESCE(SUM(amount), 0) FROM address_utxos WHERE address = %s AND spent = FALSE",
-                    (_addr,),
-                )
-                _utxo_bal = int(cur.fetchone()[0])
+            # ── wallet_addresses + address_balance_history — UTXO-aware balance snapshots ──
+            # Ensure miner address is always included even if UTXO creation failed
+            if miner_address and miner_address != "0" * 64:
+                _affected_addrs.add(miner_address)
+            for _addr in _affected_addrs:
+                try:
+                    _fp = hashlib.sha3_256(_addr.encode()).hexdigest()[:64]
+                    cur.execute(
+                        "SELECT COALESCE(SUM(amount), 0) FROM address_utxos WHERE address = %s AND spent = FALSE",
+                        (_addr,),
+                    )
+                    _utxo_bal = int(cur.fetchone()[0])
 
-                # wallet_addresses registry
-                cur.execute(
-                    """INSERT INTO wallet_addresses
-                       (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
-                       VALUES (%s, %s, %s, %s, 1, 'standard', NOW())
-                       ON CONFLICT (address) DO UPDATE SET
-                           balance = %s,
-                           transaction_count = wallet_addresses.transaction_count + 1,
-                           updated_at = NOW()""",
-                    (_addr, _fp, _fp, _utxo_bal, _utxo_bal),
-                )
+                    # wallet_addresses registry
+                    cur.execute(
+                        """INSERT INTO wallet_addresses
+                           (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
+                           VALUES (%s, %s, %s, %s, 1, 'standard', NOW())
+                           ON CONFLICT (address) DO UPDATE SET
+                               balance = %s,
+                               transaction_count = wallet_addresses.transaction_count + 1,
+                               updated_at = NOW()""",
+                        (_addr, _fp, _fp, _utxo_bal, _utxo_bal),
+                    )
 
-                # Get previous balance for delta
-                cur.execute(
-                    "SELECT balance FROM address_balance_history WHERE address = %s ORDER BY block_height DESC LIMIT 1",
-                    (_addr,),
-                )
-                _prev = cur.fetchone()
-                _prev_bal = int(_prev[0]) if _prev and _prev[0] else 0
-                _delta = _utxo_bal - _prev_bal
+                    # Get previous balance for delta
+                    cur.execute(
+                        "SELECT balance FROM address_balance_history WHERE address = %s ORDER BY block_height DESC LIMIT 1",
+                        (_addr,),
+                    )
+                    _prev = cur.fetchone()
+                    _prev_bal = int(_prev[0]) if _prev and _prev[0] else 0
+                    _delta = _utxo_bal - _prev_bal
 
-                # address_balance_history snapshot
-                cur.execute(
-                    """INSERT INTO address_balance_history
-                       (address, block_height, block_hash, balance, delta)
-                       VALUES (%s, %s, %s, %s, %s)
-                       ON CONFLICT (address, block_height) DO UPDATE SET
-                           balance = EXCLUDED.balance, delta = EXCLUDED.delta""",
-                    (_addr, height, block_hash, _utxo_bal, _delta),
-                )
-            except Exception as _wa_err:
-                _settle_log.debug(f"[SETTLE] wallet/history for {_addr[:16]}…: {_wa_err}")
+                    # address_balance_history snapshot
+                    cur.execute(
+                        """INSERT INTO address_balance_history
+                           (address, block_height, block_hash, balance, delta)
+                           VALUES (%s, %s, %s, %s, %s)
+                           ON CONFLICT (address, block_height) DO UPDATE SET
+                               balance = EXCLUDED.balance, delta = EXCLUDED.delta""",
+                        (_addr, height, block_hash, _utxo_bal, _delta),
+                    )
+                except Exception as _wa_err:
+                    _settle_log.debug(f"[SETTLE] wallet/history for {_addr[:16]}…: {_wa_err}")
 
         # ── Update chain_state ──
         try:
@@ -1606,6 +1610,7 @@ def _utxo_get_balance(address: str) -> int:
     if not address or len(address) < 10:
         return 0
     try:
+        _lazy_ensure_chain_state()
         with get_db_cursor() as cur:
             cur.execute(
                 """
