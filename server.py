@@ -1861,12 +1861,14 @@ class _OracleBridge:
                         cur.execute("UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s", (int(time.time()), height))
                         with self._lock:
                             self._processed.add(height)
+                        _oracle_ids = list(_ATTESTATION_CACHE.get(height, {}).keys())
                         _push_to_sse_service("/push/oracle_consensus", {
                             "event_type": "block_finalized",
                             "height": height,
                             "block_hash": block_hash,
                             "miner_address": miner_address or "",
                             "oracle_count": res.get("attestation_count", 3),
+                            "oracle_ids": _oracle_ids,
                             "finalized": True,
                             "timestamp": int(time.time()),
                         })
@@ -6925,12 +6927,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     except Exception:
                         pass
                     _is_finalized = True
+                    _oracle_ids = list(_ATTESTATION_CACHE.get(height, {}).keys())
                     _push_to_sse_service("/push/oracle_consensus", {
                         "event_type": "block_finalized",
                         "height": height,
                         "block_hash": block_hash,
                         "miner_address": miner_address,
                         "oracle_count": _oracle_valid,
+                        "oracle_ids": _oracle_ids,
                         "finalized": True,
                         "timestamp": int(time.time()),
                     })

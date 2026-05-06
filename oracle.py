@@ -1030,6 +1030,7 @@ class _MinimalWStateManagerFacade:
 # Legacy exports for server.py compatibility (no side effects on import)
 ORACLE = _MinimalOracleFacade()
 ORACLE_W_STATE_MANAGER = _MinimalWStateManagerFacade()
+PYTH_ORACLE = None  # Deprecated; kept for backward compatibility with health checks
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
