@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # Scales with CPU count to handle burst traffic from thousands of miners.
 # Fast (cache-read) methods run INLINE — never touch the pool.
 # Slow (DB/oracle) methods submit to pool with hard timeout.
-_RPC_MAX_WORKERS = max(16, (_os.cpu_count() or 4) * 4)
+_RPC_MAX_WORKERS = max(16, (os.cpu_count() or 4) * 4)
 _RPC_THREAD_POOL = _cf.ThreadPoolExecutor(
     max_workers=_RPC_MAX_WORKERS, thread_name_prefix="rpc_worker"
 )
