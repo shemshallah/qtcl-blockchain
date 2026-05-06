@@ -130,13 +130,16 @@ class TessellationRewardSchedule:
         8: 62_300_160,
     }
 
-    # Rewards in QTCL (float) — no base units
-    REWARDS: Dict[int, Dict[str, float]] = {
-        5: {'miner': 7.20, 'treasury': 0.80},
-        6: {'miner': 7.60, 'treasury': 0.40},
-        7: {'miner': 7.80, 'treasury': 0.20},
-        8: {'miner': 7.90, 'treasury': 0.10},
-    }
+    # Rewards in QTCL (float) — env var overrides MINER_REWARD / TREASURY_REWARD
+    # allow Koyeb to set canonical values that a hacked client cannot change.
+    _MINER_REWARD_ENV = os.environ.get('MINER_REWARD', '')
+    _TREASURY_REWARD_ENV = os.environ.get('TREASURY_REWARD', '')
+    REWARDS: Dict[int, Dict[str, float]] = {}
+    for _d, _base in {5: (7.20, 0.80), 6: (7.60, 0.40), 7: (7.80, 0.20), 8: (7.90, 0.10)}.items():
+        REWARDS[_d] = {
+            'miner': float(_MINER_REWARD_ENV) if _MINER_REWARD_ENV else _base[0],
+            'treasury': float(_TREASURY_REWARD_ENV) if _TREASURY_REWARD_ENV else _base[1],
+        }
 
     TOTAL_PER_BLOCK_QTCL: float = 8.00
     TOTAL_BLOCKS: int = 62_300_160
@@ -212,7 +215,7 @@ class TessellationRewardSchedule:
         return breakdown
 
 
-MINING_COINBASE_REWARD = 7.20  # depth-5 miner reward in QTCL
+MINING_COINBASE_REWARD = float(os.environ.get('MINER_REWARD', '7.20'))  # from env, fallback 7.20
 
 # Canonical null-sink burn address for oracle registration TXs.
 # No private key exists for this address — it is a pure chain commitment.

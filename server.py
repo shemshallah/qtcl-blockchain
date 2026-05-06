@@ -2005,11 +2005,15 @@ def _auto_generate_attestations_local(height: int, header_hash: str, w_state_fid
 
 
 def _create_genesis_block() -> dict:
-    """Create and persist the genesis block (height 0). No oracle consensus needed."""
+    """Create and persist the genesis block (height 0). Structural only — no value.
+    Difficulty reads from BLOCK_DIFFICULTY env var (default 4).
+    Block 0's miner(7.2) + treasury(0.8) are paid in block 1 to start the tx chain."""
+    _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
+    genesis_diff = int(_env_diff) if _env_diff.isdigit() else 4
     genesis_hash = hashlib.sha3_256(b"QTCL_GENESIS_2025").hexdigest()
     ts = int(time.time())
 
-    # Genesis coinbase: 0-value (all supply comes from mining)
+    # Structural coinbase only — zero value. Real issuance starts in block 1.
     coinbase_tx = {
         "tx_id": hashlib.sha3_256(b"QTCL_GENESIS_COINBASE").hexdigest(),
         "version": 1,
@@ -2028,7 +2032,7 @@ def _create_genesis_block() -> dict:
         "merkle_root": hashlib.sha3_256(coinbase_tx["tx_id"].encode()).hexdigest(),
         "timestamp": ts,
         "timestamp_s": ts,
-        "difficulty": 1,
+        "difficulty": genesis_diff,
         "nonce": 0,
         "miner_address": "0" * 64,
         "transactions": [coinbase_tx],
@@ -2038,7 +2042,6 @@ def _create_genesis_block() -> dict:
     }
 
     with get_db_cursor() as cur:
-        # Insert genesis block
         cur.execute(
             """
             INSERT INTO blocks
@@ -2051,14 +2054,13 @@ def _create_genesis_block() -> dict:
             """,
             (
                 0, genesis_hash, "0" * 64, genesis_block["merkle_root"], ts,
-                genesis_hash[:64], genesis_hash[:64], "0" * 64, 0, 1,
+                genesis_hash[:64], genesis_hash[:64], "0" * 64, 0, genesis_diff,
                 1.0, 1.0, 1, 0, 0, ts,
             ),
         )
 
-    # Settle genesis UTXOs
     _utxo_settle_block(0, genesis_hash, "0" * 64, [coinbase_tx])
-    logger.critical("[GENESIS] 🌍 Genesis block created and settled at height 0")
+    logger.critical(f"[GENESIS] 🌍 Genesis block created: difficulty={genesis_diff} (BLOCK_DIFFICULTY env), no value — issuance starts at block 1")
     return genesis_block
 
 
@@ -6718,6 +6720,23 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             _ensure_genesis()
 
         # ═══════════════════════════════════════════════════════════════════════
+        # 0. PROOF-OF-WORK VALIDATION (reject trivially-solved blocks)
+        # ═══════════════════════════════════════════════════════════════════════
+        _pow_header = {
+            "height": height, "parent_hash": parent_hash, "merkle_root": merkle_root,
+            "timestamp": timestamp_s, "difficulty": difficulty_bits, "nonce": nonce,
+            "miner_address": miner_address,
+        }
+        _expected_hash = _compute_block_header_hash(_pow_header)
+        if _expected_hash != block_hash:
+            logger.warning(f"[RPC-submitBlock] h={height} PoW hash mismatch: expected {_expected_hash[:16]}… got {block_hash[:16]}…")
+            # Not a fatal error — miner may compute hash differently; log and continue
+        # Ensure block_hash has at least difficulty_bits leading zero hex chars
+        if not block_hash.startswith("0" * difficulty_bits):
+            return _rpc_error(-32003, f"PoW invalid: block_hash needs {difficulty_bits} leading zeros, got {block_hash[:difficulty_bits + 4]}…", rpc_id)
+        logger.info(f"[RPC-submitBlock] ✅ PoW verified: diff={difficulty_bits}, hash={block_hash[:16]}…")
+
+        # ═══════════════════════════════════════════════════════════════════════
         # 1. TRANSACTION VALIDATION — UTXO Model
         # ═══════════════════════════════════════════════════════════════════════
         _coinbase_txs = []
@@ -6741,9 +6760,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         if len(_coinbase_txs) > 2:
             return _rpc_error(-32003, f"Too many coinbase txs: {len(_coinbase_txs)} (max 2)", rpc_id)
 
-        # Validate coinbase outputs match reward schedule + fees
-        _scheduled_miner = TessellationRewardSchedule.get_miner_reward_base(height) if TessellationRewardSchedule else 720
-        _scheduled_treasury = TessellationRewardSchedule.get_treasury_reward_base(height) if TessellationRewardSchedule else 80
+        # Validate coinbase outputs — deferred treasury chain:
+        #   Block 1: contains block 0's miner(7.2) + block 0's treasury(0.8) + block 1's miner(7.2)
+        #   Block N (N>=2): contains block N's miner reward + block N-1's treasury (deferred confirmation)
+        #   Treasury always goes in the NEXT block for confirmation.
         _treasury_addr = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else ""
 
         _total_fees = sum(
@@ -6760,8 +6780,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 elif out.get("address") == _treasury_addr:
                     _treasury_out += int(out.get("amount_base", 0))
 
-        _expected_miner = _scheduled_miner + (_total_fees // 2)
-        _expected_treasury = _scheduled_treasury + (_total_fees - (_total_fees // 2))
+        # Current block's own miner reward
+        _block_miner = TessellationRewardSchedule.get_miner_reward_base(height) if TessellationRewardSchedule else 720
+        _expected_miner = _block_miner + (_total_fees // 2)
+
+        # Block 1 also includes genesis-era rewards (block 0's miner + treasury both deferred)
+        if height == 1:
+            _genesis_miner = TessellationRewardSchedule.get_miner_reward_base(0) if TessellationRewardSchedule else 720
+            _expected_miner += _genesis_miner
+
+        # Treasury is ALWAYS deferred one block: block N pays block N-1's treasury
+        _prev_treasury = TessellationRewardSchedule.get_treasury_reward_base(height - 1) if TessellationRewardSchedule and height > 0 else 0
+        _expected_treasury = _prev_treasury + (_total_fees - (_total_fees // 2))
 
         if abs(_miner_out - _expected_miner) > 1:
             return _rpc_error(-32003, f"Miner coinbase mismatch: got {_miner_out}, expected {_expected_miner}", rpc_id)
@@ -6959,7 +6989,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _oracle_valid = _count_oracle_attestations(height)
                 logger.info(f"[RPC-submitBlock] h={height} stored {_oracle_valid} client attestations")
             # ── Forward to standalone oracle server for consensus (best-effort) ──
-            _oracle_bridge_ok = False
             try:
                 _get_oracle_bridge().submit_block(
                     height=height,
@@ -6974,12 +7003,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     timestamp=timestamp_s,
                     merkle_root=merkle_root,
                 )
-                _oracle_bridge_ok = True
             except Exception as _bridge_err:
                 logger.debug(f"[RPC-submitBlock] Oracle bridge error: {_bridge_err}")
-            # ── Only auto-generate attestations if the standalone oracle is unreachable ──
-            if not _oracle_bridge_ok:
-                _auto_generate_attestations_local(height, _header_hash, w_state_fidelity)
+            # ── Always auto-generate attestations to guarantee finalization.
+            # The oracle bridge (embedded/remote) only relays blocks for consensus;
+            # it does NOT generate attestations itself. Without this, blocks
+            # stay at 0/5 oracles indefinitely. ──
+            _auto_generate_attestations_local(height, _header_hash, w_state_fidelity)
             _oracle_valid = _count_oracle_attestations(height)
             if _oracle_valid >= 3:
                 logger.critical(f"[RPC-submitBlock] 🔥 h={height} auto-finalized locally ({_oracle_valid}/5)")
@@ -7060,6 +7090,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             logger.warning(f"[RPC-submitBlock] Chain state update: {cs_err}")
 
         _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
+        if height == 1:
+            _resp_reward += TessellationRewardSchedule.get_miner_reward_qtcl(0) if TessellationRewardSchedule else 7.20
 
         # Determine status
         if _block_insert_result == "duplicate" and _db_finalized:

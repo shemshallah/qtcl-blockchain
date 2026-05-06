@@ -398,13 +398,14 @@ def update_database(conn, schema_sql: str) -> Dict[str, int]:
             if apply_alter_statement_safe(cur, alter_sql):
                 stats['alters_applied'] += 1
 
-        # Phase 5: Ensure genesis block (height 0) exists
+        # Phase 5: Ensure genesis block (height 0) exists with proper difficulty and treasury mint
         logger.info("\n🌍 Phase 5: Ensuring genesis block...")
         import hashlib, json, time
         cur.execute("SELECT EXISTS (SELECT 1 FROM blocks WHERE height = 0)")
         genesis_exists = cur.fetchone()[0]
         if not genesis_exists:
             genesis_hash = hashlib.sha3_256(b"QTCL_GENESIS_2025").hexdigest()
+            treasury_addr = "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b"
             cur.execute(
                 """
                 INSERT INTO blocks
@@ -416,12 +417,19 @@ def update_database(conn, schema_sql: str) -> Dict[str, int]:
                 ON CONFLICT (height) DO NOTHING
                 """,
                 (0, genesis_hash, "0" * 64, genesis_hash[:64], int(time.time()),
-                 genesis_hash[:64], genesis_hash[:64], "0" * 64, 0, 1,
+                 genesis_hash[:64], genesis_hash[:64], treasury_addr, 0, 4,
                  1.0, 1.0, 1, 0, 0, int(time.time())),
             )
-            logger.info("  ✅ Genesis block (height 0) created")
+            logger.info("  ✅ Genesis block (height 0) created: diff=4")
         else:
-            logger.info("  ⏭️  Genesis block already exists")
+            # Ensure existing genesis has difficulty >= 4
+            cur.execute("SELECT difficulty FROM blocks WHERE height = 0")
+            row = cur.fetchone()
+            if row and row[0] is not None and row[0] < 4:
+                cur.execute("UPDATE blocks SET difficulty = 4 WHERE height = 0")
+                logger.info("  ✅ Genesis difficulty updated from %s to 4" % row[0])
+            else:
+                logger.info("  ⏭️  Genesis block already exists with difficulty >= 4")
 
         conn.commit()
         logger.info("\n✅ Schema update committed successfully")

@@ -2299,8 +2299,12 @@ class QuantumTemporalCoherenceLedgerServer:
             logger.warning(f"[DB] Close warning: {e}")
 
     def _create_genesis_block(self):
-        """Insert genesis block (height 0) into blocks table if not present."""
+        """Insert genesis block (height 0). Structural only — no value minted.
+        Difficulty reads from BLOCK_DIFFICULTY env var (default 4).
+        Block 0's miner(7.2) + treasury(0.8) are paid in block 1 to start the tx chain."""
         try:
+            _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
+            genesis_diff = int(_env_diff) if _env_diff.isdigit() else 4
             cur = self.conn.cursor()
             genesis_hash = hashlib.sha3_256(b"QTCL_GENESIS_2025").hexdigest()
             coinbase_tx_hash = hashlib.sha3_256(b"QTCL_GENESIS_COINBASE").hexdigest()
@@ -2315,7 +2319,7 @@ class QuantumTemporalCoherenceLedgerServer:
                 ON CONFLICT (height) DO NOTHING
                 """,
                 (0, genesis_hash, "0" * 64, genesis_hash[:64], int(time.time()),
-                 genesis_hash[:64], genesis_hash[:64], "0" * 64, 0, 1,
+                 genesis_hash[:64], genesis_hash[:64], "0" * 64, 0, genesis_diff,
                  1.0, 1.0, 1, 0, 0, int(time.time())),
             )
             cur.execute(
@@ -2329,7 +2333,7 @@ class QuantumTemporalCoherenceLedgerServer:
                  json.dumps({"inputs": [{"prev_tx_hash": "0" * 64, "prev_output_index": 0xFFFFFFFF}], "outputs": []})),
             )
             self.conn.commit()
-            logger.info(f"{CLR.OK}[GENESIS] Genesis block (height 0) inserted: {genesis_hash[:16]}...{CLR.E}")
+            logger.info(f"{CLR.OK}[GENESIS] Genesis block (height 0) inserted: diff={genesis_diff} (BLOCK_DIFFICULTY), no value{CLR.E}")
         except Exception as e:
             logger.warning(f"{CLR.WARN}[GENESIS] Could not insert genesis block: {e}{CLR.E}")
             self.conn.rollback()
