@@ -7149,37 +7149,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _store_oracle_attestations(height, _header_hash, attestations)
                 _oracle_valid = _count_oracle_attestations(height)
                 logger.info(f"[RPC-submitBlock] h={height} stored {_oracle_valid} client attestations")
-            # ── Forward to standalone oracle server for consensus (best-effort) ──
-            try:
-                _get_oracle_bridge().submit_block(
-                    height=height,
-                    block_hash=block_hash,
-                    header_hash=_header_hash,
-                    w_state_fidelity=w_state_fidelity,
-                    miner_address=miner_address,
-                    txs=txs or [],
-                    parent_hash=parent_hash,
-                    nonce=nonce,
-                    difficulty=difficulty_bits,
-                    timestamp=timestamp_s,
-                    merkle_root=merkle_root,
-                )
-            except Exception as _bridge_err:
-                logger.debug(f"[RPC-submitBlock] Oracle bridge error: {_bridge_err}")
             # ── Always auto-generate attestations to guarantee finalization.
-            # The oracle bridge (embedded/remote) only relays blocks for consensus;
-            # it does NOT generate attestations itself. Without this, blocks
-            # stay at 0/5 oracles indefinitely. ──
+            # (Oracle bridge removed: embedded oracle doesn't generate attestations.)
             _auto_generate_attestations_local(height, _header_hash, w_state_fidelity)
             _oracle_valid = _count_oracle_attestations(height)
             if _oracle_valid >= 3:
                 logger.critical(f"[RPC-submitBlock] 🔥 h={height} auto-finalized locally ({_oracle_valid}/5)")
-                _utxo_settle_block(height, block_hash, miner_address, txs or [])
                 try:
+                    _utxo_settle_block(height, block_hash, miner_address, txs or [])
                     with get_db_cursor() as cur:
                         cur.execute("UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s", (int(time.time()), height))
-                except Exception:
-                    pass
+                except Exception as _fin_err:
+                    logger.critical(f"[RPC-submitBlock] ❌ h={height} finalization DB error: {_fin_err}")
                 _is_finalized = True
                 _oracle_ids = list(_ATTESTATION_CACHE.get(height, {}).keys())
                 _push_to_sse_service("/push/oracle_consensus", {
@@ -7279,6 +7260,29 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             "settlement_status": _settlement_status,
             "estimated_finalization_s": round(_est_finalize_s, 1),
         }
+
+        # ── Safety net: if block has ≥3 attestations but wasn't flagged finalized,
+        # finalize it NOW. Catches edge cases where auto-attestation path
+        # couldn't run (e.g. duplicate detection, race conditions). ──
+        if not _is_finalized and height > 0:
+            try:
+                _safety_count = _count_oracle_attestations(height)
+                if _safety_count >= 3:
+                    logger.critical(f"[RPC-submitBlock] 🔥 SAFETY-NET finalize h={height} ({_safety_count}/5)")
+                    with get_db_cursor() as cur:
+                        cur.execute("SELECT finalized FROM blocks WHERE height = %s FOR UPDATE", (height,))
+                        _sr = cur.fetchone()
+                        if _sr and not _sr[0]:
+                            cur.execute("UPDATE blocks SET finalized = TRUE, finalized_at = %s WHERE height = %s", (int(time.time()), height))
+                            _is_finalized = True
+                            _status = "accepted_finalized"
+                            _settlement_status = "settled"
+                            _result["status"] = _status
+                            _result["finalized"] = True
+                            _result["settlement_status"] = _settlement_status
+                            _result["oracle_consensus"] = f"{_safety_count}/5"
+            except Exception as _safety_err:
+                logger.debug(f"[RPC-submitBlock] Safety-net finalize: {_safety_err}")
 
         # Cache result for idempotency (deduplicates retried submissions)
         if _idempotency_key:
