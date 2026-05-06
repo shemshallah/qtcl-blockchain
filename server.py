@@ -8450,12 +8450,7 @@ try:
     _mcp_ok = register_mcp_routes(app, rpc_url="http://localhost:8000/rpc")
     logger.info(f"[MCP] mcp_flask_adapter registered (modern={'YES' if _mcp_ok else 'legacy-only'})")
 except ImportError:
-    try:
-        from qtcl_mcp_server import register_mcp_routes
-        register_mcp_routes(app)
-        logger.info("[MCP] Legacy qtcl_mcp_server routes registered")
-    except ImportError:
-        logger.warning("[MCP] No MCP module found — MCP endpoints not available")
+    logger.warning("[MCP] No MCP module found — MCP endpoints not available")
 
 
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
