@@ -1462,8 +1462,7 @@ async function doRegister() {
     STATE.passphrase = pass;
     STATE.tier = result.tier;
 
-    // Save account ID locally
-    localStorage.setItem('qtcl_vault_account', result.account_id);
+    // No localStorage — vault session is ephemeral for security
 
     enterApp(result);
   } catch (e) {
@@ -1497,7 +1496,7 @@ async function doLogin() {
     STATE.tier = result.tier;
     STATE.credit = result.credit_balance;
 
-    localStorage.setItem('qtcl_vault_account', id);
+    // No localStorage — vault session is ephemeral for security
 
     toast('Vault unlocked', 'success');
     enterApp(result);
@@ -1539,14 +1538,8 @@ function enterApp(accountData) {
 }
 
 function doLogout() {
-  STATE.accountId = null;
-  STATE.passphrase = null;
-  STATE.session = null;
-  STATE.secrets = [];
-  document.getElementById('authOverlay').style.display = 'flex';
-  document.getElementById('appHeader').style.display = 'none';
-  document.getElementById('appLayout').style.display = 'none';
-  toast('Vault locked', 'info');
+  _vaultSecurityPurge('user_logout');
+  toast('Vault locked — all session data purged', 'info');
 }
 
 function updateDashboard(data) {
@@ -2202,7 +2195,7 @@ async function doChangeAccountId() {
       new_account_id: newId,
     });
     STATE.accountId = newId;
-    localStorage.setItem('qtcl_vault_account', newId);
+    // No localStorage — vault session is ephemeral
     document.getElementById('setAccountId').textContent = newId;
     document.getElementById('newAccountId').value = '';
     toast(`Account ID changed to "${newId}" — use this to log in`, 'success', 8000);
@@ -2278,10 +2271,52 @@ async function sha3_256_hex(input) {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ─── Auto-fill saved account ID ───
+// ═══ SECURITY: Purge vault session on tab switch / visibility loss ═══
+function _vaultSecurityPurge(reason) {
+  const hadSession = !!STATE.accountId;
+  STATE.accountId = null;
+  STATE.passphrase = null;
+  STATE.session = null;
+  STATE.secrets = [];
+  STATE.credit = 0;
+  STATE.currentDecryptId = null;
+  STATE.decryptedBytes = null;
+  // Clear login form fields
+  const fields = ['loginId', 'loginPass', 'createPass', 'createConfirm'];
+  fields.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  // Purge stale localStorage from prior versions
+  try { localStorage.removeItem('qtcl_vault_account'); } catch(_) {}
+  // Show login overlay
+  const overlay = document.getElementById('authOverlay');
+  if (overlay) overlay.style.display = 'flex';
+  const header = document.getElementById('appHeader');
+  if (header) header.style.display = 'none';
+  const layout = document.getElementById('appLayout');
+  if (layout) layout.style.display = 'none';
+  if (hadSession) console.log(`[VAULT-SECURITY] Session purged: ${reason}`);
+}
+
+// Tab switch (page hidden, minimized, phone lock)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && STATE.accountId) {
+    _vaultSecurityPurge('visibilitychange:hidden');
+  }
+});
+
+// Page unload
+window.addEventListener('pagehide', () => { _vaultSecurityPurge('pagehide'); });
+window.addEventListener('beforeunload', () => { _vaultSecurityPurge('beforeunload'); });
+
+// Parent iframe tab switch message (from index.html)
+window.addEventListener('message', (e) => {
+  if (e.data === 'qtcl_tab_changed') {
+    _vaultSecurityPurge('tab_changed_message');
+  }
+});
+
+// ─── Init: clean start, purge stale localStorage ───
 window.addEventListener('DOMContentLoaded', () => {
-  const saved = localStorage.getItem('qtcl_vault_account');
-  if (saved) document.getElementById('loginId').value = saved;
+  try { localStorage.removeItem('qtcl_vault_account'); } catch(_) {}
 });
 </script>
 </body>

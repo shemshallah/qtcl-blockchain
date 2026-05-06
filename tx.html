@@ -908,6 +908,9 @@ body::before {
         <span id="walletDropdownArrow" style="transition:transform 0.2s;">▼</span>
       </div>
       <div id="walletDropdownContent" class="card-body" style="display:none;">
+        <div style="background:rgba(0,232,138,0.06);border:1px solid rgba(0,232,138,0.15);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:11px;color:var(--muted);line-height:1.6;">
+          🛡 <strong style="color:var(--emerald);">Zero-persistence security</strong> — Your wallet data lives only in RAM for this session. Switching tabs, minimizing, or completing a transaction automatically purges all keys and credentials from memory. Nothing is ever written to disk or localStorage.
+        </div>
         <!-- Tab: Address-Only vs Wallet File -->
         <div class="tab-bar" style="margin-bottom:16px; border-radius:4px;">
           <button class="tab-btn active" onclick="showConnectTab('address')">Address Only</button>
@@ -1372,10 +1375,12 @@ body::before {
 
 const RPC_URL = '/rpc';
 
-// ═══ STATE ═══
+// ═══ STATE — EPHEMERAL (never persisted to localStorage) ═══
+// Wallet data lives only in RAM for the current session.
+// Tab switch, page hide, or navigation purges everything.
 const S = {
-  walletAddr: localStorage.getItem('qtcl_tx_wallet') || '',
-  walletMode: localStorage.getItem('qtcl_tx_mode') || 'readonly',
+  walletAddr: '',
+  walletMode: 'readonly',
   walletPublicKey: '',
   balance: 0,
   height: 0,
@@ -1386,11 +1391,18 @@ const S = {
   blockRangeEnd: -1,
   contacts: [],
   _contactPickTarget: null,
-  // Vault auth for address book
-  vaultAccountId: localStorage.getItem('qtcl_vault_account_id') || '',
-  vaultPassphrase: '', // never persisted — session only
+  // Vault auth for address book (session only)
+  vaultAccountId: '',
+  vaultPassphrase: '',
   vaultLoggedIn: false,
 };
+
+// ═══ SECURITY: Purge any stale localStorage from prior versions ═══
+try {
+  localStorage.removeItem('qtcl_tx_wallet');
+  localStorage.removeItem('qtcl_tx_mode');
+  localStorage.removeItem('qtcl_vault_account_id');
+} catch(_) {}
 
 // ═══ RPC HELPER ═══
 async function rpc(method, params = []) {
@@ -1433,60 +1445,32 @@ function showPage(page) {
   if (page === 'contacts') renderContactsPage();
 }
 
-// ═══ SECURITY: WALLET FILE CLEAR ON FOCUS LOSS / TAB SWITCH ═══
-// _walletFileData and _walletEncryptedPK are the sensitive blobs.
-// They are zeroed immediately whenever the page loses visibility or focus.
-// Balance + address are retained (non-sensitive) so the UI doesn't flicker.
-// Re-authenticating requires uploading the wallet file again — by design.
+// ═══ SECURITY: FULL WALLET DISCONNECT ON TAB SWITCH / VISIBILITY LOSS ═══
+// ALL wallet data (address, keys, file data, balance) is purged from RAM
+// whenever the user navigates away from the transactions page.
+// No data survives — re-connect from scratch every time. By design.
 
-function _zeroWalletKeyMaterial() {
-  // Zero the private key material and password — the sensitive parts
-  _walletEncryptedPK   = null;
-  _signPassword        = '';
-  // Only wipe wallet file data if user was fully authenticated
-  // (pre-auth file load is not sensitive — no key material decrypted yet)
-  if (S.walletMode === 'full') {
-    _walletFileData = null;
-    S.walletMode = 'readonly';
-    const authBtn = document.getElementById('walletAuthBtn');
-    if (authBtn) authBtn.textContent = 'Re-authenticate';
-    toast('Session cleared — re-authenticate to send', 'info');
-  }
-}
-
-// Only zero when the page is actually hidden (tab switch, minimize, phone lock)
-// NOT on file picker open — the OS dialog does NOT trigger visibilitychange reliably
-// and we must not disrupt the wallet load flow
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && S.walletMode === 'full') {
-    _zeroWalletKeyMaterial();
-  }
-});
-
-// Page unload / navigation
-window.addEventListener('pagehide', () => {
-  _zeroWalletKeyMaterial();
-});
-
-// Parent iframe tab switch message (from index.html)
-window.addEventListener('message', (e) => {
-  if (e.data === 'qtcl_tab_changed') {
-    _zeroWalletKeyMaterial();
-    S.vaultPassphrase = '';
-    S.vaultLoggedIn = false;
-  }
-});
-
-function clearWalletSession() {
-  _zeroWalletKeyMaterial();
+function _fullWalletPurge(reason) {
+  const hadWallet = !!S.walletAddr;
+  // Nuclear purge — zero everything
+  _walletFileData = null;
+  _walletEncryptedPK = null;
+  _signPassword = '';
   S.walletAddr = '';
   S.walletMode = 'readonly';
   S.walletPublicKey = '';
   S.balance = 0;
   S.vaultPassphrase = '';
   S.vaultLoggedIn = false;
-  localStorage.removeItem('qtcl_tx_wallet');
-  localStorage.removeItem('qtcl_tx_mode');
+  S.vaultAccountId = '';
+  S.contacts = [];
+  // Clear form fields
+  const fields = ['connectAddr', 'walletPassword', 'sendTo', 'sendAmount', 'sendMemo'];
+  fields.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const fileInput = document.getElementById('walletFileInput');
+  if (fileInput) fileInput.value = '';
+  const authStatus = document.getElementById('walletAuthStatus');
+  if (authStatus) { authStatus.innerHTML = ''; authStatus.classList.add('hidden'); }
   // Reset UI
   document.getElementById('balanceDisplay').textContent = '0.00';
   document.getElementById('balanceUsd').textContent = 'Connect wallet to view balance';
@@ -1496,11 +1480,48 @@ function clearWalletSession() {
   if (wcc) wcc.style.display = '';
   document.getElementById('sendFrom').value = '';
   document.getElementById('sendBalance').textContent = '0.00';
+  const dcBtn = document.getElementById('disconnectBtn');
+  if (dcBtn) dcBtn.style.display = 'none';
+  // Purge stale localStorage from prior versions
+  try {
+    localStorage.removeItem('qtcl_tx_wallet');
+    localStorage.removeItem('qtcl_tx_mode');
+    localStorage.removeItem('qtcl_vault_account_id');
+  } catch(_) {}
+  if (hadWallet && reason) {
+    console.log(`[SECURITY] Wallet purged: ${reason}`);
+  }
 }
 
+// Tab switch (page hidden, minimized, phone lock)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    _fullWalletPurge('visibilitychange:hidden');
+  }
+});
+
+// Page unload / navigation
+window.addEventListener('pagehide', () => {
+  _fullWalletPurge('pagehide');
+});
+
+// Before unload (belt and suspenders)
+window.addEventListener('beforeunload', () => {
+  _fullWalletPurge('beforeunload');
+});
+
+// Parent iframe tab switch message (from index.html)
+window.addEventListener('message', (e) => {
+  if (e.data === 'qtcl_tab_changed') {
+    _fullWalletPurge('tab_changed_message');
+  }
+});
+
+// clearWalletSession replaced by _fullWalletPurge — single source of truth for security purge
+
 function disconnectWallet() {
-  clearWalletSession();
-  toast('Wallet disconnected', 'info');
+  _fullWalletPurge('user_disconnect');
+  toast('Wallet disconnected — all session data purged', 'info');
 }
 
 function toggleMobileMenu() { document.getElementById('sidebar')?.classList.toggle('mobile-open'); }
@@ -1553,16 +1574,14 @@ function showConnectTab(tab) {
   );
 }
 
-// Read-only address connect
+// Read-only address connect (ephemeral — no persistence)
 async function connectWallet() {
   const addr = document.getElementById('connectAddr').value.trim();
   if (!addr) { toast('Enter an address', 'error'); return; }
   S.walletAddr = addr;
   S.walletMode = 'readonly';
-  localStorage.setItem('qtcl_tx_wallet', addr);
-  localStorage.setItem('qtcl_tx_mode', 'readonly');
   await refreshBalance();
-  toast('Wallet connected (read-only)', 'success');
+  toast('Wallet connected (read-only, session only)', 'success');
 }
 
 // Wallet file state
@@ -1622,8 +1641,7 @@ async function authenticateWallet() {
       S.walletPublicKey = result.public_key;
       _walletEncryptedPK = _walletFileData.encrypted_private_key;
       _signPassword = password;  // held session-only for sign-and-submit, zeroed after each tx
-      localStorage.setItem('qtcl_tx_wallet', result.address);
-      localStorage.setItem('qtcl_tx_mode', 'full');
+      // No localStorage — wallet is ephemeral, session-only
 
       status.innerHTML = `<div style="color:var(--emerald);font-size:11px;">✅ HypΓ Authentication SUCCESS · Vault v${result.vault_version} · ${truncAddr(result.address, 16)}</div>`;
       status.classList.remove('hidden');
@@ -1836,8 +1854,24 @@ async function executeSend() {
     document.getElementById('sendStep2').classList.add('hidden');
     document.getElementById('sendStep3').classList.remove('hidden');
     toast('Transaction signed and submitted!', 'success');
+
+    // ═══ SECURITY: Purge ALL wallet data after successful transaction ═══
+    // Zero passwords immediately
     _signPassword = '';
     pwd = '';
+    // Full purge — user must re-connect to send again
+    setTimeout(() => {
+      _walletFileData = null;
+      _walletEncryptedPK = null;
+      S.walletMode = 'readonly';
+      S.walletPublicKey = '';
+      const fileInput = document.getElementById('walletFileInput');
+      if (fileInput) fileInput.value = '';
+      const authStatus = document.getElementById('walletAuthStatus');
+      if (authStatus) { authStatus.innerHTML = ''; authStatus.classList.add('hidden'); }
+      console.log('[SECURITY] Wallet key material purged after tx submit');
+    }, 500);
+    // Refresh balance one last time before the purge takes effect
     refreshBalance();
 
   } catch (e) {
@@ -2164,7 +2198,7 @@ async function loginContactsVault() {
       S.vaultAccountId = id;
       S.vaultPassphrase = pass;
       S.vaultLoggedIn = true;
-      localStorage.setItem('qtcl_vault_account_id', id);
+      // No localStorage — vault session is ephemeral
       toast('Vault unlocked', 'success');
       renderContactsPage();
     } else {
@@ -2439,17 +2473,15 @@ function handleUrlParams() {
 
 // ═══ INIT ═══
 async function init() {
+  // ═══ SECURITY: Always start with a clean slate — no wallet persistence ═══
+  _fullWalletPurge('init');
   handleUrlParams();
   await refreshDashboard();
   loadRecentTxs();
 
-  if (S.walletAddr) {
-    document.getElementById('connectAddr').value = S.walletAddr;
-    // Always refresh balance on load — S.balance initializes to 0 even when address is in localStorage
-    await refreshBalance();
-  }
+  // Wallet starts disconnected — user must explicitly connect each session
 
-  // Auto-refresh
+  // Auto-refresh dashboard only (not wallet balance — wallet may not be connected)
   setInterval(refreshDashboard, 15000);
   setInterval(() => { if (S.walletAddr) refreshBalance(); }, 30000);
 }

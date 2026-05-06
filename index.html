@@ -836,6 +836,10 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     this.classList.add('active');
+    // Security: notify ALL iframes that the tab changed so they can purge wallet data
+    document.querySelectorAll('iframe').forEach(iframe => {
+      try { iframe.contentWindow.postMessage('qtcl_tab_changed', '*'); } catch(_) {}
+    });
   });
 });
 
