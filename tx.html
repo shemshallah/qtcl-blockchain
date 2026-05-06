@@ -1656,7 +1656,8 @@ async function refreshBalance() {
     document.getElementById('balanceDisplay').textContent = fmtQTCL(S.balance);
 
     const mode = S.walletMode === 'full' ? '🔓 Full Access (HypΓ Authenticated)' : '👁 Read-Only';
-    document.getElementById('balanceUsd').textContent = `${r.transaction_count || 0} transactions · ${r.address_type || 'standard'} · ${mode}`;
+    const utxoCount = r.unspent_outputs || 0;
+    document.getElementById('balanceUsd').textContent = `${r.transaction_count || 0} transactions · ${utxoCount} UTXOs · ${r.address_type || 'standard'} · ${mode}`;
     const wa = document.getElementById('walletAddr');
     wa.textContent = S.walletAddr;
     wa.style.display = 'inline-block';
@@ -1941,8 +1942,8 @@ async function showTxDetail(txId, height) {
   document.getElementById('txDetailModal').classList.add('active');
 
   try {
-    // Get block transactions to find this specific tx
-    const r = await rpc('qtcl_getBlockTransactions', [height]);
+    // Get block to find this specific tx (qtcl_getBlock returns block with embedded transactions)
+    const r = await rpc('qtcl_getBlock', [height]);
     const tx = (r.transactions || []).find(t => (t.tx_id || t.tx_hash) === txId) || {};
 
     const amt = (Number(tx.amount) || 0) / 100;
@@ -2316,6 +2317,8 @@ async function lookupAddress() {
             <div class="detail-value code" style="font-size:10px;">${escHtml(addr)}</div>
             <div class="detail-label">Balance</div>
             <div class="detail-value"><strong style="font-size:18px;color:var(--text-bright);">${fmtQTCL(r.balance || 0)} QTCL</strong></div>
+            <div class="detail-label">UTXOs</div>
+            <div class="detail-value">${r.unspent_outputs || 0} unspent outputs</div>
             <div class="detail-label">TX Count</div>
             <div class="detail-value">${r.transaction_count || 0}</div>
             <div class="detail-label">Type</div>

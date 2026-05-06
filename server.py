@@ -99,6 +99,8 @@ _RPC_INLINE_METHODS: frozenset = frozenset(
 _RPC_TIMEOUT_MAP: dict = {
     "qtcl_getBlockRange": 10.0,
     "qtcl_getTransactions": 10.0,
+    "qtcl_getTransactionVolume": 5.0,
+    "qtcl_getBlockTransactions": 5.0,
     "qtcl_getBlock": 5.0,
     "qtcl_getBalance": 4.0,
     "qtcl_listWallets": 2.0,
@@ -1289,6 +1291,31 @@ _tx_worker_daemon.start()
 # ═════════════════════════════════════════════════════════════════════════════════
 
 
+def _tx_amount_base(tx: dict) -> int:
+    """Extract amount in base units from a transaction dict.
+
+    Priority: amount_base (int) > amount (auto-detect QTCL vs base).
+    NUMERIC(30,0) column stores integers — this ensures correct storage.
+    """
+    ab = tx.get("amount_base")
+    if ab is not None:
+        return int(ab)
+    raw = tx.get("amount")
+    if raw is None:
+        return 0
+    try:
+        if isinstance(raw, str):
+            f = float(raw)
+            # If string contains '.', treat as QTCL float → convert to base
+            return int(f * 100) if '.' in raw else int(f)
+        elif isinstance(raw, float):
+            return int(raw * 100)
+        else:
+            return int(raw)
+    except (ValueError, TypeError):
+        return 0
+
+
 def _utxo_settle_block(
     height: int, block_hash: str, miner_address: str, txs: list, cur=None
 ) -> None:
@@ -1327,9 +1354,9 @@ def _utxo_settle_block(
                 """,
                 (
                     tx_id,
-                    tx.get("from_address", ""),
-                    tx.get("to_address", ""),
-                    tx.get("amount", 0),
+                    tx.get("from_address") or tx.get("sender_addr", ""),
+                    tx.get("to_address") or tx.get("receiver_addr", ""),
+                    _tx_amount_base(tx),
                     tx_type,
                     height,
                     block_hash,
@@ -1389,10 +1416,20 @@ def _utxo_settle_block(
                     if out_addr and out_amt > 0:
                         _upsert_utxo(out_addr, tx_id, out_idx, out_amt, height)
             else:
-                _to_addr = tx.get("to_addr") or tx.get("to_address", "")
-                _amt = tx.get("amount")
+                _to_addr = tx.get("to_addr") or tx.get("to_address") or tx.get("receiver_addr", "")
+                # amount_base (int, base units) takes priority; fall back to amount (could be QTCL float/str)
+                _amt = tx.get("amount_base") or tx.get("amount")
                 try:
-                    _amt_base = int(_amt * 100) if isinstance(_amt, float) else int(_amt)
+                    if _amt is None:
+                        _amt_base = 0
+                    elif isinstance(_amt, str):
+                        # Could be "7.20" (QTCL) or "720" (base units)
+                        _f = float(_amt)
+                        _amt_base = int(_f * 100) if _f < 1_000_000 and '.' in _amt else int(_f)
+                    elif isinstance(_amt, float):
+                        _amt_base = int(_amt * 100)
+                    else:
+                        _amt_base = int(_amt)
                 except (ValueError, TypeError):
                     _amt_base = 0
                 if _to_addr and _amt_base > 0:
@@ -1407,23 +1444,38 @@ def _utxo_settle_block(
             """,
             (int(time.time()), height),
         )
-        # ── Update wallets table balance ──
+        # ── Update wallet_addresses registry (UTXO-aware: recompute balance from address_utxos) ──
+        _seen_addrs = set()
         for tx in txs:
             for out in tx.get("outputs", []):
                 _addr = out.get("address", "")
-                _amt = int(out.get("amount_base", 0))
-                if _addr and _amt > 0:
-                    cur.execute(
-                        """
-                        INSERT INTO wallets (address, token_balance, updated_at)
-                        VALUES (%s, %s, NOW())
-                        ON CONFLICT (address) DO UPDATE SET
-                            token_balance = wallets.token_balance + EXCLUDED.token_balance,
-                            updated_at = NOW()
-                        """,
-                        (_addr, _amt),
-                    )
-                    _settle_log.debug(f"[UTXO-SETTLE] Wallet {_addr[:16]}… balance +{_amt} base units")
+                if _addr and _addr not in _seen_addrs:
+                    _seen_addrs.add(_addr)
+            _from = tx.get("from_address", "")
+            if _from and _from not in _seen_addrs and _from != "0" * 64:
+                _seen_addrs.add(_from)
+        for _addr in _seen_addrs:
+            try:
+                _fp = hashlib.sha3_256(_addr.encode()).hexdigest()[:64]
+                # Recompute confirmed balance from UTXO set
+                cur.execute(
+                    "SELECT COALESCE(SUM(amount), 0) FROM address_utxos WHERE address = %s AND spent = FALSE",
+                    (_addr,),
+                )
+                _utxo_bal = int(cur.fetchone()[0])
+                cur.execute(
+                    """
+                    INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
+                    VALUES (%s, %s, %s, %s, 1, 'standard', NOW())
+                    ON CONFLICT (address) DO UPDATE SET
+                        balance = %s,
+                        transaction_count = wallet_addresses.transaction_count + 1,
+                        updated_at = NOW()
+                    """,
+                    (_addr, _fp, _fp, _utxo_bal, _utxo_bal),
+                )
+            except Exception as _wa_err:
+                _settle_log.debug(f"[UTXO-SETTLE] wallet_addresses update skipped for {_addr[:16]}…: {_wa_err}")
 
         # ── Update chain state (best-effort; don't fail settlement if table missing) ──
         try:
@@ -3651,13 +3703,7 @@ def _lazy_ensure_chain_state():
                         finalized_at TIMESTAMPTZ
                     )
                 """)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS wallets (
-                        address      TEXT PRIMARY KEY,
-                        token_balance NUMERIC(24,8) DEFAULT 0.0,
-                        updated_at   TIMESTAMPTZ DEFAULT NOW()
-                    )
-                """)
+                # NOTE: 'wallets' table removed — UTXO model uses address_utxos + wallet_addresses
             # ALWAYS ensure oracle_attestations exists (even if other tables already existed)
             if _need_attestations:
                 cur.execute("""
@@ -3696,6 +3742,11 @@ def _lazy_ensure_chain_state():
                         SELECT 1 FROM pg_indexes WHERE indexname = 'idx_utxo_tx_unique'
                     ) THEN
                         CREATE UNIQUE INDEX idx_utxo_tx_unique ON address_utxos(tx_hash, output_index);
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_indexes WHERE indexname = 'idx_utxo_spent_in_tx'
+                    ) THEN
+                        CREATE INDEX idx_utxo_spent_in_tx ON address_utxos(spent_in_tx_hash) WHERE spent_in_tx_hash IS NOT NULL;
                     END IF;
                 END $$;
             """)
@@ -4320,6 +4371,22 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         raw_balance = _utxo_get_balance(address)
         unspent = _utxo_get_unspent(address, limit=50)
 
+        # Fetch transaction count + address type from wallet_addresses registry
+        _tx_count = 0
+        _addr_type = "standard"
+        try:
+            with get_db_cursor() as _bc:
+                _bc.execute(
+                    "SELECT transaction_count, address_type FROM wallet_addresses WHERE address = %s",
+                    (address,),
+                )
+                _wr = _bc.fetchone()
+                if _wr:
+                    _tx_count = int(_wr[0]) if _wr[0] else 0
+                    _addr_type = _wr[1] or "standard"
+        except Exception:
+            pass
+
         result = {
             "address": address,
             "balance": raw_balance / 100.0,
@@ -4327,6 +4394,8 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
             "raw_balance_base_units": raw_balance,
             "unspent_outputs": len(unspent),
             "utxos": unspent,
+            "transaction_count": _tx_count,
+            "address_type": _addr_type,
         }
         logger.debug(
             f"[RPC-METHOD] qtcl_getBalance (UTXO): address={address[:16]}…, balance={result['balance']}, utxos={len(unspent)}"
@@ -4633,12 +4702,12 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                             "inputs": [],
                             "outputs": [],
                         }
-                        # Fetch UTXO inputs for this tx
+                        # Fetch UTXO inputs for this tx (UTXOs spent BY this tx)
                         cur.execute(
                             """
-                            SELECT tx_hash, output_index, amount, address, spent
+                            SELECT tx_hash, output_index, amount, address
                             FROM address_utxos
-                            WHERE tx_hash = %s AND spent = TRUE
+                            WHERE spent_in_tx_hash = %s
                             ORDER BY output_index ASC
                             """,
                             (tr[0],),
@@ -4650,12 +4719,12 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                                 "amount_base": int(_in_row[2]) if _in_row[2] else 0,
                                 "address": _in_row[3] or "",
                             })
-                        # Fetch UTXO outputs for this tx
+                        # Fetch UTXO outputs created by this tx
                         cur.execute(
                             """
                             SELECT tx_hash, output_index, amount, address, spent
                             FROM address_utxos
-                            WHERE tx_hash = %s AND spent IN (TRUE, FALSE)
+                            WHERE tx_hash = %s
                             ORDER BY output_index ASC
                             """,
                             (tr[0],),
@@ -4875,6 +4944,64 @@ def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
 
     except Exception as e:
         logger.exception(f"[RPC] _rpc_getTransactions error: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_getTransactionVolume(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getTransactionVolume — total on-chain transaction volume."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM transactions WHERE status = 'confirmed'")
+            row = cur.fetchone()
+            total_base = int(row[0]) if row and row[0] else 0
+            total_count = int(row[1]) if row and row[1] else 0
+            return _rpc_ok({
+                "total_volume_base": total_base,
+                "total_volume_qtcl": total_base / 100.0,
+                "total_transactions": total_count,
+            }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] qtcl_getTransactionVolume: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_getBlockTransactions(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getBlockTransactions — get transactions for a specific block height."""
+    try:
+        height = None
+        if isinstance(params, list) and params:
+            height = int(params[0])
+        elif isinstance(params, dict):
+            height = int(params.get("height", 0))
+        if height is None:
+            return _rpc_error(-32602, "height required", rpc_id)
+        with get_db_cursor() as cur:
+            cur.execute(
+                """SELECT tx_hash, from_address, to_address, amount,
+                          transaction_index, tx_type, status, height,
+                          quantum_state_hash, metadata
+                   FROM transactions WHERE height = %s
+                   ORDER BY transaction_index ASC""",
+                (height,),
+            )
+            rows = cur.fetchall()
+            txs = []
+            for r in rows:
+                txs.append({
+                    "tx_id": r[0],
+                    "from_addr": r[1] or "",
+                    "to_addr": r[2] or "",
+                    "amount": float(r[3]) if r[3] is not None else 0.0,
+                    "tx_index": int(r[4]) if r[4] is not None else 0,
+                    "tx_type": r[5] or "transfer",
+                    "status": r[6] or "confirmed",
+                    "height": r[7],
+                    "w_proof": r[8] or "",
+                    "metadata": r[9],
+                })
+            return _rpc_ok({"transactions": txs, "total": len(txs), "height": height}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] qtcl_getBlockTransactions: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
@@ -6856,9 +6983,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             """,
                             (
                                 tx_id,
-                                tx.get("from_address", ""),
-                                tx.get("to_address", ""),
-                                tx.get("amount", 0),
+                                tx.get("from_address") or tx.get("sender_addr", ""),
+                                tx.get("to_address") or tx.get("receiver_addr", ""),
+                                _tx_amount_base(tx),
                                 tx_type,
                                 height,
                                 block_hash,
@@ -7587,6 +7714,8 @@ _RPC_METHODS: Dict[str, Any] = {
     # "qtcl_pushOracleDM": _rpc_pushOracleDM,
     # ── NEW: Transaction Explorer ─────────────────────────────────────────────────
     "qtcl_getTransactions": _rpc_getTransactions,
+    "qtcl_getTransactionVolume": _rpc_getTransactionVolume,
+    "qtcl_getBlockTransactions": _rpc_getBlockTransactions,
     # P2P DHT methods
     "qtcl_getDHTTable": _p2p_rpc_get_dht_table,
     "qtcl_receiveDHTTable": _p2p_rpc_receive_dht_table,

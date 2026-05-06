@@ -2854,7 +2854,7 @@ class QuantumLatticeController:
 
 @dataclass
 class QuantumTransaction:
-    """Transaction in the quantum blockchain"""
+    """Transaction in the quantum blockchain (UTXO-compatible)"""
 
     tx_id: str
     sender_addr: str
@@ -2865,11 +2865,37 @@ class QuantumTransaction:
     spatial_position: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     fee: int = 1
     signature: Optional[str] = None
+    inputs: list = None
+    outputs: list = None
+
+    def __post_init__(self):
+        if self.inputs is None:
+            self.inputs = []
+        if self.outputs is None:
+            self.outputs = []
+
+    @property
+    def amount_base(self) -> int:
+        """Amount in base units (1 QTCL = 100 base)."""
+        return int(self.amount * 100)
 
     def to_dict(self) -> Dict[str, Any]:
+        tx_type = self.tx_type if hasattr(self, "tx_type") else "transfer"
+        is_coinbase = tx_type in ("coinbase", "miner_reward", "treasury_reward")
+        _amount_base = self.amount_base
+
+        # Auto-generate UTXO inputs/outputs if not explicitly set
+        _inputs = getattr(self, "inputs", None) or []
+        _outputs = getattr(self, "outputs", None) or []
+        if not _inputs and is_coinbase:
+            _inputs = [{"prev_tx_hash": "0" * 64, "prev_output_index": 0xFFFFFFFF, "script_sig": {"height": self.nonce, "type": tx_type}}]
+        if not _outputs and self.receiver_addr and _amount_base > 0:
+            _outputs = [{"address": self.receiver_addr, "amount_base": _amount_base, "script_pubkey": "OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG"}]
+
         return {
             "tx_id": self.tx_id,
-            "tx_type": self.tx_type if hasattr(self, "tx_type") else "transfer",
+            "tx_hash": self.tx_id,
+            "tx_type": tx_type,
             "sender_addr": self.sender_addr,
             "receiver_addr": self.receiver_addr,
             "from_addr": self.sender_addr,
@@ -2877,11 +2903,15 @@ class QuantumTransaction:
             "from_address": self.sender_addr,
             "to_address": self.receiver_addr,
             "amount": str(self.amount),
+            "amount_base": _amount_base,
             "nonce": self.nonce,
             "timestamp_ns": self.timestamp_ns,
             "spatial_position": self.spatial_position,
             "fee": self.fee,
+            "fee_base": self.fee,
             "signature": self.signature,
+            "inputs": _inputs,
+            "outputs": _outputs,
         }
 
     @staticmethod

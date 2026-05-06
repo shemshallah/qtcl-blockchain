@@ -891,16 +891,16 @@ class NonceOracle:
             return set(self._pending.get(address, set()))
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BALANCE ORACLE — queries wallet_addresses table
+# BALANCE ORACLE — queries address_utxos (UTXO set)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class BalanceOracle:
     """
-    Reads confirmed balances from wallet_addresses.balance and subtracts
-    in-flight (pending) spend from the mempool's own ledger.
+    Reads confirmed balances from the UTXO set (address_utxos table) and
+    subtracts in-flight (pending) spend from the mempool's own ledger.
 
-    This is the Bitcoin UTXO model simplified to an account model:
-        spendable = confirmed_balance - sum(pending_outgoing_amounts)
+    Bitcoin-style UTXO balance:
+        spendable = sum(unspent_outputs) - sum(pending_outgoing_amounts)
     """
 
     def __init__(self) -> None:

@@ -426,31 +426,52 @@ def _apply_vault_burn(cost: int, operation: str, account_id: str, tx_ref: str = 
         burn_fp = _hl.sha3_256(BURN_ADDRESS.encode()).hexdigest()[:64]
         coh_fp  = _hl.sha3_256(COHERENCE_FUND_ADDRESS.encode()).hexdigest()[:64]
 
+        # Generate deterministic tx hash for vault burn operation
+        _burn_tx_hash = _hl.sha3_256(
+            f"vault_burn:{account_id}:{operation}:{cost}:{int(time.time())}".encode()
+        ).hexdigest()
+
         with get_db_cursor() as cur:
-            # Credit burn address (increases tracked burned supply)
-            cur.execute(
-                """INSERT INTO wallet_addresses
-                   (address, wallet_fingerprint, public_key, balance,
-                    transaction_count, address_type, updated_at)
-                   VALUES (%s, %s, %s, %s, 1, 'burn', NOW())
-                   ON CONFLICT (address) DO UPDATE SET
-                     balance = wallet_addresses.balance + EXCLUDED.balance,
-                     transaction_count = wallet_addresses.transaction_count + 1,
-                     updated_at = NOW()""",
-                (BURN_ADDRESS, burn_fp, burn_fp, burn_amount),
-            )
-            # Credit coherence fund
-            cur.execute(
-                """INSERT INTO wallet_addresses
-                   (address, wallet_fingerprint, public_key, balance,
-                    transaction_count, address_type, updated_at)
-                   VALUES (%s, %s, %s, %s, 1, 'coherence_fund', NOW())
-                   ON CONFLICT (address) DO UPDATE SET
-                     balance = wallet_addresses.balance + EXCLUDED.balance,
-                     transaction_count = wallet_addresses.transaction_count + 1,
-                     updated_at = NOW()""",
-                (COHERENCE_FUND_ADDRESS, coh_fp, coh_fp, coherence_amount),
-            )
+            # Create UTXO for burn address
+            if burn_amount > 0:
+                cur.execute(
+                    """INSERT INTO address_utxos
+                       (address, tx_hash, output_index, amount, spent, created_at_height, created_at_timestamp)
+                       VALUES (%s, %s, 0, %s, FALSE, 0, %s)
+                       ON CONFLICT (tx_hash, output_index) DO NOTHING""",
+                    (BURN_ADDRESS, _burn_tx_hash, burn_amount, int(time.time())),
+                )
+            # Create UTXO for coherence fund
+            if coherence_amount > 0:
+                cur.execute(
+                    """INSERT INTO address_utxos
+                       (address, tx_hash, output_index, amount, spent, created_at_height, created_at_timestamp)
+                       VALUES (%s, %s, 1, %s, FALSE, 0, %s)
+                       ON CONFLICT (tx_hash, output_index) DO NOTHING""",
+                    (COHERENCE_FUND_ADDRESS, _burn_tx_hash, coherence_amount, int(time.time())),
+                )
+
+            # Update wallet_addresses registry (balance from UTXO set)
+            for _addr, _fp, _type in [
+                (BURN_ADDRESS, burn_fp, 'burn'),
+                (COHERENCE_FUND_ADDRESS, coh_fp, 'coherence_fund'),
+            ]:
+                cur.execute(
+                    "SELECT COALESCE(SUM(amount), 0) FROM address_utxos WHERE address = %s AND spent = FALSE",
+                    (_addr,),
+                )
+                _utxo_bal = int(cur.fetchone()[0])
+                cur.execute(
+                    """INSERT INTO wallet_addresses
+                       (address, wallet_fingerprint, public_key, balance,
+                        transaction_count, address_type, updated_at)
+                       VALUES (%s, %s, %s, %s, 1, %s, NOW())
+                       ON CONFLICT (address) DO UPDATE SET
+                         balance = %s,
+                         transaction_count = wallet_addresses.transaction_count + 1,
+                         updated_at = NOW()""",
+                    (_addr, _fp, _fp, _utxo_bal, _type, _utxo_bal),
+                )
         logger.info(
             f"[VAULT-BURN] op={operation} acct={account_id[:12]} "
             f"total={cost} burn={burn_amount} coherence={coherence_amount}"
