@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "qtcl-blockchain": {
+      "url": "https://qtcl-blockchain.koyeb.app/mcp",
+      "transport": "streamable-http",
+      "description": "QTCL Quantum Token Chain Ledger — Post-quantum blockchain with UTXO model, flat fees, and quantum oracle consensus."
+    }
+  }
+}
