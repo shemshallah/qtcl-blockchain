@@ -896,6 +896,7 @@ class OracleRequestHandler(BaseHTTPRequestHandler):
                 "block_hash": block.block_hash,
                 "status": block.status.name,
                 "attestation_count": block.attestation_count,
+                "oracle_ids": list(block.attestations.keys()),
                 "threshold": CONSENSUS_THRESHOLD,
                 "age_seconds": block.age_seconds,
             },
