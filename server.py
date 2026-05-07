@@ -7226,6 +7226,90 @@ def rpc_blocks_stream_proxy():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# SSE PROXY: /rpc/events/blocks → localhost:8001 (SSE service)
+# ═══════════════════════════════════════════════════════════════════════════════════
+@app.route("/rpc/events/blocks", methods=["GET", "OPTIONS"])
+def rpc_events_blocks_proxy():
+    """Proxy SSE stream for block events from internal SSE server (port 8001)."""
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
+    try:
+        try:
+            import requests as _req
+        except ImportError:
+            _req = None
+        if _req is None:
+            def placeholder():
+                yield b": SSE initializing, retry in 10s\n\n"
+            return Response(placeholder(), mimetype="text/event-stream")
+        sse_url = "http://localhost:8001/rpc/events/blocks"
+        def generate():
+            try:
+                r = _req.get(sse_url, headers={"Accept": "text/event-stream"}, stream=True, timeout=(5, 60))
+                for chunk in r.iter_content(chunk_size=1024):
+                    if chunk:
+                        yield chunk
+            except GeneratorExit:
+                pass
+            except Exception as e:
+                logger.debug(f"[SSE-EVENTS] Stream error: {e}")
+                yield f": SSE stream error: {e}\n\n".encode()
+        return Response(generate(), mimetype="text/event-stream", headers={
+            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        })
+    except Exception as e:
+        logger.error(f"[SSE-EVENTS] Failed to proxy: {e}")
+        def fallback():
+            yield b": SSE unavailable\n\n"
+        return Response(fallback(), mimetype="text/event-stream")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# SSE PROXY: /rpc/oracle/consensus → localhost:8001 (SSE service)
+# ═══════════════════════════════════════════════════════════════════════════════════
+@app.route("/rpc/oracle/consensus", methods=["GET", "OPTIONS"])
+def rpc_oracle_consensus_proxy():
+    """Proxy SSE stream for oracle consensus from internal SSE server (port 8001)."""
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
+    try:
+        try:
+            import requests as _req
+        except ImportError:
+            _req = None
+        if _req is None:
+            def placeholder():
+                yield b": SSE initializing, retry in 10s\n\n"
+            return Response(placeholder(), mimetype="text/event-stream")
+        sse_url = "http://localhost:8001/rpc/oracle/consensus"
+        def generate():
+            try:
+                r = _req.get(sse_url, headers={"Accept": "text/event-stream"}, stream=True, timeout=(5, 60))
+                for chunk in r.iter_content(chunk_size=1024):
+                    if chunk:
+                        yield chunk
+            except GeneratorExit:
+                pass
+            except Exception as e:
+                logger.debug(f"[SSE-CONSENSUS] Stream error: {e}")
+                yield f": SSE stream error: {e}\n\n".encode()
+        return Response(generate(), mimetype="text/event-stream", headers={
+            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        })
+    except Exception as e:
+        logger.error(f"[SSE-CONSENSUS] Failed to proxy: {e}")
+        def fallback():
+            yield b": SSE unavailable\n\n"
+        return Response(fallback(), mimetype="text/event-stream")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
 # ═══════════════════════════════════════════════════════���═══════════════════════════
 @app.route("/rpc/methods", methods=["GET"])
