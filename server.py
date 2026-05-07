@@ -1256,6 +1256,21 @@ def _settle_block_rewards(
             f"[SETTLE] ✅ h={height}: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL, txs={len(non_coinbase_txs)}"
         )
 
+        # Cache block for getBlockRange queries
+        try:
+            _cache_block(
+                {
+                    "height": height,
+                    "block_hash": block_hash,
+                    "timestamp": int(time.time()),
+                    "difficulty": 4,
+                    "miner": miner_address,
+                    "w_state_fidelity": 0.0,
+                }
+            )
+        except Exception as cache_err:
+            _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
+
     except Exception as err:
         _settle_log.error(f"[SETTLE] ❌ h={height} settlement failed: {err}", exc_info=True)
 
@@ -3583,7 +3598,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                     and LATTICE.block_manager.db
                 ):
                     db = LATTICE.block_manager.db
-                    if db._sqlite_conn:
+                    if hasattr(db, '_sqlite_conn') and db._sqlite_conn:
                         try:
                             sql = """
                                 SELECT height, block_hash, timestamp, w_state_hash,
