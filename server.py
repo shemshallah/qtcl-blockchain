@@ -3353,12 +3353,16 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
             f"[RPC-HEIGHT] 📊 CHAIN TIP: h={height} hash={tip_hash[:16]}… (DB-authoritative, always fresh)"
         )
 
+        _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
+        target_diff = int(_env_diff) if _env_diff.isdigit() else (int(db_tip.get("difficulty", 4)) if db_tip else 4)
+
         return _rpc_ok(
             {
                 "height": height,
                 "tip_hash": tip_hash,
+                "difficulty": target_diff,
                 "ts": time.time(),
-                "source": "DB-authoritative",  # Signal to client this is ground truth
+                "source": "DB-authoritative",
             },
             rpc_id,
         )
@@ -5427,6 +5431,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         nonce = int(hdr.get("nonce", 0))
         miner_address = str(hdr.get("miner_address", ""))
         difficulty_bits = int(hdr.get("difficulty", 4))
+        # BLOCK_DIFFICULTY env var overrides header difficulty
+        _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
+        if _env_diff.isdigit():
+            difficulty_bits = int(_env_diff)
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
         logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}... processing...")
@@ -6489,11 +6497,54 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
         return {"status": "error", "message": str(e)}
 
 
+def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
+    """Retroactively settle all blocks that have no wallet_addresses entry."""
+    try:
+        settled = 0
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT b.height, b.block_hash, b.miner_address
+                FROM blocks b
+                WHERE b.height > 0
+                AND NOT EXISTS (
+                    SELECT 1 FROM wallet_addresses w
+                    WHERE w.address = b.miner_address
+                    AND w.balance > 0
+                )
+                ORDER BY b.height
+            """)
+            rows = cur.fetchall()
+            for row in rows:
+                h, bh, miner = row
+                if not miner or len(miner.strip()) < 10:
+                    continue
+                cur.execute(
+                    "SELECT tx_hash, from_address, to_address, amount, tx_type, metadata "
+                    "FROM transactions WHERE block_hash = %s", (bh,))
+                tx_rows = cur.fetchall()
+                txs = []
+                for tr in tx_rows:
+                    meta = tr[5] if isinstance(tr[5], dict) else {}
+                    txs.append({
+                        "tx_id": tr[0], "from_address": tr[1] or "",
+                        "to_address": tr[2] or "", "amount": float(tr[3] or 0),
+                        "tx_type": tr[4] or "transfer",
+                    })
+                if txs:
+                    _settle_block_rewards(h, bh, miner, txs, [])
+                    settled += 1
+        return _rpc_ok({"settled": settled, "total": len(rows)}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] retroSettle error: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock": _rpc_submitBlock,
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,
+    "qtcl_retroSettle": _rpc_retroSettle,
     "qtcl_getTransaction": _rpc_getTransaction,
     "qtcl_getBlock": _rpc_getBlock,
     "qtcl_getBlockRange": _rpc_getBlockRange,
