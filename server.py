@@ -5523,9 +5523,24 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _treasury_coinbase = None
 
         for cb in _coinbase_txs:
-            _to = cb.get("to_addr", cb.get("to_address", ""))
-            _amount = float(cb.get("amount", 0))
-            _amount_base = int(round(_amount * 100))  # Convert to base units
+            _outputs = cb.get("outputs", [])
+            # Extract recipient from direct field or first output address
+            _to = (
+                cb.get("to_addr")
+                or cb.get("to_address")
+                or cb.get("to")
+                or (_outputs[0].get("address") if _outputs else "")
+            )
+            # Extract amount from direct field or first output amount
+            _amount = float(
+                cb.get("amount")
+                or cb.get("amount_base")
+                or (_outputs[0].get("amount") if _outputs else 0)
+                or 0
+            )
+            _amount_base = int(round(_amount * 100)) if not _outputs else int(
+                _outputs[0].get("amount_base", round(_amount * 100))
+            )
 
             if _to == miner_address:
                 _miner_coinbase = cb
@@ -5617,8 +5632,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 )
 
             # Validate sender has sufficient balance by tracing unspent outputs
-            _from = tx.get("from_addr", tx.get("from_address", ""))
-            _amount = float(tx.get("amount", 0))
+            _from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
+            _amount = float(tx.get("amount") or tx.get("amount_base") or 0)
 
             # Query sender's confirmed balance from DB
             try:
@@ -5751,8 +5766,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             """,
                                 (
                                     tx_id,
-                                    tx.get("from_addr", "0" * 64),
-                                    tx.get("to_addr", ""),
+                                    tx.get("from_addr") or tx.get("from_address") or tx.get("from", "0" * 64),
+                                    tx.get("to_addr") or tx.get("to_address") or tx.get("to", ""),
                                     float(tx.get("amount", 0)),
                                     tx.get("tx_type", "transfer"),
                                     height,
