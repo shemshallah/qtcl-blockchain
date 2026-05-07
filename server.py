@@ -922,7 +922,7 @@ def _ensure_wallet_addresses_table() -> None:
                     balance NUMERIC(30,0) DEFAULT 0,
                     transaction_count INTEGER DEFAULT 0,
                     address_type VARCHAR(20) DEFAULT 'standard',
-                    last_updated TIMESTAMP DEFAULT NOW()
+                    updated_at TIMESTAMP DEFAULT NOW()
                 )
             """)
         logger.info("[STARTUP] ✅ wallet_addresses table ready")
@@ -1197,13 +1197,13 @@ def _settle_block_rewards(
             # MINER REWARD — MANDATORY, ALWAYS EXECUTED
             _miner_sql = """
             INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
             VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
             ON CONFLICT (address) DO UPDATE SET
                 balance = wallet_addresses.balance + %s,
                 transaction_count = wallet_addresses.transaction_count + 1,
                 address_type = 'miner',
-                last_updated = NOW()
+                updated_at = NOW()
             """
             cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
             _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
@@ -1217,13 +1217,13 @@ def _settle_block_rewards(
             # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
             _treasury_sql = """
             INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, last_updated)
+            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
             VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
             ON CONFLICT (address) DO UPDATE SET
                 balance = wallet_addresses.balance + %s,
                 transaction_count = wallet_addresses.transaction_count + 1,
                 address_type = 'treasury',
-                last_updated = NOW()
+                updated_at = NOW()
             """
             cur.execute(_treasury_sql, (_treasury_addr, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
             _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {_treasury_addr[:16]}… += {treasury_reward_base/100:.2f} QTCL")
@@ -4594,7 +4594,10 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
         logger.debug(
             f"[RPC-METHOD] qtcl_getHealth called with params={params}, id={rpc_id}"
         )
-        from oracle import PYTH_ORACLE as _po
+        try:
+            from oracle import PYTH_ORACLE as _po
+        except ImportError:
+            _po = None
 
         logger.debug(
             f"[RPC-METHOD] qtcl_getHealth: oracle_ready={ORACLE_AVAILABLE}, lattice_ready={LATTICE is not None}, pyth_ready={_po is not None}"
@@ -7253,7 +7256,10 @@ def _get_pyth():
 @app.route("/rpc/health", methods=["GET"])
 def rpc_health():
     """GET /rpc/health — JSON-RPC engine and Pyth oracle health."""
-    from oracle import PYTH_ORACLE as _po
+    try:
+        from oracle import PYTH_ORACLE as _po
+    except ImportError:
+        _po = None
 
     return jsonify(
         {
