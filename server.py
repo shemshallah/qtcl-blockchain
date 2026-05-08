@@ -5895,7 +5895,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _dup_reward = 7.20
             return _rpc_ok(
                 {
-                    "status": "finalized",
+                    "status": "accepted_and_finalized",
                     "height": height,
                     "block_hash": block_hash,
                     "next_height": height + 1,
@@ -6027,7 +6027,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         )
         _resp = _rpc_ok(
             {
-                "status": "finalized",
+                "status": "accepted_and_finalized",
                 "height": height,
                 "block_hash": block_hash,
                 "difficulty_bits": difficulty_bits,
