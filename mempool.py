@@ -268,8 +268,9 @@ class MempoolTx:
             'tx_hash'        : self.tx_hash,
             'from_address'   : self.from_address,
             'to_address'     : self.to_address,
+            'amount'         : self.amount_base / 100.0,
             'amount_base'    : self.amount_base,
-            'amount_qtcl'    : self.amount_base / 100,
+            'amount_qtcl'    : self.amount_base / 100.0,
             'fee_base'       : self.fee_base,
             'fee_qtcl'       : self.fee_base / 100,
             'fee_rate'       : round(self.fee_rate, 6),
@@ -1884,7 +1885,7 @@ class Mempool:
                 'treasury_reward'   : treasury_reward,
                 'treasury_address'  : treasury_address,
             },
-            tx_type        = "coinbase",
+            tx_type        = "treasury_reward",
             memo           = f"Block {block_height} treasury",
             inputs         = [{"prev_tx_hash": "0" * 64, "prev_output_index": 0xFFFFFFFF, "script_sig": {"height": block_height, "type": "treasury"}}],
             outputs        = [{"address": treasury_address, "amount_base": treasury_reward, "script_pubkey": "OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG"}],
@@ -1918,7 +1919,7 @@ class Mempool:
             }),
             w_entropy_hash = w_entropy_hash,
             timestamp_ns   = time.time_ns(),
-            tx_type        = "coinbase",
+            tx_type        = "miner_reward",
             memo           = f"Block {block_height} reward",
             metadata       = {
                 'block_height' : block_height,
@@ -2027,7 +2028,7 @@ class Mempool:
                            tx_type, quantum_state_hash, metadata, created_at
                     FROM transactions
                     WHERE status = 'pending'
-                      AND tx_type != 'coinbase'
+                      AND tx_type NOT IN ('coinbase', 'miner_reward', 'treasury_reward')
                     ORDER BY created_at ASC
                     LIMIT %s
                 """, (MAX_MEMPOOL_SIZE,))
@@ -2077,85 +2078,8 @@ class Mempool:
             logger.error(f"[MEMPOOL] DB recovery failed: {exc}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COINBASE BUILDER — standalone for BlockSealer compatibility
+# MEMPOOL SINGLETON ACCESS — thread-safe, lazy initialization
 # ══════════════════════════════════════════════════════════════════════════════
-
-class CoinbaseBuilder:
-    """
-    Builds deterministic coinbase transactions for block sealing.
-    Compatible with blockchain_entropy_mining.BlockSealer.build_transaction_list().
-    """
-
-    @staticmethod
-    def build(
-        block_height  : int,
-        miner_address : str,
-        reward_base   : int,
-        w_entropy_hash: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Returns a coinbase TX dict ready for block inclusion.
-
-        The coinbase hash is deterministic:
-            SHA3-256("COINBASE" || height || miner || reward || w_entropy_hash)
-        so all nodes independently compute the same coinbase hash.
-        """
-        if w_entropy_hash is None:
-            try:
-                w_entropy_hash = hashlib.sha3_256(get_block_field_entropy()).hexdigest()
-            except Exception:
-                w_entropy_hash = hashlib.sha3_256(secrets.token_bytes(32)).hexdigest()
-
-        raw_input = f"COINBASE:{block_height}:{miner_address}:{reward_base}:{w_entropy_hash}".encode()
-        tx_hash   = COINBASE_PREFIX + hashlib.sha3_256(raw_input).hexdigest()
-
-        return {
-            'tx_hash'        : tx_hash,
-            'from_address'   : "0" * 64,
-            'to_address'     : miner_address,
-            'amount_base'    : reward_base,
-            'amount_qtcl'    : reward_base / 100,
-            'fee_base'       : 0,
-            'fee_qtcl'       : 0.0,
-            'nonce'          : block_height,
-            'signature'      : json.dumps({'coinbase': True, 'block_height': block_height}),
-            'w_entropy_hash' : w_entropy_hash,
-            'timestamp_ns'   : time.time_ns(),
-            'tx_type'        : 'coinbase',
-            'inputs'         : [{'previous_tx_hash': '00' * 32, 'previous_output_index': 0xFFFFFFFF,
-                                  'coinbase_data'   : f"height:{block_height}"}],
-            'outputs'        : [{'amount': reward_base, 'address': miner_address}],
-            'memo'           : f"Block {block_height} subsidy",
-            'status'         : 'coinbase',
-        }
-
-    @staticmethod
-    def halving_reward(block_height: int) -> int:
-        """
-        QTCL halving schedule:
-            Epoch 0  (0 – 26623)    : 2000 base = 20 QTCL
-            Epoch 1  (26624–53247)  : 1000 base = 10 QTCL
-            Epoch 2  (53248–79871)  :  500 base =  5 QTCL
-            Epoch 3  (79872–106495) :  250 base =  2.5 QTCL
-            Beyond               :  125 base =  1.25 QTCL (permanent minimum)
-        """
-        EPOCHS = [
-            (0,      26_623, 2_000),
-            (26_624, 53_247, 1_000),
-            (53_248, 79_871,   500),
-            (79_872, 106_495,  250),
-        ]
-        for start, end, reward in EPOCHS:
-            if start <= block_height <= end:
-                return reward
-        return 125
-
-# ══════════════════════════════════════════════════════════════════════════════
-# GLOBAL SINGLETON — module-level, process-wide
-# ══════════════════════════════════════════════════════════════════════════════
-
-_MEMPOOL      : Optional[Mempool] = None
-_MEMPOOL_LOCK = threading.RLock()
 
 def get_mempool() -> Mempool:
     """
@@ -2281,130 +2205,6 @@ def estimate_fee(target_blocks: int = 1) -> Dict[str, Any]:
     return get_mempool().estimate_fee(target_blocks)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TRANSACTION builder — helper for wallet/API layer
-# ══════════════════════════════════════════════════════════════════════════════
-
-class TransactionBuilder:
-    """
-    Constructs and HypΓ Schnorr-Γ-signs transactions.
-    Used by the wallet API layer to assemble TXs before submitting to mempool.
-
-    Usage:
-        builder = TransactionBuilder(oracle_instance)
-        raw = builder.build(from_addr, to_addr, amount_qtcl, nonce, fee_qtcl=0.01)
-        accepted, msg = add_transaction(raw)
-    """
-
-    def __init__(self, oracle: Optional[Any] = None) -> None:
-        self._oracle = oracle
-        if oracle is None and _ORACLE_AVAILABLE:
-            try:
-                from oracle import ORACLE as _global_oracle
-                self._oracle = _global_oracle
-            except ImportError:
-                pass
-
-    def build(
-        self,
-        from_address : str,
-        to_address   : str,
-        amount_qtcl  : float,
-        nonce        : int,
-        fee_qtcl     : float = 0.01,
-        memo         : str   = "",
-        account      : int   = 0,
-        change       : int   = 0,
-        index        : int   = 0,
-        w_entropy    : Optional[bytes] = None,
-    ) -> Dict[str, Any]:
-        """
-        Build and sign a transaction.
-
-        Returns a raw TX dict ready for mempool.accept().
-        """
-        amount_base  = int(round(amount_qtcl * 100))
-        fee_base     = max(MIN_RELAY_FEE_ABS, int(round(fee_qtcl * 100)))
-        timestamp_ns = time.time_ns()
-
-        tx_hash = MempoolTx.canonical_hash(
-            from_address, to_address, amount_base, nonce, fee_base, timestamp_ns
-        )
-
-        # Sign with HypΓ via oracle
-        sig_dict : Dict[str, Any] = {}
-        if self._oracle:
-            try:
-                sig = self._oracle.sign_transaction(
-                    tx_hash,
-                    from_address,
-                    account=account,
-                    change=change,
-                    index=index,
-                    w_entropy=w_entropy,
-                )
-                sig_dict = sig.to_dict() if sig else {}
-            except Exception as exc:
-                logger.warning(f"[TX-BUILDER] Oracle sign failed: {exc}")
-
-        return {
-            'tx_hash'      : tx_hash,
-            'from_address' : from_address,
-            'to_address'   : to_address,
-            'amount'       : amount_base,
-            'fee'          : fee_base,
-            'nonce'        : nonce,
-            'timestamp_ns' : timestamp_ns,
-            'signature'    : json.dumps(sig_dict) if sig_dict else '',
-            'tx_type'      : 'transfer',
-            'memo'         : memo[:256],
-        }
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Transaction class — for blockchain_entropy_mining.py compatibility
-# The old mempool.Transaction is replaced by this thin shim that wraps
-# MempoolTx and adds the blockchain_entropy_mining interface.
-# ══════════════════════════════════════════════════════════════════════════════
-
-class Transaction:
-    """
-    Drop-in replacement for the old mempool.Transaction expected by
-    blockchain_entropy_mining.BlockSealer.
-
-    Wraps MempoolTx to provide .to_dict(), .tx_hash, .fee_sats.
-    Also provides .create_coinbase() static method.
-    """
-
-    def __init__(self, mempool_tx: MempoolTx) -> None:
-        self._tx = mempool_tx
-        self.tx_hash  = mempool_tx.tx_hash
-        self.fee_sats = mempool_tx.fee_base
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = self._tx.to_dict()
-        d['fee_sats']  = self._tx.fee_base
-        d['inputs']    = [{'previous_tx_hash': '00' * 32, 'previous_output_index': 0}]
-        d['outputs']   = [{'amount': self._tx.amount_base, 'address': self._tx.to_address}]
-        return d
-
-    @staticmethod
-    def create_coinbase(block_height: int, miner_address: str, reward_sats: int) -> 'Transaction':
-        coinbase_dict = CoinbaseBuilder.build(block_height, miner_address, reward_sats)
-        # Construct a synthetic MempoolTx for the coinbase
-        tx = MempoolTx(
-            tx_hash        = coinbase_dict['tx_hash'],
-            from_address   = coinbase_dict['from_address'],
-            to_address     = coinbase_dict['to_address'],
-            amount_base    = coinbase_dict['amount_base'],
-            fee_base       = 0,
-            nonce          = block_height,
-            signature      = coinbase_dict['signature'],
-            w_entropy_hash = coinbase_dict['w_entropy_hash'],
-            timestamp_ns   = coinbase_dict['timestamp_ns'],
-            tx_type        = 'coinbase',
-        )
-        return Transaction(tx)
-
-# ══════════════════════════════════════════════════════════════════════════════
 # EXPORTS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2415,9 +2215,6 @@ __all__ = [
     # Core classes
     'Mempool',
     'MempoolTx',
-    'Transaction',
-    'CoinbaseBuilder',
-    'TransactionBuilder',
     'HypMempoolVerifier',
     'HLWEMempoolVerifier',  # backward-compat alias
     'FeeHistogram',
