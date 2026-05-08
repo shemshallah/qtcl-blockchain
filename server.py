@@ -117,33 +117,43 @@ _RPC_TIMEOUT_MAP: dict = {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# SSE SERVICE CONFIGURATION
+# SSE CHANNELS — In-memory fan-out (no separate process, no proxy)
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# Separate async SSE service handles quantum streaming endpoints.
-# This server pushes data via HTTP POST to fan-out to all clients.
-SSE_SERVICE_URL = os.environ.get(
-    "SSE_SERVICE_URL", "http://localhost:8001"
-)  # Default to local SSE server
+# Import SSE channel infrastructure from sse_server and register routes
+# directly on the main Flask app. This eliminates the broken proxy-to-localhost
+# pattern that failed on Koyeb (web + sse run in separate containers).
+
+try:
+    from sse_server import (
+        _snapshot_channel,
+        _blocks_channel,
+        _oracle_consensus_channel,
+        register_sse_routes,
+    )
+except Exception as _sse_init_err:
+    logger.warning(f"[SSE] ⚠️ Could not import SSE channels: {_sse_init_err}")
+    _snapshot_channel = _blocks_channel = _oracle_consensus_channel = None
+    register_sse_routes = None
+
+_SSE_AVAILABLE = False  # Set to True after register_sse_routes(app) succeeds
 
 
 def _push_to_sse_service(path: str, payload: dict) -> None:
-    """Push data to SSE service (fire-and-forget).
+    """Push data to connected SSE clients via direct in-memory fan-out.
 
-    Args:
-        path: e.g., "/push/snapshot" or "/push/block"
-        payload: dict to JSON-encode and POST
-
-    Note: Errors are silently swallowed — SSE is non-critical infrastructure.
+    Replaces the old HTTP-proxy pattern that required a separate process.
+    Now fan-outs directly to the in-process SSEChannel objects.
     """
-    if not SSE_SERVICE_URL:
-        # SSE service not configured — skip push
+    if not _SSE_AVAILABLE:
         return
-
     try:
-        url = f"{SSE_SERVICE_URL}{path}"
-        requests.post(url, json=payload, timeout=1.0)
+        if path == "/push/snapshot" and _snapshot_channel:
+            _snapshot_channel.fan_out(payload)
+        elif path == "/push/block" and _blocks_channel:
+            _blocks_channel.fan_out(payload)
+        elif path == "/push/oracle_consensus" and _oracle_consensus_channel:
+            _oracle_consensus_channel.fan_out(payload)
     except Exception:
-        # Silently swallow errors — don't let SSE failures block main server
         pass
 
 
@@ -611,6 +621,17 @@ except ImportError:
 from flask import Flask, jsonify, request, render_template_string, send_file, Response
 
 app = Flask(__name__)
+
+# Register SSE routes directly on the main Flask app (no separate process)
+try:
+    if register_sse_routes is not None:
+        register_sse_routes(app)
+        _SSE_AVAILABLE = True
+        logger.info("[SSE] ✅ SSE routes registered directly on main Flask app")
+except Exception as _sse_reg_err:
+    _SSE_AVAILABLE = False
+    logger.warning(f"[SSE] ⚠️ SSE route registration failed: {_sse_reg_err}")
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -5515,7 +5536,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         for tx in txs or []:
             tx_type = tx.get("tx_type", "").lower()
-            if tx_type == "coinbase":
+            if tx_type in ("coinbase", "miner_reward", "treasury_reward"):
                 _coinbase_txs.append(tx)
             else:
                 _non_coinbase_txs.append(tx)
@@ -5560,8 +5581,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # Extract amount from direct field or first output amount
             _amount = float(
                 cb.get("amount")
-                or cb.get("amount_base")
-                or (_outputs[0].get("amount") if _outputs else 0)
+                or cb.get("amount_qtcl")
+                or (cb.get("amount_base", 0) / 100.0)
                 or 0
             )
             _amount_base = int(round(_amount * 100)) if not _outputs else int(
@@ -5794,7 +5815,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                     tx_id,
                                     tx.get("from_addr") or tx.get("from_address") or tx.get("from", "0" * 64),
                                     tx.get("to_addr") or tx.get("to_address") or tx.get("to", ""),
-                                    float(tx.get("amount", 0)),
+                                    int(tx.get("amount_base") or (float(tx.get("amount", 0)) * 100) or 0),
                                     tx.get("tx_type", "transfer"),
                                     height,
                                 ),
@@ -5840,7 +5861,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             # Extract transactions (same as new block path)
             txs = data.get("transactions", data.get("txs", []))
-            _non_coinbase_txs = [tx for tx in (txs or []) if tx.get("tx_type", "").lower() != "coinbase"]
+            _non_coinbase_txs = [tx for tx in (txs or []) if tx.get("tx_type", "").lower() not in ("coinbase", "miner_reward", "treasury_reward")]
 
             # RUN SETTLEMENT FOR DUPLICATE (in case first attempt failed)
             logger.critical(f"[RPC-submitBlock] 🔥 RUNNING SETTLEMENT FOR DUPLICATE h={height}")
@@ -5945,6 +5966,22 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
             # FAIL THE RPC CALL — don't hide settlement errors
             return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
+
+        # Push block event to SSE clients
+        try:
+            _push_to_sse_service("/push/block", {
+                "height": height,
+                "block_hash": block_hash,
+                "parent_hash": parent_hash,
+                "miner_address": miner_address,
+                "timestamp_s": timestamp_s,
+                "nonce": nonce,
+                "difficulty": difficulty_bits,
+                "tx_count": len(txs) if txs else 0,
+                "w_entropy_hash": w_entropy_hex,
+            })
+        except Exception:
+            pass
 
         # Return accepted immediately (settlement happens in background)
         logger.info(
@@ -7104,211 +7141,6 @@ def rpc_endpoint():
 # ═══════════════════════════════════════════════════════════════════════════════════
 # SSE PROXY: /rpc/oracle/snapshot → localhost:8001 (SSE service)
 # ═══════════════════════════════════════════════════════════════════════════════════
-@app.route("/rpc/oracle/snapshot", methods=["GET"])
-def rpc_oracle_snapshot_proxy():
-    """Proxy SSE stream from internal SSE server (port 8001) to external clients.
-
-    Koyeb exposes only the main web service (port 8000), so we proxy
-    SSE requests to the internal SSE server running on port 8001.
-
-    If proxy fails, return a placeholder response so clients don't hang.
-    """
-    try:
-        # Try to import requests - if fail, generate placeholder
-        try:
-            import requests as _req
-        except ImportError:
-            logger.warning("[SSE-PROXY] requests not available, using placeholder")
-            _req = None
-
-        if _req is None:
-            # Return placeholder SSE that tells client to retry later
-            def placeholder():
-                yield b": SSE initializing, retry in 10s\n\n"
-                yield b'data: {"status":"initializing","retry_after":10}\n\n'
-
-            return Response(placeholder(), mimetype="text/event-stream")
-
-        sse_url = "http://localhost:8001/rpc/oracle/snapshot"
-
-        def generate():
-            try:
-                r = _req.get(
-                    sse_url,
-                    headers={"Accept": "text/event-stream"},
-                    stream=True,
-                    timeout=(5, 60),
-                )
-                for chunk in r.iter_content(chunk_size=1024):
-                    if chunk:
-                        yield chunk
-            except GeneratorExit:
-                pass
-            except Exception as e:
-                logger.debug(f"[SSE-PROXY] Stream error: {e}")
-                yield f": SSE stream error: {e}\n\n".encode()
-
-        return Response(
-            generate(),
-            mimetype="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-    except Exception as e:
-        logger.error(f"[SSE-PROXY] Failed to proxy: {e}")
-
-        # Return a minimal placeholder instead of error
-        def fallback():
-            yield b": SSE unavailable\n\n"
-
-        return Response(fallback(), mimetype="text/event-stream")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════
-# SSE PROXY: /rpc/blocks/stream → localhost:8001 (SSE service)
-# ═══════════════════════════════════════════════════════════════════════════════════
-@app.route("/rpc/blocks/stream", methods=["GET"])
-def rpc_blocks_stream_proxy():
-    """Proxy SSE stream for block events from internal SSE server (port 8001)."""
-    try:
-        try:
-            import requests as _req
-        except ImportError:
-            logger.warning("[BLOCKS-STREAM] requests not available, using placeholder")
-            _req = None
-
-        if _req is None:
-
-            def placeholder():
-                yield b": SSE initializing, retry in 10s\n\n"
-                yield b'data: {"status":"initializing","retry_after":10}\n\n'
-
-            return Response(placeholder(), mimetype="text/event-stream")
-
-        sse_url = "http://localhost:8001/rpc/blocks/stream"
-
-        def generate():
-            try:
-                r = _req.get(
-                    sse_url,
-                    headers={"Accept": "text/event-stream"},
-                    stream=True,
-                    timeout=(5, 60),
-                )
-                for chunk in r.iter_content(chunk_size=1024):
-                    if chunk:
-                        yield chunk
-            except GeneratorExit:
-                pass
-            except Exception as e:
-                logger.debug(f"[BLOCKS-STREAM] Stream error: {e}")
-                yield f": SSE stream error: {e}\n\n".encode()
-
-        return Response(
-            generate(),
-            mimetype="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-    except Exception as e:
-        logger.error(f"[BLOCKS-STREAM] Failed to proxy: {e}")
-
-        def fallback():
-            yield b": SSE unavailable\n\n"
-
-        return Response(fallback(), mimetype="text/event-stream")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════
-# SSE PROXY: /rpc/events/blocks → localhost:8001 (SSE service)
-# ═══════════════════════════════════════════════════════════════════════════════════
-@app.route("/rpc/events/blocks", methods=["GET", "OPTIONS"])
-def rpc_events_blocks_proxy():
-    """Proxy SSE stream for block events from internal SSE server (port 8001)."""
-    if request.method == "OPTIONS":
-        resp = make_response("", 204)
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp
-    try:
-        try:
-            import requests as _req
-        except ImportError:
-            _req = None
-        if _req is None:
-            def placeholder():
-                yield b": SSE initializing, retry in 10s\n\n"
-            return Response(placeholder(), mimetype="text/event-stream")
-        sse_url = "http://localhost:8001/rpc/events/blocks"
-        def generate():
-            try:
-                r = _req.get(sse_url, headers={"Accept": "text/event-stream"}, stream=True, timeout=(5, 60))
-                for chunk in r.iter_content(chunk_size=1024):
-                    if chunk:
-                        yield chunk
-            except GeneratorExit:
-                pass
-            except Exception as e:
-                logger.debug(f"[SSE-EVENTS] Stream error: {e}")
-                yield f": SSE stream error: {e}\n\n".encode()
-        return Response(generate(), mimetype="text/event-stream", headers={
-            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-        })
-    except Exception as e:
-        logger.error(f"[SSE-EVENTS] Failed to proxy: {e}")
-        def fallback():
-            yield b": SSE unavailable\n\n"
-        return Response(fallback(), mimetype="text/event-stream")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════
-# SSE PROXY: /rpc/oracle/consensus → localhost:8001 (SSE service)
-# ═══════════════════════════════════════════════════════════════════════════════════
-@app.route("/rpc/oracle/consensus", methods=["GET", "OPTIONS"])
-def rpc_oracle_consensus_proxy():
-    """Proxy SSE stream for oracle consensus from internal SSE server (port 8001)."""
-    if request.method == "OPTIONS":
-        resp = make_response("", 204)
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp
-    try:
-        try:
-            import requests as _req
-        except ImportError:
-            _req = None
-        if _req is None:
-            def placeholder():
-                yield b": SSE initializing, retry in 10s\n\n"
-            return Response(placeholder(), mimetype="text/event-stream")
-        sse_url = "http://localhost:8001/rpc/oracle/consensus"
-        def generate():
-            try:
-                r = _req.get(sse_url, headers={"Accept": "text/event-stream"}, stream=True, timeout=(5, 60))
-                for chunk in r.iter_content(chunk_size=1024):
-                    if chunk:
-                        yield chunk
-            except GeneratorExit:
-                pass
-            except Exception as e:
-                logger.debug(f"[SSE-CONSENSUS] Stream error: {e}")
-                yield f": SSE stream error: {e}\n\n".encode()
-        return Response(generate(), mimetype="text/event-stream", headers={
-            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-        })
-    except Exception as e:
-        logger.error(f"[SSE-CONSENSUS] Failed to proxy: {e}")
-        def fallback():
-            yield b": SSE unavailable\n\n"
-        return Response(fallback(), mimetype="text/event-stream")
-
-
 # ═══════════════════════════════════════════════════════════════════════════════════
 # DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
 # ═══════════════════════════════════════════════════════���═══════════════════════════

@@ -3345,7 +3345,7 @@ class BlockManager:
                 nonce=block.block_height,
                 timestamp_ns=int(time.time() * 1e9),
                 fee=0,
-                tx_type="coinbase",
+                tx_type="miner_reward",
             )
             miner_coinbase.from_addr = miner_coinbase.sender_addr
             miner_coinbase.to_addr = miner_coinbase.receiver_addr
@@ -3359,7 +3359,7 @@ class BlockManager:
                 nonce=block.block_height,
                 timestamp_ns=int(time.time() * 1e9),
                 fee=0,
-                tx_type="coinbase",
+                tx_type="treasury_reward",
             )
             treasury_coinbase.from_addr = treasury_coinbase.sender_addr
             treasury_coinbase.to_addr = treasury_coinbase.receiver_addr

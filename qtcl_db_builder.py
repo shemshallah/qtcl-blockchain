@@ -2655,7 +2655,7 @@ def get_comprehensive_rls_sql() -> Dict[str, str]:
     
     CREATE POLICY IF NOT EXISTS tx_coinbase_miner ON transactions
         FOR SELECT TO qtcl_miner
-        USING (tx_type = 'coinbase' AND to_address = current_setting('app.miner_address', true));
+        USING (tx_type IN ('coinbase', 'miner_reward') AND to_address = current_setting('app.miner_address', true));
     
     CREATE POLICY IF NOT EXISTS tx_oracle_all ON transactions
         FOR ALL TO qtcl_oracle
@@ -3617,7 +3617,7 @@ def get_comprehensive_trigger_functions_sql() -> Dict[str, str]:
         _total_cost NUMERIC(30,0);
     BEGIN
         -- Skip validation for coinbase transactions
-        IF NEW.tx_type = 'coinbase' THEN
+        IF NEW.tx_type IN ('coinbase', 'miner_reward', 'treasury_reward') THEN
             RETURN NEW;
         END IF;
         
@@ -3925,7 +3925,7 @@ def get_sqlite_trigger_definitions() -> Dict[str, str]:
     -- SQLite Trigger: Transaction validation (simplified)
     CREATE TRIGGER IF NOT EXISTS trg_tx_validate
     BEFORE INSERT ON transactions
-    WHEN NEW.tx_type != 'coinbase'
+    WHEN NEW.tx_type NOT IN ('coinbase', 'miner_reward', 'treasury_reward')
     BEGIN
         SELECT CASE
             WHEN (

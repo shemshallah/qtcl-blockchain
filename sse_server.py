@@ -43,6 +43,32 @@ MAX_CONNECTIONS_PER_IP = int(os.environ.get("SSE_MAX_PER_IP", 5))
 MAX_TOTAL_CONNECTIONS = int(os.environ.get("SSE_MAX_TOTAL", 500))
 CONNECTION_CLEANUP_INTERVAL = 30.0  # seconds
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REGISTRATION HELPER — attach SSE routes to any Flask app
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_registered_apps: list = []
+
+def register_sse_routes(flask_app) -> None:
+    """Register all SSE routes onto *flask_app* so SSE endpoints are served
+    directly from the main server — no proxy, no separate process needed."""
+    if flask_app in _registered_apps:
+        return
+    _registered_apps.append(flask_app)
+
+    flask_app.add_url_rule("/rpc/oracle/snapshot",   view_func=rpc_oracle_snapshot,   methods=["GET", "OPTIONS"])
+    flask_app.add_url_rule("/rpc/events/blocks",     view_func=rpc_events_blocks,     methods=["GET", "OPTIONS"])
+    flask_app.add_url_rule("/rpc/blocks/stream",     view_func=rpc_blocks_stream,     methods=["GET"])
+    flask_app.add_url_rule("/rpc/metrics/push",      view_func=rpc_metrics_push,      methods=["GET"])
+    flask_app.add_url_rule("/rpc/oracle/consensus",  view_func=rpc_oracle_consensus,  methods=["GET", "OPTIONS"])
+    # Internal push endpoints (for direct fan-out bypass; server.py now uses in-memory fan-out)
+    flask_app.add_url_rule("/push/snapshot",         view_func=push_snapshot,         methods=["POST"])
+    flask_app.add_url_rule("/push/block",            view_func=push_block,            methods=["POST"])
+    flask_app.add_url_rule("/push/metric",           view_func=push_metric,           methods=["POST"])
+    flask_app.add_url_rule("/push/oracle_consensus", view_func=push_oracle_consensus, methods=["POST"])
+    logger.info(f"[SSE] Registered {len(_registered_apps)} SSE route group(s)")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # IN-MEMORY STATE: Per-client queues for fan-out
 # ═══════════════════════════════════════════════════════════════════════════════
