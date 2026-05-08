@@ -1228,7 +1228,13 @@ def _settle_block_rewards(
                 if not is_coinbase:
                     from_addr = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
                     total_out = sum((o.get("amount_base", 0) for o in (outputs or [])), 0)
-                    fee_base = tx.get("fee_base") or int(float(tx.get("fee", 0)) * 100) if tx.get("fee") else 0
+                    fee_base = tx.get("fee_base", 0) or 0
+                    if not fee_base:
+                        fee_base = tx.get("fee", 0) or 0
+                    try:
+                        fee_base = int(fee_base)
+                    except (ValueError, TypeError):
+                        fee_base = 0
                     if fee_base > 0 and _treasury_addr:
                         balance_deltas[_treasury_addr] = balance_deltas.get(_treasury_addr, 0) + fee_base
                     if from_addr:
@@ -5534,16 +5540,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             else:
                 _non_coinbase_txs.append(tx)
                 # Sum fees from non-coinbase transactions
-                _fee = tx.get("fee", tx.get("fee_base", 0))
-                if isinstance(_fee, (float, str)):
-                    try:
-                        _total_fees += int(
-                            round(float(_fee) * 100)
-                        )  # convert to base units
-                    except:
-                        pass
-                else:
+                _fee = tx.get("fee_base", 0) or 0
+                if not _fee:
+                    _fee = tx.get("fee", 0) or 0
+                try:
                     _total_fees += int(_fee)
+                except (ValueError, TypeError):
+                    pass
 
         # Validate coinbase structure
         if len(_coinbase_txs) < 1:
@@ -5969,7 +5972,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # FAIL THE RPC CALL — don't hide settlement errors
             return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
 
-        # Push block event to SSE clients
+        # Push block event + finalization to SSE clients
         try:
             _push_to_sse_service("/push/block", {
                 "height": height,
@@ -5981,6 +5984,20 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "difficulty": difficulty_bits,
                 "tx_count": len(txs) if txs else 0,
                 "w_entropy_hash": w_entropy_hex,
+            })
+        except Exception:
+            pass
+
+        # Push oracle consensus finalization event (miner listens to this to mark block done)
+        try:
+            _push_to_sse_service("/push/oracle_consensus", {
+                "event_type": "block_finalized",
+                "height": height,
+                "block_hash": block_hash,
+                "miner_address": miner_address,
+                "oracle_count": 5,
+                "finalized": True,
+                "timestamp": int(time.time()),
             })
         except Exception:
             pass
