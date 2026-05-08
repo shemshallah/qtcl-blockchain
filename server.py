@@ -927,12 +927,7 @@ threading.Thread(
 
 
 def _ensure_wallet_addresses_table() -> None:
-    """Ensure wallet_addresses table exists at startup (run once, not per-request).
-
-    The _rpc_submitBlock handler previously called CREATE TABLE IF NOT EXISTS
-    on every block submission. This DDL is now run once at startup to keep
-    the critical path fast.
-    """
+    """Ensure wallet_addresses and address_utxos tables exist at startup."""
     try:
         with get_db_cursor() as cur:
             cur.execute("""
@@ -946,7 +941,25 @@ def _ensure_wallet_addresses_table() -> None:
                     updated_at TIMESTAMP DEFAULT NOW()
                 )
             """)
-        logger.info("[STARTUP] ✅ wallet_addresses table ready")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS address_utxos (
+                    utxo_id BIGSERIAL PRIMARY KEY,
+                    address VARCHAR(255) NOT NULL,
+                    tx_hash VARCHAR(255) NOT NULL,
+                    output_index INT NOT NULL,
+                    amount NUMERIC(30, 0) NOT NULL,
+                    spent BOOLEAN DEFAULT FALSE,
+                    spent_at_height BIGINT,
+                    spent_in_tx_hash VARCHAR(255),
+                    created_at_height BIGINT,
+                    created_at_timestamp BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+                    CONSTRAINT unique_tx_output UNIQUE (tx_hash, output_index)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_address ON address_utxos(address)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_unspent ON address_utxos(address, spent) WHERE spent = FALSE")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_tx ON address_utxos(tx_hash, output_index)")
+        logger.info("[STARTUP] ✅ wallet_addresses + address_utxos tables ready")
     except Exception as e:
         logger.warning(f"[STARTUP] ⚠️  wallet_addresses DDL: {e}")
 
@@ -1131,36 +1144,31 @@ _tx_worker_daemon.start()
 def _settle_block_rewards(
     height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list
 ) -> None:
-    """🔗 UNIFIED SETTLEMENT LOGIC — Single execution path, atomic updates.
+    """🔗 UTXO SETTLEMENT — Creates UTXOs from tx outputs, updates wallet digests.
 
-    Consolidated settlement with NO branching:
-      1. Fetch miner + treasury rewards from TessellationRewardSchedule
-      2. Collect transaction fees
-      3. Execute wallet updates (handles same/different addresses correctly)
-      4. Update chain state
+    UTXO Model:
+      - Coinbase TXs: INSERT UTXOs from each output (amount from output.amount_base)
+      - Regular TXs:  Mark input UTXOs spent, INSERT output UTXOs
+      - wallet_addresses: Digest of summed unspent UTXOs (for fast balance queries)
+
+    Deferred Reward Pattern (matching qtcl_miner):
+      - Block 1 includes genesis miner reward (720 extra)
+      - Treasury coinbase pays PREVIOUS block's treasury reward
     """
     _settle_log = logging.getLogger("SETTLE")
 
-    # Resolve treasury address early — used for validation and rewards
     try:
         _treasury_addr = (
             TessellationRewardSchedule.TREASURY_ADDRESS
-            if TessellationRewardSchedule
-            else ""
+            if TessellationRewardSchedule else ""
         )
     except Exception:
         _treasury_addr = ""
 
     try:
-        # ════════════════════════════════════════════════════════════════════════════════
-        # MANDATORY SETTLEMENT: This MUST execute and update balances
-        # ════════════════════════════════════════════════════════════════════════════════
-
         _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} SETTLEMENT EXECUTING NOW")
-        _settle_log.critical(f"   miner={miner_address}")
-        _settle_log.critical(f"   treasury={_treasury_addr}")
+        _settle_log.critical(f"   miner={miner_address}  treasury={_treasury_addr}")
 
-        # GUARD: Reject invalid inputs
         if not miner_address or len(str(miner_address).strip()) < 10:
             _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
             return
@@ -1168,113 +1176,92 @@ def _settle_block_rewards(
             _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {_treasury_addr}")
             return
 
-        _settle_log.critical(f"✅ [SETTLE-VALIDATE] Addresses valid, proceeding with settlement")
-
-        # HARDCODED REWARDS — Single source of truth
-        # Miner: 7.20 QTCL (720 base units)
-        # Treasury: 0.80 QTCL (80 base units)
-        # These scale with TessellationRewardSchedule but have explicit hardcoded defaults
-        miner_reward_base = 720  # base units: 7.20 QTCL
-        treasury_reward_base = 80  # base units: 0.80 QTCL
-
-        # Try to get from schedule, but use hardcoded defaults if unavailable
-        try:
-            if TessellationRewardSchedule:
-                rewards = TessellationRewardSchedule.get_rewards_for_height(height)
-                miner_reward_base = int(rewards.get("miner", 720))
-                treasury_reward_base = int(rewards.get("treasury", 80))
-                _settle_log.info(f"[SETTLE] Schedule rewards: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL")
-        except Exception as sch_err:
-            _settle_log.warning(f"[SETTLE] Schedule lookup failed: {sch_err}, using hardcoded: 7.20 + 0.80")
-
-        # Collect all transaction fees for treasury
-        total_tx_fees = 0
-        for tx in txs:
-            f = tx.get("fee", tx.get("fee_base", 0))
-            if f:
-                try:
-                    total_tx_fees += int(float(f) if isinstance(f, (float, str)) else f)
-                except (ValueError, TypeError):
-                    pass
-        treasury_reward_base += total_tx_fees
-
-        # Compute wallet fingerprints
         miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
         treasury_fp = hashlib.sha256(_treasury_addr.encode()).hexdigest()[:64]
 
-        # PHASE 2: Execute settlement (SINGLE ATOMIC OPERATION — NO BRANCHING)
-        # ─────────────────────────────────────────────────────────────────────────────
-        _settle_log.critical(f"[SETTLE] FORCING wallet update: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL, {_treasury_addr[:16]}… += {treasury_reward_base/100:.2f} QTCL")
-
         with get_db_cursor() as cur:
-            # TEST: Verify database connectivity with simple SELECT
             try:
                 cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                _test_count = cur.fetchone()[0]
-                _settle_log.critical(f"[SETTLE-TEST] ✅ Database connectivity OK: {_test_count} wallets exist")
+                _settle_log.critical(f"[SETTLE-TEST] ✅ DB OK: {cur.fetchone()[0]} wallets")
             except Exception as _test_err:
-                _settle_log.critical(f"[SETTLE-TEST] ❌ Database connectivity FAILED: {_test_err}")
+                _settle_log.critical(f"[SETTLE-TEST] ❌ DB FAILED: {_test_err}")
                 return
-            # MINER REWARD — MANDATORY, ALWAYS EXECUTED
-            _miner_sql = """
-            INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
-            VALUES (%s, %s, %s, %s, 1, 'miner', NOW())
-            ON CONFLICT (address) DO UPDATE SET
-                balance = wallet_addresses.balance + %s,
-                transaction_count = wallet_addresses.transaction_count + 1,
-                address_type = 'miner',
-                updated_at = NOW()
-            """
-            cur.execute(_miner_sql, (miner_address, miner_fp, miner_fp, miner_reward_base, miner_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Miner INSERT executed: {miner_address[:16]}… += {miner_reward_base/100:.2f} QTCL")
 
-            # VERIFY MINER WALLET WAS UPDATED
-            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (miner_address,))
-            _miner_balance = cur.fetchone()
-            _miner_balance_val = _miner_balance[0] if _miner_balance else None
-            _settle_log.critical(f"[SETTLE-VERIFY] Miner {miner_address[:16]}… balance after INSERT: {_miner_balance_val} base units ({_miner_balance_val/100 if _miner_balance_val else 0:.2f} QTCL)")
+            # ── Phase 1: Create UTXOs from ALL tx outputs, track net balance deltas ──
+            balance_deltas: Dict[str, int] = {}
 
-            # TREASURY REWARD — MANDATORY, ALWAYS EXECUTED
-            _treasury_sql = """
-            INSERT INTO wallet_addresses
-            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
-            VALUES (%s, %s, %s, %s, 1, 'treasury', NOW())
-            ON CONFLICT (address) DO UPDATE SET
-                balance = wallet_addresses.balance + %s,
-                transaction_count = wallet_addresses.transaction_count + 1,
-                address_type = 'treasury',
-                updated_at = NOW()
-            """
-            cur.execute(_treasury_sql, (_treasury_addr, treasury_fp, treasury_fp, treasury_reward_base, treasury_reward_base))
-            _settle_log.critical(f"[SETTLE-EXEC] ✅ Treasury INSERT executed: {_treasury_addr[:16]}… += {treasury_reward_base/100:.2f} QTCL")
+            for tx in txs or []:
+                tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+                tx_type = tx.get("tx_type", "").lower()
+                outputs = tx.get("outputs", [])
+                is_coinbase = tx_type in ("coinbase", "miner_reward", "treasury_reward")
 
-            # VERIFY TREASURY WALLET WAS UPDATED
-            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (_treasury_addr,))
-            _treasury_balance = cur.fetchone()
-            _treasury_balance_val = _treasury_balance[0] if _treasury_balance else None
-            _settle_log.critical(f"[SETTLE-VERIFY] Treasury {_treasury_addr[:16]}… balance after INSERT: {_treasury_balance_val} base units ({_treasury_balance_val/100 if _treasury_balance_val else 0:.2f} QTCL)")
+                # For non-coinbase: mark input UTXOs as spent
+                if not is_coinbase:
+                    inputs = tx.get("inputs", [])
+                    from_addr = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
+                    for inp in inputs:
+                        prev_tx = inp.get("prev_tx_hash", "")
+                        prev_idx = inp.get("prev_output_index", 0)
+                        if prev_tx:
+                            cur.execute(
+                                "UPDATE address_utxos SET spent = TRUE, spent_at_height = %s, spent_in_tx_hash = %s "
+                                "WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
+                                (height, tx_id, prev_tx, prev_idx),
+                            )
 
-            # TRANSACTION FEES TO TREASURY — OPTIONAL
-            if non_coinbase_txs:
-                for tx in non_coinbase_txs:
-                    tx_fee = int(round(float(tx.get("fee", 0)) * 100))
-                    if tx_fee > 0:
-                        cur.execute(
-                            "UPDATE wallet_addresses SET balance = balance + %s WHERE address = %s",
-                            (tx_fee, _treasury_addr),
-                        )
+                # Create UTXOs from outputs
+                for idx, out in enumerate(outputs or []):
+                    addr = out.get("address", "")
+                    amount_base = out.get("amount_base", 0)
+                    if not addr or not amount_base:
+                        continue
+                    cur.execute(
+                        "INSERT INTO address_utxos (address, tx_hash, output_index, amount, spent, created_at_height) "
+                        "VALUES (%s, %s, %s, %s, FALSE, %s) "
+                        "ON CONFLICT (tx_hash, output_index) DO NOTHING",
+                        (addr, tx_id, idx, amount_base, height),
+                    )
+                    balance_deltas[addr] = balance_deltas.get(addr, 0) + amount_base
+
+                # For non-coinbase: deduct sender balance too
+                if not is_coinbase:
+                    from_addr = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
+                    total_out = sum((o.get("amount_base", 0) for o in (outputs or [])), 0)
+                    fee_base = tx.get("fee_base") or int(float(tx.get("fee", 0)) * 100) if tx.get("fee") else 0
+                    if fee_base > 0 and _treasury_addr:
+                        balance_deltas[_treasury_addr] = balance_deltas.get(_treasury_addr, 0) + fee_base
+                    if from_addr:
+                        balance_deltas[from_addr] = balance_deltas.get(from_addr, 0) - total_out - fee_base
+
+            # ── Phase 2: Update wallet_addresses from balance deltas ──
+            for addr, delta in balance_deltas.items():
+                if delta == 0:
+                    continue
+                if delta > 0:
+                    cur.execute("""
+                        INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
+                        VALUES (%s, %s, %s, %s, 1, 'standard', NOW())
+                        ON CONFLICT (address) DO UPDATE SET
+                            balance = wallet_addresses.balance + %s,
+                            transaction_count = wallet_addresses.transaction_count + 1,
+                            updated_at = NOW()
+                    """, (addr, hashlib.sha256(addr.encode()).hexdigest()[:64],
+                          hashlib.sha256(addr.encode()).hexdigest()[:64], delta, delta))
 
             # UPDATE CHAIN STATE
             cur.execute(
-                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
+                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) "
+                "VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET "
+                "chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, "
+                "latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
                 (height, block_hash),
             )
 
-        # PHASE 3: Log completion
-        # ─────────────────────────────────────────────────────────────────────────────
+        # Log settlement summary
+        total_settled = sum(balance_deltas.values()) // 2  # rough: total positive
         _settle_log.warning(
-            f"[SETTLE] ✅ h={height}: miner={miner_reward_base/100:.2f} QTCL, treasury={treasury_reward_base/100:.2f} QTCL, txs={len(non_coinbase_txs)}"
+            f"[SETTLE] ✅ h={height}: {len(balance_deltas)} addresses updated, {total_settled/100:.2f} QTCL net, txs={len(txs or [])}"
         )
 
         # Cache block for getBlockRange queries
@@ -3783,6 +3770,12 @@ def _cache_block(block_dict):
             _BLOCK_CACHE[h] = block_dict
 
 
+def _broadcast_block_event(block_event: dict) -> None:
+    """Fan-out a block event to SSE clients and cache."""
+    _push_to_sse_service("/push/block", block_event)
+    _cache_block(block_event)
+
+
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)
 
@@ -5591,8 +5584,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             if _to == miner_address:
                 _miner_coinbase = cb
-                # Miner reward = scheduled reward + 50% of fees
-                _expected_miner = int(round(_scheduled_miner_reward * 100)) + (
+                # Miner reward = current block reward + genesis extra (h==1) + 50% of fees
+                # qtcl_miner defers genesis block's miner reward to block 1
+                _genesis_extra_base = int(round(_scheduled_miner_reward * 100)) if height == 1 else 0
+                _expected_miner = int(round(_scheduled_miner_reward * 100)) + _genesis_extra_base + (
                     _total_fees // 2
                 )
                 if (
@@ -5601,7 +5596,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     return _rpc_error(
                         -32003,
                         f"Invalid miner coinbase: got {_amount_base} base units, expected {_expected_miner} "
-                        f"(reward={_scheduled_miner_reward}*100 + fees/2={_total_fees // 2})",
+                        f"(reward={_scheduled_miner_reward}*100 + genesis_extra={_genesis_extra_base}+ fees/2={_total_fees // 2})",
                         rpc_id,
                     )
             elif (
@@ -5609,8 +5604,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 and _to == TessellationRewardSchedule.TREASURY_ADDRESS
             ):
                 _treasury_coinbase = cb
-                # Treasury reward = scheduled reward + 50% of fees
-                _expected_treasury = int(round(_scheduled_treasury_reward * 100)) + (
+                # Treasury reward = PREVIOUS block's treasury reward + 50% of fees
+                # qtcl_miner defers each block's treasury reward by one block
+                _prev_treasury_reward_base = 0
+                if height > 0:
+                    try:
+                        _prev_treasury_reward_base = TessellationRewardSchedule.get_treasury_reward_base(height - 1)
+                    except Exception:
+                        _prev_treasury_reward_base = int(round(_scheduled_treasury_reward * 100))
+                _expected_treasury = _prev_treasury_reward_base + (
                     _total_fees - (_total_fees // 2)
                 )
                 if abs(_amount_base - _expected_treasury) > 1:
