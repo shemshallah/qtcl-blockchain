@@ -3,12 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="QTCL agent integration: JSON-RPC blockchain API with Bitcoin-style UTXO model for autonomous AI agents. 12 MCP tools, flat 1-qsat fees, ~18s blocks, post-quantum Schnorr-Γ signatures. Connect via SSE at /mcp/sse or POST to /rpc.">
-<meta name="keywords" content="QTCL, blockchain, AI agent, MCP, Model Context Protocol, JSON-RPC, post-quantum, Schnorr-Γ, PSL(2,R), cryptocurrency, autonomous agent, UTXO">
+<meta name="description" content="QTCL agent integration: JSON-RPC blockchain API with Bitcoin-style UTXO model for autonomous AI agents. 12 MCP tools, 4 resources, 1 prompt, flat 1-qsat fees, ~18s blocks, post-quantum Schnorr-Γ signatures. Connect via Streamable HTTP at /mcp or stdio for local agents.">
+<meta name="keywords" content="QTCL, blockchain, AI agent, MCP, Model Context Protocol, JSON-RPC, post-quantum, Schnorr-Γ, PSL(2,R), cryptocurrency, autonomous agent, UTXO, streamable HTTP">
 <meta name="author" content="QTCL Network">
 <meta name="robots" content="index, follow">
-<meta property="og:title" content="QTCL — Agent Integration">
-<meta property="og:description" content="Connect any AI agent to the QTCL blockchain via MCP or JSON-RPC. 12 tools, flat fees, quantum-secure, Bitcoin-style UTXO model.">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon.png"/>
+<meta property="og:title" content="QTCL — Agent Integration (MCP 2025-06-18)">
+<meta property="og:description" content="Connect any AI agent to the QTCL blockchain via MCP 2025-06-18. 12 tools, 4 resources, 1 prompt, flat fees, quantum-secure, Bitcoin-style UTXO model.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://qtcl-blockchain.koyeb.app/agents">
 <link rel="alternate" type="application/json" href="/agents/capability.json" title="QTCL Capability Document">
@@ -19,7 +20,7 @@
   "@context": "https://schema.org",
   "@type": "WebAPI",
   "name": "QTCL Blockchain API",
-  "description": "Post-quantum blockchain with Bitcoin-style UTXO model, flat-fee transactions and native MCP support for autonomous AI agents.",
+  "description": "Post-quantum blockchain with Bitcoin-style UTXO model, flat-fee transactions and native MCP 2025-06-18 support for autonomous AI agents.",
   "url": "https://qtcl-blockchain.koyeb.app/agents",
   "documentation": "https://qtcl-blockchain.koyeb.app/agents",
   "termsOfService": "https://qtcl-blockchain.koyeb.app/agents",
@@ -27,9 +28,9 @@
     "@type": "Organization",
     "name": "QTCL Network"
   },
-  "serviceType": "Blockchain JSON-RPC API",
-  "endpointUrl": "https://qtcl-blockchain.koyeb.app/rpc",
-  "accessMode": "jsonrpc"
+  "serviceType": "Blockchain JSON-RPC API with MCP",
+  "endpointUrl": "https://qtcl-blockchain.koyeb.app/mcp",
+  "accessMode": ["mcp", "jsonrpc"]
 }
 </script>
 <style>
@@ -75,6 +76,7 @@ a:hover{text-decoration:underline}
 .connect-badges{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
 .badge{font-family:var(--mono);font-size:10px;letter-spacing:1px;padding:4px 12px;border-radius:12px;border:1px solid var(--border);color:var(--muted)}
 .badge-accent{border-color:var(--accent2);color:var(--accent)}
+.badge-green{border-color:var(--green);color:var(--green)}
 
 /* ── Sections ── */
 .section{padding:40px 0}
@@ -87,6 +89,13 @@ a:hover{text-decoration:underline}
 .tool-card:hover{border-color:var(--accent2)}
 .tool-name{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--accent);margin-bottom:6px}
 .tool-desc{font-size:12px;color:var(--muted);line-height:1.6}
+
+/* ── Resource Cards ── */
+.resource-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.resource-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 18px;transition:border-color .2s}
+.resource-card:hover{border-color:var(--violet)}
+.resource-uri{font-family:var(--mono);font-size:11px;font-weight:500;color:var(--violet);margin-bottom:4px}
+.resource-desc{font-size:12px;color:var(--muted);line-height:1.5}
 
 /* ── Comparison ── */
 .compare-table{width:100%;border-collapse:collapse}
@@ -117,9 +126,17 @@ a:hover{text-decoration:underline}
 .server-tools-list{display:flex;flex-wrap:wrap;gap:6px}
 .server-tool-chip{font-family:var(--mono);font-size:10px;padding:3px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text)}
 
+/* ── Transport tabs ── */
+.transport-tabs{display:flex;gap:8px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:8px}
+.transport-tab{padding:8px 16px;font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--muted);cursor:pointer;border-radius:6px;border:1px solid transparent}
+.transport-tab:hover{color:var(--text);background:var(--bg3)}
+.transport-tab.active{color:var(--accent);border-color:var(--accent);background:rgba(0,212,255,.05)}
+.transport-panel{display:none}
+.transport-panel.active{display:block}
+
 /* ── Footer ── */
 .footer{padding:40px 0;border-top:1px solid var(--border);margin-top:40px;text-align:center}
-.footer-links{display:flex;justify-content:center;gap:24px;margin-bottom:12px}
+.footer-links{display:flex;justify-content:center;gap:24px;margin-bottom:12px;flex-wrap:wrap}
 .footer-links a{font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--muted);text-transform:uppercase}
 .footer-links a:hover{color:var(--accent)}
 .footer-copy{font-size:11px;color:var(--dim)}
@@ -139,7 +156,7 @@ a:hover{text-decoration:underline}
 .tool-wrap{display:flex;flex-direction:column}
 .tool-card{cursor:pointer;position:relative}
 .tool-card::after{content:'+';position:absolute;top:16px;right:16px;color:var(--accent);font-family:var(--mono);font-size:16px;transition:transform .2s}
-.tool-card.expanded::after{content:'−'}
+.tool-card.expanded::after{content:'\2212'}
 .tool-example{display:none;background:var(--bg2);border:1px solid var(--border);border-top:none;border-radius:0 0 10px 10px;padding:0 20px 16px;font-family:var(--mono);font-size:12px;line-height:1.7;color:var(--text);margin-bottom:12px}
 .tool-example.active{display:block}
 .tool-example .ex-label{font-size:10px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;margin-top:12px}
@@ -152,12 +169,14 @@ a:hover{text-decoration:underline}
 
 /* ── UTXO badge ── */
 .utxo-badge{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:2px;color:var(--amber);border:1px solid var(--amber);border-radius:10px;padding:2px 8px;margin-left:8px;text-transform:uppercase;vertical-align:middle}
+.mcp-badge{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:2px;color:var(--green);border:1px solid var(--green);border-radius:10px;padding:2px 8px;margin-left:8px;text-transform:uppercase;vertical-align:middle}
 
 /* ── Responsive ── */
 @media(max-width:640px){
   .hero h1{font-size:28px}
   .stats{grid-template-columns:repeat(2,1fr)}
   .stat-val{font-size:20px}
+  .transport-tabs{flex-wrap:wrap}
 }
 </style>
 </head>
@@ -167,9 +186,9 @@ a:hover{text-decoration:underline}
 
   <!-- HERO -->
   <div class="hero">
-    <div class="hero-badge">Model Context Protocol</div>
+    <div class="hero-badge">MCP 2025-06-18 Compliant</div>
     <h1>Build agents that <span>transact</span></h1>
-    <p>QTCL is the first blockchain designed for autonomous AI agents. Bitcoin-style UTXO model. Post-quantum security. Flat fees. One JSON-RPC call to transact. Connect any MCP-compatible agent in 3 lines.</p>
+    <p>QTCL is the first blockchain designed for autonomous AI agents. Bitcoin-style UTXO model. Post-quantum security. Flat fees. Full MCP 2025-06-18 server with 12 tools, 4 resources, and prompts. Connect via Streamable HTTP or stdio.</p>
   </div>
 
   <!-- LIVE STATS -->
@@ -201,7 +220,7 @@ a:hover{text-decoration:underline}
       <div class="agent-step">
         <div class="agent-step-num">Step 1</div>
         <div class="agent-step-title">Connect via MCP</div>
-        <div class="agent-step-body">Add <code>{"type":"url","url":"https://qtcl-blockchain.koyeb.app/mcp/sse"}</code> to your MCP client config. No API key required. The server exposes 12 tools.</div>
+        <div class="agent-step-body">Add <code>https://qtcl-blockchain.koyeb.app/mcp</code> (streamable HTTP) to your MCP client config, or run <code>python mcp_server.py --transport stdio</code> for local agents. No API key required.</div>
       </div>
       <div class="agent-step">
         <div class="agent-step-num">Step 2</div>
@@ -234,23 +253,80 @@ a:hover{text-decoration:underline}
   <!-- CONNECT -->
   <div class="connect">
     <div class="connect-title">Connect any agent in 3 lines</div>
-    <div class="connect-desc">Add to your MCP client config (Claude, Cursor, Windsurf, or any MCP-compatible framework). Zero SDK. Zero API keys.</div>
-    <div class="code-block" id="mcpConfig">
-      <button class="copy-btn" onclick="copyConfig(this)">COPY</button>
-<span class="comment">// claude_desktop_config.json or .cursor/mcp.json</span>
+    <div class="connect-desc">Choose your transport: Streamable HTTP for remote agents, stdio for local Claude Desktop / Cursor / Windsurf. Zero SDK. Zero API keys.</div>
+
+    <div class="transport-tabs">
+      <div class="transport-tab active" onclick="switchTransport('http', this)">Streamable HTTP (Production)</div>
+      <div class="transport-tab" onclick="switchTransport('stdio', this)">stdio (Local Desktop)</div>
+      <div class="transport-tab" onclick="switchTransport('claude', this)">Claude Desktop</div>
+      <div class="transport-tab" onclick="switchTransport('cursor', this)">Cursor</div>
+    </div>
+
+    <div class="transport-panel active" id="panel-http">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copyCode(this)">COPY</button>
+<span class="comment"># Python — OpenAI Agents SDK / any MCP client</span>
+<span class="key">from</span> mcp <span class="key">import</span> ClientSession
+<span class="key">from</span> mcp.client.http <span class="key">import</span> http_client
+
+<span class="key">async with</span> http_client(<span class="str">"https://qtcl-blockchain.koyeb.app/mcp"</span>) <span class="key">as</span> session:
+    <span class="key">await</span> session.initialize()
+    tools = <span class="key">await</span> session.list_tools()
+    result = <span class="key">await</span> session.call_tool(<span class="str">"qtcl_get_balance"</span>, {<span class="str">"address"</span>: <span class="str">"0x..."</span>})</div>
+    </div>
+
+    <div class="transport-panel" id="panel-stdio">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copyCode(this)">COPY</button>
+<span class="comment"># Run the MCP server locally</span>
+$ pip install mcp>=1.23.0
+$ python mcp_server.py --transport stdio
+
+<span class="comment"># The server reads JSON-RPC from stdin and writes to stdout</span>
+<span class="comment"># Perfect for Claude Desktop, Cursor, Windsurf, and CLI agents</span></div>
+    </div>
+
+    <div class="transport-panel" id="panel-claude">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copyCode(this)">COPY</button>
+<span class="comment"># ~/Library/Application Support/Claude/claude_desktop_config.json</span>
 {
   <span class="key">"mcpServers"</span>: {
-    <span class="key">"qtcl"</span>: {
-      <span class="key">"type"</span>: <span class="str">"url"</span>,
-      <span class="key">"url"</span>: <span class="str">"https://qtcl-blockchain.koyeb.app/mcp/sse"</span>
+    <span class="key">"qtcl-blockchain"</span>: {
+      <span class="key">"command"</span>: <span class="str">"python3"</span>,
+      <span class="key">"args"</span>: [
+        <span class="str">"/path/to/mcp_server.py"</span>,
+        <span class="str">"--transport"</span>, <span class="str">"stdio"</span>
+      ],
+      <span class="key">"env"</span>: {
+        <span class="key">"QTCL_RPC_URL"</span>: <span class="str">"https://qtcl-blockchain.koyeb.app/rpc"</span>
+      }
     }
   }
 }</div>
+    </div>
+
+    <div class="transport-panel" id="panel-cursor">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copyCode(this)">COPY</button>
+<span class="comment"># .cursor/mcp.json in your project root</span>
+{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"qtcl-blockchain"</span>: {
+      <span class="key">"url"</span>: <span class="str">"https://qtcl-blockchain.koyeb.app/mcp"</span>,
+      <span class="key">"transport"</span>: <span class="str">"streamable-http"</span>
+    }
+  }
+}</div>
+    </div>
+
     <div class="connect-badges">
-      <span class="badge badge-accent">Claude</span>
-      <span class="badge badge-accent">Claude Code</span>
-      <span class="badge badge-accent">Cursor</span>
-      <span class="badge badge-accent">Windsurf</span>
+      <span class="badge badge-green">Claude Desktop</span>
+      <span class="badge badge-green">Claude Code</span>
+      <span class="badge badge-green">Cursor</span>
+      <span class="badge badge-green">Windsurf</span>
+      <span class="badge badge-accent">VS Code</span>
+      <span class="badge badge-accent">Cline</span>
       <span class="badge">CrewAI</span>
       <span class="badge">LangChain</span>
       <span class="badge">AutoGen</span>
@@ -266,6 +342,12 @@ a:hover{text-decoration:underline}
         <div class="tool-card" onclick="toggleExample(this)">
           <div class="tool-name">qtcl_create_wallet</div>
           <div class="tool-desc">Create a post-quantum secured wallet. Returns a 64-char hex address and HypΓ public key.</div>
+        </div>
+      </div>
+      <div class="tool-wrap">
+        <div class="tool-card" onclick="toggleExample(this)">
+          <div class="tool-name">qtcl_sign_message</div>
+          <div class="tool-desc">Sign a 32-byte message hash with HypΓ private key. Returns signature, challenge, and auth_tag.</div>
         </div>
       </div>
       <div class="tool-wrap">
@@ -337,6 +419,40 @@ a:hover{text-decoration:underline}
     </div>
   </div>
 
+  <!-- RESOURCES -->
+  <div class="section">
+    <div class="section-title">Available resources <span class="mcp-badge">MCP 2025-06-18</span></div>
+    <div class="resource-grid">
+      <div class="resource-card">
+        <div class="resource-uri">chain://height</div>
+        <div class="resource-desc">Current blockchain height as a live resource. Updates every block (~18s).</div>
+      </div>
+      <div class="resource-card">
+        <div class="resource-uri">chain://health</div>
+        <div class="resource-desc">System health vector: peer count, oracle status, mempool depth, DB lag.</div>
+      </div>
+      <div class="resource-card">
+        <div class="resource-uri">price://qtcl-usd</div>
+        <div class="resource-desc">QTCL/USD price from Pyth Network oracle. Updates on price feed changes.</div>
+      </div>
+      <div class="resource-card">
+        <div class="resource-uri">docs://capability</div>
+        <div class="resource-desc">Full QTCL capability document with economics, cryptography, and network parameters.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PROMPTS -->
+  <div class="section">
+    <div class="section-title">Available prompts <span class="mcp-badge">MCP 2025-06-18</span></div>
+    <div class="resource-grid">
+      <div class="resource-card">
+        <div class="resource-uri">wallet_helper</div>
+        <div class="resource-desc">Guided wallet creation and transaction workflow prompts. Pass task="create" or task="send".</div>
+      </div>
+    </div>
+  </div>
+
   <!-- COMPARISON -->
   <div class="section">
     <div class="section-title">Why agents choose QTCL</div>
@@ -347,7 +463,7 @@ a:hover{text-decoration:underline}
       <tr><td>vs Solana</td><td>No program deployment. No rent. Deterministic fees. UTXO model — no account complexity.</td></tr>
       <tr><td>vs Lightning</td><td>No channel management. No liquidity routing. Direct UTXO transfers with memo field.</td></tr>
       <tr><td>vs Stripe</td><td>No KYC. No chargebacks. No API keys. Cryptographic proof of payment. Censorship-resistant.</td></tr>
-      <tr><td>Unique to QTCL</td><td>Quantum oracle network, density matrix streaming, hyperbolic lattice tessellation, W-state consensus, post-quantum UTXO cryptography. No other chain has any of these.</td></tr>
+      <tr><td>Unique to QTCL</td><td>Quantum oracle network, density matrix streaming, hyperbolic lattice tessellation, W-state consensus, post-quantum UTXO cryptography, native MCP 2025-06-18 server with streamable HTTP. No other chain has any of these.</td></tr>
     </table>
     </div>
   </div>
@@ -386,6 +502,11 @@ a:hover{text-decoration:underline}
         <div class="usecase-title">Cross-framework settlement</div>
         <div class="usecase-desc">LangChain agent pays CrewAI agent. Different frameworks, same QTCL UTXO rail. MCP is the universal adapter.</div>
       </div>
+      <div class="usecase">
+        <div class="usecase-icon">🚀</div>
+        <div class="usecase-title">MCP-native onboarding</div>
+        <div class="usecase-desc">Connect Claude, Cursor, GPT, or any MCP client with zero integration code. Streamable HTTP or stdio — both work out of the box.</div>
+      </div>
     </div>
   </div>
 
@@ -400,25 +521,42 @@ a:hover{text-decoration:underline}
     </div>
     <div class="server-info">
       <div class="server-field">
-        <div class="server-field-label">Endpoint</div>
-        <div class="server-field-value"><a href="/mcp/sse" target="_blank">/mcp/sse</a></div>
+        <div class="server-field-label">Primary Endpoint</div>
+        <div class="server-field-value"><a href="/mcp" target="_blank">/mcp</a> (POST/GET)</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Legacy Endpoint</div>
+        <div class="server-field-value"><a href="/mcp/sse" target="_blank">/mcp/sse</a> (deprecated)</div>
       </div>
       <div class="server-field">
         <div class="server-field-label">Protocol</div>
-        <div class="server-field-value">MCP 2024-11-05</div>
+        <div class="server-field-value">MCP 2025-06-18</div>
       </div>
       <div class="server-field">
         <div class="server-field-label">Transport</div>
-        <div class="server-field-value">SSE (Server-Sent Events)</div>
+        <div class="server-field-value">Streamable HTTP (primary) + stdio (local)</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">Server Version</div>
+        <div class="server-field-value">3.0.0</div>
+      </div>
+      <div class="server-field">
+        <div class="server-field-label">SDK</div>
+        <div class="server-field-value">mcp-python-sdk (FastMCP)</div>
       </div>
       <div class="server-field">
         <div class="server-field-label">TX Model</div>
         <div class="server-field-value">UTXO (Bitcoin-style)</div>
       </div>
+      <div class="server-field">
+        <div class="server-field-label">Tools / Resources / Prompts</div>
+        <div class="server-field-value">12 / 4 / 1</div>
+      </div>
     </div>
     <div style="font-size:11px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px">Registered tools</div>
     <div class="server-tools-list" id="toolsList">
       <span class="server-tool-chip">qtcl_create_wallet</span>
+      <span class="server-tool-chip">qtcl_sign_message</span>
       <span class="server-tool-chip">qtcl_get_balance</span>
       <span class="server-tool-chip">qtcl_get_utxos</span>
       <span class="server-tool-chip">qtcl_send_transaction</span>
@@ -430,6 +568,13 @@ a:hover{text-decoration:underline}
       <span class="server-tool-chip">qtcl_get_oracle_registry</span>
       <span class="server-tool-chip">qtcl_get_peers</span>
       <span class="server-tool-chip">qtcl_get_price</span>
+    </div>
+    <div style="font-size:11px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;margin-top:16px">Registered resources</div>
+    <div class="server-tools-list">
+      <span class="server-tool-chip">chain://height</span>
+      <span class="server-tool-chip">chain://health</span>
+      <span class="server-tool-chip">price://qtcl-usd</span>
+      <span class="server-tool-chip">docs://capability</span>
     </div>
   </div>
 
@@ -482,19 +627,21 @@ curl -X POST https://qtcl-blockchain.koyeb.app/rpc \
 <span class="comment"># ── QTCL Agent Integration Summary (UTXO Model) ──</span>
 <span class="comment"># This section is optimized for AI agent parsing.</span>
 
-<span class="key">MCP_ENDPOINT</span>     = <span class="str">"https://qtcl-blockchain.koyeb.app/mcp/sse"</span>
+<span class="key">MCP_ENDPOINT</span>     = <span class="str">"https://qtcl-blockchain.koyeb.app/mcp"</span>
+<span class="key">MCP_TRANSPORT</span>    = <span class="str">"streamable-http"</span>  <span class="comment"># or "stdio" for local</span>
 <span class="key">RPC_ENDPOINT</span>     = <span class="key">"https://qtcl-blockchain.koyeb.app/rpc"</span>
 <span class="key">CAPABILITY_JSON</span>  = <span class="str">"https://qtcl-blockchain.koyeb.app/agents/capability.json"</span>
-<span class="key">PROTOCOL</span>         = <span class="str">"MCP 2024-11-05 over SSE"</span>  <span class="comment"># or JSON-RPC 2.0 over HTTPS</span>
+<span class="key">PROTOCOL</span>         = <span class="str">"MCP 2025-06-18"</span>  <span class="comment"># or JSON-RPC 2.0 over HTTPS</span>
 <span class="key">TX_MODEL</span>         = <span class="str">"UTXO (Bitcoin-style unspent transaction outputs)"</span>
 <span class="key">BLOCK_TIME</span>       = <span class="num">18</span>  <span class="comment"># seconds</span>
 <span class="key">FEE_PER_TX</span>       = <span class="str">"1 qsat"</span>  <span class="comment"># flat, no gas estimation</span>
 <span class="key">CONFIRMATION_FINALITY</span> = <span class="num">1</span>  <span class="comment"># 1 block = final</span>
 
 <span class="comment"># ── MCP Tools (12 total) ──</span>
-<span class="comment"># All tools are called via method="tools/call" with params.name and params.arguments.</span>
+<span class="comment"># All tools are called via session.call_tool(name, arguments).</span>
 <span class="key">TOOLS</span> = [
   {<span class="key">name</span>: <span class="str">"qtcl_create_wallet"</span>,            <span class="key">rpc</span>: <span class="str">"N/A (local)"</span>,        <span class="key">params</span>: [<span class="str">"label?"</span>]},
+  {<span class="key">name</span>: <span class="str">"qtcl_sign_message"</span>,            <span class="key">rpc</span>: <span class="str">"N/A (local)"</span>,        <span class="key">params</span>: [<span class="str">"message_hex"</span>, <span class="str">"private_key"</span>]},
   {<span class="key">name</span>: <span class="str">"qtcl_get_balance"</span>,              <span class="key">rpc</span>: <span class="str">"qtcl_getBalance"</span>,    <span class="key">params</span>: [<span class="str">"address"</span>]},
   {<span class="key">name</span>: <span class="str">"qtcl_get_utxos"</span>,               <span class="key">rpc</span>: <span class="str">"qtcl_getUTXOs"</span>,     <span class="key">params</span>: [<span class="str">"address"</span>, <span class="str">"limit?"</span>]},
   {<span class="key">name</span>: <span class="str">"qtcl_send_transaction"</span>,         <span class="key">rpc</span>: <span class="str">"qtcl_submitTransaction"</span>, <span class="key">params</span>: [<span class="str">"from_address"</span>, <span class="str">"to_address"</span>, <span class="str">"amount"</span>, <span class="str">"memo?"</span>]},
@@ -506,6 +653,21 @@ curl -X POST https://qtcl-blockchain.koyeb.app/rpc \
   {<span class="key">name</span>: <span class="str">"qtcl_get_oracle_registry"</span>,      <span class="key">rpc</span>: <span class="str">"qtcl_getOracleRegistry"</span>, <span class="key">params</span>: [<span class="str">"limit?"</span>]},
   {<span class="key">name</span>: <span class="str">"qtcl_get_peers"</span>,                <span class="key">rpc</span>: <span class="str">"qtcl_getPeers"</span>,      <span class="key">params</span>: [<span class="str">"limit?"</span>]},
   {<span class="key">name</span>: <span class="str">"qtcl_get_price"</span>,                <span class="key">rpc</span>: <span class="str">"qtcl_getPythPrice"</span>,  <span class="key">params</span>: []}
+]
+
+<span class="comment"># ── MCP Resources (4 total) ──</span>
+<span class="comment"># Read via session.read_resource(uri)</span>
+<span class="key">RESOURCES</span> = [
+  {<span class="key">uri</span>: <span class="str">"chain://height"</span>,     <span class="key">description</span>: <span class="str">"Current blockchain height"</span>},
+  {<span class="key">uri</span>: <span class="str">"chain://health"</span>,     <span class="key">description</span>: <span class="str">"System health vector"</span>},
+  {<span class="key">uri</span>: <span class="str">"price://qtcl-usd"</span>,     <span class="key">description</span>: <span class="str">"QTCL/USD price from Pyth Network"</span>},
+  {<span class="key">uri</span>: <span class="str">"docs://capability"</span>,    <span class="key">description</span>: <span class="str">"Full QTCL capability document"</span>}
+]
+
+<span class="comment"># ── MCP Prompts (1 total) ──</span>
+<span class="comment"># Get via session.get_prompt(name, arguments)</span>
+<span class="key">PROMPTS</span> = [
+  {<span class="key">name</span>: <span class="str">"wallet_helper"</span>, <span class="key">description</span>: <span class="str">"Guided wallet creation / transaction workflow"</span>}
 ]
 
 <span class="comment"># ── UTXO Transaction Model ──</span>
@@ -536,7 +698,15 @@ curl -X POST https://qtcl-blockchain.koyeb.app/rpc \
 <span class="comment"># 3. Build outputs: [{address: recipient, amount_base: N}, {address: sender, amount_base: change}]</span>
 <span class="comment"># 4. Sign with Schnorr-Γ over tx_hash</span>
 <span class="comment"># 5. POST /rpc: qtcl_submitTransaction with inputs, outputs, signature, public_key</span>
-<span class="comment"># Or: use qtcl_send_transaction MCP tool (handles UTXO selection automatically)</span></div>
+<span class="comment"># Or: use qtcl_send_transaction MCP tool (handles UTXO selection automatically)</span>
+
+<span class="comment"># ── Client Configuration Examples ──</span>
+<span class="comment"># Claude Desktop (stdio):</span>
+<span class="comment">#   command: python3 /path/to/mcp_server.py --transport stdio</span>
+<span class="comment"># Cursor (streamable-http):</span>
+<span class="comment">#   url: https://qtcl-blockchain.koyeb.app/mcp</span>
+<span class="comment"># VS Code / Cline (streamable-http):</span>
+<span class="comment">#   url: https://qtcl-blockchain.koyeb.app/mcp</span></div>
   </div>
 
   <!-- FOOTER -->
@@ -549,7 +719,7 @@ curl -X POST https://qtcl-blockchain.koyeb.app/rpc \
       <a href="/agents/capability.json">Capability JSON</a>
       <a href="/mcp/health">MCP Health</a>
     </div>
-    <div class="footer-copy">QTCL — Quantum Temporal Coherence Ledger · UTXO Model · v8.3.0</div>
+    <div class="footer-copy">QTCL — Quantum Temporal Coherence Ledger · UTXO Model · MCP 2025-06-18 · v8.4.0</div>
   </div>
 
 </div>
@@ -581,63 +751,60 @@ async function checkMCP() {
     const r = await fetch('/mcp/health');
     const d = await r.json();
     if (d.status === 'ok') {
-      document.getElementById('mcpStatus').textContent = `online · ${d.tools} tools · ${d.active_sessions} sessions`;
+      const sdk = d.sdk || 'legacy';
+      document.getElementById('mcpStatus').textContent = `online · ${d.tools} tools · ${sdk}`;
       document.getElementById('mcpDot').style.background = 'var(--green)';
     } else {
       throw new Error('not ok');
     }
   } catch(e) {
-    document.getElementById('mcpStatus').textContent = 'deploy qtcl_mcp_server.py to enable';
+    document.getElementById('mcpStatus').textContent = 'deploy mcp_server.py to enable';
     document.getElementById('mcpDot').style.background = 'var(--amber)';
   }
 }
 
+// ── Transport tabs ──
+function switchTransport(name, tabEl) {
+  document.querySelectorAll('.transport-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.transport-panel').forEach(p => p.classList.remove('active'));
+  tabEl.classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
 // ── Copy helpers ──
-function copyConfig(btn) {
-  const text = `{
-  "mcpServers": {
-    "qtcl": {
-      "type": "url",
-      "url": "https://qtcl-blockchain.koyeb.app/mcp/sse"
-    }
-  }
-}`;
-  navigator.clipboard.writeText(text);
-  btn.textContent = 'COPIED'; btn.classList.add('copied');
-  setTimeout(() => { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 2000);
+function copyCode(btn) {
+  const block = btn.closest('.code-block');
+  const text = block.innerText.replace('COPY\n', '').trim();
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'COPIED';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 1500);
+  });
 }
 
 function copyRpc(btn) {
-  const text = `curl -X POST https://qtcl-blockchain.koyeb.app/rpc \\
-  -H "Content-Type: application/json" \\
-  -d '{"jsonrpc":"2.0","method":"qtcl_getBlockHeight","params":[],"id":1}'`;
-  navigator.clipboard.writeText(text);
-  btn.textContent = 'COPIED'; btn.classList.add('copied');
-  setTimeout(() => { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 2000);
+  const text = `curl -X POST https://qtcl-blockchain.koyeb.app/rpc \\\n  -H "Content-Type: application/json" \\\n  -d '{"jsonrpc":"2.0","method":"qtcl_getBlockHeight","params":[],"id":1}'`;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'COPIED';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 1500);
+  });
 }
 
-// ── Accordion toggle ──
 function toggleExample(card) {
-  const wrap = card.parentElement;
+  const wrap = card.closest('.tool-wrap');
   const example = wrap.querySelector('.tool-example');
-  if (!example) return;
-  const isOpen = example.classList.contains('active');
-  // Close all others
-  document.querySelectorAll('.tool-example.active').forEach(el => {
-    el.classList.remove('active');
-    el.parentElement.querySelector('.tool-card').classList.remove('expanded');
-  });
-  if (!isOpen) {
-    example.classList.add('active');
-    card.classList.add('expanded');
+  if (example) {
+    example.classList.toggle('active');
+    card.classList.toggle('expanded');
   }
 }
 
 // ── Init ──
 fetchHeight();
 checkMCP();
-setInterval(fetchHeight, 15000);
-setInterval(checkMCP, 30000);
+setInterval(fetchHeight, 18000);
 </script>
+
 </body>
 </html>

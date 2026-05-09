@@ -7425,6 +7425,18 @@ def rpc_health():
     ), 200
 
 
+@app.route("/favicon.png", methods=["GET"])
+def serve_favicon():
+    """GET /favicon.png — Serve the QTCL favicon."""
+    try:
+        favicon_path = os.path.join(os.path.dirname(__file__), "favicon.png")
+        if os.path.exists(favicon_path):
+            return send_file(favicon_path, mimetype="image/png")
+        return "", 404
+    except Exception:
+        return "", 404
+
+
 @app.route("/health", methods=["GET"])
 def health_bare():
     """GET /health — instant 200 OK for Koyeb health check."""
