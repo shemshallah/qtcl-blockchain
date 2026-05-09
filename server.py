@@ -3890,8 +3890,6 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.warning(f"[RPC-METHOD] qtcl_getBlockRange: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
-        logger.exception(f"[RPC] _rpc_getBlockRange exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
@@ -5521,29 +5519,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}... processing...")
 
-        # INSERT BLOCK INTO DATABASE
+        # Block insert happens AFTER validation below — not here
         _block_rowcount = 0
-        try:
-            with get_db_cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO blocks
-                    (height, block_hash, parent_hash, merkle_root, timestamp,
-                     oracle_w_state_hash, miner_address, nonce, difficulty, pq_curr, pq_last)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (height) DO NOTHING
-                    """,
-                    (
-                        height, block_hash, parent_hash, merkle_root, timestamp_s,
-                        w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
-                        miner_address, nonce, difficulty_bits, height, max(0, height - 1),
-                    ),
-                )
-                _block_rowcount = cur.rowcount
-            logger.critical(f"[RPC-submitBlock] ✅ Block inserted h={height}")
-        except Exception as e:
-            logger.exception(f"[RPC-submitBlock] ❌ Block insert ERROR: {e}")
-            return _rpc_error(-32603, f"Error: {str(e)[:100]}", rpc_id)
 
         # EXTRACT TRANSACTIONS FROM BLOCK DATA
         txs = data.get("transactions", data.get("txs", []))
@@ -5816,30 +5793,31 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     cur.execute(
                         """
                         INSERT INTO blocks
-                        (height, block_number, block_hash, previous_hash, timestamp,
-                         oracle_w_state_hash, validator_public_key, nonce,
-                         difficulty, entropy_score, transactions_root,
-                         pq_curr, pq_last, mermin_value, mermin_violated)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (height, block_hash, parent_hash, merkle_root, timestamp,
+                         oracle_w_state_hash, miner_address, nonce,
+                         difficulty, coherence_snapshot, fidelity_snapshot,
+                         pq_curr, pq_last, finalized, finalized_at, tx_count)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s)
                     """,
                         (
                             height,
-                            height,
                             block_hash,
                             parent_hash,
+                            merkle_root,
                             timestamp_s,
                             w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                             miner_address,
                             nonce,
                             difficulty_bits,
                             w_state_fidelity,
-                            merkle_root,
+                            w_state_fidelity,
                             height,
                             max(0, height - 1),
-                            mermin_value,
-                            mermin_violated,
+                            int(time.time()),
+                            len(txs or []),
                         ),
                     )
+                    _block_rowcount = cur.rowcount
 
                     # Verify insertion worked
                     cur.execute(
@@ -5859,7 +5837,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
                 # Step 3: Persist transactions if block is now in DB (inserted or duplicate)
                 if _block_insert_result in ("inserted", "duplicate"):
-                    for tx in txs or []:
+                    for _tx_idx, tx in enumerate(txs or []):
                         tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
                         if not tx_id:
                             continue
@@ -5867,9 +5845,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             # Normalize coinbase: extract amount from outputs, set proper tx_type
                             _tx_type = tx.get("tx_type", "transfer").lower()
                             _outputs = tx.get("outputs", [])
+                            _inputs = tx.get("inputs", [])
+                            _to = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "") or (_outputs[0].get("address", "") if _outputs else "")
+                            _from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "0" * 64)
+
                             if _tx_type in ("coinbase", "miner_reward", "treasury_reward"):
                                 # Derive proper type from recipient
-                                _to = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "") or (_outputs[0].get("address", "") if _outputs else "")
                                 if _to == miner_address:
                                     _tx_type = "miner_reward"
                                 elif TessellationRewardSchedule and _to == TessellationRewardSchedule.TREASURY_ADDRESS:
@@ -5884,31 +5865,50 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 _amount_base = tx.get("amount_base") or 0
                                 if not _amount_base:
                                     _amount_base = int(float(tx.get("amount", 0)) * 100) if tx.get("amount") else 0
+
+                            # Build metadata with full inputs/outputs for persistence
+                            _tx_metadata = tx.get("metadata") or {}
+                            if not _tx_metadata:
+                                _tx_metadata = {}
+                            if _inputs or _outputs:
+                                _tx_metadata["inputs"] = _inputs
+                                _tx_metadata["outputs"] = _outputs
+
                             cur.execute(
                                 """
                                 INSERT INTO transactions
                                 (tx_hash, from_address, to_address, amount,
-                                 tx_type, status, height, updated_at)
-                                VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW())
+                                 transaction_index, tx_type, status, height,
+                                 block_hash, metadata, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, 'confirmed', %s, %s, %s, NOW())
                                 ON CONFLICT (tx_hash) DO UPDATE
-                                  SET amount     = EXCLUDED.amount,
-                                      tx_type    = EXCLUDED.tx_type,
-                                      height     = EXCLUDED.height,
-                                      status     = 'confirmed',
-                                      updated_at = NOW()
+                                  SET amount            = EXCLUDED.amount,
+                                      tx_type           = EXCLUDED.tx_type,
+                                      height            = EXCLUDED.height,
+                                      block_hash        = EXCLUDED.block_hash,
+                                      transaction_index = EXCLUDED.transaction_index,
+                                      metadata          = EXCLUDED.metadata,
+                                      status            = 'confirmed',
+                                      updated_at        = NOW()
                             """,
                                 (
                                     tx_id,
-                                    tx.get("from_addr") or tx.get("from_address") or tx.get("from", "0" * 64),
-                                    tx.get("to_addr") or tx.get("to_address") or tx.get("to", "") or (_outputs[0].get("address", "") if _outputs else ""),
+                                    _from,
+                                    _to,
                                     _amount_base,
+                                    _tx_idx,
                                     _tx_type,
                                     height,
+                                    block_hash,
+                                    json.dumps(_tx_metadata) if _tx_metadata else None,
                                 ),
                             )
+                            logger.info(
+                                f"[RPC-submitBlock] ✅ TX persisted: {tx_id[:16]}… type={_tx_type} to={_to[:16]}… amount={_amount_base}"
+                            )
                         except Exception as _tx_err:
-                            logger.debug(
-                                f"[RPC-submitBlock] TX insert failed for {tx_id[:16]}: {_tx_err}"
+                            logger.warning(
+                                f"[RPC-submitBlock] ⚠️  TX insert failed for {tx_id[:16]}: {_tx_err}"
                             )
 
         except Exception as dbe:
@@ -6755,212 +6755,10 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_hyp_verifyBlock": qtcl_hyp_verifyBlock,
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ENTERPRISE P2P NETWORK — Inline Implementation (no external files)
-# ═══════════════════════════════════════════════════════════════════════════════
-P2P_BROADCAST_INTERVAL = 30
-P2P_PEER_TIMEOUT = 300
-P2P_MAX_PEERS = 100
+
+# ═══ DUPLICATE P2P BLOCK REMOVED (was redeclaring P2PPeer, _P2PSQLiteStore, and P2P RPC funcs) ═══
 
 
-class P2PPeer:
-    """A peer in the P2P network. Peer = WALLET, not oracle."""
-
-    def __init__(
-        self,
-        peer_id: str = "",
-        wallet_address: str = "",
-        external_addr: str = "",
-        port: int = 9091,
-        public_key: str = "",
-        chain_height: int = 0,
-        last_seen: float = 0.0,
-        first_seen: float = 0.0,
-        is_alive: bool = True,
-    ):
-        self.peer_id = peer_id
-        self.wallet_address = wallet_address
-        self.external_addr = external_addr
-        self.port = port
-        self.public_key = public_key
-        self.chain_height = chain_height
-        self.last_seen = last_seen
-        self.first_seen = first_seen
-        self.is_alive = is_alive
-
-    def to_dict(self) -> dict:
-        return {
-            "peer_id": self.peer_id,
-            "wallet_address": self.wallet_address,
-            "external_addr": self.external_addr,
-            "port": self.port,
-            "public_key": self.public_key,
-            "chain_height": self.chain_height,
-            "last_seen": self.last_seen,
-            "first_seen": self.first_seen,
-            "is_alive": self.is_alive,
-        }
-
-
-class _P2PSQLiteStore:
-    """SQLite store for peer persistence on client side."""
-
-    def __init__(self, db_path: str = "peers.sqlite"):
-        import sqlite3
-
-        self.db_path = db_path
-        self._lock = threading.RLock()
-        conn = sqlite3.connect(db_path)
-        conn.execute("""CREATE TABLE IF NOT EXISTS peer_registry (
-            peer_id TEXT PRIMARY KEY, wallet_address TEXT, external_addr TEXT,
-            port INTEGER, public_key TEXT, chain_height INTEGER, last_seen REAL,
-            first_seen REAL, is_alive INTEGER)""")
-        conn.commit()
-        conn.close()
-
-    def upsert_peer(self, peer: P2PPeer) -> bool:
-        import sqlite3
-
-        with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            now = time.time()
-            if peer.first_seen == 0:
-                peer.first_seen = now
-            conn.execute(
-                """INSERT OR REPLACE INTO peer_registry 
-                (peer_id, wallet_address, external_addr, port, public_key, chain_height,
-                 last_seen, first_seen, is_alive) VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    peer.peer_id,
-                    peer.wallet_address,
-                    peer.external_addr,
-                    peer.port,
-                    peer.public_key,
-                    peer.chain_height,
-                    peer.last_seen,
-                    peer.first_seen,
-                    1 if peer.is_alive else 0,
-                ),
-            )
-            conn.commit()
-            conn.close()
-            return True
-
-    def get_alive_peers(self) -> list:
-        import sqlite3
-
-        cutoff = time.time() - P2P_PEER_TIMEOUT
-        with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT * FROM peer_registry 
-                WHERE last_seen > ? AND is_alive = 1 ORDER BY last_seen DESC LIMIT ?""",
-                (cutoff, P2P_MAX_PEERS),
-            ).fetchall()
-            conn.close()
-            return [
-                P2PPeer(
-                    r["peer_id"],
-                    r["wallet_address"],
-                    r["external_addr"],
-                    r["port"],
-                    r["public_key"],
-                    r["chain_height"],
-                    r["last_seen"],
-                    r["first_seen"],
-                    bool(r["is_alive"]),
-                )
-                for r in rows
-            ]
-
-
-_p2p_dht_table: Dict[str, P2PPeer] = {}
-_p2p_dht_lock = threading.RLock()
-_p2p_seen_hashes: set = set()
-_p2p_client_store: Optional[_P2PSQLiteStore] = None
-
-
-def _p2p_rpc_get_dht_table(params, rpc_id):
-    """qtcl_getDHTTable — Return the full DHT peer table."""
-    try:
-        limit = 100
-        if isinstance(params, dict):
-            limit = min(int(params.get("limit", 100)), P2P_MAX_PEERS)
-        with _p2p_dht_lock:
-            peers = list(_p2p_dht_table.values())[:limit]
-        return {
-            "peers": [p.to_dict() for p in peers],
-            "count": len(peers),
-            "timestamp": time.time(),
-        }
-    except Exception as e:
-        logger.error(f"[P2P-RPC] getDHTTable error: {e}")
-        return {"peers": [], "count": 0, "timestamp": time.time()}
-
-
-def _p2p_rpc_receive_dht_table(params, rpc_id):
-    """qtcl_receiveDHTTable — Receive a DHT table from another peer."""
-    try:
-        dht_json = params.get("dht_table", "") if isinstance(params, dict) else ""
-        from_peer = (
-            params.get("propagating_from", "") if isinstance(params, dict) else ""
-        )
-        dht_hash = params.get("dht_hash", "") if isinstance(params, dict) else ""
-        if not dht_json:
-            return {"status": "error", "message": "dht_table required"}
-        if dht_hash and dht_hash in _p2p_seen_hashes:
-            return {"status": "already_seen", "dht_hash": dht_hash[:16]}
-        import json
-
-        doc = json.loads(dht_json)
-        peers_data = doc.get("peers", [])
-        new_count = 0
-        with _p2p_dht_lock:
-            for pd in peers_data:
-                p = P2PPeer(
-                    pd.get("peer_id", ""),
-                    pd.get("wallet_address", ""),
-                    pd.get("external_addr", ""),
-                    pd.get("port", 9091),
-                    pd.get("public_key", ""),
-                    pd.get("chain_height", 0),
-                    pd.get("last_seen", time.time()),
-                    pd.get("first_seen", 0),
-                    pd.get("is_alive", True),
-                )
-                if p.peer_id not in _p2p_dht_table:
-                    new_count += 1
-                p.last_seen = time.time()
-                _p2p_dht_table[p.peer_id] = p
-        if dht_hash:
-            _p2p_seen_hashes.add(dht_hash)
-            if len(_p2p_seen_hashes) > 10000:
-                _p2p_seen_hashes = set(list(_p2p_seen_hashes)[-5000:])
-        logger.info(
-            f"[P2P] ← Received DHT from {from_peer[:16]}…: {len(peers_data)} peers ({new_count} new)"
-        )
-        return {
-            "status": "accepted",
-            "peer_count": len(peers_data),
-            "new_peers": new_count,
-        }
-    except Exception as e:
-        logger.error(f"[P2P-RPC] receiveDHTTable error: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-def _p2p_rpc_peer_heartbeat(params, rpc_id):
-    """qtcl_peerHeartbeat — Receive heartbeat from a peer."""
-    try:
-        peer_id = params.get("peer_id", "") if isinstance(params, dict) else ""
-        if peer_id:
-            with _p2p_dht_lock:
-                if peer_id in _p2p_dht_table:
-                    _p2p_dht_table[peer_id].last_seen = time.time()
-        return {"status": "ok", "timestamp": time.time()}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 
 def _p2p_fanout_broadcast():
