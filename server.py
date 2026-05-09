@@ -7819,6 +7819,7 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             tx_json = json.dumps(tx_data, sort_keys=True, default=str)
             signing_hash_bytes = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
             _pub_key = wallet_data.get("public_key", "")
+            sig = engine.sign_hash(signing_hash_bytes, private_key_str)
             sig["public_key_hex"] = _pub_key
 
             # Zero private key from memory immediately
