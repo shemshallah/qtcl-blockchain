@@ -7797,12 +7797,17 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             tx_id = hashlib.sha3_256(f"{address}{_to}{_amount}{time.time()}".encode()).hexdigest()
 
             engine = _init_hlwe_engine()
-            tx_hash_bytes = hashlib.sha3_256(json.dumps({
-                "from": address, "to": _to, "amount": _amount_base,
-                "fee": _fee_base, "nonce": int(time.time() * 1e6),
-                "memo": _memo,
-            }, sort_keys=True).encode()).digest()
-            sig = engine.sign_hash(tx_hash_bytes, private_key_str)
+            _tx_nonce = int(time.time() * 1e6)
+            tx_data = {
+                'sender': address,
+                'recipient': _to,
+                'amount': _amount_base / 100.0,
+                'nonce': _tx_nonce,
+            }
+            tx_json = json.dumps(tx_data, sort_keys=True, default=str)
+            signing_hash_bytes = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
+            sig = engine.sign_hash(signing_hash_bytes, private_key_str)
+            sig["public_key_hex"] = wallet_data.get("public_key", "")
 
             # Zero private key from memory immediately
             private_key_str = "0" * len(private_key_str)
@@ -7813,7 +7818,7 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
                 "from_addr": address, "to_addr": _to,
                 "amount": float(_amount), "amount_base": _amount_base,
                 "fee": _fee, "fee_base": _fee_base,
-                "nonce": int(time.time() * 1e6),
+                "nonce": _tx_nonce,
                 "signature": sig, "memo": _memo,
                 "status": "pending", "timestamp": int(time.time()),
             }
