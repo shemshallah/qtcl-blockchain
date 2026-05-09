@@ -1045,6 +1045,29 @@ class _OracleFacade:
         }
         return result
 
+    def verify_transaction(self, tx_hash_hex: str, sig_dict: dict, sender_address: str):
+        """Verify a HypΓ Schnorr-Γ transaction signature.
+        
+        Args:
+            tx_hash_hex: hex string of the signing hash (32 bytes → 64 hex chars)
+            sig_dict: signature dict from engine.sign_hash() with public_key_hex
+            sender_address: derived address of the signer (not used for verification)
+        
+        Returns:
+            (True, "valid") or (False, reason)
+        """
+        try:
+            pub_key_hex = sig_dict.get('public_key_hex') or sig_dict.get('public_key', '')
+            if not pub_key_hex:
+                return False, "missing_public_key_in_signature"
+            from hyp_engine_compat import get_hyp_engine
+            engine = get_hyp_engine()
+            msg_bytes = bytes.fromhex(tx_hash_hex)
+            valid = engine.verify_signature(msg_bytes, sig_dict, pub_key_hex)
+            return (True, "valid") if valid else (False, "invalid_signature")
+        except Exception as e:
+            return False, f"verification_error:{e}"
+
     def to_dict(self):
         snap = self.get_snapshot()
         return snap if snap else {"error": "not ready"}

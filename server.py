@@ -7787,10 +7787,20 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         # 3. Build and sign transaction
         try:
             _to = tx_data.get("to_address", tx_data.get("to", ""))
-            _amount = float(tx_data.get("amount", 0))
-            _fee = float(tx_data.get("fee", 0.01))
+            _raw_amount = tx_data.get("amount", 0)
+            if _raw_amount is None:
+                _raw_amount = 0
+            _amount = float(_raw_amount)
+            _raw_fee = tx_data.get("fee", 0.01)
+            if _raw_fee is None:
+                _raw_fee = 0.01
+            _fee = float(_raw_fee)
             _memo = tx_data.get("memo", "")
 
+            if _amount <= 0:
+                return _rpc_ok({"valid": False, "reason": "Invalid amount — must be positive"}, rpc_id)
+            if _fee < 0:
+                _fee = 0.01
             _amount_base = int(round(_amount * 100))
             _fee_base = int(round(_fee * 100))
 
