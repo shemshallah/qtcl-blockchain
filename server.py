@@ -7802,7 +7802,7 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
                 "fee": _fee_base, "nonce": int(time.time() * 1e6),
                 "memo": _memo,
             }, sort_keys=True).encode()).digest()
-            sig = engine.sign_hash(tx_hash_bytes.hex(), private_key_str)
+            sig = engine.sign_hash(tx_hash_bytes, private_key_str)
 
             # Zero private key from memory immediately
             private_key_str = "0" * len(private_key_str)
