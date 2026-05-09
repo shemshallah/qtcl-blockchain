@@ -6580,7 +6580,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 )
 
             # ── CATHEDRAL-GRADE: Transaction signature verification ──
-            _tx_pubkey = tx.get("sender_public_key_hex") or tx.get("public_key", "")
+            _tx_pubkey = (tx.get("sender_public_key_hex") or tx.get("public_key", "")
+                          or (tx.get("signature") or {}).get("public_key_hex", "")
+                          or (tx.get("signature") or {}).get("public_key", ""))
             _tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
             if not _tx_pubkey:
                 return _rpc_error(
@@ -7816,8 +7818,8 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             }
             tx_json = json.dumps(tx_data, sort_keys=True, default=str)
             signing_hash_bytes = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
-            sig = engine.sign_hash(signing_hash_bytes, private_key_str)
-            sig["public_key_hex"] = wallet_data.get("public_key", "")
+            _pub_key = wallet_data.get("public_key", "")
+            sig["public_key_hex"] = _pub_key
 
             # Zero private key from memory immediately
             private_key_str = "0" * len(private_key_str)
@@ -7831,6 +7833,8 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
                 "nonce": _tx_nonce,
                 "signature": sig, "memo": _memo,
                 "status": "pending", "timestamp": int(time.time()),
+                "sender_public_key_hex": _pub_key,
+                "public_key": _pub_key,
             }
 
             # 4. Submit to mempool via existing handler
