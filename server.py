@@ -1280,7 +1280,8 @@ def _settle_block_rewards(
                     "difficulty": 4,
                     "miner": miner_address,
                     "w_state_fidelity": 0.0,
-                }
+                },
+                txs=txs,
             )
         except Exception as cache_err:
             _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
@@ -1318,7 +1319,8 @@ def _settle_block_rewards(
                     "difficulty": 4,
                     "miner": miner_address,
                     "w_state_fidelity": 0.0,
-                }
+                },
+                txs=txs,
             )
             _settle_log.debug(f"[SETTLE] ✅ Block cached: h={height}")
         except Exception as cache_err:
@@ -3768,37 +3770,46 @@ _BLOCK_CACHE = {}  # height -> block dict
 _BLOCK_CACHE_LOCK = threading.RLock()
 
 
-def _cache_block(block_dict):
-    """Add block to cache with transaction data fetched from DB."""
+def _cache_block(block_dict, txs=None):
+    """Add block to cache with optional transaction data.
+
+    If *txs* is provided, uses it directly (caller already has the data
+    from the block submission).  Otherwise falls back to querying the DB.
+    """
     with _BLOCK_CACHE_LOCK:
         h = block_dict.get("height")
         if h:
             entry = dict(block_dict)
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute(
-                        "SELECT tx_hash, from_address, to_address, amount, "
-                        "transaction_index, tx_type, status, quantum_state_hash, metadata "
-                        "FROM transactions WHERE height = %s ORDER BY transaction_index ASC",
-                        (h,),
-                    )
-                    txs = []
-                    for tr in cur.fetchall():
-                        txs.append({
-                            "tx_id": tr[0],
-                            "from_addr": tr[1] or "",
-                            "to_addr": tr[2] or "",
-                            "amount": int(tr[3]) if tr[3] is not None else 0,
-                            "tx_index": int(tr[4]) if tr[4] is not None else 0,
-                            "tx_type": tr[5] or "transfer",
-                            "status": tr[6] or "confirmed",
-                            "w_proof": tr[7] or "",
-                            "metadata": tr[8] if tr[8] else None,
-                        })
-                    entry["transactions"] = txs
-                    entry["tx_count"] = len(txs)
-            except Exception:
-                entry["transactions"] = block_dict.get("transactions", [])
+            if txs is not None:
+                entry["transactions"] = list(txs)
+                entry["tx_count"] = len(txs)
+            else:
+                try:
+                    with get_db_cursor() as cur:
+                        cur.execute(
+                            "SELECT tx_hash, from_address, to_address, amount, "
+                            "transaction_index, tx_type, status, quantum_state_hash, metadata "
+                            "FROM transactions WHERE height = %s ORDER BY transaction_index ASC",
+                            (h,),
+                        )
+                        tx_list = []
+                        for tr in cur.fetchall():
+                            tx_list.append({
+                                "tx_id": tr[0],
+                                "from_addr": tr[1] or "",
+                                "to_addr": tr[2] or "",
+                                "amount": int(tr[3]) if tr[3] is not None else 0,
+                                "tx_index": int(tr[4]) if tr[4] is not None else 0,
+                                "tx_type": tr[5] or "transfer",
+                                "status": tr[6] or "confirmed",
+                                "w_proof": tr[7] or "",
+                                "metadata": tr[8] if tr[8] else None,
+                            })
+                        entry["transactions"] = tx_list
+                        entry["tx_count"] = len(tx_list)
+                except Exception:
+                    entry["transactions"] = block_dict.get("transactions", [])
+                    entry["tx_count"] = len(entry["transactions"])
             _BLOCK_CACHE[h] = entry
 
 
