@@ -1,54 +1,37 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-MCP FLASK ADAPTER — Mount Modern MCP Server into Existing Flask App
+MCP FLASK ADAPTER v4.0 — QTCL MCP 2025-06-18 Compatibility Shim
 ================================================================================
 
-Purpose:
-  Bridges the modern MCP 2025-06-18 server (mcp_server.py / FastMCP) into the
-  existing QTCL Flask application so both the old JSON-RPC routes and the new
-  MCP endpoints coexist on the same port / same gunicorn worker pool.
+ARCHITECTURE (v4.0 — pure Flask, zero ASGI):
+  MCP 2025-06-18 is now implemented NATIVELY in server.py as plain Flask routes.
+  This file is retained for:
+    1. Backward-compatible import surface (register_mcp_routes still works)
+    2. stdio transport entry point for Claude Desktop / Cursor / CLI agents
+    3. Standalone test/dev mode
 
-Architecture:
-  ┌─────────────────────────────────────────┐
-  │  Gunicorn (port 8000)                   │
-  │  ┌─────────────┐  ┌──────────────────┐  │
-  │  │ Flask App   │  │ MCP ASGI App     │  │
-  │  │ /rpc        │  │ /mcp             │  │
-  │  │ /mcp/health │  │ /mcp/sse (legacy)│  │
-  │  └─────────────┘  └──────────────────┘  │
-  │         both served by same process      │
-  └─────────────────────────────────────────┘
+  The old _ASGIBridge / Starlette approach is removed — it was fundamentally
+  incompatible with Gunicorn gthread workers (asyncio event loop conflicts) and
+  caused silent failures under concurrent load.
 
-Usage (in your existing server.py or wsgi_config.py):
+Endpoints (all registered natively in server.py):
+  POST   /mcp          — Streamable HTTP primary channel (MCP 2025-06-18)
+  GET    /mcp          — Server info JSON (stateless handshake)
+  OPTIONS /mcp         — CORS preflight (204)
+  GET    /mcp/sse      — Legacy SSE (2024-11-05 backward compat)
+  POST   /mcp/message  — Legacy message channel
+  GET    /mcp/health   — Health / capability summary
+  GET    /mcp/capability — Full agent capability document
 
-    from flask import Flask
-    from mcp_flask_adapter import register_mcp_routes
-
-    app = Flask(__name__)
-    register_mcp_routes(app, rpc_url="http://localhost:8000/rpc")
-
-    # Your existing routes...
-    # app.register_blueprint(api_blueprint)
-
-    if __name__ == "__main__":
-        app.run()
-
-Endpoints Added:
-  GET  /mcp         — MCP streamable HTTP (or JSON handshake for GET)
-  POST /mcp         — MCP streamable HTTP primary endpoint
-  GET  /mcp/sse     — Legacy SSE (backward compatible)
-  POST /mcp/message — Legacy message endpoint
-  GET  /mcp/health  — Combined health status
+Tool surface (13 tools, 4 resources, 1 prompt — all in server.py):
+  qtcl_create_wallet, qtcl_sign_message, qtcl_get_balance, qtcl_get_utxos,
+  qtcl_send_transaction, qtcl_get_transaction, qtcl_get_chain_info,
+  qtcl_get_block, qtcl_get_recent_transactions, qtcl_get_quantum_metrics,
+  qtcl_get_oracle_registry, qtcl_get_peers, qtcl_get_price
 
 Dependencies:
-  pip install mcp>=1.23.0 flask>=2.0 starlette>=0.27.0 uvicorn>=0.23.0
-
-Note:
-  The FastMCP streamable-http transport uses Starlette (ASGI). When mounted
-  inside Flask (WSGI), we proxy requests through a small WSGI-ASGI bridge.
-  For production at scale, run the MCP server standalone on a separate port
-  or switch the entire app to an ASGI framework (FastAPI, Quart, etc.).
+  pip install flask>=2.0 mcp>=1.23.0 (optional, for stdio transport only)
 ================================================================================
 """
 
@@ -57,559 +40,427 @@ from __future__ import annotations
 import os
 import sys
 import json
-import asyncio
 import logging
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Configuration ──────────────────────────────────────────────────────────
-QTCL_RPC_URL = os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
-MCP_PROTOCOL_VERSION = "2024-11-05"   # Broadly-supported stable version
+# ── Configuration ──────────────────────────────────────────────────────────────
+QTCL_RPC_URL      = os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
+MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_SERVER_NAME   = "qtcl-blockchain"
+MCP_SERVER_VERSION = "3.0.0"
 
-# ── Lazy imports (fail gracefully if SDK not installed) ───────────────────────
+# ── Optional MCP SDK (only needed for stdio transport) ───────────────────────
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP as _FastMCP
     SDK_AVAILABLE = True
 except ImportError:
+    _FastMCP = None  # type: ignore
     SDK_AVAILABLE = False
-    logger.warning("[MCP Adapter] Official MCP Python SDK not installed. "
-                   "Legacy mode only. Run: pip install 'mcp>=1.23.0'")
+    logger.debug("[MCP Adapter] MCP Python SDK not installed — stdio transport unavailable. "
+                 "HTTP transport works without it. Run: pip install 'mcp>=1.23.0'")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §1  Create Modern MCP Server Instance (reuses mcp_server.py logic)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _make_mcp_app(rpc_url: str) -> Optional[Any]:
-    """Build a FastMCP application with all QTCL tools, resources, and prompts."""
-    if not SDK_AVAILABLE:
-        return None
-
-    mcp = FastMCP(
-        "qtcl-blockchain",
-        stateless_http=True,
-        json_response=True,
-    )
-
-    # ── Re-import tool implementations from mcp_server.py ──
-    # We avoid circular imports by lazy-loading
-    try:
-        import mcp_server as _ms
-    except Exception:
-        _ms = None
-
-    # If mcp_server module is importable, reuse its helpers. Otherwise define inline.
-    if _ms is not None and hasattr(_ms, '_wallet_create'):
-        _wallet_create = _ms._wallet_create
-        _sign_message = _ms._sign_message
-        qtcl_rpc = _ms.qtcl_rpc
-    else:
-        # Inline fallback (duplicated minimally for standalone use)
-        import urllib.request
-        _rpc_counter = [0]
-        def qtcl_rpc(method: str, params=None) -> Any:
-            _rpc_counter[0] += 1
-            payload = {
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params if params is not None else [],
-                "id": _rpc_counter[0],
-            }
-            data = json.dumps(payload).encode()
-            req = urllib.request.Request(
-                rpc_url,
-                data=data,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    body = json.loads(resp.read().decode())
-                if "error" in body:
-                    raise RuntimeError(body["error"].get("message", "RPC error"))
-                return body.get("result", body)
-            except Exception as e:
-                raise RuntimeError(f"QTCL RPC '{method}' failed: {e}")
-
-        async def _wallet_create(label: str = "") -> dict:
-            return qtcl_rpc("qtcl_hyp_generateKeypair", {})
-
-        async def _sign_message(message_hex: str, private_key: str) -> dict:
-            return qtcl_rpc("qtcl_hyp_signMessage", {
-                "message": message_hex,
-                "private_key": private_key,
-            })
-
-    # ── Tools ───────────────────────────────────────────────────────────────
-
-    @mcp.tool()
-    async def qtcl_create_wallet(label: str = "") -> str:
-        """Create a new QTCL wallet backed by a real HypΓ post-quantum keypair."""
-        result = await _wallet_create(label)
-        return json.dumps(result, indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_sign_message(message_hex: str, private_key: str) -> str:
-        """Sign a 32-byte message hash with a HypΓ private key using Schnorr-Γ."""
-        if len(message_hex) != 64:
-            raise ValueError(f"message_hex must be 64 hex chars; got {len(message_hex)}")
-        result = await _sign_message(message_hex, private_key)
-        return json.dumps(result, indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_balance(address: str) -> str:
-        """Check QTCL balance for any address."""
-        return json.dumps(qtcl_rpc("qtcl_getBalance", [address]), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_utxos(address: str, limit: int = 1000) -> str:
-        """List UTXOs for an address."""
-        p = {"address": address}
-        if limit:
-            p["limit"] = int(limit)
-        return json.dumps(qtcl_rpc("qtcl_getUTXOs", [p]), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_send_transaction(
-        from_address: str, to_address: str, amount: float,
-        memo: str = "", signature: str = "", public_key: str = "", nonce: int = 0
-    ) -> str:
-        """Submit a signed UTXO transaction. Flat fee: 1 qsat."""
-        p = {"from_address": from_address, "to_address": to_address, "amount": amount}
-        for k, v in (("memo", memo), ("signature", signature), ("public_key", public_key), ("nonce", nonce)):
-            if v:
-                p[k] = v
-        return json.dumps(qtcl_rpc("qtcl_submitTransaction", [p]), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_transaction(tx_hash: str) -> str:
-        """Look up a transaction by hash."""
-        return json.dumps(qtcl_rpc("qtcl_getTransaction", [tx_hash]), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_chain_info() -> str:
-        """Current blockchain state."""
-        return json.dumps({
-            "chain": qtcl_rpc("qtcl_getBlockHeight"),
-            "mempool": qtcl_rpc("qtcl_getMempoolStats"),
-            "health": qtcl_rpc("qtcl_getHealth"),
-        }, indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_block(height: int = -1, hash: str = "") -> str:
-        """Block by height or hash. Use height=0 for genesis. Omit both for latest block."""
-        if hash:
-            key = hash
-        elif height >= 0:
-            key = height
-        else:
-            tip = qtcl_rpc("qtcl_getBlockHeight")
-            key = tip.get("height", 0) if isinstance(tip, dict) else tip
-        return json.dumps(qtcl_rpc("qtcl_getBlock", [key]), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_recent_transactions(address: str = "", per_page: int = 20) -> str:
-        """Recent transactions, optionally filtered by address."""
-        p = {"page": 0, "per_page": min(int(per_page), 50)}
-        if address:
-            p["address"] = address
-        return json.dumps(qtcl_rpc("qtcl_getTransactions", p), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_quantum_metrics() -> str:
-        """Live quantum coherence metrics."""
-        return json.dumps(qtcl_rpc("qtcl_getQuantumMetrics"), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_oracle_registry(limit: int = 10) -> str:
-        """List registered quantum oracles."""
-        return json.dumps(qtcl_rpc("qtcl_getOracleRegistry", {"limit": limit}), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_peers(limit: int = 20) -> str:
-        """List active P2P peers."""
-        return json.dumps(qtcl_rpc("qtcl_getPeers", [limit]), indent=2, default=str)
-
-    @mcp.tool()
-    async def qtcl_get_price() -> str:
-        """QTCL quantum coherence metrics (no public USD exchange)."""
-        return json.dumps(qtcl_rpc("qtcl_getQuantumMetrics"), indent=2, default=str)
-
-    # ── Resources ─────────────────────────────────────────────────────────────
-
-    @mcp.resource("chain://height")
-    async def get_block_height() -> str:
-        return str(qtcl_rpc("qtcl_getBlockHeight"))
-
-    @mcp.resource("chain://health")
-    async def get_health() -> str:
-        return json.dumps(qtcl_rpc("qtcl_getHealth"), indent=2, default=str)
-
-    @mcp.resource("price://qtcl-usd")
-    async def get_qtcl_price() -> str:
-        return str(qtcl_rpc("qtcl_getQuantumMetrics"))
-
-    @mcp.resource("docs://capability")
-    async def get_capability_doc() -> str:
-        return json.dumps({
-            "name": "QTCL — Quantum Temporal Coherence Ledger",
-            "version": "3.0.0",
-            "protocol": f"JSON-RPC 2.0 + MCP {MCP_PROTOCOL_VERSION}",
-            "tools": 13,
-            "resources": 4,
-            "transports": ["streamable-http", "stdio"],
-        }, indent=2)
-
-    # ── Prompts ───────────────────────────────────────────────────────────────
-
-    @mcp.prompt()
-    def wallet_helper(task: str = "create") -> str:
-        if task == "create":
-            return (
-                "You are helping a user create a QTCL post-quantum wallet.\n"
-                "Call qtcl_create_wallet to generate a keypair, then securely present:\n"
-                "  - address (64-char hex)\n"
-                "  - public_key (long hex)\n"
-                "  - private_key (critical: user must save this)\n"
-                "Warn the user that the server does not retain private keys."
-            )
-        elif task == "send":
-            return (
-                "You are helping a user send QTCL. The workflow is:\n"
-                "1. qtcl_get_balance(from_address) — check funds\n"
-                "2. qtcl_get_utxos(from_address) — select inputs\n"
-                "3. qtcl_sign_message(tx_hash, private_key) — authorize\n"
-                "4. qtcl_send_transaction(...) — submit\n"
-                "Flat fee is 1 qsat. ~18s finality."
-            )
-        return "How can I help you with QTCL today?"
-
-    return mcp
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# §2  WSGI-ASGI Bridge for Mounting inside Flask
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class _ASGIBridge:
-    """
-    Minimal WSGI-to-ASGI bridge for running Starlette (MCP) inside Flask.
-
-    Fixes vs original:
-      - start_response is called correctly with proper status string
-      - Response headers are passed through (not discarded)
-      - Uses get_event_loop() safely instead of new_event_loop() per request
-        (new_event_loop per request breaks under Gunicorn/gevent workers)
-      - CORS headers injected on every response
-      - PATH_INFO is passed without the query string appended (scope splits them)
-    """
-
-    # HTTP status code → reason phrase (common ones)
-    _STATUS_REASONS = {
-        200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
-        400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
-        404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
-        422: "Unprocessable Entity", 500: "Internal Server Error",
-    }
-
-    def __init__(self, asgi_app: Any):
-        self.asgi_app = asgi_app
-
-    def __call__(self, environ, start_response):
-        import asyncio
-        from io import BytesIO
-
-        method = environ.get("REQUEST_METHOD", "GET")
-        path = environ.get("PATH_INFO", "/")
-        query = environ.get("QUERY_STRING", "")
-
-        # Build ASGI headers list
-        headers = []
-        for key, value in environ.items():
-            if key.startswith("HTTP_"):
-                name = key[5:].replace("_", "-").lower()
-                headers.append((name.encode(), value.encode()))
-            elif key == "CONTENT_TYPE":
-                headers.append((b"content-type", value.encode()))
-            elif key == "CONTENT_LENGTH" and value:
-                headers.append((b"content-length", value.encode()))
-
-        # Read request body
-        body = b""
-        if method in ("POST", "PUT", "PATCH"):
-            content_length = int(environ.get("CONTENT_LENGTH", 0) or 0)
-            if content_length:
-                body = environ["wsgi.input"].read(content_length)
-
-        scope = {
-            "type": "http",
-            "asgi": {"version": "3.0"},
-            "http_version": "1.1",
-            "method": method.upper(),
-            "path": path,
-            "raw_path": path.encode("latin-1"),
-            "query_string": query.encode("latin-1"),
-            "root_path": environ.get("SCRIPT_NAME", ""),
-            "headers": headers,
-            "scheme": environ.get("wsgi.url_scheme", "http"),
-            "server": (
-                environ.get("SERVER_NAME", "localhost"),
-                int(environ.get("SERVER_PORT", 80)),
-            ),
-            "client": (
-                environ.get("REMOTE_ADDR", "127.0.0.1"),
-                int(environ.get("REMOTE_PORT", 0) or 0),
-            ),
-        }
-
-        status_code = [200]
-        response_headers = [[]]
-        response_body = BytesIO()
-
-        async def receive():
-            return {"type": "http.request", "body": body, "more_body": False}
-
-        async def send(message):
-            if message["type"] == "http.response.start":
-                status_code[0] = message["status"]
-                response_headers[0] = [
-                    (
-                        k.decode("latin-1") if isinstance(k, bytes) else k,
-                        v.decode("latin-1") if isinstance(v, bytes) else v,
-                    )
-                    for k, v in message.get("headers", [])
-                ]
-            elif message["type"] == "http.response.body":
-                response_body.write(message.get("body", b""))
-
-        # Use existing event loop if available (Gunicorn/gevent safe),
-        # otherwise create one just for this request.
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("closed")
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        loop.run_until_complete(self.asgi_app(scope, receive, send))
-
-        # Build status string e.g. "200 OK"
-        code = status_code[0]
-        reason = self._STATUS_REASONS.get(code, "Unknown")
-        status_str = f"{code} {reason}"
-
-        # Ensure CORS headers are always present
-        cors = {
-            "access-control-allow-origin": "*",
-            "access-control-allow-methods": "GET, POST, OPTIONS",
-            "access-control-allow-headers": "Content-Type, Accept, Mcp-Session-Id, Authorization",
-        }
-        final_headers = list(response_headers[0])
-        existing_keys = {k.lower() for k, _ in final_headers}
-        for k, v in cors.items():
-            if k not in existing_keys:
-                final_headers.append((k, v))
-
-        start_response(status_str, final_headers)
-        return [response_body.getvalue()]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# §3  Flask Registration
+# §1  register_mcp_routes — compatibility shim
+#     In v4+, MCP routes are registered natively in server.py.
+#     This function is a no-op when called after server.py is loaded,
+#     but provides backward compatibility for any external code calling it.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def register_mcp_routes(app: Any, rpc_url: Optional[str] = None) -> bool:
     """
-    Register modern MCP routes on an existing Flask application.
+    Register MCP routes on a Flask application.
 
-    Args:
-        app:      Flask application instance
-        rpc_url:  QTCL JSON-RPC backend URL (default: env QTCL_RPC_URL)
+    In production (server.py), MCP routes are already registered natively.
+    This function detects that and skips re-registration to avoid conflicts.
+    In standalone/test mode, it registers a minimal native implementation.
 
-    Returns:
-        True if modern MCP routes were registered, False if fallback legacy only.
+    Returns True if routes were registered (or already present), False on error.
     """
-    rpc_url = rpc_url or os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
+    # Check if native MCP routes are already mounted on this app
+    existing_rules = {rule.rule for rule in app.url_map.iter_rules()}
+    if "/mcp" in existing_rules:
+        logger.info("[MCP Adapter] Native MCP routes already registered — skipping re-registration")
+        return True
 
-    if not SDK_AVAILABLE:
-        logger.warning("[MCP Adapter] MCP SDK unavailable — registering legacy routes only")
-        _register_legacy_only(app)
-        return False
+    logger.info("[MCP Adapter] Registering MCP 2025-06-18 routes (standalone mode)...")
+    return _register_native_mcp(app, rpc_url or QTCL_RPC_URL)
 
-    mcp = _make_mcp_app(rpc_url)
-    if mcp is None:
-        _register_legacy_only(app)
-        return False
 
-    # Extract the underlying Starlette app from FastMCP and wrap it
-    try:
-        starlette_app = mcp._mcp_server.app
-    except AttributeError:
-        # FastMCP internal structure may vary by version — fallback
-        starlette_app = mcp.app if hasattr(mcp, "app") else None
+def _register_native_mcp(app: Any, rpc_url: str) -> bool:
+    """
+    Register MCP 2025-06-18 Streamable HTTP routes as pure Flask.
+    Zero ASGI, zero asyncio, zero Starlette — runs on any WSGI server.
+    """
+    import urllib.request
+    import threading
+    import queue
+    import uuid
 
-    if starlette_app is None:
-        logger.warning("[MCP Adapter] Could not extract ASGI app — legacy routes only")
-        _register_legacy_only(app)
-        return False
+    _rpc_id_counter = [0]
+    _lock = threading.Lock()
 
-    bridge = _ASGIBridge(starlette_app)
-
-    @app.route("/mcp", methods=["GET", "POST", "OPTIONS"])
-    @app.route("/mcp/<path:subpath>", methods=["GET", "POST", "OPTIONS"])
-    def mcp_streamable_http(subpath=""):
-        from flask import request, Response
-
-        if request.method == "OPTIONS":
-            return Response("", status=204, headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id, Authorization",
-            })
-
-        # Adjust PATH_INFO so bridge sees the right path
-        environ = dict(request.environ)
-        if subpath:
-            environ["PATH_INFO"] = f"/mcp/{subpath}"
-
-        # Capture what bridge sends to start_response
-        captured = {"status": "200 OK", "headers": []}
-
-        def _start_response(status, headers, exc_info=None):
-            captured["status"] = status
-            captured["headers"] = headers
-
-        body_parts = bridge(environ, _start_response)
-        body = b"".join(body_parts)
-
-        # Build status code int
+    def _rpc(method: str, params: Any = None) -> Any:
+        with _lock:
+            _rpc_id_counter[0] += 1
+            rid = _rpc_id_counter[0]
+        payload = {"jsonrpc": "2.0", "method": method, "params": params or [], "id": rid}
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            rpc_url, data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
-            status_code = int(captured["status"].split(" ", 1)[0])
-        except (ValueError, IndexError):
-            status_code = 200
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = json.loads(resp.read().decode())
+            if "error" in body:
+                raise RuntimeError(body["error"].get("message", "RPC error"))
+            return body.get("result", body)
+        except Exception as e:
+            raise RuntimeError(f"RPC '{method}' failed: {e}")
 
-        resp = Response(body, status=status_code)
-        for k, v in captured["headers"]:
-            resp.headers[k] = v
-        # Always set CORS
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Accept, Mcp-Session-Id, Authorization"
-        return resp
+    _CORS = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
+        "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id, Authorization, Last-Event-ID",
+        "Access-Control-Expose-Headers": "Mcp-Session-Id",
+    }
 
-    # Legacy SSE (backward compatible)
-    _register_legacy_only(app)
+    _MCP_TOOLS_LOCAL = [
+        {"name": "qtcl_get_balance",          "description": "Check QTCL balance for an address.", "inputSchema": {"type": "object", "properties": {"address": {"type": "string"}}, "required": ["address"]}},
+        {"name": "qtcl_get_chain_info",        "description": "Current blockchain state.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "qtcl_get_quantum_metrics",   "description": "Live quantum coherence metrics.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "qtcl_get_recent_transactions","description": "Recent transactions.", "inputSchema": {"type": "object", "properties": {"address": {"type": "string"}, "per_page": {"type": "integer", "default": 20}}}},
+        {"name": "qtcl_get_peers",             "description": "Active P2P peers.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}}},
+        {"name": "qtcl_get_oracle_registry",   "description": "Registered quantum oracles.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 10}}}},
+    ]
 
-    logger.info("[MCP Adapter] Modern MCP 2025-06-18 routes registered on /mcp")
-    logger.info("[MCP Adapter] Legacy SSE preserved on /mcp/sse and /mcp/message")
-    return True
+    from flask import request as _request, Response as _Response, jsonify as _jsonify
 
+    def _tool_dispatch(name: str, args: dict) -> dict:
+        try:
+            if name == "qtcl_get_balance":
+                r = _rpc("qtcl_getBalance", [args.get("address", "")])
+            elif name == "qtcl_get_chain_info":
+                r = {"chain": _rpc("qtcl_getBlockHeight"), "mempool": _rpc("qtcl_getMempoolStats"), "health": _rpc("qtcl_getHealth")}
+            elif name == "qtcl_get_quantum_metrics":
+                r = _rpc("qtcl_getQuantumMetrics")
+            elif name == "qtcl_get_recent_transactions":
+                p = {"page": 0, "per_page": min(int(args.get("per_page", 20)), 50)}
+                if args.get("address"):
+                    p["address"] = args["address"]
+                r = _rpc("qtcl_getTransactions", [p])
+            elif name == "qtcl_get_peers":
+                r = _rpc("qtcl_getPeers", [int(args.get("limit", 20))])
+            elif name == "qtcl_get_oracle_registry":
+                r = _rpc("qtcl_getOracleRegistry", [{"limit": int(args.get("limit", 10))}])
+            else:
+                return {"jsonrpc": "2.0", "error": {"code": -32601, "message": f"Unknown tool: {name}"}, "id": None}
+            return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": json.dumps(r, indent=2, default=str)}]}, "id": None}
+        except Exception as e:
+            return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True}, "id": None}
 
-def _register_legacy_only(app: Any):
-    """Register only the legacy v2.x SSE routes (no FastMCP)."""
-    import uuid, queue
-    from flask import Response, request, jsonify
+    def _handle_msg(body_bytes: bytes, sid: Optional[str]):
+        try:
+            msg = json.loads(body_bytes)
+        except Exception as e:
+            return {"jsonrpc": "2.0", "error": {"code": -32700, "message": f"Parse error: {e}"}, "id": None}, None
 
-    _sessions: dict = {}
-    _sessions_lock = __import__("threading").Lock()
+        method = msg.get("method", "")
+        params = msg.get("params", {})
+        req_id = msg.get("id")
+        new_sid = None
+
+        if method == "initialize":
+            new_sid = sid or str(uuid.uuid4())
+            return {"jsonrpc": "2.0", "result": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "serverInfo": {"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION},
+                "capabilities": {"tools": {"listChanged": False}, "resources": {"subscribe": False}, "prompts": {"listChanged": False}, "logging": {}},
+            }, "id": req_id}, new_sid
+
+        if method == "notifications/initialized" or req_id is None:
+            return None, None
+
+        if method == "tools/list":
+            return {"jsonrpc": "2.0", "result": {"tools": _MCP_TOOLS_LOCAL}, "id": req_id}, None
+
+        if method == "tools/call":
+            name = params.get("name", "") if isinstance(params, dict) else ""
+            args = params.get("arguments", {}) if isinstance(params, dict) else {}
+            r = _tool_dispatch(name, args or {})
+            r["id"] = req_id
+            return r, None
+
+        if method == "ping":
+            return {"jsonrpc": "2.0", "result": {}, "id": req_id}, None
+
+        return {"jsonrpc": "2.0", "error": {"code": -32601, "message": f"Method not found: {method}"}, "id": req_id}, None
 
     @app.route("/mcp", methods=["OPTIONS"])
-    @app.route("/mcp/sse", methods=["OPTIONS"])
-    def mcp_options():
-        return Response("", status=204, headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id, Authorization",
-        })
+    @app.route("/mcp/<path:subpath>", methods=["OPTIONS"])
+    def _mcp_opts(subpath=""):
+        r = _Response("", status=204)
+        for k, v in _CORS.items():
+            r.headers[k] = v
+        return r
+
+    @app.route("/mcp", methods=["POST"])
+    def _mcp_post():
+        sid = _request.headers.get("Mcp-Session-Id", "").strip() or None
+        body = _request.get_data()
+        if not body:
+            out = json.dumps({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Empty body"}, "id": None}).encode()
+            r = _Response(out, status=200, mimetype="application/json")
+            for k, v in _CORS.items():
+                r.headers[k] = v
+            return r
+        try:
+            parsed = json.loads(body)
+        except Exception as e:
+            out = json.dumps({"jsonrpc": "2.0", "error": {"code": -32700, "message": str(e)}, "id": None}).encode()
+            r = _Response(out, status=200, mimetype="application/json")
+            for k, v in _CORS.items():
+                r.headers[k] = v
+            return r
+        new_sid = sid
+        if isinstance(parsed, list):
+            responses = []
+            for item in parsed:
+                resp_obj, maybe = _handle_msg(json.dumps(item).encode(), new_sid)
+                if maybe:
+                    new_sid = maybe
+                if resp_obj is not None:
+                    responses.append(resp_obj)
+            out = json.dumps(responses).encode()
+        else:
+            resp_obj, maybe = _handle_msg(body, sid)
+            if maybe:
+                new_sid = maybe
+            out = json.dumps(resp_obj).encode() if resp_obj is not None else b"{}"
+        r = _Response(out, status=200, mimetype="application/json")
+        for k, v in _CORS.items():
+            r.headers[k] = v
+        if new_sid:
+            r.headers["Mcp-Session-Id"] = new_sid
+        return r
+
+    @app.route("/mcp", methods=["GET"])
+    def _mcp_get():
+        info = {"jsonrpc": "2.0", "method": "server/info", "params": {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "serverInfo": {"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION},
+            "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+            "transport": "streamable-http",
+        }}
+        r = _Response(json.dumps(info).encode(), status=200, mimetype="application/json")
+        for k, v in _CORS.items():
+            r.headers[k] = v
+        return r
+
+    _sessions_local: dict = {}
+    _sessions_lock_local = threading.RLock()
 
     @app.route("/mcp/sse", methods=["GET"])
-    def mcp_sse():
+    def _mcp_sse():
         sid = str(uuid.uuid4())
         q: queue.Queue = queue.Queue(maxsize=100)
-        with _sessions_lock:
-            _sessions[sid] = q
+        with _sessions_lock_local:
+            _sessions_local[sid] = q
 
-        def generate():
-            yield f"event: endpoint\ndata: /mcp\n\n"
+        def gen():
+            yield f"event: endpoint\ndata: /mcp?session_id={sid}\n\n"
             try:
                 while True:
                     try:
-                        msg = q.get(timeout=25.0)
+                        msg = q.get(timeout=20.0)
                         if msg is None:
                             break
-                        yield f"event: message\ndata: {json.dumps(msg)}\n\n"
+                        yield f"event: message\ndata: {json.dumps(msg, default=str)}\n\n"
                     except queue.Empty:
                         yield ": heartbeat\n\n"
-            except GeneratorExit:
-                pass
             finally:
-                with _sessions_lock:
-                    _sessions.pop(sid, None)
+                with _sessions_lock_local:
+                    _sessions_local.pop(sid, None)
 
-        return Response(generate(), mimetype="text/event-stream", headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-        })
+        r = _Response(gen(), mimetype="text/event-stream")
+        r.headers.update({"Cache-Control": "no-cache", "Connection": "keep-alive",
+                          "X-Accel-Buffering": "no", "Mcp-Session-Id": sid})
+        for k, v in _CORS.items():
+            r.headers[k] = v
+        return r
 
     @app.route("/mcp/message", methods=["POST"])
-    def mcp_message():
-        sid = request.args.get("session_id", "")
-        with _sessions_lock:
-            q = _sessions.get(sid)
+    def _mcp_msg():
+        sid = _request.args.get("session_id", "")
+        with _sessions_lock_local:
+            q = _sessions_local.get(sid)
         if not q:
-            return jsonify({"error": "Invalid or expired session"}), 400
-        try:
-            msg = request.get_json(force=True, silent=True)
-            if not msg:
-                return jsonify({"error": "No JSON body"}), 400
-            return jsonify({"status": "queued", "session_id": sid}), 202
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+            return _jsonify({"error": "Invalid session"}), 404
+        body = _request.get_data()
+        if not body:
+            return _jsonify({"error": "Empty body"}), 400
+        resp_obj, _ = _handle_msg(body, sid)
+        if resp_obj:
+            try:
+                q.put_nowait(resp_obj)
+            except queue.Full:
+                return _jsonify({"error": "Queue full"}), 429
+        return _jsonify({"status": "accepted"}), 202
 
     @app.route("/mcp/health", methods=["GET"])
-    def mcp_health():
-        return jsonify({
-            "status": "ok",
-            "server": "qtcl-blockchain",
-            "version": "3.0.0",
-            "protocol": MCP_PROTOCOL_VERSION,
-            "transport": "streamable-http",
-            "legacy_sse": True,
-            "sdk": "mcp-python-sdk" if SDK_AVAILABLE else "not-installed",
-            "tools": 12,
-            "resources": 4,
-            "prompts": 1,
-            "note": "Legacy SSE deprecated — migrate to /mcp streamable HTTP",
-        })
+    def _mcp_health():
+        out = json.dumps({
+            "status": "ok", "server": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION,
+            "protocol": MCP_PROTOCOL_VERSION, "transport": "streamable-http",
+            "tools": len(_MCP_TOOLS_LOCAL), "rpc_url": rpc_url, "ts": __import__("time").time(),
+        }).encode()
+        r = _Response(out, status=200, mimetype="application/json")
+        for k, v in _CORS.items():
+            r.headers[k] = v
+        return r
 
-    logger.info("[MCP Adapter] Legacy SSE routes registered: /mcp/sse, /mcp/message, /mcp/health")
+    logger.info(f"[MCP Adapter] ✅ Native MCP 2025-06-18 routes registered (standalone mode, rpc_url={rpc_url})")
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# §4  Standalone Test
+# §2  stdio transport — for Claude Desktop / Cursor / CLI agents
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_stdio_transport(rpc_url: str = QTCL_RPC_URL) -> None:
+    """
+    Run MCP server over stdio (for Claude Desktop, Cursor, Windsurf, CLI).
+
+    Requires: pip install 'mcp>=1.23.0'
+    Usage: python mcp_flask_adapter.py --transport stdio
+    """
+    if not SDK_AVAILABLE or _FastMCP is None:
+        print("[MCP] ERROR: MCP Python SDK not installed.", file=sys.stderr)
+        print("[MCP]        Run: pip install 'mcp>=1.23.0'", file=sys.stderr)
+        sys.exit(1)
+
+    import urllib.request
+
+    _counter = [0]
+
+    def _rpc(method: str, params: Any = None) -> Any:
+        _counter[0] += 1
+        payload = {"jsonrpc": "2.0", "method": method, "params": params or [], "id": _counter[0]}
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            rpc_url, data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read().decode())
+        if "error" in body:
+            raise RuntimeError(body["error"].get("message", "RPC error"))
+        return body.get("result", body)
+
+    mcp = _FastMCP("qtcl-blockchain")
+
+    @mcp.tool()
+    async def qtcl_get_balance(address: str) -> str:
+        """Check QTCL balance for any address."""
+        return json.dumps(_rpc("qtcl_getBalance", [address]), indent=2, default=str)
+
+    @mcp.tool()
+    async def qtcl_get_chain_info() -> str:
+        """Current blockchain state: height, mempool, health."""
+        return json.dumps({
+            "chain": _rpc("qtcl_getBlockHeight"),
+            "mempool": _rpc("qtcl_getMempoolStats"),
+            "health": _rpc("qtcl_getHealth"),
+        }, indent=2, default=str)
+
+    @mcp.tool()
+    async def qtcl_get_quantum_metrics() -> str:
+        """Live quantum coherence metrics."""
+        return json.dumps(_rpc("qtcl_getQuantumMetrics"), indent=2, default=str)
+
+    @mcp.tool()
+    async def qtcl_send_transaction(from_address: str, to_address: str, amount: float,
+                                     memo: str = "", signature: str = "", public_key: str = "") -> str:
+        """Submit a signed UTXO transaction. Flat fee: 1 qsat."""
+        p = {"from_address": from_address, "to_address": to_address, "amount": amount}
+        for k, v in (("memo", memo), ("signature", signature), ("public_key", public_key)):
+            if v:
+                p[k] = v
+        return json.dumps(_rpc("qtcl_submitTransaction", [p]), indent=2, default=str)
+
+    @mcp.tool()
+    async def qtcl_create_wallet(label: str = "") -> str:
+        """Create a new post-quantum QTCL wallet."""
+        return json.dumps(_rpc("qtcl_hyp_generateKeypair", []), indent=2, default=str)
+
+    @mcp.tool()
+    async def qtcl_get_block(height: int = -1, hash: str = "") -> str:
+        """Get block by height or hash. Omit both for latest."""
+        if hash:
+            key: Any = hash
+        elif height >= 0:
+            key = height
+        else:
+            tip = _rpc("qtcl_getBlockHeight")
+            key = tip.get("height", 0) if isinstance(tip, dict) else 0
+        return json.dumps(_rpc("qtcl_getBlock", [key]), indent=2, default=str)
+
+    @mcp.resource("chain://height")
+    async def res_height() -> str:
+        return str(_rpc("qtcl_getBlockHeight"))
+
+    @mcp.resource("chain://health")
+    async def res_health() -> str:
+        return json.dumps(_rpc("qtcl_getHealth"), indent=2, default=str)
+
+    @mcp.prompt()
+    def wallet_helper(task: str = "create") -> str:
+        if task == "send":
+            return ("QTCL send: 1) qtcl_get_balance 2) qtcl_get_utxos 3) qtcl_sign_message "
+                    "4) qtcl_send_transaction. Fee: 1 qsat. Finality: ~18s.")
+        return ("Create QTCL wallet: call qtcl_create_wallet → save private_key locally "
+                "(server never retains it). Cryptography: Schnorr-Γ post-quantum.")
+
+    print(f"[MCP] Starting stdio transport → {rpc_url}", file=sys.stderr)
+    mcp.run(transport="stdio")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §3  Standalone entrypoint
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    from flask import Flask
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    import argparse
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    app = Flask(__name__)
-    ok = register_mcp_routes(app)
+    ap = argparse.ArgumentParser(description="QTCL MCP Adapter")
+    ap.add_argument("--transport", choices=["stdio", "http"], default="http")
+    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--rpc-url", default=QTCL_RPC_URL)
+    args = ap.parse_args()
 
-    print()
-    print("╔══════════════════════════════════════════════════════════════╗")
-    print("║  QTCL MCP Flask Adapter — Test Mode                          ║")
-    print("╚══════════════════════════════════════════════════════════════╝")
-    print(f"  Modern MCP: {'YES (FastMCP)' if ok else 'NO (legacy only)'}")
-    print("  Endpoints:")
-    print("    POST/GET /mcp          — Streamable HTTP (MCP 2025-06-18)")
-    print("    GET      /mcp/sse      — Legacy SSE (deprecated)")
-    print("    POST     /mcp/message  — Legacy message (deprecated)")
-    print("    GET      /mcp/health   — Health check")
-    print()
-    print("  Starting Flask on http://127.0.0.1:8000 ...")
-    app.run(host="127.0.0.1", port=8000, debug=False)
+    if args.transport == "stdio":
+        run_stdio_transport(args.rpc_url)
+    else:
+        from flask import Flask
+        _app = Flask(__name__)
+        register_mcp_routes(_app, args.rpc_url)
+
+        print()
+        print("╔══════════════════════════════════════════════════════════════════╗")
+        print("║  QTCL MCP Adapter v4.0 — HTTP Standalone Mode                    ║")
+        print("║  MCP 2025-06-18 Streamable HTTP | Pure Flask | Zero ASGI          ║")
+        print("╚══════════════════════════════════════════════════════════════════╝")
+        print(f"  RPC backend: {args.rpc_url}")
+        print(f"  Endpoints:")
+        print(f"    POST/GET /mcp          — Streamable HTTP (MCP 2025-06-18)")
+        print(f"    GET      /mcp/sse      — Legacy SSE (2024-11-05)")
+        print(f"    POST     /mcp/message  — Legacy message channel")
+        print(f"    GET      /mcp/health   — Health check")
+        print()
+        _app.run(host="0.0.0.0", port=args.port, debug=False, threaded=True)
