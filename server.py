@@ -653,7 +653,8 @@ import queue as _mcp_queue
 import uuid as _mcp_uuid
 
 # ── MCP Protocol constants ────────────────────────────────────────────────────
-_MCP_PROTOCOL_VERSION    = "2025-06-18"
+_MCP_PROTOCOL_VERSION    = "2025-03-26"   # latest ratified spec (Claude.ai compatible)
+_MCP_PROTOCOL_VERSIONS   = {"2025-03-26", "2024-11-05"}  # all supported versions
 _MCP_SERVER_NAME         = "qtcl-blockchain"
 _MCP_SERVER_VERSION      = "3.0.0"
 
@@ -1008,8 +1009,11 @@ def _mcp_handle_jsonrpc(body_bytes: bytes, session_id: Optional[str]) -> tuple:
                     "created": time.time(),
                     "last_access": time.time(),
                 }
+        # Negotiate: use client's requested version if we support it, else our best
+        client_version = params.get("protocolVersion", _MCP_PROTOCOL_VERSION) if isinstance(params, dict) else _MCP_PROTOCOL_VERSION
+        negotiated = client_version if client_version in _MCP_PROTOCOL_VERSIONS else _MCP_PROTOCOL_VERSION
         result = {
-            "protocolVersion": _MCP_PROTOCOL_VERSION,
+            "protocolVersion": negotiated,
             "serverInfo": {"name": _MCP_SERVER_NAME, "version": _MCP_SERVER_VERSION},
             "capabilities": {
                 "tools": {"listChanged": False},
@@ -1188,7 +1192,7 @@ def mcp_get():
     """
     # Stateless streamable-http: return JSON capability snapshot.
     # Claude's built-in MCP client (claude.ai) uses this to verify the server
-    # is alive and supports the 2025-06-18 protocol before POSTing initialize.
+    # is alive and supports the 2025-03-26 protocol before POSTing initialize.
     info = {
         "jsonrpc": "2.0",
         "method": "server/info",
@@ -1302,7 +1306,7 @@ def mcp_health_check():
 @app.route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])
 @app.route("/.well-known/oauth-authorization-server", methods=["GET"])
 def oauth_well_known():
-    """OAuth discovery stubs — QTCL MCP uses no auth, return minimal doc."""
+    """OAuth discovery — QTCL MCP is auth-free, return minimal doc to stop 404 noise."""
     resp = Response(
         _mcp_json({"resource": request.url_root.rstrip("/") + "/mcp", "bearer_methods_supported": []}),
         status=200, mimetype="application/json"
@@ -1314,9 +1318,8 @@ def oauth_well_known():
 
 @app.route("/register", methods=["POST"])
 def oauth_register():
-    """OAuth dynamic client registration stub — return 400 (not supported)."""
     resp = Response(
-        _mcp_json({"error": "not_supported", "error_description": "QTCL MCP requires no auth"}),
+        _mcp_json({"error": "not_supported", "error_description": "QTCL MCP requires no authentication"}),
         status=400, mimetype="application/json"
     )
     for k, v in _MCP_CORS_HEADERS.items():
@@ -1324,7 +1327,8 @@ def oauth_register():
     return resp
 
 
-
+@app.route("/mcp/capability", methods=["GET"])
+def mcp_capability_doc():
     """GET /mcp/capability — Serve the full QTCL agent capability JSON."""
     try:
         cap_path = os.path.join(os.path.dirname(__file__), "qtcl_agent_capability.json")
