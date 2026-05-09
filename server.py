@@ -5805,6 +5805,26 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         if not tx_id:
                             continue
                         try:
+                            # Normalize coinbase: extract amount from outputs, set proper tx_type
+                            _tx_type = tx.get("tx_type", "transfer").lower()
+                            _outputs = tx.get("outputs", [])
+                            if _tx_type in ("coinbase", "miner_reward", "treasury_reward"):
+                                # Derive proper type from recipient
+                                _to = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "") or (_outputs[0].get("address", "") if _outputs else "")
+                                if _to == miner_address:
+                                    _tx_type = "miner_reward"
+                                elif TessellationRewardSchedule and _to == TessellationRewardSchedule.TREASURY_ADDRESS:
+                                    _tx_type = "treasury_reward"
+                                # Extract amount from outputs[0].amount_base if top-level missing
+                                _amount_base = tx.get("amount_base") or 0
+                                if not _amount_base and _outputs:
+                                    _amount_base = _outputs[0].get("amount_base", 0)
+                                if not _amount_base:
+                                    _amount_base = int(float(tx.get("amount", 0)) * 100) if tx.get("amount") else 0
+                            else:
+                                _amount_base = tx.get("amount_base") or 0
+                                if not _amount_base:
+                                    _amount_base = int(float(tx.get("amount", 0)) * 100) if tx.get("amount") else 0
                             cur.execute(
                                 """
                                 INSERT INTO transactions
@@ -5819,9 +5839,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 (
                                     tx_id,
                                     tx.get("from_addr") or tx.get("from_address") or tx.get("from", "0" * 64),
-                                    tx.get("to_addr") or tx.get("to_address") or tx.get("to", ""),
-                                    int(tx.get("amount_base") or (float(tx.get("amount", 0)) * 100) or 0),
-                                    tx.get("tx_type", "transfer"),
+                                    tx.get("to_addr") or tx.get("to_address") or tx.get("to", "") or (_outputs[0].get("address", "") if _outputs else ""),
+                                    _amount_base,
+                                    _tx_type,
                                     height,
                                 ),
                             )
