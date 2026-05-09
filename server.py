@@ -3769,11 +3769,37 @@ _BLOCK_CACHE_LOCK = threading.RLock()
 
 
 def _cache_block(block_dict):
-    """Add block to cache (called by block sealing)"""
+    """Add block to cache with transaction data fetched from DB."""
     with _BLOCK_CACHE_LOCK:
         h = block_dict.get("height")
         if h:
-            _BLOCK_CACHE[h] = block_dict
+            entry = dict(block_dict)
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT tx_hash, from_address, to_address, amount, "
+                        "transaction_index, tx_type, status, quantum_state_hash, metadata "
+                        "FROM transactions WHERE height = %s ORDER BY transaction_index ASC",
+                        (h,),
+                    )
+                    txs = []
+                    for tr in cur.fetchall():
+                        txs.append({
+                            "tx_id": tr[0],
+                            "from_addr": tr[1] or "",
+                            "to_addr": tr[2] or "",
+                            "amount": int(tr[3]) if tr[3] is not None else 0,
+                            "tx_index": int(tr[4]) if tr[4] is not None else 0,
+                            "tx_type": tr[5] or "transfer",
+                            "status": tr[6] or "confirmed",
+                            "w_proof": tr[7] or "",
+                            "metadata": tr[8] if tr[8] else None,
+                        })
+                    entry["transactions"] = txs
+                    entry["tx_count"] = len(txs)
+            except Exception:
+                entry["transactions"] = block_dict.get("transactions", [])
+            _BLOCK_CACHE[h] = entry
 
 
 def _broadcast_block_event(block_event: dict) -> None:
@@ -3796,17 +3822,13 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
 
         blocks = []
         with _BLOCK_CACHE_LOCK:
-            logger.debug(
-                f"[RPC] getBlockRange cache debug: keys={list(_BLOCK_CACHE.keys())[:5]}"
-            )
-
             # Handle negative to_height: "from end"
             if to_h < 0:
                 max_height = max(_BLOCK_CACHE.keys()) if _BLOCK_CACHE else 0
                 to_h = max_height
                 from_h = max(
                     0, to_h + from_h + 1
-                )  # from_h was negative (e.g., -20 means 20 blocks before end)
+                )
 
             if to_h - from_h > 99:
                 to_h = from_h + 99
@@ -3816,6 +3838,32 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
             for h in range(from_h, to_h + 1):
                 if h in _BLOCK_CACHE:
                     blocks.append(_BLOCK_CACHE[h])
+
+        # Fill gaps from DB
+        if len(blocks) < (to_h - from_h + 1):
+            missing = [h for h in range(from_h, to_h + 1) if h not in _BLOCK_CACHE]
+            try:
+                with get_db_cursor() as cur:
+                    for h in missing:
+                        cur.execute(
+                            "SELECT height, block_hash, timestamp, w_state_hash, parent_hash, "
+                            "nonce, difficulty, coherence_snapshot, merkle_root, tx_count "
+                            "FROM blocks WHERE height = %s LIMIT 1", (h,))
+                        row = cur.fetchone()
+                        if row:
+                            b = {
+                                "height": row[0], "block_hash": row[1],
+                                "timestamp": int(row[2]) if row[2] else 0,
+                                "parent_hash": row[4] or ("0" * 64),
+                                "difficulty": int(float(row[6])) if row[6] else 5,
+                                "nonce": int(row[5]) if row[5] else 0,
+                            }
+                            _cache_block(b)
+                            with _BLOCK_CACHE_LOCK:
+                                if h in _BLOCK_CACHE:
+                                    blocks.append(_BLOCK_CACHE[h])
+            except Exception:
+                pass
 
         logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
         return _rpc_ok(
@@ -5832,7 +5880,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                  tx_type, status, height, updated_at)
                                 VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW())
                                 ON CONFLICT (tx_hash) DO UPDATE
-                                  SET height     = EXCLUDED.height,
+                                  SET amount     = EXCLUDED.amount,
+                                      tx_type    = EXCLUDED.tx_type,
+                                      height     = EXCLUDED.height,
                                       status     = 'confirmed',
                                       updated_at = NOW()
                             """,
