@@ -3475,7 +3475,7 @@ def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBalance — address QTCL balance via direct DB query."""
+    """qtcl_getBalance — address QTCL balance via direct DB query + UTXO fallback."""
     try:
         if not isinstance(params, (list, dict)):
             return _rpc_error(-32602, "params must be list or object", rpc_id)
@@ -3491,9 +3491,17 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
             "address_queried": address[:24] + "…" if len(address) > 24 else address
         }
 
+        wallet_balance = 0
+        wallet_tx_count = 0
+        wallet_addr_type = "unknown"
+        effective_balance = 0
+        utxo_balance = 0
+        utxo_count = 0
+        found_in_db = False
+
         try:
             with get_db_cursor() as cur:
-                # Check if wallet_addresses table exists
+                # Query wallet_addresses for digest balance
                 try:
                     cur.execute("""
                         SELECT EXISTS (
@@ -3506,60 +3514,102 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                 except Exception as _te:
                     _diagnostic["table_check_error"] = str(_te)
 
-                # Query balance
                 cur.execute(
                     "SELECT balance, transaction_count, address_type FROM wallet_addresses WHERE address = %s",
                     (address,),
                 )
                 row = cur.fetchone()
                 if row:
-                    wallet = {
-                        "address": address,
-                        "balance": row[0],
-                        "tx_count": row[1],
-                        "address_type": row[2] if len(row) > 2 else "unknown",
-                    }
-                    _diagnostic["found_in_db"] = True
-                    _diagnostic["raw_balance_base_units"] = int(row[0]) if row[0] else 0
-                else:
-                    wallet = None
-                    _diagnostic["found_in_db"] = False
-                    # Check how many total wallet addresses exist
-                    try:
-                        cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                        _total_wallets = cur.fetchone()[0]
-                        _diagnostic["total_wallets_in_db"] = (
-                            int(_total_wallets) if _total_wallets else 0
+                    wallet_balance = int(row[0]) if row[0] else 0
+                    wallet_tx_count = int(row[1]) if row[1] else 0
+                    wallet_addr_type = row[2] if len(row) > 2 else "unknown"
+                    found_in_db = True
+                    _diagnostic["wallet_balance_base_units"] = wallet_balance
+
+                # Query UTXO-computed balance from address_utxos (authoritative source)
+                try:
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = 'address_utxos'
                         )
-                    except Exception:
-                        pass
+                    """)
+                    _utxo_table_exists = cur.fetchone()[0] if cur.fetchone() else False
+                    _diagnostic["utxo_table_exists"] = bool(_utxo_table_exists)
+                except Exception:
+                    _diagnostic["utxo_table_exists"] = False
+
+                utxo_balance = 0
+                utxo_count = 0
+                if _diagnostic.get("utxo_table_exists"):
+                    try:
+                        cur.execute(
+                            "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM address_utxos WHERE address = %s AND spent = FALSE",
+                            (address,),
+                        )
+                        utxo_row = cur.fetchone()
+                        if utxo_row:
+                            utxo_balance = int(utxo_row[0]) if utxo_row[0] else 0
+                            utxo_count = int(utxo_row[1]) if utxo_row[1] else 0
+                    except Exception as _utxo_err:
+                        _diagnostic["utxo_query_error"] = str(_utxo_err)
+
+                _diagnostic["utxo_balance_base_units"] = utxo_balance
+                _diagnostic["utxo_count"] = utxo_count
+
+                # Use the HIGHER of wallet digest vs UTXO sum.
+                # If wallet digest is stale (0), UTXO sum gives the real balance.
+                effective_balance = max(wallet_balance, utxo_balance)
+
+                # Auto-heal: if UTXOs show balance but wallet digest doesn't, update it
+                if utxo_balance > 0 and wallet_balance == 0 and found_in_db:
+                    try:
+                        cur.execute(
+                            "UPDATE wallet_addresses SET balance = %s, updated_at = NOW() WHERE address = %s",
+                            (utxo_balance, address),
+                        )
+                        _diagnostic["wallet_auto_healed"] = True
+                        logger.info(f"[RPC] Auto-healed wallet_addresses balance for {address[:16]}…: {utxo_balance} base units")
+                    except Exception as _heal_err:
+                        _diagnostic["wallet_auto_heal_error"] = str(_heal_err)
+
+                # Auto-create wallet entry from UTXOs if missing entirely
+                if utxo_balance > 0 and not found_in_db:
+                    try:
+                        cur.execute("""
+                            INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, 'standard', NOW())
+                        """, (
+                            address,
+                            hashlib.sha256(address.encode()).hexdigest()[:64],
+                            hashlib.sha256(address.encode()).hexdigest()[:64],
+                            utxo_balance,
+                            utxo_count,
+                        ))
+                        _diagnostic["wallet_auto_created"] = True
+                        found_in_db = True
+                        wallet_balance = utxo_balance
+                        wallet_tx_count = utxo_count
+                        logger.info(f"[RPC] Auto-created wallet_addresses entry for {address[:16]}…: {utxo_balance} base units")
+                    except Exception as _create_err:
+                        _diagnostic["wallet_auto_create_error"] = str(_create_err)
+
         except Exception as _wqe:
             logger.debug(f"[RPC] query_wallet_info DB error: {_wqe}")
             _diagnostic["db_error"] = str(_wqe)
-            wallet = None
 
-        if wallet is None:
-            # Address not yet in DB — return 0 balance with diagnostic info
-            result = {
-                "address": address,
-                "balance": 0.0,
-                "symbol": "QTCL",
-                "diagnostic": _diagnostic,
-                "note": "Address not found in wallet_addresses table — no balance recorded",
-            }
-        else:
-            raw_balance = int(wallet.get("balance") or 0)
-            result = {
-                "address": address,
-                "balance": raw_balance / 100.0,
-                "symbol": "QTCL",
-                "raw_balance_base_units": raw_balance,
-                "transaction_count": wallet.get("tx_count", 0),
-                "address_type": wallet.get("address_type", "unknown"),
-                "diagnostic": _diagnostic,
-            }
-        logger.debug(
-            f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}"
+        result = {
+            "address": address,
+            "balance": effective_balance / 100.0,
+            "symbol": "QTCL",
+            "raw_balance_base_units": effective_balance,
+            "unspent_outputs": utxo_count,
+            "transaction_count": wallet_tx_count or utxo_count,
+            "address_type": wallet_addr_type,
+            "diagnostic": _diagnostic,
+        }
+        logger.info(
+            f"[RPC-METHOD] qtcl_getBalance: addr={address[:16]}… balance={result['balance']} QTCL utxos={utxo_count} wallet_found={found_in_db}"
         )
         return _rpc_ok(result, rpc_id)
     except Exception as e:
@@ -6715,6 +6765,9 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
                         "tx_id": tr[0], "from_address": tr[1] or "",
                         "to_address": tr[2] or "", "amount": float(tr[3] or 0),
                         "tx_type": tr[4] or "transfer",
+                        "outputs": meta.get("outputs", []),
+                        "inputs": meta.get("inputs", []),
+                        "metadata": meta,
                     })
                 if txs:
                     _settle_block_rewards(h, bh, miner, txs, [])
@@ -6722,6 +6775,241 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
         return _rpc_ok({"settled": settled, "total": len(rows)}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] retroSettle error: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WALLET AUTH — HypΓ PBKDF2 password verification (pure stdlib, no decrypt needed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_WALLET_VERIFIER_DOMAIN = b"QTCL_WALLET_VERIFIER_v2"
+_WALLET_PBKDF2_ITERATIONS = 600_000
+_WALLET_PBKDF2_KEY_LEN = 64
+
+def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
+    """qtcl_walletAuth — verify wallet password via PBKDF2 verifier."""
+    try:
+        if not isinstance(params, list) or not params:
+            return _rpc_error(-32602, "params: [{ wallet_data, password }]", rpc_id)
+        req = params[0] if isinstance(params[0], dict) else {}
+        wallet_data = req.get("wallet_data", {})
+        password = req.get("password", "")
+        if not wallet_data or not password:
+            return _rpc_error(-32602, "wallet_data and password required", rpc_id)
+
+        enc_pk = wallet_data.get("encrypted_private_key", {})
+        if not isinstance(enc_pk, dict):
+            return _rpc_error(-32602, "wallet_data.encrypted_private_key must be a dict", rpc_id)
+
+        salt_hex = enc_pk.get("salt_hex", "")
+        verifier_hex = enc_pk.get("verifier_hex", "")
+        if not salt_hex or not verifier_hex:
+            return _rpc_ok({"valid": False, "reason": "Missing salt_hex or verifier_hex in encrypted_private_key"}, rpc_id)
+
+        salt = bytes.fromhex(salt_hex)
+        stored_v = bytes.fromhex(verifier_hex)
+
+        raw = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt,
+                                   _WALLET_PBKDF2_ITERATIONS, dklen=_WALLET_PBKDF2_KEY_LEN)
+        verifier_key = raw[32:]
+        expected_v = hashlib.sha3_256(_WALLET_VERIFIER_DOMAIN + verifier_key).digest()
+
+        if not hmac.compare_digest(stored_v, expected_v):
+            return _rpc_ok({"valid": False, "reason": "Invalid password — PBKDF2 verifier mismatch"}, rpc_id)
+
+        address = wallet_data.get("address", "")
+        public_key = wallet_data.get("public_key", "")
+        vault_version = wallet_data.get("vault_version", enc_pk.get("vault_version", 2))
+
+        logger.info(f"[WALLET-AUTH] ✅ HypΓ auth success: {address[:16]}… vault_v{vault_version}")
+        return _rpc_ok({
+            "valid": True,
+            "address": address,
+            "public_key": public_key,
+            "vault_version": vault_version,
+        }, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[RPC] walletAuth error: {e}")
+        return _rpc_error(-32603, f"Wallet auth error: {str(e)}", rpc_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET UTXOs — query unspent outputs for an address
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _rpc_getUTXOs(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getUTXOs — return unspent outputs for address."""
+    try:
+        address = None
+        limit = 1000
+        if isinstance(params, list) and params:
+            if isinstance(params[0], dict):
+                address = params[0].get("address", "")
+                limit = int(params[0].get("limit", 1000))
+            else:
+                address = str(params[0])
+        elif isinstance(params, dict):
+            address = params.get("address", "")
+            limit = int(params.get("limit", 1000))
+
+        if not address:
+            return _rpc_error(-32602, "address required", rpc_id)
+
+        utxos = []
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT utxo_id, tx_hash, output_index, amount, spent,
+                           created_at_height, created_at_timestamp
+                    FROM address_utxos
+                    WHERE address = %s AND spent = FALSE
+                    ORDER BY created_at_height DESC NULLS LAST
+                    LIMIT %s
+                """, (address, limit))
+                for row in cur.fetchall():
+                    utxos.append({
+                        "utxo_id": int(row[0]),
+                        "tx_hash": row[1],
+                        "output_index": int(row[2]),
+                        "amount_base": int(row[3]) if row[3] else 0,
+                        "spent": bool(row[4]),
+                        "created_at_height": int(row[5]) if row[5] else None,
+                        "created_at_timestamp": int(row[6]) if row[6] else None,
+                    })
+        except Exception as _ue:
+            logger.debug(f"[RPC] getUTXOs DB error: {_ue}")
+
+        return _rpc_ok({"utxos": utxos, "count": len(utxos), "address": address}, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[RPC] getUTXOs error: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WALLET CRYPTO — stdlib-only SHAKE-256-CTR + SHA3-256 MAC (same as hyp_lwe.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _wallet_shake_ctr(key: bytes, nonce: bytes, data: bytes) -> bytes:
+    """SHAKE-256 CTR mode — symmetric (encrypt == decrypt)."""
+    out = bytearray(len(data))
+    for i in range(0, len(data), 64):
+        counter = struct.pack('<Q', i // 64)
+        stream = hashlib.shake_256(key + nonce + counter).digest(64)
+        chunk = data[i:i+64]
+        for j in range(len(chunk)):
+            out[i + j] = chunk[j] ^ stream[j]
+    return bytes(out)
+
+def _wallet_aead_decrypt(key: bytes, nonce: bytes, ciphertext_and_tag: bytes) -> bytes:
+    """AEAD decrypt: verify SHA3-256 MAC, then SHAKE-256-CTR decrypt."""
+    ciphertext = ciphertext_and_tag[:-32]
+    tag = ciphertext_and_tag[-32:]
+    enc_key = hashlib.sha3_256(b"QTCL_ENC:" + key).digest()
+    mac_key = hashlib.sha3_256(b"QTCL_MAC:" + key).digest()
+    expected_tag = hashlib.sha3_256(mac_key + nonce + ciphertext).digest()
+    if not hmac.compare_digest(tag, expected_tag):
+        raise ValueError("Authentication tag verification failed")
+    return _wallet_shake_ctr(enc_key, nonce, ciphertext)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIGN AND SUBMIT TX — decrypt private key, sign with HypΓ, submit to mempool
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
+    """qtcl_signAndSubmitTx — server-side HypΓ decrypt, sign, submit."""
+    try:
+        if not isinstance(params, list) or not params:
+            return _rpc_error(-32602, "params: [{ wallet_data, password, tx }]", rpc_id)
+        req = params[0] if isinstance(params[0], dict) else {}
+        wallet_data = req.get("wallet_data", {})
+        password = req.get("password", "")
+        tx_data = req.get("tx", {})
+
+        if not wallet_data or not password or not tx_data:
+            return _rpc_error(-32602, "wallet_data, password, and tx required", rpc_id)
+
+        enc_pk = wallet_data.get("encrypted_private_key", {})
+        address = wallet_data.get("address", "")
+
+        # 1. Verify password via PBKDF2 verifier
+        try:
+            salt = bytes.fromhex(enc_pk.get("salt_hex", ""))
+            stored_v = bytes.fromhex(enc_pk.get("verifier_hex", ""))
+            raw = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt,
+                                       _WALLET_PBKDF2_ITERATIONS, dklen=_WALLET_PBKDF2_KEY_LEN)
+            verifier_key = raw[32:]
+            expected_v = hashlib.sha3_256(_WALLET_VERIFIER_DOMAIN + verifier_key).digest()
+            if not hmac.compare_digest(stored_v, expected_v):
+                return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
+        except Exception as _ve:
+            return _rpc_ok({"valid": False, "reason": f"Verification error: {str(_ve)}"}, rpc_id)
+
+        # 2. Decrypt private key (stdlib-only SHAKE-256-CTR + SHA3-256 MAC)
+        try:
+            nonce = bytes.fromhex(enc_pk.get("nonce_hex", ""))
+            ciphertext = bytes.fromhex(enc_pk.get("ciphertext_hex", ""))
+            tag = bytes.fromhex(enc_pk.get("tag_hex", ""))
+            enc_key = raw[:32]
+            private_key_bytes = _wallet_aead_decrypt(enc_key, nonce, ciphertext + tag)
+            private_key_str = private_key_bytes.decode('utf-8')
+        except Exception as _de:
+            logger.error(f"[SIGN-TX] Decrypt failed: {_de}")
+            return _rpc_ok({"valid": False, "reason": "Private key decryption failed — wrong password or corrupted wallet"}, rpc_id)
+
+        # 3. Build and sign transaction
+        try:
+            _to = tx_data.get("to_address", tx_data.get("to", ""))
+            _amount = float(tx_data.get("amount", 0))
+            _fee = float(tx_data.get("fee", 0.01))
+            _memo = tx_data.get("memo", "")
+
+            _amount_base = int(round(_amount * 100))
+            _fee_base = int(round(_fee * 100))
+
+            tx_id = hashlib.sha3_256(f"{address}{_to}{_amount}{time.time()}".encode()).hexdigest()
+
+            engine = _init_hlwe_engine()
+            tx_hash_bytes = hashlib.sha3_256(json.dumps({
+                "from": address, "to": _to, "amount": _amount_base,
+                "fee": _fee_base, "nonce": int(time.time() * 1e6),
+                "memo": _memo,
+            }, sort_keys=True).encode()).digest()
+            sig = engine.sign_hash(tx_hash_bytes.hex(), private_key_str)
+
+            # Zero private key from memory immediately
+            private_key_str = "0" * len(private_key_str)
+
+            tx_payload = {
+                "tx_id": tx_id, "tx_hash": tx_id, "tx_type": "transfer",
+                "from_addr": address, "to_addr": _to,
+                "amount": float(_amount), "amount_base": _amount_base,
+                "fee": _fee, "fee_base": _fee_base,
+                "nonce": int(time.time() * 1e6),
+                "signature": sig, "memo": _memo,
+                "status": "pending", "timestamp": int(time.time()),
+            }
+
+            # 4. Submit to mempool via existing handler
+            mempool_result = _rpc_submitTransaction([tx_payload], rpc_id)
+            if isinstance(mempool_result, dict) and mempool_result.get("error"):
+                return _rpc_ok({"valid": False, "reason": f"Mempool rejected: {mempool_result['error'].get('message', 'unknown')}"}, rpc_id)
+
+            tx_hash_out = tx_id
+            if isinstance(mempool_result, dict):
+                tx_hash_out = mempool_result.get("result", {}).get("tx_hash", tx_id)
+
+            logger.info(f"[SIGN-TX] ✅ Signed+submitted: {tx_id[:16]}… {address[:16]}… → {_to[:16]}… {_amount} QTCL")
+            return _rpc_ok({"valid": True, "tx_hash": tx_hash_out, "tx_id": tx_id}, rpc_id)
+
+        except Exception as _se:
+            logger.error(f"[SIGN-TX] Sign/submit failed: {_se}", exc_info=True)
+            return _rpc_ok({"valid": False, "reason": f"Sign/submit error: {str(_se)[:100]}"}, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[RPC] signAndSubmitTx error: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
 
 
@@ -6779,6 +7067,10 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_hyp_decryptMessage": qtcl_hyp_decryptMessage,
     "qtcl_hyp_signBlock": qtcl_hyp_signBlock,
     "qtcl_hyp_verifyBlock": qtcl_hyp_verifyBlock,
+    # ── Wallet Auth + UTXOs + Sign/Submit ───────────────────────────────────────
+    "qtcl_walletAuth": _rpc_walletAuth,
+    "qtcl_getUTXOs": _rpc_getUTXOs,
+    "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
 }
 
 
