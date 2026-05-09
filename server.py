@@ -7276,6 +7276,66 @@ def serve_hyp_doc():
         return f"Error: {e}", 500
 
 
+@app.route("/tx", methods=["GET"])
+def serve_tx():
+    """GET /tx — Serve tx.html (transaction system / wallet)."""
+    try:
+        import os
+        from flask import send_file
+        tx_path = os.path.join(os.path.dirname(__file__), "tx.html")
+        if os.path.exists(tx_path):
+            return send_file(tx_path, mimetype="text/html")
+        return "tx.html not found", 404
+    except Exception as e:
+        logger.error(f"[TX] Failed to serve tx.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/vault", methods=["GET"])
+def serve_vault():
+    """GET /vault — Serve vault.html (post-quantum encrypted vault)."""
+    try:
+        import os
+        from flask import send_file
+        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
+        if os.path.exists(vault_path):
+            return send_file(vault_path, mimetype="text/html")
+        return "vault.html not found", 404
+    except Exception as e:
+        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/agents", methods=["GET"])
+def serve_agents():
+    """GET /agents — Serve agents.html (MCP agent integration)."""
+    try:
+        import os
+        from flask import send_file
+        agents_path = os.path.join(os.path.dirname(__file__), "agents.html")
+        if os.path.exists(agents_path):
+            return send_file(agents_path, mimetype="text/html")
+        return "agents.html not found", 404
+    except Exception as e:
+        logger.error(f"[AGENTS] Failed to serve agents.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/bridge", methods=["GET"])
+def serve_bridge():
+    """GET /bridge — Serve bridge.html if available."""
+    try:
+        import os
+        from flask import send_file
+        bridge_path = os.path.join(os.path.dirname(__file__), "bridge.html")
+        if os.path.exists(bridge_path):
+            return send_file(bridge_path, mimetype="text/html")
+        return "bridge.html not found", 404
+    except Exception as e:
+        logger.error(f"[BRIDGE] Failed to serve bridge.html: {e}")
+        return f"Error: {e}", 500
+
+
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
 def rpc_hlwe_system_info():
     """GET /rpc/hlwe/system-info — HypΓ cryptographic system information.

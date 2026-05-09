@@ -533,6 +533,16 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
       <div class="stat-val" id="s-blocktime">—</div>
       <div class="stat-sub">seconds avg</div>
     </div>
+    <div class="stat am">
+      <div class="stat-label">⛏ Miner Reward</div>
+      <div class="stat-val" id="s-miner-reward" style="font-size:16px">—</div>
+      <div class="stat-sub">QTCL per block</div>
+    </div>
+    <div class="stat cy">
+      <div class="stat-label">🏛 Treasury Reward</div>
+      <div class="stat-val" id="s-treasury-reward" style="font-size:16px">—</div>
+      <div class="stat-sub">QTCL per block</div>
+    </div>
   </div>
 
   <!-- Chain + Detail -->
@@ -672,6 +682,8 @@ let _chainBlocks = [];
 let _exPage = 0;
 const EX_PER_PAGE = 20;
 let _exMaxHeight = 0;
+const MINER_REWARD_QTCL = 7.20;
+const TREASURY_REWARD_QTCL = 0.80;
 
 // ── Server readiness state ───────────────────────────────────────────
 let _serverReady = false;
@@ -714,10 +726,10 @@ function setStatus(text, color) {
   const dot = document.querySelector('.cd');
   const cp = document.getElementById('cp');
   if (el) el.textContent = text;
-  const colors = {gr: 'var(--gr)', am: 'var(--am)', re: 'var(--re)', cy: 'var(--cy)'};
+  const colors = {gr: 'rgba(0,232,138,1)', am: 'rgba(255,140,0,1)', re: 'rgba(244,63,94,1)', cy: 'rgba(0,212,255,1)'};
   const c = colors[color] || colors.cy;
   if (dot) dot.style.background = c;
-  if (cp) cp.style.borderColor = c.replace('var(--', 'rgba(').replace(')', ', .25)');
+  if (cp) cp.style.borderColor = c.replace('1)', '.25)');
 }
 
 // ── RPC Helper — GET /rpc?method=…&params=…&id=… (we ask nicely, never POST) ──
@@ -742,7 +754,7 @@ async function rpc(method, params, retries = 3) {
 
       const data = await res.json();
       if (data.error) {
-        if (data.error.code === -32000 && attempt < retries) {
+        if (data.error.code === -32000 && attempt < retries && (!data.error.message || data.error.message.includes('initializing') || data.error.message.includes('Initializing') || data.error.message.includes('Server'))) {
           _serverReady = false;
           setStatus('INIT…', 'am');
           await sleep(4000 + attempt * 2000);
@@ -1027,6 +1039,14 @@ function renderBlockDetail(b, container) {
         <div class="mg-label">⛏ Miner Address</div>
         <div class="mg-val" style="color:var(--am);word-break:break-all;font-size:9px">${b.miner_address}</div>
       </div>` : ''}
+      <div class="mg-item">
+        <div class="mg-label">⛏ Miner Reward</div>
+        <div class="mg-val" style="color:var(--am)">${MINER_REWARD_QTCL} QTCL</div>
+      </div>
+      <div class="mg-item">
+        <div class="mg-label">🏛 Treasury Reward</div>
+        <div class="mg-val" style="color:var(--cy)">${TREASURY_REWARD_QTCL} QTCL</div>
+      </div>
     </div>
 
     <!-- TRANSACTIONS -->
@@ -1153,6 +1173,11 @@ async function fetchChain() {
         }
       }
     }
+
+    const minerRewardEl = document.getElementById('s-miner-reward');
+    const treasuryRewardEl = document.getElementById('s-treasury-reward');
+    if (minerRewardEl) minerRewardEl.textContent = MINER_REWARD_QTCL.toFixed(2);
+    if (treasuryRewardEl) treasuryRewardEl.textContent = TREASURY_REWARD_QTCL.toFixed(2);
 
     renderChainRail(blocks);
     setStatus('LIVE', 'gr');
