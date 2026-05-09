@@ -1309,7 +1309,7 @@ def _settle_block_rewards(
                     "block_hash": block_hash,
                     "timestamp": int(time.time()),
                     "difficulty": 4,
-                    "miner": miner_address,
+                    "miner_address": miner_address,
                     "w_state_fidelity": 0.0,
                 },
                 txs=txs,
@@ -1348,7 +1348,7 @@ def _settle_block_rewards(
                     "block_hash": block_hash,
                     "timestamp": int(time.time()),
                     "difficulty": 4,
-                    "miner": miner_address,
+                    "miner_address": miner_address,
                     "w_state_fidelity": 0.0,
                 },
                 txs=txs,
@@ -3646,7 +3646,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         """
                         SELECT height, block_hash, timestamp, w_state_hash,
                                parent_hash, nonce, difficulty,
-                               coherence_snapshot, merkle_root, tx_count
+                               coherence_snapshot, merkle_root, tx_count,
+                               miner_address
                         FROM blocks WHERE height = %s LIMIT 1
                     """,
                         (h,),
@@ -3673,6 +3674,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         "pq_curr": h,
                         "pq_last": max(0, h - 1),
                         "tx_count": int(row[9]) if row[9] else 0,
+                        "miner_address": row[10] or "",
                         "mined": True,
                         "finalized": True,
                     }
@@ -3758,16 +3760,49 @@ _BLOCK_CACHE_LOCK = threading.RLock()
 def _cache_block(block_dict, txs=None):
     """Add block to cache with optional transaction data.
 
-    If *txs* is provided, uses it directly (caller already has the data
-    from the block submission).  Otherwise falls back to querying the DB.
+    If *txs* is provided, normalizes field names to the canonical format
+    (tx_id, from_addr, to_addr, amount, tx_type, status) that the frontend
+    expects.  Otherwise falls back to querying the DB.
     """
     with _BLOCK_CACHE_LOCK:
         h = block_dict.get("height")
-        if h:
+        if h is not None:
             entry = dict(block_dict)
             if txs is not None:
-                entry["transactions"] = list(txs)
-                entry["tx_count"] = len(txs)
+                # Normalize raw miner tx dicts → canonical format
+                normalized = []
+                for idx, tx in enumerate(txs):
+                    tx_type = (tx.get("tx_type") or "transfer").lower()
+                    outputs = tx.get("outputs", [])
+                    # Resolve amount: prefer amount_base (integer base units)
+                    amount_base = tx.get("amount_base") or 0
+                    if not amount_base and outputs:
+                        amount_base = outputs[0].get("amount_base", 0)
+                    if not amount_base:
+                        raw_amt = tx.get("amount", 0)
+                        if raw_amt:
+                            amount_base = int(float(raw_amt) * 100)
+                    # Resolve addresses
+                    to_addr = (
+                        tx.get("to_addr") or tx.get("to_address") or tx.get("to")
+                        or (outputs[0].get("address", "") if outputs else "")
+                    )
+                    from_addr = (
+                        tx.get("from_addr") or tx.get("from_address") or tx.get("from") or ""
+                    )
+                    normalized.append({
+                        "tx_id": tx.get("tx_id") or tx.get("tx_hash", ""),
+                        "from_addr": from_addr,
+                        "to_addr": to_addr,
+                        "amount": amount_base,
+                        "tx_index": tx.get("transaction_index", idx),
+                        "tx_type": tx_type,
+                        "status": tx.get("status", "confirmed"),
+                        "w_proof": tx.get("quantum_state_hash") or tx.get("w_proof", ""),
+                        "metadata": tx.get("metadata"),
+                    })
+                entry["transactions"] = normalized
+                entry["tx_count"] = len(normalized)
             else:
                 try:
                     with get_db_cursor() as cur:
@@ -3843,16 +3878,22 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                     for h in missing:
                         cur.execute(
                             "SELECT height, block_hash, timestamp, w_state_hash, parent_hash, "
-                            "nonce, difficulty, coherence_snapshot, merkle_root, tx_count "
+                            "nonce, difficulty, coherence_snapshot, merkle_root, tx_count, "
+                            "miner_address "
                             "FROM blocks WHERE height = %s LIMIT 1", (h,))
                         row = cur.fetchone()
                         if row:
                             b = {
                                 "height": row[0], "block_hash": row[1],
                                 "timestamp": int(row[2]) if row[2] else 0,
+                                "w_entropy_hash": row[3] or "",
                                 "parent_hash": row[4] or ("0" * 64),
-                                "difficulty": int(float(row[6])) if row[6] else 5,
                                 "nonce": int(row[5]) if row[5] else 0,
+                                "difficulty": int(float(row[6])) if row[6] else 5,
+                                "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                                "merkle_root": row[8] or ("0" * 64),
+                                "tx_count": int(row[9]) if row[9] else 0,
+                                "miner_address": row[10] or "",
                             }
                             _cache_block(b)
                             with _BLOCK_CACHE_LOCK:

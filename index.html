@@ -590,7 +590,7 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
             <th>HEIGHT</th>
             <th>BLOCK HASH (FULL)</th>
             <th>PARENT HASH (FULL)</th>
-            <th>MERKLE ROOT</th>
+            <th>MINER</th>
             <th>TIMESTAMP (UTC)</th>
             <th>DIFFICULTY</th>
             <th>NONCE</th>
@@ -885,6 +885,7 @@ function renderChainRail(blocks) {
           <div class="bc-meta-item"><div class="bc-meta-label">Nonce</div><div class="bc-meta-val">${b.nonce !== undefined ? b.nonce.toLocaleString() : '—'}</div></div>
           <div class="bc-meta-item"><div class="bc-meta-label">TXNs</div><div class="bc-meta-val" style="color:var(--vi)">${b.tx_count || (b.transactions ? b.transactions.length : 0)}</div></div>
           <div class="bc-meta-item"><div class="bc-meta-label">QF</div><div class="bc-meta-val" style="color:var(--gr)">${(b.w_state_fidelity || b.quantum_fidelity || 0).toFixed(4)}</div></div>
+          ${b.miner_address ? `<div class="bc-meta-item" style="grid-column:1/-1"><div class="bc-meta-label">⛏ Miner</div><div class="bc-meta-val" style="color:var(--am);font-size:7.5px;word-break:break-all">${b.miner_address}</div></div>` : ''}
         </div>
       </div>
       ${!isLast ? '<div class="bc-connector"><div class="bc-connector-line"></div></div>' : ''}
@@ -913,10 +914,6 @@ async function selectBlock(height) {
   try {
     const block = await rpc('qtcl_getBlock', [height]);
     if (!block) throw new Error('Block not found');
-    if (!block.transactions || block.transactions.length === 0) {
-      const txRes = await rpc('qtcl_getBlockTransactions', [height]).catch(()=>({transactions:[]}));
-      if (txRes && txRes.transactions) block.transactions = txRes.transactions;
-    }
     renderBlockDetail(block, detailScroll);
   } catch(e) {
     detailScroll.innerHTML = `<div style="padding:16px"><div class="error-msg">Failed to load block: ${e.message}</div></div>`;
@@ -1025,6 +1022,11 @@ function renderBlockDetail(b, container) {
         <div class="mg-label">Transaction Count</div>
         <div class="mg-val" style="color:var(--vi)">${b.tx_count || txs.length}</div>
       </div>
+      ${b.miner_address ? `
+      <div class="mg-item" style="grid-column:1/-1">
+        <div class="mg-label">⛏ Miner Address</div>
+        <div class="mg-val" style="color:var(--am);word-break:break-all;font-size:9px">${b.miner_address}</div>
+      </div>` : ''}
     </div>
 
     <!-- TRANSACTIONS -->
@@ -1249,7 +1251,7 @@ function renderExTable(blocks) {
   tbody.innerHTML = blocks.map(b => {
     const hash = b.block_hash || b.hash || '—';
     const parent = b.parent_hash || b.previous_hash || (b.height === 0 ? '0'.repeat(64) : '—');
-    const merkle = b.merkle_root || '—';
+    const miner = b.miner_address || '—';
     const qf = (b.w_state_fidelity || b.quantum_fidelity || 0).toFixed(4);
     const txCount = b.tx_count || (b.transactions ? b.transactions.length : 0);
     return `
@@ -1257,7 +1259,7 @@ function renderExTable(blocks) {
         <td class="height-cell">#${b.height}</td>
         <td class="hash-cell">${hash}</td>
         <td class="parent-cell">${parent}</td>
-        <td class="hash-cell" style="color:var(--gr);opacity:.8">${merkle}</td>
+        <td class="hash-cell" style="color:var(--am);opacity:.9;max-width:160px">${miner !== '—' ? shortAddr(miner) : '—'}</td>
         <td class="time-cell">${fmtTime(b.timestamp || b.timestamp_s)}</td>
         <td class="num-cell" style="color:var(--go)">${b.difficulty || '—'}</td>
         <td class="num-cell">${b.nonce !== undefined ? b.nonce.toLocaleString() : '—'}</td>
