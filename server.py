@@ -908,14 +908,15 @@ def _mcp_dispatch_tool(name: str, arguments: dict, req_id: Any) -> dict:
             hash_val = arguments.get("hash", "")
             height_val = arguments.get("height", -1)
             if hash_val:
-                key = hash_val
+                # Pass as dict so _rpc_getBlock can branch on block_hash vs height
+                rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlock", "params": [{"hash": hash_val}], "id": req_id})
             elif int(height_val) >= 0:
-                key = int(height_val)
+                rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlock", "params": [int(height_val)], "id": req_id})
             else:
                 tip_res = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlockHeight", "params": [], "id": req_id})
                 tip = tip_res.get("result", {}) if isinstance(tip_res, dict) else {}
                 key = tip.get("height", 0) if isinstance(tip, dict) else 0
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlock", "params": [key], "id": req_id})
+                rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlock", "params": [int(key)], "id": req_id})
 
         elif name == "qtcl_get_recent_transactions":
             address = arguments.get("address", "")
@@ -4378,7 +4379,12 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getTransaction — tx details by hash."""
+    """qtcl_getTransaction — tx details by hash.
+
+    Resolution order:
+      1. PostgreSQL transactions table (authoritative, covers all persisted txs)
+      2. In-memory blockchain index (covers transactions received but not yet flushed)
+    """
     try:
         logger.debug(
             f"[RPC-METHOD] qtcl_getTransaction called with params={params}, id={rpc_id}"
@@ -4391,35 +4397,67 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
         if not tx_hash:
             logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx_hash missing or empty")
             return _rpc_error(-32602, "tx_hash required", rpc_id)
+
+        # ── 1. DB-authoritative lookup (covers tx_hash AND tx_id column aliases) ──
+        try:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tx_hash, from_address, to_address, amount,
+                           transaction_index, tx_type, status, height,
+                           block_hash, quantum_state_hash, metadata, created_at
+                    FROM transactions
+                    WHERE tx_hash = %s
+                    LIMIT 1
+                    """,
+                    (tx_hash,),
+                )
+                row = cur.fetchone()
+                if row:
+                    meta = row[10]
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except Exception:
+                            meta = {}
+                    tx = {
+                        "tx_id": row[0],
+                        "tx_hash": row[0],
+                        "from_addr": row[1] or "",
+                        "from_address": row[1] or "",
+                        "to_addr": row[2] or "",
+                        "to_address": row[2] or "",
+                        "amount": int(row[3]) if row[3] is not None else 0,
+                        "tx_index": int(row[4]) if row[4] is not None else 0,
+                        "tx_type": row[5] or "transfer",
+                        "status": row[6] or "confirmed",
+                        "height": row[7],
+                        "block_hash": row[8] or "",
+                        "w_proof": row[9] or "",
+                        "metadata": meta or {},
+                        "inputs": (meta or {}).get("inputs", []),
+                        "outputs": (meta or {}).get("outputs", []),
+                    }
+                    logger.debug(f"[RPC-METHOD] qtcl_getTransaction: found in DB tx_hash={tx_hash[:16]}…")
+                    return _rpc_ok(tx, rpc_id)
+        except Exception as db_err:
+            logger.debug(f"[RPC-METHOD] qtcl_getTransaction: DB lookup error: {db_err}")
+
+        # ── 2. In-memory blockchain index fallback ──────────────────────────────
         try:
             from globals import get_blockchain
-
             bc = get_blockchain()
-            if bc is None:
-                logger.warning(
-                    f"[RPC-METHOD] qtcl_getTransaction: blockchain not initialized"
-                )
-                return _rpc_error(-32003, "Blockchain not synced", rpc_id)
-            tx = bc.get_transaction(tx_hash)
-            if tx is None:
-                logger.debug(
-                    f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})"
-                )
-                return _rpc_error(
-                    -32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash}
-                )
-            logger.debug(f"[RPC-METHOD] qtcl_getTransaction success: tx_hash={tx_hash}")
-            return _rpc_ok(tx, rpc_id)
+            if bc is not None:
+                tx = bc.get_transaction(tx_hash)
+                if tx is not None:
+                    logger.debug(f"[RPC-METHOD] qtcl_getTransaction: found in memory index tx_hash={tx_hash[:16]}…")
+                    return _rpc_ok(tx, rpc_id)
         except Exception as be:
-            logger.exception(
-                f"[RPC-METHOD] qtcl_getTransaction: blockchain error: {be}"
-            )
-            return _rpc_error(
-                -32603,
-                f"TX lookup failed: {str(be)}",
-                rpc_id,
-                {"exception": str(be).__class__.__name__},
-            )
+            logger.debug(f"[RPC-METHOD] qtcl_getTransaction: in-memory fallback error: {be}")
+
+        logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})")
+        return _rpc_error(-32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash})
+
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getTransaction outer exception: {e}")
         return _rpc_error(
@@ -5540,6 +5578,18 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
         )
 
 
+def _iso(dt: Any) -> Optional[str]:
+    """Convert a datetime, float epoch, or None → ISO-8601 string (or None)."""
+    if dt is None:
+        return None
+    try:
+        if hasattr(dt, "isoformat"):
+            return dt.isoformat()
+        return datetime.fromtimestamp(float(dt), tz=timezone.utc).isoformat()
+    except Exception:
+        return str(dt)
+
+
 def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
     """qtcl_getOracleRegistry — paginated on-chain oracle registry.
     Params (object or positional list):
@@ -6021,12 +6071,15 @@ def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
     try:
         engine = _init_hlwe_engine()
         kp = engine.generate_keypair()
+        # HypKeyPair may or may not carry a .timestamp field depending on engine version;
+        # fall back to wall-clock ISO string so the MCP tool always returns a valid value.
+        _kp_ts = getattr(kp, "timestamp", None) or datetime.now(timezone.utc).isoformat()
         return _rpc_ok(
             {
                 "private_key": kp.private_key,
                 "public_key": kp.public_key,
                 "address": kp.address,
-                "timestamp": kp.timestamp,
+                "timestamp": _kp_ts,
             },
             rpc_id,
         )
