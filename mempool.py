@@ -2081,6 +2081,9 @@ class Mempool:
 # MEMPOOL SINGLETON ACCESS — thread-safe, lazy initialization
 # ══════════════════════════════════════════════════════════════════════════════
 
+_MEMPOOL: "Mempool | None" = None          # module-level singleton
+_MEMPOOL_LOCK = threading.Lock()           # guards initialization
+
 def get_mempool() -> Mempool:
     """
     Get or create the process-wide Mempool singleton.

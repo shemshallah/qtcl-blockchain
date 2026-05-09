@@ -97,7 +97,7 @@ _RPC_INLINE_METHODS: frozenset = frozenset(
 
 # Slow methods (DB round-trips, crypto ops) — get pool + timeout protection
 _RPC_TIMEOUT_MAP: dict = {
-    "qtcl_getBlockRange": 10.0,
+    "qtcl_getBlockRange": 20.0,
     "qtcl_getTransactions": 10.0,
     "qtcl_getBlock": 5.0,
     "qtcl_getBalance": 4.0,
@@ -1298,8 +1298,33 @@ def mcp_health_check():
     return resp
 
 
-@app.route("/mcp/capability", methods=["GET"])
-def mcp_capability_doc():
+@app.route("/.well-known/oauth-protected-resource", methods=["GET"])
+@app.route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])
+@app.route("/.well-known/oauth-authorization-server", methods=["GET"])
+def oauth_well_known():
+    """OAuth discovery stubs — QTCL MCP uses no auth, return minimal doc."""
+    resp = Response(
+        _mcp_json({"resource": request.url_root.rstrip("/") + "/mcp", "bearer_methods_supported": []}),
+        status=200, mimetype="application/json"
+    )
+    for k, v in _MCP_CORS_HEADERS.items():
+        resp.headers[k] = v
+    return resp
+
+
+@app.route("/register", methods=["POST"])
+def oauth_register():
+    """OAuth dynamic client registration stub — return 400 (not supported)."""
+    resp = Response(
+        _mcp_json({"error": "not_supported", "error_description": "QTCL MCP requires no auth"}),
+        status=400, mimetype="application/json"
+    )
+    for k, v in _MCP_CORS_HEADERS.items():
+        resp.headers[k] = v
+    return resp
+
+
+
     """GET /mcp/capability — Serve the full QTCL agent capability JSON."""
     try:
         cap_path = os.path.join(os.path.dirname(__file__), "qtcl_agent_capability.json")
@@ -4651,19 +4676,20 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 if h in _BLOCK_CACHE:
                     blocks.append(_BLOCK_CACHE[h])
 
-        # Fill gaps from DB
+        # Fill gaps from DB — single batch query for all missing heights
         if len(blocks) < (to_h - from_h + 1):
             missing = [h for h in range(from_h, to_h + 1) if h not in _BLOCK_CACHE]
-            try:
-                with get_db_cursor() as cur:
-                    for h in missing:
+            if missing:
+                try:
+                    with get_db_cursor() as cur:
                         cur.execute(
                             "SELECT height, block_hash, timestamp, w_state_hash, parent_hash, "
                             "nonce, difficulty, coherence_snapshot, merkle_root, tx_count, "
                             "miner_address "
-                            "FROM blocks WHERE height = %s LIMIT 1", (h,))
-                        row = cur.fetchone()
-                        if row:
+                            "FROM blocks WHERE height = ANY(%s) ORDER BY height",
+                            (missing,)
+                        )
+                        for row in cur.fetchall():
                             b = {
                                 "height": row[0], "block_hash": row[1],
                                 "timestamp": int(row[2]) if row[2] else 0,
@@ -4677,11 +4703,12 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                                 "miner_address": row[10] or "",
                             }
                             _cache_block(b)
-                            with _BLOCK_CACHE_LOCK:
+                        with _BLOCK_CACHE_LOCK:
+                            for h in missing:
                                 if h in _BLOCK_CACHE:
                                     blocks.append(_BLOCK_CACHE[h])
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
         return _rpc_ok(
