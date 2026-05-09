@@ -1845,9 +1845,13 @@ async function executeSend() {
     }]);
 
     if (r.valid === false) {
-      toast('Wallet password incorrect — please re-authenticate', 'error');
+      const reason = r.reason || 'Transaction rejected by server';
+      toast('✕ ' + reason, 'error', 6000);
       btn.disabled = false; btn.textContent = 'Sign & Submit';
-      pwd = '';
+      if (reason.toLowerCase().includes('password') || reason.toLowerCase().includes('auth')) {
+        _signPassword = '';
+        pwd = '';
+      }
       return;
     }
 
