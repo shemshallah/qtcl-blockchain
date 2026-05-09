@@ -7809,6 +7809,7 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
 
             tx_payload = {
                 "tx_id": tx_id, "tx_hash": tx_id, "tx_type": "transfer",
+                "from_address": address, "to_address": _to,
                 "from_addr": address, "to_addr": _to,
                 "amount": float(_amount), "amount_base": _amount_base,
                 "fee": _fee, "fee_base": _fee_base,
