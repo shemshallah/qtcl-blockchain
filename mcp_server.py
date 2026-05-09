@@ -74,7 +74,8 @@ from contextlib import asynccontextmanager
 QTCL_RPC_URL = os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
 MCP_SERVER_NAME = "qtcl-blockchain"
 MCP_SERVER_VERSION = "3.0.0"
-MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_PROTOCOL_VERSION = "2024-11-05"   # Use the broadly-supported stable version
+MCP_PROTOCOL_VERSION_LATEST = "2025-06-18"  # Keep for docs/advertising
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,7 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         MCP_SERVER_NAME,
         stateless_http=stateless,
         json_response=True,
+        # Accept all known protocol versions — FastMCP negotiates automatically
     )
 
     # ── Tools ─────────────────────────────────────────────────────────────────
@@ -371,9 +373,17 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
 
     @mcp.tool()
     async def qtcl_get_price() -> str:
-        """QTCL quantum coherence metrics (no public USD exchange — valuation via W-state fidelity)."""
+        """
+        QTCL network valuation metrics. Note: QTCL has no public USD exchange listing.
+        Returns W-state fidelity, entanglement witness, and oracle coherence score as
+        a proxy for network health/value. Use qtcl_get_quantum_metrics for full detail.
+        """
         result = qtcl_rpc("qtcl_getQuantumMetrics")
-        return json.dumps(result, indent=2, default=str)
+        # Wrap with context so caller understands what they're getting
+        return json.dumps({
+            "note": "QTCL has no public USD exchange. Returning quantum coherence metrics as network value proxy.",
+            "metrics": result,
+        }, indent=2, default=str)
 
     # ── Resources ───────────────────────────────────────────────────────────────
 
@@ -387,7 +397,7 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         """System health vector."""
         return json.dumps(qtcl_rpc("qtcl_getHealth"), indent=2, default=str)
 
-    @mcp.resource("price://qtcl-quantum")
+    @mcp.resource("price://qtcl-usd")
     async def get_qtcl_price() -> str:
         """QTCL quantum coherence metrics (no public USD exchange)."""
         return str(qtcl_rpc("qtcl_getQuantumMetrics"))
@@ -399,7 +409,7 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
             "name": "QTCL — Quantum Temporal Coherence Ledger",
             "version": MCP_SERVER_VERSION,
             "protocol": f"JSON-RPC 2.0 + MCP {MCP_PROTOCOL_VERSION}",
-            "tools": 12,
+            "tools": 13,
             "resources": 4,
             "transports": ["streamable-http", "stdio"],
             "cryptography": "Schnorr-Γ over PSL(2,R) — Fiat-Shamir on hyperbolic Fuchsian group",

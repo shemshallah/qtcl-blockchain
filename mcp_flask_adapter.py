@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────────────
 QTCL_RPC_URL = os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
-MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_PROTOCOL_VERSION = "2024-11-05"   # Broadly-supported stable version
 
 # ── Lazy imports (fail gracefully if SDK not installed) ───────────────────────
 try:
@@ -246,7 +246,7 @@ def _make_mcp_app(rpc_url: str) -> Optional[Any]:
     async def get_health() -> str:
         return json.dumps(qtcl_rpc("qtcl_getHealth"), indent=2, default=str)
 
-    @mcp.resource("price://qtcl-quantum")
+    @mcp.resource("price://qtcl-usd")
     async def get_qtcl_price() -> str:
         return str(qtcl_rpc("qtcl_getQuantumMetrics"))
 
@@ -256,7 +256,7 @@ def _make_mcp_app(rpc_url: str) -> Optional[Any]:
             "name": "QTCL — Quantum Temporal Coherence Ledger",
             "version": "3.0.0",
             "protocol": f"JSON-RPC 2.0 + MCP {MCP_PROTOCOL_VERSION}",
-            "tools": 12,
+            "tools": 13,
             "resources": 4,
             "transports": ["streamable-http", "stdio"],
         }, indent=2)
@@ -293,7 +293,25 @@ def _make_mcp_app(rpc_url: str) -> Optional[Any]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _ASGIBridge:
-    """Minimal WSGI-to-ASGI bridge for running Starlette (MCP) inside Flask."""
+    """
+    Minimal WSGI-to-ASGI bridge for running Starlette (MCP) inside Flask.
+
+    Fixes vs original:
+      - start_response is called correctly with proper status string
+      - Response headers are passed through (not discarded)
+      - Uses get_event_loop() safely instead of new_event_loop() per request
+        (new_event_loop per request breaks under Gunicorn/gevent workers)
+      - CORS headers injected on every response
+      - PATH_INFO is passed without the query string appended (scope splits them)
+    """
+
+    # HTTP status code → reason phrase (common ones)
+    _STATUS_REASONS = {
+        200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
+        400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+        404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+        422: "Unprocessable Entity", 500: "Internal Server Error",
+    }
 
     def __init__(self, asgi_app: Any):
         self.asgi_app = asgi_app
@@ -305,18 +323,19 @@ class _ASGIBridge:
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/")
         query = environ.get("QUERY_STRING", "")
-        if query:
-            path += "?" + query
 
+        # Build ASGI headers list
         headers = []
         for key, value in environ.items():
             if key.startswith("HTTP_"):
-                name = key[5:].replace("_", "-").title()
+                name = key[5:].replace("_", "-").lower()
                 headers.append((name.encode(), value.encode()))
-            elif key in ("CONTENT_TYPE", "CONTENT_LENGTH"):
-                name = key.replace("_", "-").title()
-                headers.append((name.encode(), value.encode()))
+            elif key == "CONTENT_TYPE":
+                headers.append((b"content-type", value.encode()))
+            elif key == "CONTENT_LENGTH" and value:
+                headers.append((b"content-length", value.encode()))
 
+        # Read request body
         body = b""
         if method in ("POST", "PUT", "PATCH"):
             content_length = int(environ.get("CONTENT_LENGTH", 0) or 0)
@@ -325,42 +344,75 @@ class _ASGIBridge:
 
         scope = {
             "type": "http",
-            "method": method,
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": method.upper(),
             "path": path,
-            "raw_path": path.encode(),
-            "query_string": query.encode(),
+            "raw_path": path.encode("latin-1"),
+            "query_string": query.encode("latin-1"),
+            "root_path": environ.get("SCRIPT_NAME", ""),
             "headers": headers,
             "scheme": environ.get("wsgi.url_scheme", "http"),
-            "server": (environ.get("SERVER_NAME", "localhost"), int(environ.get("SERVER_PORT", 80))),
-            "client": (environ.get("REMOTE_ADDR", "127.0.0.1"), int(environ.get("REMOTE_PORT", 0) or 0)),
+            "server": (
+                environ.get("SERVER_NAME", "localhost"),
+                int(environ.get("SERVER_PORT", 80)),
+            ),
+            "client": (
+                environ.get("REMOTE_ADDR", "127.0.0.1"),
+                int(environ.get("REMOTE_PORT", 0) or 0),
+            ),
         }
 
-        response_started = False
-        status_code = 200
-        response_headers = []
+        status_code = [200]
+        response_headers = [[]]
         response_body = BytesIO()
 
         async def receive():
             return {"type": "http.request", "body": body, "more_body": False}
 
         async def send(message):
-            nonlocal response_started, status_code, response_headers
             if message["type"] == "http.response.start":
-                response_started = True
-                status_code = message["status"]
-                response_headers = [(k.decode() if isinstance(k, bytes) else k,
-                                       v.decode() if isinstance(v, bytes) else v)
-                                      for k, v in message.get("headers", [])]
+                status_code[0] = message["status"]
+                response_headers[0] = [
+                    (
+                        k.decode("latin-1") if isinstance(k, bytes) else k,
+                        v.decode("latin-1") if isinstance(v, bytes) else v,
+                    )
+                    for k, v in message.get("headers", [])
+                ]
             elif message["type"] == "http.response.body":
                 response_body.write(message.get("body", b""))
 
-        loop = asyncio.new_event_loop()
+        # Use existing event loop if available (Gunicorn/gevent safe),
+        # otherwise create one just for this request.
         try:
-            loop.run_until_complete(self.asgi_app(scope, receive, send))
-        finally:
-            loop.close()
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
-        start_response(f"{status_code} OK", response_headers)
+        loop.run_until_complete(self.asgi_app(scope, receive, send))
+
+        # Build status string e.g. "200 OK"
+        code = status_code[0]
+        reason = self._STATUS_REASONS.get(code, "Unknown")
+        status_str = f"{code} {reason}"
+
+        # Ensure CORS headers are always present
+        cors = {
+            "access-control-allow-origin": "*",
+            "access-control-allow-methods": "GET, POST, OPTIONS",
+            "access-control-allow-headers": "Content-Type, Accept, Mcp-Session-Id, Authorization",
+        }
+        final_headers = list(response_headers[0])
+        existing_keys = {k.lower() for k, _ in final_headers}
+        for k, v in cors.items():
+            if k not in existing_keys:
+                final_headers.append((k, v))
+
+        start_response(status_str, final_headers)
         return [response_body.getvalue()]
 
 
@@ -406,10 +458,46 @@ def register_mcp_routes(app: Any, rpc_url: Optional[str] = None) -> bool:
     bridge = _ASGIBridge(starlette_app)
 
     @app.route("/mcp", methods=["GET", "POST", "OPTIONS"])
-    @app.route("/mcp/<path:path>", methods=["GET", "POST", "OPTIONS"])
-    def mcp_streamable_http(path=""):
-        from flask import request
-        return bridge(request.environ, lambda status, headers: None)
+    @app.route("/mcp/<path:subpath>", methods=["GET", "POST", "OPTIONS"])
+    def mcp_streamable_http(subpath=""):
+        from flask import request, Response
+
+        if request.method == "OPTIONS":
+            return Response("", status=204, headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id, Authorization",
+            })
+
+        # Adjust PATH_INFO so bridge sees the right path
+        environ = dict(request.environ)
+        if subpath:
+            environ["PATH_INFO"] = f"/mcp/{subpath}"
+
+        # Capture what bridge sends to start_response
+        captured = {"status": "200 OK", "headers": []}
+
+        def _start_response(status, headers, exc_info=None):
+            captured["status"] = status
+            captured["headers"] = headers
+
+        body_parts = bridge(environ, _start_response)
+        body = b"".join(body_parts)
+
+        # Build status code int
+        try:
+            status_code = int(captured["status"].split(" ", 1)[0])
+        except (ValueError, IndexError):
+            status_code = 200
+
+        resp = Response(body, status=status_code)
+        for k, v in captured["headers"]:
+            resp.headers[k] = v
+        # Always set CORS
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Accept, Mcp-Session-Id, Authorization"
+        return resp
 
     # Legacy SSE (backward compatible)
     _register_legacy_only(app)
