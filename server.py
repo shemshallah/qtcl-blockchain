@@ -927,7 +927,7 @@ threading.Thread(
 
 
 def _ensure_wallet_addresses_table() -> None:
-    """Ensure wallet_addresses and address_utxos tables exist at startup."""
+    """Ensure wallet_addresses, address_utxos, and transactions tables exist at startup."""
     try:
         with get_db_cursor() as cur:
             cur.execute("""
@@ -956,10 +956,41 @@ def _ensure_wallet_addresses_table() -> None:
                     CONSTRAINT unique_tx_output UNIQUE (tx_hash, output_index)
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id BIGSERIAL PRIMARY KEY,
+                    tx_hash VARCHAR(255) UNIQUE NOT NULL,
+                    from_address VARCHAR(255) NOT NULL DEFAULT '',
+                    to_address VARCHAR(255) NOT NULL DEFAULT '',
+                    amount NUMERIC(30, 0) NOT NULL DEFAULT 0,
+                    nonce BIGINT,
+                    height BIGINT,
+                    block_hash VARCHAR(255),
+                    transaction_index INT,
+                    tx_type VARCHAR(50) DEFAULT 'transfer',
+                    status VARCHAR(50) DEFAULT 'pending',
+                    pq_signature TEXT,
+                    pq_signer_key_fp VARCHAR(255),
+                    pq_verified BOOLEAN DEFAULT FALSE,
+                    pq_verified_at TIMESTAMPTZ,
+                    quantum_state_hash VARCHAR(255),
+                    commitment_hash VARCHAR(255),
+                    entropy_score NUMERIC(5, 4),
+                    input_data TEXT,
+                    metadata JSONB,
+                    error_message TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    finalized_at TIMESTAMPTZ
+                )
+            """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_address ON address_utxos(address)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_unspent ON address_utxos(address, spent) WHERE spent = FALSE")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_tx ON address_utxos(tx_hash, output_index)")
-        logger.info("[STARTUP] ✅ wallet_addresses + address_utxos tables ready")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_tx_height ON transactions(height)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_tx_hash ON transactions(tx_hash)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(tx_type)")
+        logger.info("[STARTUP] ✅ wallet_addresses + address_utxos + transactions tables ready")
     except Exception as e:
         logger.warning(f"[STARTUP] ⚠️  wallet_addresses DDL: {e}")
 
@@ -3608,55 +3639,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                 height = int(height)
 
         def _query_block_at_height(h: int) -> Optional[dict]:
-            """Full block query from database (authoritative source)."""
+            """Full block query from PostgreSQL (authoritative source)."""
             try:
-                # Try SQLite first
-                if (
-                    LATTICE
-                    and hasattr(LATTICE, "block_manager")
-                    and LATTICE.block_manager
-                    and LATTICE.block_manager.db
-                ):
-                    db = LATTICE.block_manager.db
-                    if hasattr(db, '_sqlite_conn') and db._sqlite_conn:
-                        try:
-                            sql = """
-                                SELECT height, block_hash, timestamp, w_state_hash,
-                                       parent_hash, nonce, difficulty,
-                                       coherence_snapshot, merkle_root, tx_count
-                                FROM blocks WHERE height = ? LIMIT 1
-                            """
-                            cursor = db._sqlite_conn.execute(sql, (h,))
-                            row = cursor.fetchone()
-                            if not row:
-                                return None
-                            block = {
-                                "height": row[0],
-                                "block_height": row[0],
-                                "block_hash": row[1],
-                                "hash": row[1],
-                                "parent_hash": row[4] or ("0" * 64),
-                                "previous_hash": row[4] or ("0" * 64),
-                                "merkle_root": row[8] or ("0" * 64),
-                                "timestamp_s": int(row[2]) if row[2] else 0,
-                                "timestamp": int(row[2]) if row[2] else 0,
-                                "difficulty": int(float(row[6])) if row[6] else 5,
-                                "nonce": int(row[5]) if row[5] else 0,
-                                "w_state_fidelity": float(row[7])
-                                if row[7] is not None
-                                else 0.0,
-                                "w_entropy_hash": row[3] or "",
-                                "pq_curr": h,
-                                "pq_last": max(0, h - 1),
-                                "tx_count": int(row[9]) if row[9] else 0,
-                                "mined": True,
-                                "finalized": True,
-                            }
-                            return block
-                        except Exception as _se:
-                            logger.debug(f"[RPC] SQLite query failed: {_se}")
-
-                # Fallback to PostgreSQL
                 with get_db_cursor() as cur:
                     cur.execute(
                         """
@@ -3700,7 +3684,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                                quantum_state_hash, metadata
                         FROM transactions
                         WHERE height = %s
-                        ORDER BY transaction_index ASC
+                        ORDER BY COALESCE(transaction_index, 0) ASC
                     """,
                         (h,),
                     )
@@ -3722,6 +3706,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         )
                     block["transactions"] = txs
                     block["tx_count"] = len(txs)
+                    logger.info(f"[RPC-getBlock] h={h} returned {len(txs)} transactions")
                     return block
             except Exception as e:
                 logger.exception(f"[RPC] _query_block_at_height({h}): {e}")
