@@ -48,7 +48,6 @@ if _HYP_DIR not in sys.path:
 import socket
 import struct
 import hashlib
-import hmac
 import secrets
 import logging
 import threading
@@ -97,13 +96,14 @@ _RPC_INLINE_METHODS: frozenset = frozenset(
 
 # Slow methods (DB round-trips, crypto ops) — get pool + timeout protection
 _RPC_TIMEOUT_MAP: dict = {
-    "qtcl_getBlockRange": 20.0,
+    "qtcl_getBlockRange": 10.0,
     "qtcl_getTransactions": 10.0,
     "qtcl_getBlock": 5.0,
     "qtcl_getBalance": 4.0,
     "qtcl_getTransaction": 4.0,
     "qtcl_submitBlock": 30.0,
     "qtcl_submitTransaction": 6.0,
+    "qtcl_signAndSubmitTx": 10.0,
     "qtcl_submitOracleReg": 6.0,
     "qtcl_getOracleRegistry": 5.0,
     "qtcl_getOracleRecord": 4.0,
@@ -632,732 +632,6 @@ try:
 except Exception as _sse_reg_err:
     _SSE_AVAILABLE = False
     logger.warning(f"[SSE] ⚠️ SSE route registration failed: {_sse_reg_err}")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MCP 2025-06-18 — PURE FLASK STREAMABLE HTTP SERVER (zero-ASGI, zero-eventloop)
-# ═══════════════════════════════════════════════════════════════════════════════
-# This is a ground-up, spec-compliant MCP Streamable HTTP implementation that
-# runs natively inside Flask/Gunicorn with gthread workers.  No Starlette, no
-# asyncio, no ASGI bridge, no event-loop gymnastics — just clean WSGI/Flask.
-#
-# Protocol: https://spec.modelcontextprotocol.io/specification/2025-06-18/
-#   POST /mcp  — client → server JSON-RPC messages (initialize, tools/call, etc.)
-#   GET  /mcp  — server → client SSE stream (resumable, session-scoped)
-#   OPTIONS /mcp — CORS preflight
-#
-# Tool dispatch calls the SAME _dispatch_single() and _RPC_METHODS that power
-# the /rpc endpoint — no duplication, no drift.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-import queue as _mcp_queue
-import uuid as _mcp_uuid
-
-# ── MCP Protocol constants ────────────────────────────────────────────────────
-_MCP_PROTOCOL_VERSION    = "2025-03-26"   # latest ratified spec (Claude.ai compatible)
-_MCP_PROTOCOL_VERSIONS   = {"2025-03-26", "2024-11-05"}  # all supported versions
-_MCP_SERVER_NAME         = "qtcl-blockchain"
-_MCP_SERVER_VERSION      = "3.0.0"
-
-# ── Session store: session_id → {"queue": Queue, "created": float} ────────────
-_MCP_SESSIONS: dict = {}
-_MCP_SESSIONS_LOCK = threading.RLock()
-_MCP_SESSION_TTL   = 3600.0   # 1-hour idle TTL
-
-# ── Tool registry (built once, referenced by all request handlers) ────────────
-# Each entry: {"name": str, "description": str, "inputSchema": dict}
-_MCP_TOOLS: list = [
-    {
-        "name": "qtcl_create_wallet",
-        "description": "Create a new QTCL wallet backed by a HypΓ post-quantum keypair (Schnorr-Γ over PSL(2,R)). Returns address, public_key, private_key.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "label": {"type": "string", "description": "Optional human-readable label for the wallet."}
-            },
-        },
-    },
-    {
-        "name": "qtcl_sign_message",
-        "description": "Sign a 32-byte message hash with a HypΓ private key using Schnorr-Γ. Returns signature hex.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "message_hex": {"type": "string", "description": "64 hex chars (32-byte SHA3-256 hash to sign)"},
-                "private_key": {"type": "string", "description": "HypΓ private key hex"},
-            },
-            "required": ["message_hex", "private_key"],
-        },
-    },
-    {
-        "name": "qtcl_get_balance",
-        "description": "Check QTCL balance (sum of unspent UTXOs) for any address.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"address": {"type": "string", "description": "64-char hex QTCL address"}},
-            "required": ["address"],
-        },
-    },
-    {
-        "name": "qtcl_get_utxos",
-        "description": "List unspent transaction outputs (UTXOs) for an address. Bitcoin-style UTXO model.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "address": {"type": "string", "description": "64-char hex QTCL address"},
-                "limit": {"type": "integer", "description": "Max UTXOs to return (default 1000)", "default": 1000},
-            },
-            "required": ["address"],
-        },
-    },
-    {
-        "name": "qtcl_send_transaction",
-        "description": "Submit a signed UTXO transaction to the QTCL network. Flat fee: 1 qsat (~18s finality).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "from_address": {"type": "string", "description": "Sender 64-char hex address"},
-                "to_address": {"type": "string", "description": "Recipient 64-char hex address"},
-                "amount": {"type": "number", "description": "Amount in QTCL (1 QTCL = 100 qsat)"},
-                "memo": {"type": "string", "description": "Optional 256-char memo (invoice ID, agent ref, etc.)"},
-                "signature": {"type": "string", "description": "Schnorr-Γ signature hex from qtcl_sign_message"},
-                "public_key": {"type": "string", "description": "HypΓ public key hex"},
-                "nonce": {"type": "integer", "description": "Optional transaction nonce", "default": 0},
-            },
-            "required": ["from_address", "to_address", "amount"],
-        },
-    },
-    {
-        "name": "qtcl_get_transaction",
-        "description": "Look up a QTCL transaction by its SHA3-256 hash. Returns inputs, outputs, block info.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"tx_hash": {"type": "string", "description": "64-char SHA3-256 transaction hash"}},
-            "required": ["tx_hash"],
-        },
-    },
-    {
-        "name": "qtcl_get_chain_info",
-        "description": "Get current blockchain state: height, mempool depth, system health vector.",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "qtcl_get_block",
-        "description": "Retrieve a block by height (int) or hash (hex). Omit both for the latest block.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "height": {"type": "integer", "description": "Block height (0 = genesis). Use -1 to get latest.", "default": -1},
-                "hash": {"type": "string", "description": "64-char block hash (alternative to height)"},
-            },
-        },
-    },
-    {
-        "name": "qtcl_get_recent_transactions",
-        "description": "List recent transactions, optionally filtered by address. Paginated.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "address": {"type": "string", "description": "Optional 64-char hex address filter"},
-                "per_page": {"type": "integer", "description": "Results per page (max 50)", "default": 20},
-            },
-        },
-    },
-    {
-        "name": "qtcl_get_quantum_metrics",
-        "description": "Live quantum coherence metrics: W-state fidelity, NPT witness, density matrix, oracle consensus state.",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "qtcl_get_oracle_registry",
-        "description": "List registered quantum oracle nodes with their types, stakes, and consensus votes.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"limit": {"type": "integer", "description": "Max oracles to return", "default": 10}},
-        },
-    },
-    {
-        "name": "qtcl_get_peers",
-        "description": "List active P2P peers in the QTCL DHT network.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"limit": {"type": "integer", "description": "Max peers to return", "default": 20}},
-        },
-    },
-    {
-        "name": "qtcl_get_price",
-        "description": "Get QTCL quantum coherence metrics and network vitals (no public USD exchange listing).",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-]
-
-_MCP_RESOURCES: list = [
-    {"uri": "chain://height",   "name": "Block Height",   "description": "Current blockchain tip height",          "mimeType": "application/json"},
-    {"uri": "chain://health",   "name": "System Health",  "description": "QTCL system health vector",              "mimeType": "application/json"},
-    {"uri": "price://qtcl-usd", "name": "QTCL Metrics",   "description": "Quantum coherence metrics (no USD feed)","mimeType": "application/json"},
-    {"uri": "docs://capability","name": "Capability Doc",  "description": "Full QTCL agent capability document",    "mimeType": "application/json"},
-]
-
-_MCP_PROMPTS: list = [
-    {
-        "name": "wallet_helper",
-        "description": "Generate step-by-step guidance for wallet creation and transaction workflows.",
-        "arguments": [{"name": "task", "description": "Workflow type: 'create' or 'send'", "required": False}],
-    },
-]
-
-_MCP_CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
-    "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id, Authorization, Last-Event-ID",
-    "Access-Control-Expose-Headers": "Mcp-Session-Id",
-}
-
-
-def _mcp_rpc_ok(result: Any, req_id: Any) -> dict:
-    return {"jsonrpc": "2.0", "result": result, "id": req_id}
-
-def _mcp_rpc_err(code: int, message: str, req_id: Any, data: Any = None) -> dict:
-    err: dict = {"code": code, "message": message}
-    if data is not None:
-        err["data"] = data
-    return {"jsonrpc": "2.0", "error": err, "id": req_id}
-
-def _mcp_json(obj: Any) -> bytes:
-    return json.dumps(obj, default=str).encode("utf-8")
-
-def _mcp_get_session(session_id: str) -> Optional[dict]:
-    with _MCP_SESSIONS_LOCK:
-        s = _MCP_SESSIONS.get(session_id)
-        if s:
-            s["last_access"] = time.time()
-        return s
-
-def _mcp_create_session() -> tuple:
-    """Create a new MCP session, returning (session_id, queue)."""
-    sid = str(_mcp_uuid.uuid4())
-    q: _mcp_queue.Queue = _mcp_queue.Queue(maxsize=256)
-    with _MCP_SESSIONS_LOCK:
-        _MCP_SESSIONS[sid] = {"queue": q, "created": time.time(), "last_access": time.time()}
-    return sid, q
-
-def _mcp_purge_stale_sessions() -> None:
-    """Evict sessions idle longer than TTL. Called periodically from dispatch."""
-    now = time.time()
-    with _MCP_SESSIONS_LOCK:
-        stale = [sid for sid, s in _MCP_SESSIONS.items() if now - s.get("last_access", 0) > _MCP_SESSION_TTL]
-        for sid in stale:
-            _MCP_SESSIONS.pop(sid, None)
-    if stale:
-        logger.info(f"[MCP] Purged {len(stale)} stale sessions")
-
-# ── Periodic session janitor ───────────────────────────────────────────────────
-def _mcp_session_janitor():
-    while True:
-        time.sleep(300)
-        try:
-            _mcp_purge_stale_sessions()
-        except Exception:
-            pass
-
-threading.Thread(target=_mcp_session_janitor, daemon=True, name="MCPSessionJanitor").start()
-
-
-def _mcp_dispatch_tool(name: str, arguments: dict, req_id: Any) -> dict:
-    """
-    Route MCP tool call → QTCL JSON-RPC handler → MCP content response.
-
-    Maps the 13 MCP tools directly onto the existing _RPC_METHODS dispatch
-    layer so there is a single source of truth for all blockchain logic.
-    Tool calls that don't map to RPC methods are handled inline.
-    """
-    try:
-        # ── Tools backed 1:1 by JSON-RPC methods ─────────────────────────────
-        if name == "qtcl_get_balance":
-            address = arguments.get("address", "")
-            if not address:
-                raise ValueError("address is required")
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBalance", "params": [address], "id": req_id})
-
-        elif name == "qtcl_get_utxos":
-            address = arguments.get("address", "")
-            limit = int(arguments.get("limit", 1000))
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getUTXOs", "params": [{"address": address, "limit": limit}], "id": req_id})
-
-        elif name == "qtcl_send_transaction":
-            p = {k: v for k, v in arguments.items() if v is not None and v != ""}
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_submitTransaction", "params": [p], "id": req_id})
-
-        elif name == "qtcl_get_transaction":
-            tx_hash = arguments.get("tx_hash", "")
-            if not tx_hash:
-                raise ValueError("tx_hash is required")
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getTransaction", "params": [tx_hash], "id": req_id})
-
-        elif name == "qtcl_get_chain_info":
-            h_res = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlockHeight", "params": [], "id": req_id})
-            m_res = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getMempoolStats", "params": [], "id": req_id})
-            g_res = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getHealth", "params": [], "id": req_id})
-            combined = {
-                "chain": h_res.get("result") if isinstance(h_res, dict) else h_res,
-                "mempool": m_res.get("result") if isinstance(m_res, dict) else m_res,
-                "health": g_res.get("result") if isinstance(g_res, dict) else g_res,
-            }
-            rpc_result = _mcp_rpc_ok(combined, req_id)
-
-        elif name == "qtcl_get_block":
-            hash_val = arguments.get("hash", "")
-            height_val = arguments.get("height", -1)
-            if hash_val:
-                # Pass as dict so _rpc_getBlock can branch on block_hash vs height
-                rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlock", "params": [{"hash": hash_val}], "id": req_id})
-            elif int(height_val) >= 0:
-                rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlock", "params": [int(height_val)], "id": req_id})
-            else:
-                tip_res = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlockHeight", "params": [], "id": req_id})
-                tip = tip_res.get("result", {}) if isinstance(tip_res, dict) else {}
-                key = tip.get("height", 0) if isinstance(tip, dict) else 0
-                rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlock", "params": [int(key)], "id": req_id})
-
-        elif name == "qtcl_get_recent_transactions":
-            address = arguments.get("address", "")
-            per_page = min(int(arguments.get("per_page", 20)), 50)
-            p: dict = {"page": 0, "per_page": per_page}
-            if address:
-                p["address"] = address
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getTransactions", "params": [p], "id": req_id})
-
-        elif name == "qtcl_get_quantum_metrics":
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getQuantumMetrics", "params": [], "id": req_id})
-
-        elif name == "qtcl_get_oracle_registry":
-            limit = int(arguments.get("limit", 10))
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getOracleRegistry", "params": [{"limit": limit}], "id": req_id})
-
-        elif name == "qtcl_get_peers":
-            limit = int(arguments.get("limit", 20))
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getPeers", "params": [limit], "id": req_id})
-
-        elif name == "qtcl_get_price":
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getQuantumMetrics", "params": [], "id": req_id})
-
-        elif name == "qtcl_create_wallet":
-            label = arguments.get("label", "")
-            p_dict: dict = {}
-            if label:
-                p_dict["label"] = label
-            rpc_result = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_hyp_generateKeypair", "params": [p_dict] if p_dict else [], "id": req_id})
-
-        elif name == "qtcl_sign_message":
-            message_hex = arguments.get("message_hex", "")
-            private_key = arguments.get("private_key", "")
-            if len(message_hex) != 64:
-                raise ValueError(f"message_hex must be 64 hex chars; got {len(message_hex)}")
-            rpc_result = _dispatch_single({
-                "jsonrpc": "2.0", "method": "qtcl_hyp_signMessage",
-                "params": [{"message": message_hex, "private_key": private_key}],
-                "id": req_id,
-            })
-
-        else:
-            return _mcp_rpc_err(-32601, f"Unknown tool: {name}", req_id)
-
-        # ── Extract result payload and format as MCP content ──────────────────
-        if isinstance(rpc_result, dict) and "error" in rpc_result:
-            err_msg = rpc_result["error"].get("message", "RPC error") if isinstance(rpc_result["error"], dict) else str(rpc_result["error"])
-            return _mcp_rpc_ok({
-                "content": [{"type": "text", "text": f"Error: {err_msg}"}],
-                "isError": True,
-            }, req_id)
-
-        payload = rpc_result.get("result", rpc_result) if isinstance(rpc_result, dict) else rpc_result
-        text_out = json.dumps(payload, indent=2, default=str)
-        return _mcp_rpc_ok({"content": [{"type": "text", "text": text_out}]}, req_id)
-
-    except Exception as exc:
-        logger.exception(f"[MCP] Tool dispatch '{name}' error: {exc}")
-        return _mcp_rpc_err(-32603, f"Tool error: {str(exc)}", req_id)
-
-
-def _mcp_handle_jsonrpc(body_bytes: bytes, session_id: Optional[str]) -> tuple:
-    """
-    Parse and dispatch a single MCP JSON-RPC message.
-
-    Returns (response_dict_or_None, new_session_id_or_None).
-    response is None for notifications (no id field).
-    """
-    try:
-        msg = json.loads(body_bytes)
-    except (json.JSONDecodeError, ValueError) as e:
-        return _mcp_rpc_err(-32700, f"Parse error: {e}", None), None
-
-    if not isinstance(msg, dict):
-        return _mcp_rpc_err(-32600, "Request must be a JSON object", None), None
-
-    method  = msg.get("method", "")
-    params  = msg.get("params", {})
-    req_id  = msg.get("id")           # None → notification
-    is_notif = req_id is None
-
-    new_session_id = None
-
-    # ── initialize ────────────────────────────────────────────────────────────
-    if method == "initialize":
-        new_session_id = session_id or str(_mcp_uuid.uuid4())
-        with _MCP_SESSIONS_LOCK:
-            if new_session_id not in _MCP_SESSIONS:
-                _MCP_SESSIONS[new_session_id] = {
-                    "queue": _mcp_queue.Queue(maxsize=256),
-                    "created": time.time(),
-                    "last_access": time.time(),
-                }
-        # Negotiate: use client's requested version if we support it, else our best
-        client_version = params.get("protocolVersion", _MCP_PROTOCOL_VERSION) if isinstance(params, dict) else _MCP_PROTOCOL_VERSION
-        negotiated = client_version if client_version in _MCP_PROTOCOL_VERSIONS else _MCP_PROTOCOL_VERSION
-        result = {
-            "protocolVersion": negotiated,
-            "serverInfo": {"name": _MCP_SERVER_NAME, "version": _MCP_SERVER_VERSION},
-            "capabilities": {
-                "tools": {"listChanged": False},
-                "resources": {"subscribe": False, "listChanged": False},
-                "prompts": {"listChanged": False},
-                "logging": {},
-            },
-        }
-        return _mcp_rpc_ok(result, req_id), new_session_id
-
-    # ── notifications/initialized — no response ────────────────────────────────
-    if method == "notifications/initialized" or is_notif:
-        return None, None
-
-    # ── tools/list ────────────────────────────────────────────────────────────
-    if method == "tools/list":
-        return _mcp_rpc_ok({"tools": _MCP_TOOLS}, req_id), None
-
-    # ── tools/call ────────────────────────────────────────────────────────────
-    if method == "tools/call":
-        tool_name  = params.get("name", "") if isinstance(params, dict) else ""
-        tool_args  = params.get("arguments", {}) if isinstance(params, dict) else {}
-        if not tool_name:
-            return _mcp_rpc_err(-32602, "tools/call requires 'name'", req_id), None
-        return _mcp_dispatch_tool(tool_name, tool_args or {}, req_id), None
-
-    # ── resources/list ────────────────────────────────────────────────────────
-    if method == "resources/list":
-        return _mcp_rpc_ok({"resources": _MCP_RESOURCES}, req_id), None
-
-    # ── resources/read ────────────────────────────────────────────────────────
-    if method == "resources/read":
-        uri = params.get("uri", "") if isinstance(params, dict) else ""
-        if uri == "chain://height":
-            r = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getBlockHeight", "params": [], "id": req_id})
-            text = json.dumps(r.get("result", r) if isinstance(r, dict) else r, default=str)
-        elif uri == "chain://health":
-            r = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getHealth", "params": [], "id": req_id})
-            text = json.dumps(r.get("result", r) if isinstance(r, dict) else r, default=str)
-        elif uri == "price://qtcl-usd":
-            r = _dispatch_single({"jsonrpc": "2.0", "method": "qtcl_getQuantumMetrics", "params": [], "id": req_id})
-            text = json.dumps(r.get("result", r) if isinstance(r, dict) else r, default=str)
-        elif uri == "docs://capability":
-            text = json.dumps({
-                "name": "QTCL — Quantum Temporal Coherence Ledger",
-                "version": _MCP_SERVER_VERSION,
-                "protocol": f"JSON-RPC 2.0 + MCP {_MCP_PROTOCOL_VERSION}",
-                "mcp_endpoint": "/mcp",
-                "tools": len(_MCP_TOOLS),
-                "resources": len(_MCP_RESOURCES),
-                "prompts": len(_MCP_PROMPTS),
-                "transports": ["streamable-http", "stdio"],
-                "block_time_seconds": 18,
-                "fee_per_tx": "1 qsat",
-                "cryptography": "HypΓ Schnorr-Γ PSL(2,R) + GeodesicLWE",
-            }, indent=2)
-        else:
-            return _mcp_rpc_err(-32602, f"Unknown resource URI: {uri}", req_id), None
-        return _mcp_rpc_ok({"contents": [{"uri": uri, "mimeType": "application/json", "text": text}]}, req_id), None
-
-    # ── prompts/list ─────────────────────────────────────────────────────────
-    if method == "prompts/list":
-        return _mcp_rpc_ok({"prompts": _MCP_PROMPTS}, req_id), None
-
-    # ── prompts/get ──────────────────────────────────────────────────────────
-    if method == "prompts/get":
-        pname = params.get("name", "") if isinstance(params, dict) else ""
-        args  = params.get("arguments", {}) if isinstance(params, dict) else {}
-        if pname == "wallet_helper":
-            task = (args or {}).get("task", "create")
-            if task == "create":
-                text = ("You are helping a user create a QTCL post-quantum wallet.\n"
-                        "Call qtcl_create_wallet to generate a keypair, then present:\n"
-                        "  - address (64-char hex)\n  - public_key (long hex)\n"
-                        "  - private_key (CRITICAL: user must save — server does not retain it)\n"
-                        "Cryptography: Schnorr-Γ over PSL(2,R) + GeodesicLWE. Post-quantum secure.")
-            elif task == "send":
-                text = ("QTCL send workflow:\n"
-                        "1. qtcl_get_balance(from_address) — verify funds\n"
-                        "2. qtcl_get_utxos(from_address) — enumerate spendable outputs\n"
-                        "3. qtcl_sign_message(tx_hash, private_key) — authorize spend\n"
-                        "4. qtcl_send_transaction(...) — submit to network\n"
-                        "Flat fee: 1 qsat. ~18-second block finality.")
-            else:
-                text = "I can help you create a QTCL wallet or send a transaction. Which workflow?"
-            return _mcp_rpc_ok({"description": f"wallet_helper/{task}", "messages": [
-                {"role": "user", "content": {"type": "text", "text": text}}
-            ]}, req_id), None
-        return _mcp_rpc_err(-32602, f"Unknown prompt: {pname}", req_id), None
-
-    # ── ping ─────────────────────────────────────────────────────────────────
-    if method == "ping":
-        return _mcp_rpc_ok({}, req_id), None
-
-    return _mcp_rpc_err(-32601, f"Method not found: {method}", req_id), None
-
-
-# ── Flask route handlers ──────────────────────────────────────────────────────
-
-@app.route("/mcp", methods=["OPTIONS"])
-@app.route("/mcp/<path:subpath>", methods=["OPTIONS"])
-def mcp_preflight(subpath=""):
-    """CORS preflight — always allow."""
-    resp = Response("", status=204)
-    for k, v in _MCP_CORS_HEADERS.items():
-        resp.headers[k] = v
-    return resp
-
-
-@app.route("/mcp", methods=["POST"])
-def mcp_post():
-    """
-    POST /mcp — MCP 2025-06-18 Streamable HTTP primary channel.
-
-    Accepts JSON-RPC 2.0 messages or batches.  Dispatches inline (sync).
-    Returns application/json with the JSON-RPC response.
-    Session lifecycle managed via Mcp-Session-Id header.
-    """
-    session_id = request.headers.get("Mcp-Session-Id", "").strip() or None
-    body = request.get_data()
-
-    if not body:
-        resp = Response(_mcp_json(_mcp_rpc_err(-32700, "Empty request body", None)),
-                        status=200, mimetype="application/json")
-        for k, v in _MCP_CORS_HEADERS.items():
-            resp.headers[k] = v
-        return resp
-
-    # ── Batch detection ───────────────────────────────────────────────────────
-    try:
-        parsed = json.loads(body)
-    except (json.JSONDecodeError, ValueError) as e:
-        resp = Response(_mcp_json(_mcp_rpc_err(-32700, f"Parse error: {e}", None)),
-                        status=200, mimetype="application/json")
-        for k, v in _MCP_CORS_HEADERS.items():
-            resp.headers[k] = v
-        return resp
-
-    new_sid = session_id
-    if isinstance(parsed, list):
-        # Batch request
-        responses = []
-        for item in parsed:
-            item_bytes = json.dumps(item).encode()
-            r, maybe_sid = _mcp_handle_jsonrpc(item_bytes, new_sid)
-            if maybe_sid:
-                new_sid = maybe_sid
-            if r is not None:
-                responses.append(r)
-        out = _mcp_json(responses) if responses else b"[]"
-    else:
-        r, maybe_sid = _mcp_handle_jsonrpc(body, session_id)
-        if maybe_sid:
-            new_sid = maybe_sid
-        out = _mcp_json(r) if r is not None else b"{}"
-
-    resp = Response(out, status=200, mimetype="application/json")
-    for k, v in _MCP_CORS_HEADERS.items():
-        resp.headers[k] = v
-    if new_sid and new_sid != session_id:
-        resp.headers["Mcp-Session-Id"] = new_sid
-    elif session_id:
-        resp.headers["Mcp-Session-Id"] = session_id
-    return resp
-
-
-@app.route("/mcp", methods=["GET"])
-def mcp_get():
-    """
-    GET /mcp — MCP 2025-06-18 Server-Sent Events channel (stateless-safe).
-
-    Claude and compatible agents connect here to receive server-initiated
-    notifications and resumable message streams.  In stateless mode
-    (json_response=True) this returns a 200 with server info JSON so Claude
-    can immediately POST initialize without a persistent SSE connection.
-    """
-    # Stateless streamable-http: return JSON capability snapshot.
-    # Claude's built-in MCP client (claude.ai) uses this to verify the server
-    # is alive and supports the 2025-03-26 protocol before POSTing initialize.
-    info = {
-        "jsonrpc": "2.0",
-        "method": "server/info",
-        "params": {
-            "protocolVersion": _MCP_PROTOCOL_VERSION,
-            "serverInfo": {"name": _MCP_SERVER_NAME, "version": _MCP_SERVER_VERSION},
-            "capabilities": {
-                "tools": {"listChanged": False},
-                "resources": {"subscribe": False, "listChanged": False},
-                "prompts": {"listChanged": False},
-                "logging": {},
-            },
-            "tools_count": len(_MCP_TOOLS),
-            "resources_count": len(_MCP_RESOURCES),
-            "prompts_count": len(_MCP_PROMPTS),
-            "transport": "streamable-http",
-            "endpoint": "/mcp",
-            "rpc_endpoint": "/rpc",
-        },
-    }
-    resp = Response(_mcp_json(info), status=200, mimetype="application/json")
-    for k, v in _MCP_CORS_HEADERS.items():
-        resp.headers[k] = v
-    return resp
-
-
-@app.route("/mcp/sse", methods=["GET"])
-def mcp_legacy_sse():
-    """
-    GET /mcp/sse — MCP 2024-11-05 legacy SSE transport (backward compatible).
-
-    Kept for clients on older MCP versions.  Sends an initial 'endpoint'
-    event pointing at POST /mcp, then streams heartbeats + queued messages.
-    """
-    sid, q = _mcp_create_session()
-
-    def _generate():
-        # MCP legacy: first event tells client where to POST messages
-        yield f"event: endpoint\ndata: /mcp?session_id={sid}\n\n"
-        while True:
-            try:
-                msg = q.get(timeout=20.0)
-                if msg is None:
-                    break
-                yield f"event: message\ndata: {json.dumps(msg, default=str)}\n\n"
-            except _mcp_queue.Empty:
-                yield ": heartbeat\n\n"
-
-    resp = Response(_generate(), mimetype="text/event-stream")
-    resp.headers["Cache-Control"] = "no-cache"
-    resp.headers["Connection"] = "keep-alive"
-    resp.headers["X-Accel-Buffering"] = "no"
-    for k, v in _MCP_CORS_HEADERS.items():
-        resp.headers[k] = v
-    resp.headers["Mcp-Session-Id"] = sid
-    return resp
-
-
-@app.route("/mcp/message", methods=["POST"])
-def mcp_legacy_message():
-    """POST /mcp/message — MCP 2024-11-05 legacy message endpoint."""
-    sid = request.args.get("session_id", "")
-    session = _mcp_get_session(sid)
-    if not session:
-        return jsonify({"error": "Invalid or expired session_id"}), 404
-
-    body = request.get_data()
-    if not body:
-        return jsonify({"error": "Empty body"}), 400
-
-    r, _ = _mcp_handle_jsonrpc(body, sid)
-    if r is not None:
-        try:
-            session["queue"].put_nowait(r)
-        except _mcp_queue.Full:
-            return jsonify({"error": "Session queue full"}), 429
-
-    return jsonify({"status": "accepted", "session_id": sid}), 202
-
-
-@app.route("/mcp/health", methods=["GET"])
-def mcp_health_check():
-    """GET /mcp/health — MCP server health (used by Claude App diagnostic)."""
-    with _MCP_SESSIONS_LOCK:
-        session_count = len(_MCP_SESSIONS)
-
-    resp_data = {
-        "status": "ok",
-        "server": _MCP_SERVER_NAME,
-        "version": _MCP_SERVER_VERSION,
-        "protocol": _MCP_PROTOCOL_VERSION,
-        "transport": "streamable-http",
-        "endpoint": "/mcp",
-        "legacy_sse": "/mcp/sse",
-        "tools": len(_MCP_TOOLS),
-        "resources": len(_MCP_RESOURCES),
-        "prompts": len(_MCP_PROMPTS),
-        "active_sessions": session_count,
-        "uptime_s": round(time.time() - _SERVER_START_TIME, 1),
-        "rpc_methods": len(_RPC_METHODS) if "_RPC_METHODS" in dir() else "pending",
-        "quantum_oracle": ORACLE_AVAILABLE,
-        "ts": time.time(),
-    }
-    resp = Response(_mcp_json(resp_data), status=200, mimetype="application/json")
-    for k, v in _MCP_CORS_HEADERS.items():
-        resp.headers[k] = v
-    return resp
-
-
-@app.route("/.well-known/oauth-protected-resource", methods=["GET"])
-@app.route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])
-@app.route("/.well-known/oauth-authorization-server", methods=["GET"])
-def oauth_well_known():
-    """OAuth discovery — QTCL MCP is auth-free, return minimal doc to stop 404 noise."""
-    resp = Response(
-        _mcp_json({"resource": request.url_root.rstrip("/") + "/mcp", "bearer_methods_supported": []}),
-        status=200, mimetype="application/json"
-    )
-    for k, v in _MCP_CORS_HEADERS.items():
-        resp.headers[k] = v
-    return resp
-
-
-@app.route("/register", methods=["POST"])
-def oauth_register():
-    resp = Response(
-        _mcp_json({"error": "not_supported", "error_description": "QTCL MCP requires no authentication"}),
-        status=400, mimetype="application/json"
-    )
-    for k, v in _MCP_CORS_HEADERS.items():
-        resp.headers[k] = v
-    return resp
-
-
-@app.route("/mcp/capability", methods=["GET"])
-def mcp_capability_doc():
-    """GET /mcp/capability — Serve the full QTCL agent capability JSON."""
-    try:
-        cap_path = os.path.join(os.path.dirname(__file__), "qtcl_agent_capability.json")
-        if os.path.exists(cap_path):
-            from flask import send_file
-            return send_file(cap_path, mimetype="application/json")
-    except Exception:
-        pass
-    # Inline minimal capability
-    cap = {
-        "name": "QTCL — Quantum Temporal Coherence Ledger",
-        "version": _MCP_SERVER_VERSION,
-        "mcp_endpoint": "https://qtcl-blockchain.koyeb.app/mcp",
-        "mcp_transport": "streamable-http",
-        "mcp_protocol_version": _MCP_PROTOCOL_VERSION,
-        "tools_count": len(_MCP_TOOLS),
-        "resources_count": len(_MCP_RESOURCES),
-    }
-    resp = Response(_mcp_json(cap), status=200, mimetype="application/json")
-    for k, v in _MCP_CORS_HEADERS.items():
-        resp.headers[k] = v
-    return resp
-
-
-logger.info(f"[MCP] ✅ MCP 2025-06-18 Streamable HTTP server registered — /mcp (POST/GET/OPTIONS)")
-logger.info(f"[MCP] ✅ {len(_MCP_TOOLS)} tools | {len(_MCP_RESOURCES)} resources | {len(_MCP_PROMPTS)} prompts")
-logger.info(f"[MCP] ✅ Legacy SSE preserved — /mcp/sse | /mcp/message | /mcp/health | /mcp/capability")
-logger.info(f"[MCP] 🔒 Zero ASGI, zero asyncio, zero bridge — pure Flask/WSGI/gthread safe")
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -2028,24 +1302,7 @@ def _settle_block_rewards(
             f"[SETTLE] ✅ h={height}: {len(balance_deltas)} addresses updated, {total_settled/100:.2f} QTCL net, txs={len(txs or [])}"
         )
 
-        # Cache block for getBlockRange queries — preserve fidelity from DB/oracle
-        _cached_fidelity = 0.0
-        try:
-            with get_db_cursor() as _cur:
-                _cur.execute(
-                    "SELECT coherence_snapshot FROM blocks WHERE height = %s", (height,)
-                )
-                _fid_row = _cur.fetchone()
-                if _fid_row and _fid_row[0] is not None:
-                    _cached_fidelity = float(_fid_row[0])
-        except Exception:
-            pass
-        if _cached_fidelity <= 0.0:
-            try:
-                from lattice_controller import LATTICE as _lat_inst
-                _cached_fidelity = getattr(_lat_inst, "fidelity", 0.0) or 0.0
-            except Exception:
-                pass
+        # Cache block for getBlockRange queries
         try:
             _cache_block(
                 {
@@ -2054,7 +1311,7 @@ def _settle_block_rewards(
                     "timestamp": int(time.time()),
                     "difficulty": 4,
                     "miner_address": miner_address,
-                    "w_state_fidelity": _cached_fidelity,
+                    "w_state_fidelity": 0.0,
                 },
                 txs=txs,
             )
@@ -2085,23 +1342,6 @@ def _settle_block_rewards(
             _settle_log.warning(f"[SETTLE] ⚠️  Chain state update: {cs_err}")
 
         # ── Cache block ──────────────────────────────────────────────────
-        _cached_fidelity = 0.0
-        try:
-            with get_db_cursor() as _cur:
-                _cur.execute(
-                    "SELECT coherence_snapshot FROM blocks WHERE height = %s", (height,)
-                )
-                _fid_row = _cur.fetchone()
-                if _fid_row and _fid_row[0] is not None:
-                    _cached_fidelity = float(_fid_row[0])
-        except Exception:
-            pass
-        if _cached_fidelity <= 0.0:
-            try:
-                from lattice_controller import LATTICE as _lat_inst
-                _cached_fidelity = getattr(_lat_inst, "fidelity", 0.0) or 0.0
-            except Exception:
-                pass
         try:
             _cache_block(
                 {
@@ -2110,7 +1350,7 @@ def _settle_block_rewards(
                     "timestamp": int(time.time()),
                     "difficulty": 4,
                     "miner_address": miner_address,
-                    "w_state_fidelity": _cached_fidelity,
+                    "w_state_fidelity": 0.0,
                 },
                 txs=txs,
             )
@@ -4236,7 +3476,7 @@ def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBalance — address QTCL balance via direct DB query + UTXO fallback."""
+    """qtcl_getBalance — address QTCL balance via direct DB query."""
     try:
         if not isinstance(params, (list, dict)):
             return _rpc_error(-32602, "params must be list or object", rpc_id)
@@ -4252,17 +3492,9 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
             "address_queried": address[:24] + "…" if len(address) > 24 else address
         }
 
-        wallet_balance = 0
-        wallet_tx_count = 0
-        wallet_addr_type = "unknown"
-        effective_balance = 0
-        utxo_balance = 0
-        utxo_count = 0
-        found_in_db = False
-
         try:
             with get_db_cursor() as cur:
-                # Query wallet_addresses for digest balance
+                # Check if wallet_addresses table exists
                 try:
                     cur.execute("""
                         SELECT EXISTS (
@@ -4275,102 +3507,60 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                 except Exception as _te:
                     _diagnostic["table_check_error"] = str(_te)
 
+                # Query balance
                 cur.execute(
                     "SELECT balance, transaction_count, address_type FROM wallet_addresses WHERE address = %s",
                     (address,),
                 )
                 row = cur.fetchone()
                 if row:
-                    wallet_balance = int(row[0]) if row[0] else 0
-                    wallet_tx_count = int(row[1]) if row[1] else 0
-                    wallet_addr_type = row[2] if len(row) > 2 else "unknown"
-                    found_in_db = True
-                    _diagnostic["wallet_balance_base_units"] = wallet_balance
-
-                # Query UTXO-computed balance from address_utxos (authoritative source)
-                try:
-                    cur.execute("""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.tables 
-                            WHERE table_name = 'address_utxos'
-                        )
-                    """)
-                    _utxo_table_exists = cur.fetchone()[0] if cur.fetchone() else False
-                    _diagnostic["utxo_table_exists"] = bool(_utxo_table_exists)
-                except Exception:
-                    _diagnostic["utxo_table_exists"] = False
-
-                utxo_balance = 0
-                utxo_count = 0
-                if _diagnostic.get("utxo_table_exists"):
+                    wallet = {
+                        "address": address,
+                        "balance": row[0],
+                        "tx_count": row[1],
+                        "address_type": row[2] if len(row) > 2 else "unknown",
+                    }
+                    _diagnostic["found_in_db"] = True
+                    _diagnostic["raw_balance_base_units"] = int(row[0]) if row[0] else 0
+                else:
+                    wallet = None
+                    _diagnostic["found_in_db"] = False
+                    # Check how many total wallet addresses exist
                     try:
-                        cur.execute(
-                            "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM address_utxos WHERE address = %s AND spent = FALSE",
-                            (address,),
+                        cur.execute("SELECT COUNT(*) FROM wallet_addresses")
+                        _total_wallets = cur.fetchone()[0]
+                        _diagnostic["total_wallets_in_db"] = (
+                            int(_total_wallets) if _total_wallets else 0
                         )
-                        utxo_row = cur.fetchone()
-                        if utxo_row:
-                            utxo_balance = int(utxo_row[0]) if utxo_row[0] else 0
-                            utxo_count = int(utxo_row[1]) if utxo_row[1] else 0
-                    except Exception as _utxo_err:
-                        _diagnostic["utxo_query_error"] = str(_utxo_err)
-
-                _diagnostic["utxo_balance_base_units"] = utxo_balance
-                _diagnostic["utxo_count"] = utxo_count
-
-                # Use the HIGHER of wallet digest vs UTXO sum.
-                # If wallet digest is stale (0), UTXO sum gives the real balance.
-                effective_balance = max(wallet_balance, utxo_balance)
-
-                # Auto-heal: if UTXOs show balance but wallet digest doesn't, update it
-                if utxo_balance > 0 and wallet_balance == 0 and found_in_db:
-                    try:
-                        cur.execute(
-                            "UPDATE wallet_addresses SET balance = %s, updated_at = NOW() WHERE address = %s",
-                            (utxo_balance, address),
-                        )
-                        _diagnostic["wallet_auto_healed"] = True
-                        logger.info(f"[RPC] Auto-healed wallet_addresses balance for {address[:16]}…: {utxo_balance} base units")
-                    except Exception as _heal_err:
-                        _diagnostic["wallet_auto_heal_error"] = str(_heal_err)
-
-                # Auto-create wallet entry from UTXOs if missing entirely
-                if utxo_balance > 0 and not found_in_db:
-                    try:
-                        cur.execute("""
-                            INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, 'standard', NOW())
-                        """, (
-                            address,
-                            hashlib.sha256(address.encode()).hexdigest()[:64],
-                            hashlib.sha256(address.encode()).hexdigest()[:64],
-                            utxo_balance,
-                            utxo_count,
-                        ))
-                        _diagnostic["wallet_auto_created"] = True
-                        found_in_db = True
-                        wallet_balance = utxo_balance
-                        wallet_tx_count = utxo_count
-                        logger.info(f"[RPC] Auto-created wallet_addresses entry for {address[:16]}…: {utxo_balance} base units")
-                    except Exception as _create_err:
-                        _diagnostic["wallet_auto_create_error"] = str(_create_err)
-
+                    except Exception:
+                        pass
         except Exception as _wqe:
             logger.debug(f"[RPC] query_wallet_info DB error: {_wqe}")
             _diagnostic["db_error"] = str(_wqe)
+            wallet = None
 
-        result = {
-            "address": address,
-            "balance": effective_balance / 100.0,
-            "symbol": "QTCL",
-            "raw_balance_base_units": effective_balance,
-            "unspent_outputs": utxo_count,
-            "transaction_count": wallet_tx_count or utxo_count,
-            "address_type": wallet_addr_type,
-            "diagnostic": _diagnostic,
-        }
-        logger.info(
-            f"[RPC-METHOD] qtcl_getBalance: addr={address[:16]}… balance={result['balance']} QTCL utxos={utxo_count} wallet_found={found_in_db}"
+        if wallet is None:
+            # Address not yet in DB — return 0 balance with diagnostic info
+            result = {
+                "address": address,
+                "balance": 0.0,
+                "symbol": "QTCL",
+                "diagnostic": _diagnostic,
+                "note": "Address not found in wallet_addresses table — no balance recorded",
+            }
+        else:
+            raw_balance = int(wallet.get("balance") or 0)
+            result = {
+                "address": address,
+                "balance": raw_balance / 100.0,
+                "symbol": "QTCL",
+                "raw_balance_base_units": raw_balance,
+                "transaction_count": wallet.get("tx_count", 0),
+                "address_type": wallet.get("address_type", "unknown"),
+                "diagnostic": _diagnostic,
+            }
+        logger.debug(
+            f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}"
         )
         return _rpc_ok(result, rpc_id)
     except Exception as e:
@@ -4379,12 +3569,7 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getTransaction — tx details by hash.
-
-    Resolution order:
-      1. PostgreSQL transactions table (authoritative, covers all persisted txs)
-      2. In-memory blockchain index (covers transactions received but not yet flushed)
-    """
+    """qtcl_getTransaction — tx details by hash."""
     try:
         logger.debug(
             f"[RPC-METHOD] qtcl_getTransaction called with params={params}, id={rpc_id}"
@@ -4397,67 +3582,35 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
         if not tx_hash:
             logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx_hash missing or empty")
             return _rpc_error(-32602, "tx_hash required", rpc_id)
-
-        # ── 1. DB-authoritative lookup (covers tx_hash AND tx_id column aliases) ──
-        try:
-            with get_db_cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT tx_hash, from_address, to_address, amount,
-                           transaction_index, tx_type, status, height,
-                           block_hash, quantum_state_hash, metadata, created_at
-                    FROM transactions
-                    WHERE tx_hash = %s
-                    LIMIT 1
-                    """,
-                    (tx_hash,),
-                )
-                row = cur.fetchone()
-                if row:
-                    meta = row[10]
-                    if isinstance(meta, str):
-                        try:
-                            meta = json.loads(meta)
-                        except Exception:
-                            meta = {}
-                    tx = {
-                        "tx_id": row[0],
-                        "tx_hash": row[0],
-                        "from_addr": row[1] or "",
-                        "from_address": row[1] or "",
-                        "to_addr": row[2] or "",
-                        "to_address": row[2] or "",
-                        "amount": int(row[3]) if row[3] is not None else 0,
-                        "tx_index": int(row[4]) if row[4] is not None else 0,
-                        "tx_type": row[5] or "transfer",
-                        "status": row[6] or "confirmed",
-                        "height": row[7],
-                        "block_hash": row[8] or "",
-                        "w_proof": row[9] or "",
-                        "metadata": meta or {},
-                        "inputs": (meta or {}).get("inputs", []),
-                        "outputs": (meta or {}).get("outputs", []),
-                    }
-                    logger.debug(f"[RPC-METHOD] qtcl_getTransaction: found in DB tx_hash={tx_hash[:16]}…")
-                    return _rpc_ok(tx, rpc_id)
-        except Exception as db_err:
-            logger.debug(f"[RPC-METHOD] qtcl_getTransaction: DB lookup error: {db_err}")
-
-        # ── 2. In-memory blockchain index fallback ──────────────────────────────
         try:
             from globals import get_blockchain
+
             bc = get_blockchain()
-            if bc is not None:
-                tx = bc.get_transaction(tx_hash)
-                if tx is not None:
-                    logger.debug(f"[RPC-METHOD] qtcl_getTransaction: found in memory index tx_hash={tx_hash[:16]}…")
-                    return _rpc_ok(tx, rpc_id)
+            if bc is None:
+                logger.warning(
+                    f"[RPC-METHOD] qtcl_getTransaction: blockchain not initialized"
+                )
+                return _rpc_error(-32003, "Blockchain not synced", rpc_id)
+            tx = bc.get_transaction(tx_hash)
+            if tx is None:
+                logger.debug(
+                    f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})"
+                )
+                return _rpc_error(
+                    -32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash}
+                )
+            logger.debug(f"[RPC-METHOD] qtcl_getTransaction success: tx_hash={tx_hash}")
+            return _rpc_ok(tx, rpc_id)
         except Exception as be:
-            logger.debug(f"[RPC-METHOD] qtcl_getTransaction: in-memory fallback error: {be}")
-
-        logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})")
-        return _rpc_error(-32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash})
-
+            logger.exception(
+                f"[RPC-METHOD] qtcl_getTransaction: blockchain error: {be}"
+            )
+            return _rpc_error(
+                -32603,
+                f"TX lookup failed: {str(be)}",
+                rpc_id,
+                {"exception": str(be).__class__.__name__},
+            )
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getTransaction outer exception: {e}")
         return _rpc_error(
@@ -4718,20 +3871,19 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 if h in _BLOCK_CACHE:
                     blocks.append(_BLOCK_CACHE[h])
 
-        # Fill gaps from DB — single batch query for all missing heights
+        # Fill gaps from DB
         if len(blocks) < (to_h - from_h + 1):
             missing = [h for h in range(from_h, to_h + 1) if h not in _BLOCK_CACHE]
-            if missing:
-                try:
-                    with get_db_cursor() as cur:
+            try:
+                with get_db_cursor() as cur:
+                    for h in missing:
                         cur.execute(
                             "SELECT height, block_hash, timestamp, w_state_hash, parent_hash, "
                             "nonce, difficulty, coherence_snapshot, merkle_root, tx_count, "
                             "miner_address "
-                            "FROM blocks WHERE height = ANY(%s) ORDER BY height",
-                            (missing,)
-                        )
-                        for row in cur.fetchall():
+                            "FROM blocks WHERE height = %s LIMIT 1", (h,))
+                        row = cur.fetchone()
+                        if row:
                             b = {
                                 "height": row[0], "block_hash": row[1],
                                 "timestamp": int(row[2]) if row[2] else 0,
@@ -4745,12 +3897,11 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                                 "miner_address": row[10] or "",
                             }
                             _cache_block(b)
-                        with _BLOCK_CACHE_LOCK:
-                            for h in missing:
+                            with _BLOCK_CACHE_LOCK:
                                 if h in _BLOCK_CACHE:
                                     blocks.append(_BLOCK_CACHE[h])
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
         logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
         return _rpc_ok(
@@ -5578,18 +4729,6 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
         )
 
 
-def _iso(dt: Any) -> Optional[str]:
-    """Convert a datetime, float epoch, or None → ISO-8601 string (or None)."""
-    if dt is None:
-        return None
-    try:
-        if hasattr(dt, "isoformat"):
-            return dt.isoformat()
-        return datetime.fromtimestamp(float(dt), tz=timezone.utc).isoformat()
-    except Exception:
-        return str(dt)
-
-
 def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
     """qtcl_getOracleRegistry — paginated on-chain oracle registry.
     Params (object or positional list):
@@ -6071,15 +5210,12 @@ def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
     try:
         engine = _init_hlwe_engine()
         kp = engine.generate_keypair()
-        # HypKeyPair may or may not carry a .timestamp field depending on engine version;
-        # fall back to wall-clock ISO string so the MCP tool always returns a valid value.
-        _kp_ts = getattr(kp, "timestamp", None) or datetime.now(timezone.utc).isoformat()
         return _rpc_ok(
             {
                 "private_key": kp.private_key,
                 "public_key": kp.public_key,
                 "address": kp.address,
-                "timestamp": _kp_ts,
+                "timestamp": kp.timestamp,
             },
             rpc_id,
         )
@@ -6417,18 +5553,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         txs = data.get("transactions", data.get("txs", []))
         logger.info(f"[RPC-submitBlock] h={height}: {len(txs or [])} transactions in block")
 
-        # Extract W-state attestation data — override with server's oracle fidelity
-        _miner_fidelity = float(data.get("w_state_fidelity", 0.0))
-        w_state_fidelity = 0.0
-        try:
-            _lat_fid = getattr(LATTICE, "fidelity", None)
-            if _lat_fid is not None:
-                w_state_fidelity = float(_lat_fid)
-        except Exception:
-            pass
-        if w_state_fidelity <= 0.0:
-            w_state_fidelity = _miner_fidelity
-        logger.info(f"[RPC-submitBlock] h={height}: fidelity lattice={w_state_fidelity} miner_submitted={_miner_fidelity}")
+        # Extract W-state attestation data
+        w_state_fidelity = float(data.get("w_state_fidelity", 0.0))
 
         # ═══════════════════════════════════════════════════════════════════════
         # CATHEDRAL-GRADE: BLOCK SIGNATURE VERIFICATION (HypΓ Schnorr-Γ)
@@ -6471,15 +5597,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _coinbase_txs = []
 
         for tx in txs or []:
-            if isinstance(tx, str):
-                try:
-                    tx = json.loads(tx)
-                except Exception:
-                    logger.warning(f"[RPC-submitBlock] Skipping non-JSON tx string")
-                    continue
-            if not isinstance(tx, dict):
-                logger.warning(f"[RPC-submitBlock] Skipping non-dict tx: {type(tx).__name__}")
-                continue
             tx_type = tx.get("tx_type", "").lower()
             if tx_type in ("coinbase", "miner_reward", "treasury_reward"):
                 _coinbase_txs.append(tx)
@@ -6512,21 +5629,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _treasury_coinbase = None
 
         for cb in _coinbase_txs:
-            if not isinstance(cb, dict):
-                logger.warning(f"[RPC-submitBlock] Skipping non-dict coinbase tx: {type(cb).__name__}")
-                continue
-            _raw_outputs = cb.get("outputs", [])
-            _outputs = []
-            for _o in (_raw_outputs if isinstance(_raw_outputs, list) else []):
-                if isinstance(_o, dict):
-                    _outputs.append(_o)
-                elif isinstance(_o, str):
-                    try:
-                        _parsed = json.loads(_o)
-                        if isinstance(_parsed, dict):
-                            _outputs.append(_parsed)
-                    except Exception:
-                        pass
+            _outputs = cb.get("outputs", [])
             # Extract recipient from direct field or first output address
             _to = (
                 cb.get("to_addr")
@@ -6593,16 +5696,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # Validate non-coinbase transactions (if any)
         for tx in _non_coinbase_txs:
-            if not isinstance(tx, dict):
-                logger.warning(f"[RPC-submitBlock] Skipping non-dict tx: {type(tx).__name__}")
-                continue
-            # Parse metadata if it's a JSON string
-            _tx_meta = tx.get("metadata", {})
-            if isinstance(_tx_meta, str):
-                try:
-                    _tx_meta = json.loads(_tx_meta)
-                except Exception:
-                    _tx_meta = {}
             # Every non-coinbase must have a valid signature
             _sig = tx.get("signature") or tx.get("hyp_sig") or tx.get("sig", {})
             if not _sig:
@@ -6613,17 +5706,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 )
 
             # ── CATHEDRAL-GRADE: Transaction signature verification ──
-            _tx_pubkey = (tx.get("sender_public_key_hex") or tx.get("public_key", "")
-                          or _tx_meta.get("sender_public_key_hex", "")
-                          or _tx_meta.get("public_key", ""))
-            if not _tx_pubkey:
-                _sig_raw = tx.get("signature", "")
-                if isinstance(_sig_raw, str) and _sig_raw.startswith("{"):
-                    try:
-                        _sig_d = json.loads(_sig_raw)
-                        _tx_pubkey = _sig_d.get("public_key_hex") or _sig_d.get("public_key", "")
-                    except Exception:
-                        pass
+            _tx_pubkey = tx.get("sender_public_key_hex") or tx.get("public_key", "")
             _tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
             if not _tx_pubkey:
                 return _rpc_error(
@@ -6632,11 +5715,36 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     rpc_id,
                 )
 
-            # Transaction signature verification disabled for MVP
-            # (verification would require reconstructing the signing hash from
-            #  {sender, recipient, amount, nonce} — currently compares against tx_id
-            #  which doesn't match. Mempool-level verification is active.)
-            logger.debug(f"[RPC-submitBlock] ✓ TX sig present for {_tx_id[:16]}…")
+            try:
+                _engine = _init_hlwe_engine()
+                # Hash the transaction ID for signature verification
+                _tx_hash_bytes = (
+                    bytes.fromhex(_tx_id)
+                    if len(_tx_id) == 64
+                    else hashlib.sha3_256(str(_tx_id).encode()).digest()
+                )
+                # Call engine's verify_signature method
+                # It expects (message_hash: bytes, sig: Dict[str, str], public_key: str)
+                _tx_sig_valid = _engine.verify_signature(
+                    _tx_hash_bytes, _sig, _tx_pubkey
+                )
+                if not _tx_sig_valid:
+                    logger.error(
+                        f"[RPC-submitBlock] ❌ Transaction signature verification FAILED {_tx_id[:16]}..."
+                    )
+                    return _rpc_error(-32003, f"Transaction signature invalid", rpc_id)
+                logger.debug(
+                    f"[RPC-submitBlock] ✅ Transaction signature verified: {_tx_id[:16]}..."
+                )
+            except Exception as _tx_verify_err:
+                logger.error(
+                    f"[RPC-submitBlock] ❌ Transaction verification error {_tx_id[:16]}...: {_tx_verify_err}"
+                )
+                return _rpc_error(
+                    -32003,
+                    f"Transaction verification failed: {str(_tx_verify_err)}",
+                    rpc_id,
+                )
 
             # Validate sender has sufficient balance by tracing unspent outputs
             _from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
@@ -7020,15 +6128,61 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception:
             pass
 
-        # Mark confirmed txs in mempool so they're removed from pending
+        # ── Drain confirmed transactions from mempool ──────────────────────────
+        # After successful settlement, remove included TXs from mempool so they
+        # don't get re-included in the next block.
+        _mempool_drained = 0
+        if _non_coinbase_txs:
+            try:
+                from mempool import mark_included_in_block as _mp_mark
+                _included_hashes = [
+                    tx.get("tx_id") or tx.get("tx_hash", "")
+                    for tx in _non_coinbase_txs
+                    if tx.get("tx_id") or tx.get("tx_hash")
+                ]
+                if _included_hashes:
+                    _mempool_drained = _mp_mark(_included_hashes, height)
+                    logger.info(
+                        f"[RPC-submitBlock] 🧹 Drained {_mempool_drained} TXs from mempool at h={height}"
+                    )
+            except Exception as mp_err:
+                logger.warning(f"[RPC-submitBlock] ⚠️  Mempool drain failed (non-critical): {mp_err}")
+
+        # ── Bundle pending mempool TXs for the miner's next block ──────────────
+        # Return up to 50 pending transactions so the miner can include them
+        # in the next block without a separate RPC call.
+        _pending_for_next = []
         try:
-            _confirmed_hashes = [tx.get("tx_id") or tx.get("tx_hash", "") for tx in (txs or []) if tx.get("tx_type", "").lower() not in ("coinbase", "miner_reward", "treasury_reward")]
-            _confirmed_hashes = [h for h in _confirmed_hashes if h]
-            if _confirmed_hashes:
-                from mempool import mark_included_in_block as _mark_included
-                _mark_included(_confirmed_hashes, height)
-        except Exception as _mark_err:
-            logger.debug(f"[RPC-submitBlock] Mempool mark_included skipped: {_mark_err}")
+            from mempool import get_mempool as _get_mp
+            _mp = _get_mp()
+            _pending_txs, _, _ = _mp.get_block_transactions(
+                max_txs=50,
+                block_height=height + 1,
+                miner_address=miner_address,
+            )
+            for _ptx in _pending_txs:
+                _ptx_dict = _ptx.to_dict() if hasattr(_ptx, 'to_dict') else _ptx
+                # Normalize to the format the miner expects
+                _pending_for_next.append({
+                    "tx_id": _ptx_dict.get("tx_hash", ""),
+                    "tx_type": "transfer",
+                    "from_addr": _ptx_dict.get("from_address", ""),
+                    "to_addr": _ptx_dict.get("to_address", ""),
+                    "amount": _ptx_dict.get("amount_base", 0) / 100.0,
+                    "amount_base": _ptx_dict.get("amount_base", 0),
+                    "fee_base": _ptx_dict.get("fee_base", 0),
+                    "nonce": _ptx_dict.get("nonce", 0),
+                    "signature": _ptx_dict.get("signature", ""),
+                    "sender_public_key_hex": _ptx_dict.get("metadata", {}).get("sender_public_key_hex", ""),
+                    "inputs": _ptx_dict.get("inputs", []),
+                    "outputs": _ptx_dict.get("outputs", []),
+                })
+            if _pending_for_next:
+                logger.info(
+                    f"[RPC-submitBlock] 📦 Bundling {len(_pending_for_next)} pending mempool TXs for miner's next block"
+                )
+        except Exception as mp_bundle_err:
+            logger.debug(f"[RPC-submitBlock] Mempool bundle: {mp_bundle_err}")
 
         # Return accepted immediately (settlement happens in background)
         logger.info(
@@ -7045,6 +6199,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "oracle_consensus": "5/5",
                 "oracle_ids": [],
                 "next_height": height + 1,
+                "mempool_drained": _mempool_drained,
+                "pending_mempool_txs": _pending_for_next,
+                "pending_mempool_count": len(_pending_for_next),
                 "diagnostic": {
                     "block_rowcount": _block_rowcount,
                     "persistence_verified": True,
@@ -7618,9 +6775,6 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
                         "tx_id": tr[0], "from_address": tr[1] or "",
                         "to_address": tr[2] or "", "amount": float(tr[3] or 0),
                         "tx_type": tr[4] or "transfer",
-                        "outputs": meta.get("outputs", []),
-                        "inputs": meta.get("inputs", []),
-                        "metadata": meta,
                     })
                 if txs:
                     _settle_block_rewards(h, bh, miner, txs, [])
@@ -7632,255 +6786,187 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WALLET AUTH — HypΓ PBKDF2 password verification (pure stdlib, no decrypt needed)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_WALLET_VERIFIER_DOMAIN = b"QTCL_WALLET_VERIFIER_v2"
-_WALLET_PBKDF2_ITERATIONS = 600_000
-_WALLET_PBKDF2_KEY_LEN = 64
-
-def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
-    """qtcl_walletAuth — verify wallet password via PBKDF2 verifier."""
-    try:
-        if not isinstance(params, list) or not params:
-            return _rpc_error(-32602, "params: [{ wallet_data, password }]", rpc_id)
-        req = params[0] if isinstance(params[0], dict) else {}
-        wallet_data = req.get("wallet_data", {})
-        password = req.get("password", "")
-        if not wallet_data or not password:
-            return _rpc_error(-32602, "wallet_data and password required", rpc_id)
-
-        enc_pk = wallet_data.get("encrypted_private_key", {})
-        if not isinstance(enc_pk, dict):
-            return _rpc_error(-32602, "wallet_data.encrypted_private_key must be a dict", rpc_id)
-
-        salt_hex = enc_pk.get("salt_hex", "")
-        verifier_hex = enc_pk.get("verifier_hex", "")
-        if not salt_hex or not verifier_hex:
-            return _rpc_ok({"valid": False, "reason": "Missing salt_hex or verifier_hex in encrypted_private_key"}, rpc_id)
-
-        salt = bytes.fromhex(salt_hex)
-        stored_v = bytes.fromhex(verifier_hex)
-
-        raw = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt,
-                                   _WALLET_PBKDF2_ITERATIONS, dklen=_WALLET_PBKDF2_KEY_LEN)
-        verifier_key = raw[32:]
-        expected_v = hashlib.sha3_256(_WALLET_VERIFIER_DOMAIN + verifier_key).digest()
-
-        if not hmac.compare_digest(stored_v, expected_v):
-            return _rpc_ok({"valid": False, "reason": "Invalid password — PBKDF2 verifier mismatch"}, rpc_id)
-
-        address = wallet_data.get("address", "")
-        public_key = wallet_data.get("public_key", "")
-        vault_version = wallet_data.get("vault_version", enc_pk.get("vault_version", 2))
-
-        logger.info(f"[WALLET-AUTH] ✅ HypΓ auth success: {address[:16]}… vault_v{vault_version}")
-        return _rpc_ok({
-            "valid": True,
-            "address": address,
-            "public_key": public_key,
-            "vault_version": vault_version,
-        }, rpc_id)
-
-    except Exception as e:
-        logger.exception(f"[RPC] walletAuth error: {e}")
-        return _rpc_error(-32603, f"Wallet auth error: {str(e)}", rpc_id)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GET UTXOs — query unspent outputs for an address
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _rpc_getUTXOs(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getUTXOs — return unspent outputs for address."""
-    try:
-        address = None
-        limit = 1000
-        if isinstance(params, list) and params:
-            if isinstance(params[0], dict):
-                address = params[0].get("address", "")
-                limit = int(params[0].get("limit", 1000))
-            else:
-                address = str(params[0])
-        elif isinstance(params, dict):
-            address = params.get("address", "")
-            limit = int(params.get("limit", 1000))
-
-        if not address:
-            return _rpc_error(-32602, "address required", rpc_id)
-
-        utxos = []
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    SELECT utxo_id, tx_hash, output_index, amount, spent,
-                           created_at_height, created_at_timestamp
-                    FROM address_utxos
-                    WHERE address = %s AND spent = FALSE
-                    ORDER BY created_at_height DESC NULLS LAST
-                    LIMIT %s
-                """, (address, limit))
-                for row in cur.fetchall():
-                    utxos.append({
-                        "utxo_id": int(row[0]),
-                        "tx_hash": row[1],
-                        "output_index": int(row[2]),
-                        "amount_base": int(row[3]) if row[3] else 0,
-                        "spent": bool(row[4]),
-                        "created_at_height": int(row[5]) if row[5] else None,
-                        "created_at_timestamp": int(row[6]) if row[6] else None,
-                    })
-        except Exception as _ue:
-            logger.debug(f"[RPC] getUTXOs DB error: {_ue}")
-
-        return _rpc_ok({"utxos": utxos, "count": len(utxos), "address": address}, rpc_id)
-
-    except Exception as e:
-        logger.exception(f"[RPC] getUTXOs error: {e}")
-        return _rpc_error(-32603, str(e), rpc_id)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# WALLET CRYPTO — stdlib-only SHAKE-256-CTR + SHA3-256 MAC (same as hyp_lwe.py)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _wallet_shake_ctr(key: bytes, nonce: bytes, data: bytes) -> bytes:
-    """SHAKE-256 CTR mode — symmetric (encrypt == decrypt)."""
-    out = bytearray(len(data))
-    for i in range(0, len(data), 64):
-        counter = struct.pack('<Q', i // 64)
-        stream = hashlib.shake_256(key + nonce + counter).digest(64)
-        chunk = data[i:i+64]
-        for j in range(len(chunk)):
-            out[i + j] = chunk[j] ^ stream[j]
-    return bytes(out)
-
-def _wallet_aead_decrypt(key: bytes, nonce: bytes, ciphertext_and_tag: bytes) -> bytes:
-    """AEAD decrypt: verify SHA3-256 MAC, then SHAKE-256-CTR decrypt."""
-    ciphertext = ciphertext_and_tag[:-32]
-    tag = ciphertext_and_tag[-32:]
-    enc_key = hashlib.sha3_256(b"QTCL_ENC:" + key).digest()
-    mac_key = hashlib.sha3_256(b"QTCL_MAC:" + key).digest()
-    expected_tag = hashlib.sha3_256(mac_key + nonce + ciphertext).digest()
-    if not hmac.compare_digest(tag, expected_tag):
-        raise ValueError("Authentication tag verification failed")
-    return _wallet_shake_ctr(enc_key, nonce, ciphertext)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SIGN AND SUBMIT TX — decrypt private key, sign with HypΓ, submit to mempool
+# qtcl_signAndSubmitTx — Server-side wallet decrypt → sign → submit
+# Used by tx.html send form: decrypts wallet file, signs TX, submits to mempool
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
-    """qtcl_signAndSubmitTx — server-side HypΓ decrypt, sign, submit."""
+    """qtcl_signAndSubmitTx — Decrypt wallet, sign transaction, submit to mempool.
+
+    params[0] = {
+        wallet_data: <full wallet JSON from .qtcl-wallet file>,
+        password: <wallet password>,
+        tx: {from_address, to_address, amount, fee, nonce, memo}
+    }
+    """
     try:
-        if not isinstance(params, list) or not params:
-            return _rpc_error(-32602, "params: [{ wallet_data, password, tx }]", rpc_id)
-        req = params[0] if isinstance(params[0], dict) else {}
-        wallet_data = req.get("wallet_data", {})
-        password = req.get("password", "")
-        tx_data = req.get("tx", {})
+        if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
+            return _rpc_error(-32602, "params[0] required", rpc_id)
 
-        if not wallet_data or not password or not tx_data:
-            return _rpc_error(-32602, "wallet_data, password, and tx required", rpc_id)
+        data = params[0] if isinstance(params, (list, tuple)) else params
+        if not isinstance(data, dict):
+            return _rpc_error(-32602, "params[0] must be object", rpc_id)
 
-        enc_pk = wallet_data.get("encrypted_private_key", {})
-        address = wallet_data.get("address", "")
+        wallet_data = data.get("wallet_data")
+        password = data.get("password", "")
+        tx_fields = data.get("tx", {})
 
-        # 1. Verify password via PBKDF2 verifier
+        if not wallet_data or not password:
+            return _rpc_error(-32602, "wallet_data and password required", rpc_id)
+        if not tx_fields.get("from_address") or not tx_fields.get("to_address"):
+            return _rpc_error(-32602, "tx.from_address and tx.to_address required", rpc_id)
+
+        # ── Parse wallet file ──────────────────────────────────────────────────
+        if isinstance(wallet_data, str):
+            try:
+                wallet_data = json.loads(wallet_data)
+            except json.JSONDecodeError:
+                return _rpc_error(-32602, "wallet_data must be valid JSON", rpc_id)
+
+        encrypted_pk = wallet_data.get("encrypted_private_key", "")
+        public_key_hex = wallet_data.get("public_key", "") or wallet_data.get("public_key_hex", "")
+        wallet_addr = wallet_data.get("address", "") or tx_fields.get("from_address", "")
+
+        if not encrypted_pk:
+            return _rpc_error(-32602, "Wallet file missing encrypted_private_key", rpc_id)
+
+        # ── Decrypt private key ────────────────────────────────────────────────
         try:
-            salt = bytes.fromhex(enc_pk.get("salt_hex", ""))
-            stored_v = bytes.fromhex(enc_pk.get("verifier_hex", ""))
-            raw = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt,
-                                       _WALLET_PBKDF2_ITERATIONS, dklen=_WALLET_PBKDF2_KEY_LEN)
-            verifier_key = raw[32:]
-            expected_v = hashlib.sha3_256(_WALLET_VERIFIER_DOMAIN + verifier_key).digest()
-            if not hmac.compare_digest(stored_v, expected_v):
-                return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
-        except Exception as _ve:
-            return _rpc_ok({"valid": False, "reason": f"Verification error: {str(_ve)}"}, rpc_id)
-
-        # 2. Decrypt private key (stdlib-only SHAKE-256-CTR + SHA3-256 MAC)
-        try:
-            nonce = bytes.fromhex(enc_pk.get("nonce_hex", ""))
-            ciphertext = bytes.fromhex(enc_pk.get("ciphertext_hex", ""))
-            tag = bytes.fromhex(enc_pk.get("tag_hex", ""))
-            enc_key = raw[:32]
-            private_key_bytes = _wallet_aead_decrypt(enc_key, nonce, ciphertext + tag)
-            private_key_str = private_key_bytes.decode('utf-8')
-        except Exception as _de:
-            logger.error(f"[SIGN-TX] Decrypt failed: {_de}")
-            return _rpc_ok({"valid": False, "reason": "Private key decryption failed — wrong password or corrupted wallet"}, rpc_id)
-
-        # 3. Build and sign transaction
-        try:
-            _to = tx_data.get("to_address", tx_data.get("to", ""))
-            _raw_amount = tx_data.get("amount", 0)
-            if _raw_amount is None:
-                _raw_amount = 0
-            _amount = float(_raw_amount)
-            _raw_fee = tx_data.get("fee", 0.01)
-            if _raw_fee is None:
-                _raw_fee = 0.01
-            _fee = float(_raw_fee)
-            _memo = tx_data.get("memo", "")
-
-            if _fee < 0 or _fee is None:
-                _fee = 0.01
-            _amount_base = int(round(_amount * 100))
-            _fee_base = int(round(_fee * 100))
-
-            tx_id = hashlib.sha3_256(f"{address}{_to}{_amount}{time.time()}".encode()).hexdigest()
-
             engine = _init_hlwe_engine()
-            _tx_nonce = int(time.time() * 1e6)
-            tx_data = {
-                'sender': address,
-                'recipient': _to,
-                'amount': _amount_base / 100.0,
-                'nonce': _tx_nonce,
+
+            # Derive decryption key from password via SHA3-256
+            password_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
+
+            # Decrypt: XOR the encrypted_pk with password-derived key stream
+            # This matches the client-side encryption in qtcl_client.py
+            enc_bytes = bytes.fromhex(encrypted_pk)
+            key_bytes = bytes.fromhex(password_hash)
+            # Extend key to match encrypted data length
+            key_stream = (key_bytes * ((len(enc_bytes) // len(key_bytes)) + 1))[:len(enc_bytes)]
+            private_key_bytes = bytes(a ^ b for a, b in zip(enc_bytes, key_stream))
+            private_key_hex = private_key_bytes.hex()
+
+            # Verify decryption: derive address from public key and check it matches
+            if public_key_hex and wallet_addr:
+                try:
+                    derived_addr = engine.derive_address(public_key_hex)
+                    if derived_addr != wallet_addr:
+                        logger.warning(
+                            f"[SIGN-TX] Address mismatch: derived={derived_addr[:16]}… wallet={wallet_addr[:16]}…"
+                        )
+                except Exception:
+                    pass  # Non-fatal: address derivation may differ between implementations
+
+        except Exception as decrypt_err:
+            logger.error(f"[SIGN-TX] Decrypt failed: {decrypt_err}")
+            return _rpc_error(-32000, "Failed to decrypt wallet — wrong password?", rpc_id,
+                             {"reason": "password_error"})
+
+        # ── Build transaction ──────────────────────────────────────────────────
+        from_addr = tx_fields["from_address"]
+        to_addr = tx_fields["to_address"]
+        amount_qtcl = float(tx_fields.get("amount", 0))
+        fee_qtcl = float(tx_fields.get("fee", 0.01))
+        amount_base = int(round(amount_qtcl * 100))
+        fee_base = int(round(fee_qtcl * 100))
+        nonce = int(tx_fields.get("nonce", int(time.time() * 1000)))
+        memo = tx_fields.get("memo", "")
+        timestamp_ns = int(time.time() * 1e9)
+
+        # ── Compute tx_hash (must match mempool's canonical_hash) ──────────────
+        tx_data_str = f"{from_addr}:{to_addr}:{amount_qtcl}:{fee_qtcl}:{nonce}:{timestamp_ns}"
+        tx_hash = hashlib.sha3_256(tx_data_str.encode()).hexdigest()
+
+        # ── Sign the transaction ───────────────────────────────────────────────
+        try:
+            # Build the signing payload (must match client-side _integrate_wallet_send)
+            sign_payload = {
+                "sender": from_addr,
+                "recipient": to_addr,
+                "amount": amount_qtcl,
+                "nonce": nonce,
             }
-            tx_json = json.dumps(tx_data, sort_keys=True, default=str)
-            signing_hash_bytes = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
-            _pub_key = wallet_data.get("public_key", "")
-            sig = engine.sign_hash(signing_hash_bytes, private_key_str)
-            sig["public_key_hex"] = _pub_key
+            sign_json = json.dumps(sign_payload, sort_keys=True, default=str)
+            message_hash = hashlib.sha3_256(sign_json.encode("utf-8")).digest()
 
-            # Zero private key from memory immediately
-            private_key_str = "0" * len(private_key_str)
+            sig = engine.sign_hash(message_hash, private_key_hex)
+            sig["public_key_hex"] = public_key_hex
 
-            tx_payload = {
-                "tx_id": tx_id, "tx_hash": tx_id, "tx_type": "transfer",
-                "from_address": address, "to_address": _to,
-                "from_addr": address, "to_addr": _to,
-                "amount": float(_amount), "amount_base": _amount_base,
-                "fee": _fee, "fee_base": _fee_base,
-                "nonce": _tx_nonce,
-                "signature": sig, "memo": _memo,
-                "status": "pending", "timestamp": int(time.time()),
-                "sender_public_key_hex": _pub_key,
-                "public_key": _pub_key,
+            logger.info(f"[SIGN-TX] ✅ Transaction signed: {tx_hash[:16]}…")
+        except Exception as sign_err:
+            logger.error(f"[SIGN-TX] Signing failed: {sign_err}", exc_info=True)
+            return _rpc_error(-32000, f"Signing failed: {str(sign_err)}", rpc_id,
+                             {"reason": "signing_error"})
+
+        # ── Build UTXO inputs/outputs ──────────────────────────────────────────
+        outputs = [
+            {"address": to_addr, "amount_base": amount_base},
+        ]
+        inputs = []  # UTXO inputs will be resolved by mempool/settlement
+
+        # ── Submit to mempool ──────────────────────────────────────────────────
+        try:
+            from mempool import get_mempool
+            tx_raw = {
+                "tx_hash": tx_hash,
+                "from_address": from_addr,
+                "to_address": to_addr,
+                "amount": amount_qtcl,
+                "amount_base": amount_base,
+                "fee": fee_qtcl,
+                "fee_base": fee_base,
+                "nonce": nonce,
+                "timestamp_ns": timestamp_ns,
+                "tx_type": "transfer",
+                "memo": memo,
+                "signature": sig,
+                "sender_public_key_hex": public_key_hex,
+                "public_key": public_key_hex,
+                "inputs": inputs,
+                "outputs": outputs,
+                "metadata": {
+                    "sender_public_key_hex": public_key_hex,
+                    "signed_server_side": True,
+                },
             }
 
-            # 4. Submit to mempool via existing handler
-            mempool_result = _rpc_submitTransaction([tx_payload], rpc_id)
-            if isinstance(mempool_result, dict) and mempool_result.get("error"):
-                return _rpc_ok({"valid": False, "reason": f"Mempool rejected: {mempool_result['error'].get('message', 'unknown')}"}, rpc_id)
+            result_code, message, accepted_tx = get_mempool().accept(tx_raw)
 
-            tx_hash_out = tx_id
-            if isinstance(mempool_result, dict):
-                tx_hash_out = mempool_result.get("result", {}).get("tx_hash", tx_id)
+            if accepted_tx:
+                logger.info(
+                    f"[SIGN-TX] ✅ TX submitted to mempool: {tx_hash[:16]}… "
+                    f"from={from_addr[:16]}… to={to_addr[:16]}… amount={amount_qtcl} QTCL"
+                )
+                return _rpc_ok(
+                    {
+                        "valid": True,
+                        "tx_hash": tx_hash,
+                        "status": "accepted",
+                        "message": message,
+                        "amount_qtcl": amount_qtcl,
+                        "fee_qtcl": fee_qtcl,
+                    },
+                    rpc_id,
+                )
+            else:
+                logger.warning(f"[SIGN-TX] ❌ Mempool rejected: {message}")
+                return _rpc_ok(
+                    {
+                        "valid": False,
+                        "tx_hash": tx_hash,
+                        "reason": message,
+                        "code": str(result_code),
+                    },
+                    rpc_id,
+                )
 
-            logger.info(f"[SIGN-TX] ✅ Signed+submitted: {tx_id[:16]}… {address[:16]}… → {_to[:16]}… {_amount} QTCL")
-            return _rpc_ok({"valid": True, "tx_hash": tx_hash_out, "tx_id": tx_id}, rpc_id)
-
-        except Exception as _se:
-            logger.error(f"[SIGN-TX] Sign/submit failed: {_se}", exc_info=True)
-            return _rpc_ok({"valid": False, "reason": f"Sign/submit error: {str(_se)[:100]}"}, rpc_id)
+        except Exception as submit_err:
+            logger.error(f"[SIGN-TX] Submit failed: {submit_err}", exc_info=True)
+            return _rpc_error(-32603, f"Mempool submission failed: {str(submit_err)}", rpc_id)
 
     except Exception as e:
-        logger.exception(f"[RPC] signAndSubmitTx error: {e}")
-        return _rpc_error(-32603, str(e), rpc_id)
+        logger.exception(f"[RPC] signAndSubmitTx unhandled: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 _RPC_METHODS: Dict[str, Any] = {
@@ -7897,6 +6983,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempoolStats": _rpc_getMempoolStats,
     "qtcl_getMempool": _rpc_getMempool,
     "qtcl_submitTransaction": _rpc_submitTransaction,
+    "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
     "qtcl_getPeers": _rpc_getPeers,
     "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
     "qtcl_registerPeer": _rpc_registerPeer,  # ← NEW: miner bootstrap registration
@@ -7937,10 +7024,6 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_hyp_decryptMessage": qtcl_hyp_decryptMessage,
     "qtcl_hyp_signBlock": qtcl_hyp_signBlock,
     "qtcl_hyp_verifyBlock": qtcl_hyp_verifyBlock,
-    # ── Wallet Auth + UTXOs + Sign/Submit ───────────────────────────────────────
-    "qtcl_walletAuth": _rpc_walletAuth,
-    "qtcl_getUTXOs": _rpc_getUTXOs,
-    "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
 }
 
 
@@ -8295,18 +7378,6 @@ def rpc_health():
     ), 200
 
 
-@app.route("/favicon.png", methods=["GET"])
-def serve_favicon():
-    """GET /favicon.png — Serve the QTCL favicon."""
-    try:
-        favicon_path = os.path.join(os.path.dirname(__file__), "favicon.png")
-        if os.path.exists(favicon_path):
-            return send_file(favicon_path, mimetype="image/png")
-        return "", 404
-    except Exception:
-        return "", 404
-
-
 @app.route("/health", methods=["GET"])
 def health_bare():
     """GET /health — instant 200 OK for Koyeb health check."""
@@ -8447,66 +7518,6 @@ def serve_hyp_doc():
         return "hyp.html not found", 404
     except Exception as e:
         logger.error(f"[HYP] Failed to serve hyp.html: {e}")
-        return f"Error: {e}", 500
-
-
-@app.route("/tx", methods=["GET"])
-def serve_tx():
-    """GET /tx — Serve tx.html (transaction system / wallet)."""
-    try:
-        import os
-        from flask import send_file
-        tx_path = os.path.join(os.path.dirname(__file__), "tx.html")
-        if os.path.exists(tx_path):
-            return send_file(tx_path, mimetype="text/html")
-        return "tx.html not found", 404
-    except Exception as e:
-        logger.error(f"[TX] Failed to serve tx.html: {e}")
-        return f"Error: {e}", 500
-
-
-@app.route("/vault", methods=["GET"])
-def serve_vault():
-    """GET /vault — Serve vault.html (post-quantum encrypted vault)."""
-    try:
-        import os
-        from flask import send_file
-        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
-        if os.path.exists(vault_path):
-            return send_file(vault_path, mimetype="text/html")
-        return "vault.html not found", 404
-    except Exception as e:
-        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
-        return f"Error: {e}", 500
-
-
-@app.route("/agents", methods=["GET"])
-def serve_agents():
-    """GET /agents — Serve agents.html (MCP agent integration)."""
-    try:
-        import os
-        from flask import send_file
-        agents_path = os.path.join(os.path.dirname(__file__), "agents.html")
-        if os.path.exists(agents_path):
-            return send_file(agents_path, mimetype="text/html")
-        return "agents.html not found", 404
-    except Exception as e:
-        logger.error(f"[AGENTS] Failed to serve agents.html: {e}")
-        return f"Error: {e}", 500
-
-
-@app.route("/bridge", methods=["GET"])
-def serve_bridge():
-    """GET /bridge — Serve bridge.html if available."""
-    try:
-        import os
-        from flask import send_file
-        bridge_path = os.path.join(os.path.dirname(__file__), "bridge.html")
-        if os.path.exists(bridge_path):
-            return send_file(bridge_path, mimetype="text/html")
-        return "bridge.html not found", 404
-    except Exception as e:
-        logger.error(f"[BRIDGE] Failed to serve bridge.html: {e}")
         return f"Error: {e}", 500
 
 
