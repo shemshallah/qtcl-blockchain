@@ -1049,7 +1049,7 @@ class _OracleFacade:
         """Verify a HypΓ Schnorr-Γ transaction signature.
         
         Args:
-            tx_hash_hex: hex string of the signing hash (32 bytes → 64 hex chars)
+            tx_hash_hex: hex string of the signing hash
             sig_dict: signature dict from engine.sign_hash() with public_key_hex
             sender_address: derived address of the signer (not used for verification)
         
