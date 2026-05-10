@@ -104,6 +104,7 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_submitBlock": 30.0,
     "qtcl_submitTransaction": 6.0,
     "qtcl_signAndSubmitTx": 10.0,
+    "qtcl_walletAuth": 15.0,
     "qtcl_submitOracleReg": 6.0,
     "qtcl_getOracleRegistry": 5.0,
     "qtcl_getOracleRecord": 4.0,
@@ -6786,6 +6787,124 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# qtcl_walletAuth — Verify wallet password (PBKDF2 tag or sign-verify round-trip)
+# Used by tx.html: authenticates wallet without exposing the private key
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
+    """qtcl_walletAuth — Verify wallet password and return wallet metadata.
+
+    Verification strategy:
+      1. If wallet has password_verifier field → PBKDF2 tag check
+      2. Otherwise → decrypt private key, sign a challenge, verify with public key
+
+    params[0] = { wallet_data: <wallet JSON>, password: <string> }
+    Returns: { valid: bool, address, public_key, vault_version, reason? }
+    """
+    try:
+        if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
+            return _rpc_error(-32602, "params[0] required", rpc_id)
+
+        data = params[0] if isinstance(params, (list, tuple)) else params
+        if not isinstance(data, dict):
+            return _rpc_error(-32602, "params[0] must be object", rpc_id)
+
+        wallet_data = data.get("wallet_data")
+        password = data.get("password", "")
+
+        if not wallet_data:
+            return _rpc_ok({"valid": False, "reason": "No wallet data provided"}, rpc_id)
+        if not password:
+            return _rpc_ok({"valid": False, "reason": "Password required"}, rpc_id)
+
+        if isinstance(wallet_data, str):
+            try:
+                wallet_data = json.loads(wallet_data)
+            except json.JSONDecodeError:
+                return _rpc_ok({"valid": False, "reason": "Invalid wallet JSON"}, rpc_id)
+
+        address = wallet_data.get("address", "")
+        public_key_hex = wallet_data.get("public_key", "") or wallet_data.get("public_key_hex", "")
+        encrypted_pk = wallet_data.get("encrypted_private_key", "")
+        vault_version = wallet_data.get("vault_version") or wallet_data.get("version", "1.0")
+
+        if not encrypted_pk:
+            return _rpc_ok({"valid": False, "reason": "Wallet missing encrypted_private_key"}, rpc_id)
+        if not public_key_hex:
+            return _rpc_ok({"valid": False, "reason": "Wallet missing public_key"}, rpc_id)
+
+        # ── Strategy 1: PBKDF2 verifier tag ────────────────────────────────────
+        password_verifier = wallet_data.get("password_verifier", "")
+        if password_verifier:
+            import hmac as _hmac
+            # Derive verifier from password using same PBKDF2 params
+            _salt = wallet_data.get("pbkdf2_salt", address).encode("utf-8")
+            _iterations = int(wallet_data.get("pbkdf2_iterations", 600_000))
+            _dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), _salt, _iterations)
+            _computed_tag = hashlib.sha3_256(_dk).hexdigest()
+            if _hmac.compare_digest(_computed_tag, password_verifier):
+                return _rpc_ok({
+                    "valid": True,
+                    "address": address,
+                    "public_key": public_key_hex,
+                    "vault_version": str(vault_version),
+                }, rpc_id)
+            else:
+                return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
+
+        # ── Strategy 2: Sign-verify round-trip ─────────────────────────────────
+        # Decrypt private key, sign a challenge, verify with stored public key.
+        # If the private key decrypts to something that produces valid signatures
+        # matching the stored public key, the password is correct.
+        try:
+            engine = _init_hlwe_engine()
+
+            # Decrypt: the encrypted_pk may be XOR'd with password hash,
+            # or may be the raw key if wallet has no encryption (alpha wallets).
+            # Try raw first (base-4 walk string), then XOR decryption.
+            private_key = encrypted_pk  # try raw first
+
+            # If it's base-4 (all chars 0-3) and 512 chars, it might be the raw key
+            is_raw_base4 = len(encrypted_pk) == 512 and all(c in '0123' for c in encrypted_pk)
+
+            if not is_raw_base4:
+                # XOR decrypt with password-derived key
+                password_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
+                try:
+                    enc_bytes = bytes.fromhex(encrypted_pk)
+                    key_bytes = bytes.fromhex(password_hash)
+                    key_stream = (key_bytes * ((len(enc_bytes) // len(key_bytes)) + 1))[:len(enc_bytes)]
+                    private_key = bytes(a ^ b for a, b in zip(enc_bytes, key_stream)).hex()
+                except Exception:
+                    private_key = encrypted_pk
+
+            # Sign a test challenge
+            challenge = hashlib.sha3_256(f"auth:{address}:{int(time.time())}".encode()).digest()
+            sig = engine.sign_hash(challenge, private_key)
+
+            # Verify with stored public key
+            valid = engine.verify_signature(challenge, sig, public_key_hex)
+
+            if valid:
+                return _rpc_ok({
+                    "valid": True,
+                    "address": address,
+                    "public_key": public_key_hex,
+                    "vault_version": str(vault_version),
+                }, rpc_id)
+            else:
+                return _rpc_ok({"valid": False, "reason": "Invalid password — signature verification failed"}, rpc_id)
+
+        except Exception as auth_err:
+            logger.warning(f"[WALLET-AUTH] Verification failed: {auth_err}")
+            return _rpc_ok({"valid": False, "reason": f"Authentication failed: {str(auth_err)[:80]}"}, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[RPC] walletAuth unhandled: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # qtcl_signAndSubmitTx — Server-side wallet decrypt → sign → submit
 # Used by tx.html send form: decrypts wallet file, signs TX, submits to mempool
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -6984,6 +7103,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempool": _rpc_getMempool,
     "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
+    "qtcl_walletAuth": _rpc_walletAuth,
     "qtcl_getPeers": _rpc_getPeers,
     "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
     "qtcl_registerPeer": _rpc_registerPeer,  # ← NEW: miner bootstrap registration
