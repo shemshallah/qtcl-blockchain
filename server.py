@@ -6809,9 +6809,10 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
 def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
     """qtcl_walletAuth — Verify wallet password and return wallet metadata.
 
-    Verification strategy:
-      1. If wallet has password_verifier field → PBKDF2 tag check
-      2. Otherwise → decrypt private key, sign a challenge, verify with public key
+    Supports multiple wallet formats:
+      - v2.0 wallets (from tx.html): XOR-SHA256 encryption, SHA256-based verifier
+      - Alpha wallets: raw base-4 private key (no encryption)
+      - Legacy wallets: XOR-SHA3-256 encryption
 
     params[0] = { wallet_data: <wallet JSON>, password: <string> }
     Returns: { valid: bool, address, public_key, vault_version, reason? }
@@ -6842,21 +6843,35 @@ def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
         public_key_hex = wallet_data.get("public_key", "") or wallet_data.get("public_key_hex", "")
         encrypted_pk = wallet_data.get("encrypted_private_key", "")
         vault_version = wallet_data.get("vault_version") or wallet_data.get("version", "1.0")
+        encryption_info = wallet_data.get("encryption", {})
+        encryption_algo = encryption_info.get("algorithm", "").upper() if isinstance(encryption_info, dict) else ""
 
         if not encrypted_pk:
             return _rpc_ok({"valid": False, "reason": "Wallet missing encrypted_private_key"}, rpc_id)
         if not public_key_hex:
             return _rpc_ok({"valid": False, "reason": "Wallet missing public_key"}, rpc_id)
 
-        # ── Strategy 1: PBKDF2 verifier tag ────────────────────────────────────
+        # ── Strategy 1: Verifier tag check (fast, no signing needed) ───────────
         password_verifier = wallet_data.get("password_verifier", "")
         if password_verifier:
             import hmac as _hmac
-            # Derive verifier from password using same PBKDF2 params
-            _salt = wallet_data.get("pbkdf2_salt", address).encode("utf-8")
-            _iterations = int(wallet_data.get("pbkdf2_iterations", 600_000))
-            _dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), _salt, _iterations)
-            _computed_tag = hashlib.sha3_256(_dk).hexdigest()
+
+            # Determine which hash was used based on encryption algorithm
+            if "SHA-256" in encryption_algo or encryption_algo == "XOR-SHA256":
+                # v2.0 wallets from tx.html: SHA-256(SHA-256(password) + address)
+                _pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+                _computed_tag = hashlib.sha256((_pw_hash + address).encode("utf-8")).hexdigest()
+            else:
+                # Legacy: try PBKDF2 first, then SHA3 fallback
+                _salt = wallet_data.get("pbkdf2_salt", "")
+                if _salt:
+                    _iterations = int(wallet_data.get("pbkdf2_iterations", 600_000))
+                    _dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), _salt.encode("utf-8"), _iterations)
+                    _computed_tag = hashlib.sha3_256(_dk).hexdigest()
+                else:
+                    _pw_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
+                    _computed_tag = hashlib.sha3_256((_pw_hash + address).encode("utf-8")).hexdigest()
+
             if _hmac.compare_digest(_computed_tag, password_verifier):
                 return _rpc_ok({
                     "valid": True,
@@ -6867,37 +6882,40 @@ def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
             else:
                 return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
 
-        # ── Strategy 2: Sign-verify round-trip ─────────────────────────────────
-        # Decrypt private key, sign a challenge, verify with stored public key.
-        # If the private key decrypts to something that produces valid signatures
-        # matching the stored public key, the password is correct.
+        # ── Strategy 2: Decrypt + sign-verify round-trip ───────────────────────
         try:
             engine = _init_hlwe_engine()
 
-            # Decrypt: the encrypted_pk may be XOR'd with password hash,
-            # or may be the raw key if wallet has no encryption (alpha wallets).
-            # Try raw first (base-4 walk string), then XOR decryption.
-            private_key = encrypted_pk  # try raw first
-
-            # If it's base-4 (all chars 0-3) and 512 chars, it might be the raw key
+            # Alpha wallets: raw base-4 private key (no encryption)
             is_raw_base4 = len(encrypted_pk) == 512 and all(c in '0123' for c in encrypted_pk)
 
-            if not is_raw_base4:
-                # XOR decrypt with password-derived key
-                password_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
-                try:
-                    enc_bytes = bytes.fromhex(encrypted_pk)
-                    key_bytes = bytes.fromhex(password_hash)
-                    key_stream = (key_bytes * ((len(enc_bytes) // len(key_bytes)) + 1))[:len(enc_bytes)]
-                    private_key = bytes(a ^ b for a, b in zip(enc_bytes, key_stream)).hex()
-                except Exception:
-                    private_key = encrypted_pk
+            if is_raw_base4:
+                private_key = encrypted_pk
+            else:
+                # Decrypt based on encryption algorithm
+                if "SHA-256" in encryption_algo or encryption_algo == "XOR-SHA256":
+                    pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+                else:
+                    pw_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
 
-            # Sign a test challenge
+                enc_bytes = bytes.fromhex(encrypted_pk)
+                key_bytes = bytes.fromhex(pw_hash)
+                key_stream = (key_bytes * ((len(enc_bytes) // len(key_bytes)) + 1))[:len(enc_bytes)]
+                dec_bytes = bytes(a ^ b for a, b in zip(enc_bytes, key_stream))
+
+                # The decrypted result should be the UTF-8 encoded base-4 private key
+                try:
+                    private_key = dec_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    return _rpc_ok({"valid": False, "reason": "Invalid password — decryption produced invalid data"}, rpc_id)
+
+                # Validate: must be 512 chars of base-4 digits
+                if len(private_key) != 512 or not all(c in '0123' for c in private_key):
+                    return _rpc_ok({"valid": False, "reason": "Invalid password — decrypted key is not a valid HypΓ walk"}, rpc_id)
+
+            # Sign a test challenge and verify
             challenge = hashlib.sha3_256(f"auth:{address}:{int(time.time())}".encode()).digest()
             sig = engine.sign_hash(challenge, private_key)
-
-            # Verify with stored public key
             valid = engine.verify_signature(challenge, sig, public_key_hex)
 
             if valid:
