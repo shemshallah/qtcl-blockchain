@@ -48,6 +48,7 @@ if _HYP_DIR not in sys.path:
 import socket
 import struct
 import hashlib
+import hmac
 import secrets
 import logging
 import threading
@@ -633,21 +634,6 @@ try:
 except Exception as _sse_reg_err:
     _SSE_AVAILABLE = False
     logger.warning(f"[SSE] ⚠️ SSE route registration failed: {_sse_reg_err}")
-
-# Register MCP 2025-06-18 routes on the main Flask app
-_MCP_AVAILABLE = False
-try:
-    from mcp_flask_adapter import register_mcp_routes as _register_mcp
-    _mcp_rpc_url = os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
-    if _register_mcp(app, _mcp_rpc_url):
-        _MCP_AVAILABLE = True
-        logger.info("[MCP] ✅ MCP 2025-06-18 routes registered on main Flask app")
-    else:
-        logger.warning("[MCP] ⚠️ MCP route registration returned False")
-except ImportError:
-    logger.warning("[MCP] ⚠️ mcp_flask_adapter not found — /mcp endpoints unavailable")
-except Exception as _mcp_reg_err:
-    logger.warning(f"[MCP] ⚠️ MCP route registration failed: {_mcp_reg_err}")
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -5231,7 +5217,7 @@ def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
                 "private_key": kp.private_key,
                 "public_key": kp.public_key,
                 "address": kp.address,
-                "timestamp": getattr(kp, "timestamp", datetime.now(timezone.utc).isoformat()),
+                "timestamp": kp.timestamp,
             },
             rpc_id,
         )
@@ -6807,15 +6793,18 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
-    """qtcl_walletAuth — Verify wallet password and return wallet metadata.
+    """qtcl_walletAuth — Verify wallet password using hyp_lwe's canonical format.
 
-    Supports multiple wallet formats:
-      - v2.0 wallets (from tx.html): XOR-SHA256 encryption, SHA256-based verifier
-      - Alpha wallets: raw base-4 private key (no encryption)
-      - Legacy wallets: XOR-SHA3-256 encryption
+    The wallet's encrypted_private_key is a DICT produced by hyp_lwe.encrypt_with_password():
+      {vault_version, salt_hex, nonce_hex, ciphertext_hex, tag_hex, verifier_hex}
+
+    Verification: hyp_lwe.verify_wallet_password(encrypted_pk_dict, password)
+      → PBKDF2-HMAC-SHA256(password, salt, 600K) → 64 bytes
+      → verifier_key = bytes[32:64]
+      → SHA3-256("QTCL_WALLET_VERIFIER_v2" + verifier_key)
+      → compare with verifier_hex
 
     params[0] = { wallet_data: <wallet JSON>, password: <string> }
-    Returns: { valid: bool, address, public_key, vault_version, reason? }
     """
     try:
         if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
@@ -6841,88 +6830,34 @@ def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
 
         address = wallet_data.get("address", "")
         public_key_hex = wallet_data.get("public_key", "") or wallet_data.get("public_key_hex", "")
-        encrypted_pk_raw = wallet_data.get("encrypted_private_key", "")
+        encrypted_pk = wallet_data.get("encrypted_private_key")
         vault_version = wallet_data.get("vault_version") or wallet_data.get("version", "1.0")
-        encryption_info = wallet_data.get("encryption", {})
-        encryption_algo = encryption_info.get("algorithm", "").upper() if isinstance(encryption_info, dict) else ""
-
-        # Normalize encrypted_pk to string — some wallet formats nest it in an object
-        if isinstance(encrypted_pk_raw, dict):
-            encrypted_pk = encrypted_pk_raw.get("data", "") or encrypted_pk_raw.get("ciphertext", "") or str(encrypted_pk_raw)
-        else:
-            encrypted_pk = str(encrypted_pk_raw) if encrypted_pk_raw else ""
 
         if not encrypted_pk:
             return _rpc_ok({"valid": False, "reason": "Wallet missing encrypted_private_key"}, rpc_id)
         if not public_key_hex:
             return _rpc_ok({"valid": False, "reason": "Wallet missing public_key"}, rpc_id)
 
-        # ── Strategy 1: Verifier tag check (fast, no signing needed) ───────────
-        password_verifier = wallet_data.get("password_verifier", "")
-        if password_verifier:
-            import hmac as _hmac
-
-            # Determine which hash was used based on encryption algorithm
-            if "SHA-256" in encryption_algo or encryption_algo == "XOR-SHA256":
-                # v2.0 wallets from tx.html: SHA-256(SHA-256(password) + address)
-                _pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
-                _computed_tag = hashlib.sha256((_pw_hash + address).encode("utf-8")).hexdigest()
-            else:
-                # Legacy: try PBKDF2 first, then SHA3 fallback
-                _salt = wallet_data.get("pbkdf2_salt", "")
-                if _salt:
-                    _iterations = int(wallet_data.get("pbkdf2_iterations", 600_000))
-                    _dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), _salt.encode("utf-8"), _iterations)
-                    _computed_tag = hashlib.sha3_256(_dk).hexdigest()
-                else:
-                    _pw_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
-                    _computed_tag = hashlib.sha3_256((_pw_hash + address).encode("utf-8")).hexdigest()
-
-            if _hmac.compare_digest(_computed_tag, password_verifier):
-                return _rpc_ok({
-                    "valid": True,
-                    "address": address,
-                    "public_key": public_key_hex,
-                    "vault_version": str(vault_version),
-                }, rpc_id)
-            else:
-                return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
-
-        # ── Strategy 2: Decrypt + sign-verify round-trip ───────────────────────
-        try:
-            engine = _init_hlwe_engine()
-
-            # Alpha wallets: raw base-4 private key (no encryption)
-            is_raw_base4 = len(encrypted_pk) == 512 and all(c in '0123' for c in encrypted_pk)
-
-            if is_raw_base4:
-                private_key = encrypted_pk
-            else:
-                # Decrypt based on encryption algorithm
-                if "SHA-256" in encryption_algo or encryption_algo == "XOR-SHA256":
-                    pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
-                else:
-                    pw_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
-
-                enc_bytes = bytes.fromhex(encrypted_pk)
-                key_bytes = bytes.fromhex(pw_hash)
-                key_stream = (key_bytes * ((len(enc_bytes) // len(key_bytes)) + 1))[:len(enc_bytes)]
-                dec_bytes = bytes(a ^ b for a, b in zip(enc_bytes, key_stream))
-
-                # The decrypted result should be the UTF-8 encoded base-4 private key
+        # ── hyp_lwe dict format (canonical) ────────────────────────────────────
+        if isinstance(encrypted_pk, dict):
+            try:
+                from hyp_lwe import verify_wallet_password as _hyp_verify
+                valid = _hyp_verify(encrypted_pk, password)
+            except ImportError:
+                # Manual implementation matching hyp_lwe exactly
                 try:
-                    private_key = dec_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    return _rpc_ok({"valid": False, "reason": "Invalid password — decryption produced invalid data"}, rpc_id)
-
-                # Validate: must be 512 chars of base-4 digits
-                if len(private_key) != 512 or not all(c in '0123' for c in private_key):
-                    return _rpc_ok({"valid": False, "reason": "Invalid password — decrypted key is not a valid HypΓ walk"}, rpc_id)
-
-            # Sign a test challenge and verify
-            challenge = hashlib.sha3_256(f"auth:{address}:{int(time.time())}".encode()).digest()
-            sig = engine.sign_hash(challenge, private_key)
-            valid = engine.verify_signature(challenge, sig, public_key_hex)
+                    _salt = bytes.fromhex(encrypted_pk.get("salt_hex", ""))
+                    _stored_v = bytes.fromhex(encrypted_pk.get("verifier_hex", ""))
+                    if not _salt or not _stored_v:
+                        return _rpc_ok({"valid": False, "reason": "Malformed wallet (missing salt_hex/verifier_hex)"}, rpc_id)
+                    _PBKDF2_ITERS = 600_000
+                    _PBKDF2_DKLEN = 64
+                    _raw = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), _salt, _PBKDF2_ITERS, dklen=_PBKDF2_DKLEN)
+                    _verifier_key = _raw[32:]
+                    _computed_v = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + _verifier_key).digest()
+                    valid = hmac.compare_digest(_stored_v, _computed_v)
+                except Exception as e:
+                    return _rpc_ok({"valid": False, "reason": f"Verification error: {str(e)[:60]}"}, rpc_id)
 
             if valid:
                 return _rpc_ok({
@@ -6932,11 +6867,19 @@ def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
                     "vault_version": str(vault_version),
                 }, rpc_id)
             else:
-                return _rpc_ok({"valid": False, "reason": "Invalid password — signature verification failed"}, rpc_id)
+                return _rpc_ok({"valid": False, "reason": "Invalid password"}, rpc_id)
 
-        except Exception as auth_err:
-            logger.warning(f"[WALLET-AUTH] Verification failed: {auth_err}")
-            return _rpc_ok({"valid": False, "reason": f"Authentication failed: {str(auth_err)[:80]}"}, rpc_id)
+        # ── Alpha wallet: raw base-4 string (512 chars, digits 0-3) ────────────
+        if isinstance(encrypted_pk, str) and len(encrypted_pk) == 512 and all(c in '0123' for c in encrypted_pk):
+            # No encryption — any password "works" (alpha wallets have no password)
+            return _rpc_ok({
+                "valid": True,
+                "address": address,
+                "public_key": public_key_hex,
+                "vault_version": str(vault_version),
+            }, rpc_id)
+
+        return _rpc_ok({"valid": False, "reason": "Unrecognized wallet format"}, rpc_id)
 
     except Exception as e:
         logger.exception(f"[RPC] walletAuth unhandled: {e}")
@@ -6981,17 +6924,9 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             except json.JSONDecodeError:
                 return _rpc_error(-32602, "wallet_data must be valid JSON", rpc_id)
 
-        encrypted_pk_raw = wallet_data.get("encrypted_private_key", "")
+        encrypted_pk = wallet_data.get("encrypted_private_key")
         public_key_hex = wallet_data.get("public_key", "") or wallet_data.get("public_key_hex", "")
         wallet_addr = wallet_data.get("address", "") or tx_fields.get("from_address", "")
-        encryption_info = wallet_data.get("encryption", {})
-        encryption_algo = encryption_info.get("algorithm", "").upper() if isinstance(encryption_info, dict) else ""
-
-        # Normalize encrypted_pk to string
-        if isinstance(encrypted_pk_raw, dict):
-            encrypted_pk = encrypted_pk_raw.get("data", "") or encrypted_pk_raw.get("ciphertext", "") or ""
-        else:
-            encrypted_pk = str(encrypted_pk_raw) if encrypted_pk_raw else ""
 
         if not encrypted_pk:
             return _rpc_error(-32602, "Wallet file missing encrypted_private_key", rpc_id)
@@ -7000,44 +6935,49 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         try:
             engine = _init_hlwe_engine()
 
-            # Check if it's an unencrypted alpha wallet (raw base-4 walk)
-            is_raw_base4 = len(encrypted_pk) == 512 and all(c in '0123' for c in encrypted_pk)
-
-            if is_raw_base4:
+            if isinstance(encrypted_pk, dict):
+                # Canonical hyp_lwe format: {salt_hex, nonce_hex, ciphertext_hex, tag_hex, verifier_hex}
+                try:
+                    from hyp_lwe import decrypt_with_password as _hyp_decrypt
+                    private_key_hex = _hyp_decrypt(encrypted_pk, password).decode("utf-8")
+                except ImportError:
+                    # Manual SHAKE-256-CTR decryption matching hyp_lwe exactly
+                    _salt = bytes.fromhex(encrypted_pk["salt_hex"])
+                    _nonce = bytes.fromhex(encrypted_pk["nonce_hex"])
+                    _ct = bytes.fromhex(encrypted_pk["ciphertext_hex"])
+                    _tag = bytes.fromhex(encrypted_pk["tag_hex"])
+                    _raw = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), _salt, 600_000, dklen=64)
+                    _enc_key_raw, _verifier_key = _raw[:32], _raw[32:]
+                    # Verify first
+                    _stored_v = encrypted_pk.get("verifier_hex", "")
+                    if _stored_v:
+                        _computed_v = hashlib.sha3_256(b"QTCL_WALLET_VERIFIER_v2" + _verifier_key).digest()
+                        if not hmac.compare_digest(bytes.fromhex(_stored_v), _computed_v):
+                            return _rpc_error(-32000, "Wrong password", rpc_id, {"reason": "password_error"})
+                    # Decrypt
+                    _ek = hashlib.sha3_256(b"QTCL_ENC:" + _enc_key_raw).digest()
+                    _mk = hashlib.sha3_256(b"QTCL_MAC:" + _enc_key_raw).digest()
+                    # Verify MAC
+                    _mac_h = hashlib.sha3_256()
+                    _mac_h.update(_mk)
+                    _mac_h.update(_nonce)
+                    _mac_h.update(_ct)
+                    if not hmac.compare_digest(_tag, _mac_h.digest()):
+                        return _rpc_error(-32000, "Wrong password or tampered wallet", rpc_id, {"reason": "mac_error"})
+                    # SHAKE-256-CTR decrypt
+                    _shake = hashlib.shake_256()
+                    _shake.update(_ek)
+                    _shake.update(_nonce)
+                    _ks = _shake.digest(len(_ct))
+                    private_key_hex = bytes(a ^ b for a, b in zip(_ct, _ks)).decode("utf-8")
+            elif isinstance(encrypted_pk, str) and len(encrypted_pk) == 512 and all(c in '0123' for c in encrypted_pk):
+                # Alpha wallet: raw base-4 walk, no encryption
                 private_key_hex = encrypted_pk
             else:
-                # Derive decryption key — match the hash used during encryption
-                if "SHA-256" in encryption_algo or encryption_algo == "XOR-SHA256":
-                    password_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
-                else:
-                    password_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
+                return _rpc_error(-32000, "Unrecognized wallet encryption format", rpc_id)
 
-                # Decrypt: XOR the encrypted_pk with password-derived key stream
-                enc_bytes = bytes.fromhex(encrypted_pk)
-                key_bytes = bytes.fromhex(password_hash)
-                key_stream = (key_bytes * ((len(enc_bytes) // len(key_bytes)) + 1))[:len(enc_bytes)]
-                dec_bytes = bytes(a ^ b for a, b in zip(enc_bytes, key_stream))
-
-                try:
-                    private_key_hex = dec_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    return _rpc_error(-32000, "Failed to decrypt wallet — wrong password?", rpc_id,
-                                     {"reason": "password_error"})
-
-                if len(private_key_hex) != 512 or not all(c in '0123' for c in private_key_hex):
-                    return _rpc_error(-32000, "Failed to decrypt wallet — wrong password?", rpc_id,
-                                     {"reason": "password_error"})
-
-            # Verify decryption: derive address from public key and check it matches
-            if public_key_hex and wallet_addr:
-                try:
-                    derived_addr = engine.derive_address(public_key_hex)
-                    if derived_addr != wallet_addr:
-                        logger.warning(
-                            f"[SIGN-TX] Address mismatch: derived={derived_addr[:16]}… wallet={wallet_addr[:16]}…"
-                        )
-                except Exception:
-                    pass  # Non-fatal: address derivation may differ between implementations
+            if not private_key_hex or len(private_key_hex) != 512 or not all(c in '0123' for c in private_key_hex):
+                return _rpc_error(-32000, "Decryption failed — wrong password?", rpc_id, {"reason": "password_error"})
 
         except Exception as decrypt_err:
             logger.error(f"[SIGN-TX] Decrypt failed: {decrypt_err}")
@@ -7151,6 +7091,61 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
+def _rpc_createWallet(params: Any, rpc_id: Any) -> dict:
+    """qtcl_createWallet — Generate keypair + encrypt with hyp_lwe.create_wallet_file.
+
+    Returns the complete wallet JSON (minus private_key) for download.
+    The private key is encrypted inside encrypted_private_key dict and NEVER
+    returned in plaintext. The wallet file can be downloaded and used with
+    walletAuth to authenticate.
+
+    params[0] = { password: <string>, label?: <string> }
+    """
+    try:
+        data = params[0] if isinstance(params, (list, tuple)) and params else params or {}
+        password = data.get("password", "")
+        label = data.get("label", "")
+
+        if not password or len(password) < 6:
+            return _rpc_error(-32602, "Password required (min 6 chars)", rpc_id)
+
+        engine = _init_hlwe_engine()
+        kp = engine.generate_keypair()
+
+        try:
+            from hyp_lwe import create_wallet_file
+            wallet_dict, _ = create_wallet_file(
+                kp.address, kp.public_key, kp.private_key, password
+            )
+        except ImportError:
+            # Manual construction matching hyp_lwe exactly
+            from hyp_lwe import encrypt_with_password
+            enc_pk = encrypt_with_password(kp.private_key.encode("utf-8"), password)
+            wallet_dict = {
+                "vault_version": 2,
+                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "address": kp.address,
+                "public_key": kp.public_key,
+                "encrypted_private_key": enc_pk,
+            }
+
+        if label:
+            wallet_dict["label"] = label
+
+        logger.info(f"[CREATE-WALLET] ✅ Wallet created: {kp.address[:16]}…")
+
+        return _rpc_ok({
+            "wallet": wallet_dict,
+            "address": kp.address,
+            "public_key": kp.public_key,
+            "vault_version": wallet_dict.get("vault_version", 2),
+        }, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[RPC] createWallet: {e}")
+        return _rpc_error(-32603, f"Wallet creation failed: {str(e)}", rpc_id)
+
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock": _rpc_submitBlock,
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
@@ -7167,6 +7162,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
     "qtcl_walletAuth": _rpc_walletAuth,
+    "qtcl_createWallet": _rpc_createWallet,
     "qtcl_getPeers": _rpc_getPeers,
     "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
     "qtcl_registerPeer": _rpc_registerPeer,  # ← NEW: miner bootstrap registration
@@ -7178,16 +7174,6 @@ _RPC_METHODS: Dict[str, Any] = {
                 TessellationRewardSchedule,
                 "TREASURY_ADDRESS",
                 "qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d",
-            )
-        },
-        rid,
-    ),
-    "qtcl_getMinerAddress": lambda p, rid: _rpc_ok(
-        {
-            "miner_address": getattr(
-                TessellationRewardSchedule,
-                "MINER_ADDRESS",
-                "",
             )
         },
         rid,
@@ -7712,73 +7698,6 @@ def serve_hyp_doc():
     except Exception as e:
         logger.error(f"[HYP] Failed to serve hyp.html: {e}")
         return f"Error: {e}", 500
-
-
-@app.route("/tx", methods=["GET"])
-def serve_tx():
-    """GET /tx — Serve tx.html (transaction / wallet UI)."""
-    try:
-        tx_path = os.path.join(os.path.dirname(__file__), "tx.html")
-        if os.path.exists(tx_path):
-            return send_file(tx_path, mimetype="text/html")
-        return "tx.html not found", 404
-    except Exception as e:
-        logger.error(f"[TX] Failed to serve tx.html: {e}")
-        return f"Error: {e}", 500
-
-
-@app.route("/vault", methods=["GET"])
-def serve_vault():
-    """GET /vault — Serve vault.html (vault management UI)."""
-    try:
-        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
-        if os.path.exists(vault_path):
-            return send_file(vault_path, mimetype="text/html")
-        return "vault.html not found", 404
-    except Exception as e:
-        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
-        return f"Error: {e}", 500
-
-
-@app.route("/agents", methods=["GET"])
-def serve_agents():
-    """GET /agents — Serve agents.html (agent swarm dashboard)."""
-    try:
-        agents_path = os.path.join(os.path.dirname(__file__), "agents.html")
-        if os.path.exists(agents_path):
-            return send_file(agents_path, mimetype="text/html")
-        return "agents.html not found", 404
-    except Exception as e:
-        logger.error(f"[AGENTS] Failed to serve agents.html: {e}")
-        return f"Error: {e}", 500
-
-
-@app.route("/favicon.png", methods=["GET"])
-def serve_favicon_png():
-    """Serve favicon.png from repo root."""
-    try:
-        fav_path = os.path.join(os.path.dirname(__file__), "favicon.png")
-        if os.path.exists(fav_path):
-            return send_file(fav_path, mimetype="image/png")
-        return "", 204
-    except Exception:
-        return "", 204
-
-
-@app.route("/favicon.ico", methods=["GET"])
-def serve_favicon_ico():
-    """Serve favicon.ico (or fallback to .png)."""
-    try:
-        base = os.path.dirname(__file__)
-        ico_path = os.path.join(base, "favicon.ico")
-        if os.path.exists(ico_path):
-            return send_file(ico_path, mimetype="image/x-icon")
-        png_path = os.path.join(base, "favicon.png")
-        if os.path.exists(png_path):
-            return send_file(png_path, mimetype="image/png")
-        return "", 204
-    except Exception:
-        return "", 204
 
 
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
