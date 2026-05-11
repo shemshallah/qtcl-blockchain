@@ -7088,87 +7088,6 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# qtcl_createCheckoutSession — Stripe checkout session for buying QTCL
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _rpc_createCheckoutSession(params: Any, rpc_id: Any) -> dict:
-    """Create a Stripe checkout session for QTCL purchase.
-
-    Requires STRIPE_SECRET_KEY env var. If not configured, returns a helpful message.
-    After payment, Stripe webhook triggers QTCL delivery to the receiving address.
-    """
-    try:
-        data = params[0] if isinstance(params, (list, tuple)) and params else params or {}
-        amount_qtcl = int(data.get("amount_qtcl", 0))
-        receiving_address = data.get("receiving_address", "")
-        price_usd_cents = int(data.get("price_usd_cents", 0))
-
-        if not receiving_address or len(receiving_address) != 64:
-            return _rpc_error(-32602, "Valid 64-char receiving_address required", rpc_id)
-        if amount_qtcl <= 0:
-            return _rpc_error(-32602, "amount_qtcl must be > 0", rpc_id)
-
-        stripe_key = os.environ.get("STRIPE_SECRET_KEY", "")
-        if not stripe_key:
-            logger.info("[STRIPE] No STRIPE_SECRET_KEY configured — returning stub")
-            return _rpc_ok({
-                "status": "not_configured",
-                "message": "Stripe integration is being configured. Check back soon!",
-                "amount_qtcl": amount_qtcl,
-                "price_usd_cents": price_usd_cents,
-            }, rpc_id)
-
-        # Stripe API call
-        import urllib.request
-        import urllib.parse
-
-        checkout_data = urllib.parse.urlencode({
-            "payment_method_types[]": "card",
-            "line_items[0][price_data][currency]": "usd",
-            "line_items[0][price_data][product_data][name]": f"{amount_qtcl} QTCL Tokens",
-            "line_items[0][price_data][product_data][description]": "Post-quantum blockchain tokens — QTCL Network",
-            "line_items[0][price_data][unit_amount]": str(price_usd_cents),
-            "line_items[0][quantity]": "1",
-            "mode": "payment",
-            "success_url": f"{os.environ.get('BASE_URL', 'https://qtcl-blockchain.koyeb.app')}/tx?page=dashboard&purchase=success&amount={amount_qtcl}",
-            "cancel_url": f"{os.environ.get('BASE_URL', 'https://qtcl-blockchain.koyeb.app')}/tx?page=buy&purchase=cancelled",
-            "metadata[receiving_address]": receiving_address,
-            "metadata[amount_qtcl]": str(amount_qtcl),
-            "metadata[network]": "qtcl-mainnet",
-        }).encode()
-
-        req = urllib.request.Request(
-            "https://api.stripe.com/v1/checkout/sessions",
-            data=checkout_data,
-            headers={
-                "Authorization": f"Bearer {stripe_key}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            method="POST",
-        )
-
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            session = json.loads(resp.read())
-
-        logger.info(
-            f"[STRIPE] ✅ Checkout session created: {session.get('id', '?')[:24]}… "
-            f"for {amount_qtcl} QTCL → {receiving_address[:16]}…"
-        )
-
-        return _rpc_ok({
-            "status": "created",
-            "checkout_url": session.get("url", ""),
-            "session_id": session.get("id", ""),
-            "amount_qtcl": amount_qtcl,
-            "price_usd_cents": price_usd_cents,
-        }, rpc_id)
-
-    except Exception as e:
-        logger.error(f"[STRIPE] Checkout error: {e}", exc_info=True)
-        return _rpc_error(-32603, f"Stripe checkout failed: {str(e)}", rpc_id)
-
-
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock": _rpc_submitBlock,
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
@@ -7184,7 +7103,6 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempool": _rpc_getMempool,
     "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
-    "qtcl_createCheckoutSession": _rpc_createCheckoutSession,
     "qtcl_walletAuth": _rpc_walletAuth,
     "qtcl_getPeers": _rpc_getPeers,
     "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
@@ -7720,6 +7638,45 @@ def serve_hyp_doc():
         return "hyp.html not found", 404
     except Exception as e:
         logger.error(f"[HYP] Failed to serve hyp.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/tx", methods=["GET"])
+def serve_tx():
+    """GET /tx — Serve tx.html (transaction / wallet UI)."""
+    try:
+        tx_path = os.path.join(os.path.dirname(__file__), "tx.html")
+        if os.path.exists(tx_path):
+            return send_file(tx_path, mimetype="text/html")
+        return "tx.html not found", 404
+    except Exception as e:
+        logger.error(f"[TX] Failed to serve tx.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/vault", methods=["GET"])
+def serve_vault():
+    """GET /vault — Serve vault.html (vault management UI)."""
+    try:
+        vault_path = os.path.join(os.path.dirname(__file__), "vault.html")
+        if os.path.exists(vault_path):
+            return send_file(vault_path, mimetype="text/html")
+        return "vault.html not found", 404
+    except Exception as e:
+        logger.error(f"[VAULT] Failed to serve vault.html: {e}")
+        return f"Error: {e}", 500
+
+
+@app.route("/agents", methods=["GET"])
+def serve_agents():
+    """GET /agents — Serve agents.html (agent swarm dashboard)."""
+    try:
+        agents_path = os.path.join(os.path.dirname(__file__), "agents.html")
+        if os.path.exists(agents_path):
+            return send_file(agents_path, mimetype="text/html")
+        return "agents.html not found", 404
+    except Exception as e:
+        logger.error(f"[AGENTS] Failed to serve agents.html: {e}")
         return f"Error: {e}", 500
 
 
