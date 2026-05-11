@@ -634,6 +634,21 @@ except Exception as _sse_reg_err:
     _SSE_AVAILABLE = False
     logger.warning(f"[SSE] ⚠️ SSE route registration failed: {_sse_reg_err}")
 
+# Register MCP 2025-06-18 routes on the main Flask app
+_MCP_AVAILABLE = False
+try:
+    from mcp_flask_adapter import register_mcp_routes as _register_mcp
+    _mcp_rpc_url = os.environ.get("QTCL_RPC_URL", "http://localhost:8000/rpc")
+    if _register_mcp(app, _mcp_rpc_url):
+        _MCP_AVAILABLE = True
+        logger.info("[MCP] ✅ MCP 2025-06-18 routes registered on main Flask app")
+    else:
+        logger.warning("[MCP] ⚠️ MCP route registration returned False")
+except ImportError:
+    logger.warning("[MCP] ⚠️ mcp_flask_adapter not found — /mcp endpoints unavailable")
+except Exception as _mcp_reg_err:
+    logger.warning(f"[MCP] ⚠️ MCP route registration failed: {_mcp_reg_err}")
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry

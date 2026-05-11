@@ -130,33 +130,65 @@ def _register_native_mcp(app: Any, rpc_url: str) -> bool:
     }
 
     _MCP_TOOLS_LOCAL = [
-        {"name": "qtcl_get_balance",          "description": "Check QTCL balance for an address.", "inputSchema": {"type": "object", "properties": {"address": {"type": "string"}}, "required": ["address"]}},
-        {"name": "qtcl_get_chain_info",        "description": "Current blockchain state.", "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "qtcl_get_quantum_metrics",   "description": "Live quantum coherence metrics.", "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "qtcl_get_recent_transactions","description": "Recent transactions.", "inputSchema": {"type": "object", "properties": {"address": {"type": "string"}, "per_page": {"type": "integer", "default": 20}}}},
-        {"name": "qtcl_get_peers",             "description": "Active P2P peers.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}}},
-        {"name": "qtcl_get_oracle_registry",   "description": "Registered quantum oracles.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 10}}}},
+        {"name": "qtcl_create_wallet",          "description": "Create a new QTCL wallet backed by a HypΓ post-quantum keypair (Schnorr-Γ over PSL(2,R)).", "inputSchema": {"type": "object", "properties": {"label": {"type": "string", "description": "Optional wallet label"}}}},
+        {"name": "qtcl_sign_message",            "description": "Sign a 32-byte message hash with a HypΓ private key using Schnorr-Γ. Returns signature dict.", "inputSchema": {"type": "object", "properties": {"message_hex": {"type": "string", "description": "64-char hex SHA3-256 hash"}, "private_key": {"type": "string", "description": "512-char base-4 private key"}}, "required": ["message_hex", "private_key"]}},
+        {"name": "qtcl_get_balance",             "description": "Check QTCL balance (sum of unspent UTXOs) for any address.", "inputSchema": {"type": "object", "properties": {"address": {"type": "string", "description": "64-char hex QTCL address"}}, "required": ["address"]}},
+        {"name": "qtcl_get_utxos",               "description": "List unspent transaction outputs (UTXOs) for an address.", "inputSchema": {"type": "object", "properties": {"address": {"type": "string"}}, "required": ["address"]}},
+        {"name": "qtcl_send_transaction",         "description": "Submit a signed UTXO transaction to the QTCL network. Flat fee: 1 qsat (~18s finality).", "inputSchema": {"type": "object", "properties": {"from_address": {"type": "string"}, "to_address": {"type": "string"}, "amount": {"type": "number"}, "memo": {"type": "string"}, "signature": {"type": "string"}, "public_key": {"type": "string"}}, "required": ["from_address", "to_address", "amount"]}},
+        {"name": "qtcl_get_transaction",          "description": "Look up a QTCL transaction by its SHA3-256 hash.", "inputSchema": {"type": "object", "properties": {"tx_hash": {"type": "string"}}, "required": ["tx_hash"]}},
+        {"name": "qtcl_get_chain_info",           "description": "Get current blockchain state: height, mempool depth, system health vector.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "qtcl_get_block",                "description": "Retrieve a block by height (int) or hash (hex). Omit both for the latest block.", "inputSchema": {"type": "object", "properties": {"height": {"type": "integer"}, "hash": {"type": "string"}}}},
+        {"name": "qtcl_get_recent_transactions",  "description": "List recent transactions, optionally filtered by address. Paginated.", "inputSchema": {"type": "object", "properties": {"address": {"type": "string"}, "limit": {"type": "integer", "default": 20}}}},
+        {"name": "qtcl_get_quantum_metrics",      "description": "Live quantum coherence metrics: W-state fidelity, NPT witness, density matrix, oracle consensus.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "qtcl_get_oracle_registry",      "description": "List registered quantum oracle nodes with their types, stakes, and consensus votes.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 10}}}},
+        {"name": "qtcl_get_peers",                "description": "List active P2P peers in the QTCL DHT network.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}}},
+        {"name": "qtcl_get_price",                "description": "Get QTCL quantum coherence metrics and network vitals (no public USD exchange listing yet).", "inputSchema": {"type": "object", "properties": {}}},
     ]
 
     from flask import request as _request, Response as _Response, jsonify as _jsonify
 
     def _tool_dispatch(name: str, args: dict) -> dict:
         try:
-            if name == "qtcl_get_balance":
+            if name == "qtcl_create_wallet":
+                r = _rpc("qtcl_hyp_generateKeypair", {})
+                if "created_at" not in r:
+                    r["created_at"] = r.pop("timestamp", "")
+                r["crypto"] = "HypΓ Schnorr-Γ / PSL(2,R) | 512-step walk | SHA3-256² address"
+            elif name == "qtcl_sign_message":
+                r = _rpc("qtcl_hyp_signMessage", {"message": args.get("message_hex", ""), "private_key": args.get("private_key", "")})
+            elif name == "qtcl_get_balance":
                 r = _rpc("qtcl_getBalance", [args.get("address", "")])
+            elif name == "qtcl_get_utxos":
+                r = _rpc("qtcl_getUTXOs", [args.get("address", "")])
+            elif name == "qtcl_send_transaction":
+                p = {k: v for k, v in args.items() if v}
+                r = _rpc("qtcl_submitTransaction", [p])
+            elif name == "qtcl_get_transaction":
+                r = _rpc("qtcl_getTransaction", [args.get("tx_hash", "")])
             elif name == "qtcl_get_chain_info":
                 r = {"chain": _rpc("qtcl_getBlockHeight"), "mempool": _rpc("qtcl_getMempoolStats"), "health": _rpc("qtcl_getHealth")}
-            elif name == "qtcl_get_quantum_metrics":
-                r = _rpc("qtcl_getQuantumMetrics")
+            elif name == "qtcl_get_block":
+                if args.get("hash"):
+                    key = args["hash"]
+                elif args.get("height") is not None and int(args.get("height", -1)) >= 0:
+                    key = int(args["height"])
+                else:
+                    tip = _rpc("qtcl_getBlockHeight")
+                    key = tip.get("height", 0) if isinstance(tip, dict) else 0
+                r = _rpc("qtcl_getBlock", [key])
             elif name == "qtcl_get_recent_transactions":
-                p = {"page": 0, "per_page": min(int(args.get("per_page", 20)), 50)}
+                p = {"page": 0, "per_page": min(int(args.get("limit", 20)), 50)}
                 if args.get("address"):
                     p["address"] = args["address"]
                 r = _rpc("qtcl_getTransactions", [p])
-            elif name == "qtcl_get_peers":
-                r = _rpc("qtcl_getPeers", [int(args.get("limit", 20))])
+            elif name == "qtcl_get_quantum_metrics":
+                r = _rpc("qtcl_getQuantumMetrics")
             elif name == "qtcl_get_oracle_registry":
                 r = _rpc("qtcl_getOracleRegistry", [{"limit": int(args.get("limit", 10))}])
+            elif name == "qtcl_get_peers":
+                r = _rpc("qtcl_getPeers", [int(args.get("limit", 20))])
+            elif name == "qtcl_get_price":
+                r = _rpc("qtcl_getQuantumMetrics")
             else:
                 return {"jsonrpc": "2.0", "error": {"code": -32601, "message": f"Unknown tool: {name}"}, "id": None}
             return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": json.dumps(r, indent=2, default=str)}]}, "id": None}
