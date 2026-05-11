@@ -7688,9 +7688,6 @@ def serve_root():
 def serve_hyp_doc():
     """GET /hyp — Serve hyp.html (canonical architecture reference)."""
     try:
-        import os
-        from flask import send_file
-
         hyp_path = os.path.join(os.path.dirname(__file__), "hyp.html")
         if os.path.exists(hyp_path):
             return send_file(hyp_path, mimetype="text/html")
@@ -7698,6 +7695,66 @@ def serve_hyp_doc():
     except Exception as e:
         logger.error(f"[HYP] Failed to serve hyp.html: {e}")
         return f"Error: {e}", 500
+
+
+@app.route("/tx", methods=["GET"])
+def serve_tx():
+    """GET /tx — Serve tx.html (transaction / wallet UI)."""
+    try:
+        p = os.path.join(os.path.dirname(__file__), "tx.html")
+        if os.path.exists(p):
+            return send_file(p, mimetype="text/html")
+        return "tx.html not found", 404
+    except Exception as e:
+        return f"Error: {e}", 500
+
+
+@app.route("/vault", methods=["GET"])
+def serve_vault():
+    """GET /vault — Serve vault.html."""
+    try:
+        p = os.path.join(os.path.dirname(__file__), "vault.html")
+        if os.path.exists(p):
+            return send_file(p, mimetype="text/html")
+        return "vault.html not found", 404
+    except Exception as e:
+        return f"Error: {e}", 500
+
+
+@app.route("/agents", methods=["GET"])
+def serve_agents():
+    """GET /agents — Serve agents.html."""
+    try:
+        p = os.path.join(os.path.dirname(__file__), "agents.html")
+        if os.path.exists(p):
+            return send_file(p, mimetype="text/html")
+        return "agents.html not found", 404
+    except Exception as e:
+        return f"Error: {e}", 500
+
+
+@app.route("/favicon.png", methods=["GET"])
+def serve_favicon_png():
+    try:
+        p = os.path.join(os.path.dirname(__file__), "favicon.png")
+        if os.path.exists(p):
+            return send_file(p, mimetype="image/png")
+        return "", 204
+    except Exception:
+        return "", 204
+
+
+@app.route("/favicon.ico", methods=["GET"])
+def serve_favicon_ico():
+    try:
+        base = os.path.dirname(__file__)
+        for name in ("favicon.ico", "favicon.png"):
+            p = os.path.join(base, name)
+            if os.path.exists(p):
+                return send_file(p, mimetype="image/x-icon" if name.endswith(".ico") else "image/png")
+        return "", 204
+    except Exception:
+        return "", 204
 
 
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
