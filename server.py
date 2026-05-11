@@ -7119,6 +7119,16 @@ _RPC_METHODS: Dict[str, Any] = {
         },
         rid,
     ),
+    "qtcl_getMinerAddress": lambda p, rid: _rpc_ok(
+        {
+            "miner_address": getattr(
+                TessellationRewardSchedule,
+                "MINER_ADDRESS",
+                "",
+            )
+        },
+        rid,
+    ),
     "qtcl_getEvents": _rpc_getEvents,
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord": _rpc_getOracleRecord,

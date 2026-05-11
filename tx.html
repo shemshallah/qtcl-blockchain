@@ -2936,29 +2936,16 @@ async function loadBuySupply() {
   supplyBody.innerHTML = '<div style="text-align:center;padding:12px;color:var(--muted);font-size:11px;">⏳ Querying miner & treasury wallets…</div>';
 
   try {
-    // 1. Get treasury address
+    // 1. Get treasury address (from TREASURY_ADDRESS env var)
     const treasuryResult = await rpc('qtcl_getTreasuryAddress', []);
     _buyTreasuryAddr = treasuryResult.treasury_address || '';
 
-    // 2. Get chain info to find the active miner from latest block
-    const heightResult = await rpc('qtcl_getBlockHeight', []);
-    const latestHeight = heightResult.height || 0;
-
-    _buyMinerAddr = '';
-    if (latestHeight > 0) {
-      try {
-        const latestBlock = await rpc('qtcl_getBlock', [latestHeight]);
-        _buyMinerAddr = latestBlock.miner_address || '';
-        // If miner_address not in block, scan transactions for miner_reward
-        if (!_buyMinerAddr && latestBlock.transactions) {
-          for (const tx of latestBlock.transactions) {
-            if (tx.tx_type === 'miner_reward' && tx.to_addr) {
-              _buyMinerAddr = tx.to_addr;
-              break;
-            }
-          }
-        }
-      } catch (e) { console.warn('Failed to get latest block:', e); }
+    // 2. Get miner address (from MINER_ADDRESS env var on Koyeb)
+    try {
+      const minerResult = await rpc('qtcl_getMinerAddress', []);
+      _buyMinerAddr = minerResult.miner_address || '';
+    } catch (_) {
+      _buyMinerAddr = '';
     }
 
     // 3. Query both balances
