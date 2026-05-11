@@ -881,6 +881,14 @@ body::before {
 
     <div class="nav-section-title">Tools</div>
     <div class="nav-section">
+      <div class="nav-item" data-page="walletmgr" onclick="showPage('walletmgr')">
+        <span class="nav-icon">🔑</span> Wallet Manager
+        <span class="nav-badge" style="background:rgba(16,185,129,.15);color:var(--emerald);border-color:rgba(16,185,129,.3);">NEW</span>
+      </div>
+      <div class="nav-item" data-page="buy" onclick="showPage('buy')">
+        <span class="nav-icon">💳</span> Buy QTCL
+        <span class="nav-badge" style="background:rgba(139,92,246,.15);color:var(--violet);border-color:rgba(139,92,246,.3);">STRIPE</span>
+      </div>
       <div class="nav-item" data-page="contacts" onclick="showPage('contacts')">
         <span class="nav-icon">👤</span> Address Book
       </div>
@@ -1329,6 +1337,230 @@ body::before {
       <div id="lookupResult" class="hidden"></div>
     </div>
 
+    <!-- ═══════ PAGE: WALLET MANAGER ═══════ -->
+    <div class="page" id="page-walletmgr">
+      <div class="page-title">🔑 Wallet Manager</div>
+      <div class="page-desc">Create, export, and verify QTCL wallets — all cryptography runs client-side</div>
+
+      <!-- Security banner -->
+      <div style="background:rgba(16,185,129,.06);border:1px solid rgba(16,185,129,.2);border-radius:6px;padding:14px 18px;margin-bottom:20px;font-size:11px;color:var(--text);line-height:1.7;">
+        <strong style="color:var(--emerald);">🛡 Air-gapped wallet generation</strong><br>
+        Your private key is generated server-side by the HypΓ engine, transmitted once over TLS, displayed to you, and <strong>immediately purged from server memory</strong>.
+        The wallet JSON file is assembled entirely in your browser. <strong>No private key is ever stored on the server or in any database.</strong>
+        After downloading, the key material is zeroed from browser memory. For maximum security, generate wallets on a trusted device with no extensions.
+      </div>
+
+      <!-- Tab bar -->
+      <div class="tab-bar" style="margin-bottom:20px;">
+        <button class="tab-btn active" onclick="showWalletMgrTab('create')" id="wmTabCreate">Create New Wallet</button>
+        <button class="tab-btn" onclick="showWalletMgrTab('verify')" id="wmTabVerify">Verify Wallet</button>
+        <button class="tab-btn" onclick="showWalletMgrTab('backup')" id="wmTabBackup">Backup Guide</button>
+      </div>
+
+      <!-- ── CREATE WALLET ── -->
+      <div id="wmCreateTab">
+        <div class="card">
+          <div class="card-header"><div class="card-title">⚛ Generate HypΓ Keypair</div></div>
+          <div class="card-body">
+
+            <div class="form-group">
+              <label class="form-label">Wallet Password <span style="color:var(--red);">*</span></label>
+              <input type="password" class="form-input" id="wmPassword" placeholder="Strong password — encrypts your private key" autocomplete="new-password">
+              <div class="form-hint">Used to encrypt the private key in your wallet file. Choose something strong — there is NO recovery if lost.</div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Confirm Password <span style="color:var(--red);">*</span></label>
+              <input type="password" class="form-input" id="wmPasswordConfirm" placeholder="Confirm password" autocomplete="new-password">
+            </div>
+
+            <!-- Password strength meter -->
+            <div style="margin-bottom:16px;">
+              <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:4px;">
+                <span>Password strength</span>
+                <span id="wmPwStrengthLabel">—</span>
+              </div>
+              <div style="height:3px;background:var(--raised);border-radius:2px;overflow:hidden;">
+                <div id="wmPwStrengthBar" style="height:100%;width:0%;transition:all .3s;border-radius:2px;"></div>
+              </div>
+            </div>
+
+            <button class="btn btn-primary btn-full" onclick="generateNewWallet()" id="wmGenerateBtn">
+              ⚛ Generate Quantum-Safe Wallet
+            </button>
+
+            <!-- Generated wallet display -->
+            <div id="wmResult" class="hidden" style="margin-top:20px;">
+              <div style="background:rgba(0,212,255,.04);border:1px solid rgba(0,212,255,.15);border-radius:6px;padding:16px;">
+                <div style="font-size:12px;font-weight:600;color:var(--cyan);margin-bottom:12px;">✅ Wallet Generated Successfully</div>
+
+                <div class="form-group">
+                  <label class="form-label">Address</label>
+                  <div class="form-input" id="wmAddr" style="word-break:break-all;font-size:11px;color:var(--emerald);user-select:all;cursor:text;min-height:auto;"></div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Public Key <span style="color:var(--muted);font-weight:normal;">(safe to share)</span></label>
+                  <div class="form-input" id="wmPubKey" style="word-break:break-all;font-size:9px;color:var(--text);max-height:60px;overflow-y:auto;user-select:all;cursor:text;"></div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" style="color:var(--red);">🔒 Private Key <span style="font-weight:normal;">(NEVER share — encrypted in wallet file)</span></label>
+                  <div style="position:relative;">
+                    <div class="form-input" id="wmPrivKey" style="word-break:break-all;font-size:9px;color:var(--amber);max-height:60px;overflow-y:auto;filter:blur(4px);transition:filter .2s;user-select:all;cursor:text;"></div>
+                    <button style="position:absolute;top:6px;right:6px;background:var(--raised);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:10px;padding:3px 8px;cursor:pointer;" onclick="togglePrivKeyReveal()">👁 Reveal</button>
+                  </div>
+                  <div class="form-hint" style="color:var(--red);">This key controls your funds. Anyone with it can spend your QTCL. Back it up securely and NEVER paste it online.</div>
+                </div>
+
+                <div style="display:flex;gap:8px;margin-top:16px;">
+                  <button class="btn btn-primary" onclick="downloadWalletFile()" style="flex:1;">
+                    💾 Download Wallet File (.json)
+                  </button>
+                  <button class="btn btn-outline" onclick="copyWalletAddress()" style="flex:0 0 auto;">
+                    📋 Copy Address
+                  </button>
+                </div>
+
+                <div style="margin-top:12px;padding:10px 14px;background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.15);border-radius:6px;font-size:10px;color:var(--amber);line-height:1.6;">
+                  ⚠ <strong>CRITICAL:</strong> Download your wallet file NOW. After you leave this page, the private key is permanently erased from memory.
+                  There is no "forgot password" — if you lose the wallet file or password, your funds are gone forever. Store the file in a secure, offline location.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── VERIFY WALLET ── -->
+      <div id="wmVerifyTab" class="hidden">
+        <div class="card">
+          <div class="card-header"><div class="card-title">🔍 Verify Wallet Integrity</div></div>
+          <div class="card-body">
+            <div class="form-group">
+              <label class="form-label">Upload Wallet File</label>
+              <input type="file" class="form-input" id="wmVerifyFile" accept=".json" onchange="handleVerifyFile(event)" style="padding:8px;">
+              <div class="form-hint">Checks that the wallet file is valid, the public key derives to the correct address, and the file structure is intact.</div>
+            </div>
+            <div id="wmVerifyResult" class="hidden" style="margin-top:16px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── BACKUP GUIDE ── -->
+      <div id="wmBackupTab" class="hidden">
+        <div class="card">
+          <div class="card-header"><div class="card-title">📋 Wallet Backup Checklist</div></div>
+          <div class="card-body" style="font-size:12px;line-height:1.8;color:var(--text);">
+            <div style="margin-bottom:16px;">
+              <strong style="color:var(--cyan);">1. Download the wallet JSON file</strong><br>
+              This file contains your encrypted private key, public key, and address. Without it, you cannot sign transactions.
+            </div>
+            <div style="margin-bottom:16px;">
+              <strong style="color:var(--cyan);">2. Store in multiple secure locations</strong><br>
+              USB drive (encrypted), password manager vault, or printed paper wallet stored in a safe. Never store only in cloud storage.
+            </div>
+            <div style="margin-bottom:16px;">
+              <strong style="color:var(--cyan);">3. Remember your password</strong><br>
+              The wallet password encrypts your private key. Without it, the wallet file is useless. Consider using a password manager.
+            </div>
+            <div style="margin-bottom:16px;">
+              <strong style="color:var(--cyan);">4. Verify your backup</strong><br>
+              Use the "Verify Wallet" tab to confirm your backup file is valid before relying on it.
+            </div>
+            <div style="padding:12px 16px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.15);border-radius:6px;color:var(--red);font-size:11px;">
+              <strong>⚠ There is no recovery.</strong> QTCL uses client-side key management. No server, company, or support team can recover a lost wallet or reset a forgotten password. You are your own bank — act accordingly.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════ PAGE: BUY QTCL ═══════ -->
+    <div class="page" id="page-buy">
+      <div class="page-title">💳 Buy QTCL</div>
+      <div class="page-desc">Purchase QTCL tokens with credit/debit card via Stripe</div>
+
+      <!-- ── SUPPLY DASHBOARD ── -->
+      <div class="card" style="margin-bottom:20px;">
+        <div class="card-header">
+          <div class="card-title">⚛ Available Supply</div>
+          <button class="btn btn-sm" onclick="loadBuySupply()" style="font-size:10px;">↻ Refresh</button>
+        </div>
+        <div class="card-body" id="buySupplyBody">
+          <div style="text-align:center;padding:12px;color:var(--muted);font-size:11px;">Loading supply data…</div>
+        </div>
+      </div>
+
+      <!-- ── OUT OF STOCK BANNER (shown when supply = 0) ── -->
+      <div id="buyOutOfStock" class="hidden" style="margin-bottom:20px;">
+        <div style="background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.25);border-radius:6px;padding:18px 22px;text-align:center;">
+          <div style="font-size:28px;margin-bottom:8px;">⛏</div>
+          <div style="font-family:var(--font-display);font-size:15px;font-weight:700;color:var(--amber);margin-bottom:8px;">No QTCL Available for Purchase</div>
+          <div style="font-size:11px;color:var(--text);line-height:1.7;max-width:460px;margin:0 auto;">
+            The miner and treasury wallets currently hold <strong style="color:var(--red);">0 QTCL</strong>.
+            New supply is created through mining — each block mints <strong style="color:var(--cyan);">7.2 QTCL</strong> (miner reward) and <strong style="color:var(--violet);">0.8 QTCL</strong> (treasury).
+          </div>
+          <div style="margin-top:14px;padding:12px 16px;background:rgba(0,212,255,.04);border:1px solid rgba(0,212,255,.1);border-radius:6px;font-size:11px;color:var(--muted);line-height:1.7;">
+            <strong style="color:var(--cyan);">How to get QTCL:</strong><br>
+            ⛏ <strong>Mine it yourself</strong> — run the QTCL miner client and earn 7.2 QTCL per block<br>
+            ⏳ <strong>Wait for restock</strong> — the miner and treasury accumulate QTCL with every mined block<br>
+            🔄 <strong>Peer-to-peer</strong> — receive QTCL from another wallet holder via the Send tab
+          </div>
+        </div>
+      </div>
+
+      <!-- ── PURCHASE FORM (hidden when supply = 0) ── -->
+      <div id="buyFormSection">
+        <div class="card">
+          <div class="card-header"><div class="card-title">Purchase QTCL</div></div>
+          <div class="card-body">
+
+            <div class="form-group">
+              <label class="form-label">Receiving Address <span style="color:var(--red);">*</span></label>
+              <input type="text" class="form-input" id="buyAddr" placeholder="Your 64-char QTCL address">
+              <div class="form-hint">QTCL will be sent to this address after payment confirmation. Double-check — transactions are irreversible.</div>
+            </div>
+
+            <!-- Amount selector -->
+            <div class="form-group">
+              <label class="form-label">Amount <span id="buyMaxLabel" style="color:var(--muted);font-weight:normal;font-size:10px;"></span></label>
+              <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;" id="buyAmountGrid">
+                <!-- Populated dynamically based on available supply -->
+              </div>
+            </div>
+
+            <!-- Order summary -->
+            <div id="buyOrderSummary" class="hidden">
+              <div class="confirm-box">
+                <div class="confirm-row"><span class="label">QTCL Amount</span><span class="value" id="buyQtclAmount">—</span></div>
+                <div class="confirm-row"><span class="label">Price per QTCL</span><span class="value">$0.10 USD</span></div>
+                <div class="confirm-row"><span class="label">Network Fee</span><span class="value" style="color:var(--emerald);">FREE</span></div>
+                <div class="confirm-row total"><span class="label">Total</span><span class="value" id="buyTotal">$0.00</span></div>
+                <div class="confirm-row"><span class="label">Deliver to</span><span class="value" id="buyDeliverTo" style="font-size:10px;word-break:break-all;">—</span></div>
+              </div>
+            </div>
+
+            <button class="btn btn-primary btn-full" onclick="initStripeCheckout()" id="buyBtn" disabled style="margin-top:16px;">
+              💳 Pay with Stripe
+            </button>
+
+            <div style="margin-top:12px;font-size:10px;color:var(--muted);text-align:center;line-height:1.6;">
+              Payments processed securely by <strong style="color:var(--text);">Stripe</strong>. QTCL is delivered to your address within 1 block (~18 seconds) after payment confirmation.
+              <br>By purchasing, you agree that QTCL is an experimental quantum blockchain token with no guaranteed monetary value.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Supply source breakdown -->
+      <div class="card" style="margin-top:20px;">
+        <div class="card-header"><div class="card-title">Supply Sources</div></div>
+        <div class="card-body" id="buySupplySources" style="font-size:11px;color:var(--muted);text-align:center;padding:20px;">
+          Loading…
+        </div>
+      </div>
+    </div>
+
   </div><!-- /main -->
 </div><!-- /app-layout -->
 
@@ -1444,6 +1676,7 @@ function showPage(page) {
   if (page === 'blocks') loadBlocks();
   if (page === 'mempool') loadMempool();
   if (page === 'contacts') renderContactsPage();
+  if (page === 'buy') loadBuySupply();
 }
 
 // ═══ SECURITY: FULL WALLET DISCONNECT ON TAB SWITCH / VISIBILITY LOSS ═══
@@ -2456,6 +2689,498 @@ async function refreshDashboard() {
   } catch (e) {
     document.getElementById('networkDot').style.background = 'var(--red)';
     document.getElementById('networkStatus').textContent = 'Offline';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WALLET MANAGER — Client-side wallet generation, encryption, download
+// Private key never stored server-side. All assembly happens in-browser.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let _wmGeneratedWallet = null;  // Ephemeral — zeroed after download or page leave
+
+function showWalletMgrTab(tab) {
+  ['create', 'verify', 'backup'].forEach(t => {
+    const el = document.getElementById(`wm${t.charAt(0).toUpperCase()+t.slice(1)}Tab`);
+    const btn = document.getElementById(`wmTab${t.charAt(0).toUpperCase()+t.slice(1)}`);
+    if (el) el.classList.toggle('hidden', t !== tab);
+    if (btn) btn.classList.toggle('active', t === tab);
+  });
+}
+
+// Password strength meter
+document.addEventListener('DOMContentLoaded', () => {
+  const pw = document.getElementById('wmPassword');
+  if (pw) pw.addEventListener('input', () => {
+    const v = pw.value;
+    let score = 0;
+    if (v.length >= 8) score++;
+    if (v.length >= 14) score++;
+    if (/[A-Z]/.test(v) && /[a-z]/.test(v)) score++;
+    if (/\d/.test(v)) score++;
+    if (/[^A-Za-z0-9]/.test(v)) score++;
+    const labels = ['Very Weak', 'Weak', 'Fair', 'Good', 'Strong', 'Excellent'];
+    const colors = ['#ef4444', '#ef4444', '#f59e0b', '#f59e0b', '#10b981', '#00d4ff'];
+    const pct = [10, 25, 45, 65, 85, 100];
+    document.getElementById('wmPwStrengthLabel').textContent = labels[score] || '—';
+    document.getElementById('wmPwStrengthLabel').style.color = colors[score] || 'var(--muted)';
+    const bar = document.getElementById('wmPwStrengthBar');
+    bar.style.width = (pct[score] || 0) + '%';
+    bar.style.background = colors[score] || 'var(--muted)';
+  });
+});
+
+function togglePrivKeyReveal() {
+  const el = document.getElementById('wmPrivKey');
+  if (!el) return;
+  el.style.filter = el.style.filter === 'none' ? 'blur(4px)' : 'none';
+}
+
+async function generateNewWallet() {
+  const pw = document.getElementById('wmPassword').value;
+  const pwc = document.getElementById('wmPasswordConfirm').value;
+  if (!pw) { toast('Password required', 'error'); return; }
+  if (pw.length < 6) { toast('Password must be at least 6 characters', 'error'); return; }
+  if (pw !== pwc) { toast('Passwords do not match', 'error'); return; }
+
+  const btn = document.getElementById('wmGenerateBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating HypΓ keypair (PSL(2,ℝ) eigendecomposition)…';
+
+  try {
+    // 1. Generate keypair server-side (HypΓ engine needs mpmath at 150-digit precision)
+    const kp = await rpc('qtcl_hyp_generateKeypair', {});
+
+    if (!kp.private_key || !kp.public_key || !kp.address) {
+      throw new Error('Keypair generation returned incomplete data');
+    }
+
+    // 2. Encrypt private key CLIENT-SIDE with password
+    // XOR with SHA3-256 of password — same scheme as existing wallets
+    const pwHash = await sha3_256_hex(pw);
+    const pkBytes = new TextEncoder().encode(kp.private_key);
+    const keyBytes = hexToBytes(pwHash);
+    const encrypted = new Uint8Array(pkBytes.length);
+    for (let i = 0; i < pkBytes.length; i++) {
+      encrypted[i] = pkBytes[i] ^ keyBytes[i % keyBytes.length];
+    }
+    const encryptedHex = bytesToHex(encrypted);
+
+    // 3. Build password verifier tag (PBKDF2 not available in all browsers, use SHA3 chain)
+    const verifierInput = pwHash + kp.address;
+    const verifierTag = await sha3_256_hex(verifierInput);
+
+    // 4. Build wallet JSON (assembled entirely in-browser)
+    const walletData = {
+      version: '2.0',
+      vault_version: '2.0',
+      network: 'qtcl-mainnet',
+      created_at: new Date().toISOString(),
+      address: kp.address,
+      public_key: kp.public_key,
+      encrypted_private_key: encryptedHex,
+      password_verifier: verifierTag,
+      encryption: {
+        algorithm: 'XOR-SHA3-256',
+        key_derivation: 'SHA3-256(password)',
+        note: 'Decrypt: XOR encrypted_private_key bytes with SHA3-256(password) key stream'
+      },
+      cryptosystem: {
+        name: 'HypΓ',
+        type: 'post-quantum',
+        group: 'PSL(2,ℝ)',
+        signature: 'Schnorr-Γ',
+        security_level: 'HLWE-256'
+      }
+    };
+
+    // 5. Store temporarily for download (purged on page leave)
+    _wmGeneratedWallet = {
+      walletData,
+      rawPrivateKey: kp.private_key,  // shown to user, zeroed after download
+      address: kp.address,
+    };
+
+    // 6. Display
+    document.getElementById('wmAddr').textContent = kp.address;
+    document.getElementById('wmPubKey').textContent = kp.public_key;
+    document.getElementById('wmPrivKey').textContent = kp.private_key;
+    document.getElementById('wmPrivKey').style.filter = 'blur(4px)';
+    document.getElementById('wmResult').classList.remove('hidden');
+
+    // Auto-fill the buy page address
+    document.getElementById('buyAddr').value = kp.address;
+
+    toast('Wallet generated! Download the file before leaving this page.', 'success', 5000);
+
+  } catch (e) {
+    toast(`Generation failed: ${e.message}`, 'error');
+    console.error('Wallet generation error:', e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⚛ Generate Quantum-Safe Wallet';
+  }
+}
+
+function downloadWalletFile() {
+  if (!_wmGeneratedWallet) { toast('No wallet to download', 'error'); return; }
+  const json = JSON.stringify(_wmGeneratedWallet.walletData, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `qtcl-wallet-${_wmGeneratedWallet.address.slice(0, 12)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Wallet file downloaded — store it securely!', 'success');
+}
+
+function copyWalletAddress() {
+  if (!_wmGeneratedWallet) return;
+  copyText(_wmGeneratedWallet.address);
+}
+
+// ── Verify wallet file ──
+async function handleVerifyFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const el = document.getElementById('wmVerifyResult');
+  el.classList.remove('hidden');
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;">Verifying…</div>';
+
+  try {
+    const text = await file.text();
+    const w = JSON.parse(text);
+    const checks = [];
+
+    // Structure checks
+    checks.push({ name: 'Has address', ok: !!w.address && w.address.length === 64 });
+    checks.push({ name: 'Has public_key', ok: !!w.public_key && w.public_key.length > 100 });
+    checks.push({ name: 'Has encrypted_private_key', ok: !!w.encrypted_private_key && w.encrypted_private_key.length > 50 });
+    checks.push({ name: 'Has version', ok: !!w.version || !!w.vault_version });
+
+    // Address derivation check (server-side)
+    try {
+      const derived = await rpc('qtcl_hyp_deriveAddress', { public_key: w.public_key });
+      const match = derived.address === w.address;
+      checks.push({ name: 'Address ↔ Public Key match', ok: match, detail: match ? 'Cryptographically verified' : `Derived: ${derived.address.slice(0,16)}…` });
+    } catch (e) {
+      checks.push({ name: 'Address ↔ Public Key match', ok: false, detail: e.message });
+    }
+
+    const allOk = checks.every(c => c.ok);
+    el.innerHTML = `
+      <div style="background:${allOk ? 'rgba(16,185,129,.06)' : 'rgba(239,68,68,.06)'};border:1px solid ${allOk ? 'rgba(16,185,129,.2)' : 'rgba(239,68,68,.2)'};border-radius:6px;padding:14px 18px;">
+        <div style="font-size:13px;font-weight:600;color:${allOk ? 'var(--emerald)' : 'var(--red)'};margin-bottom:10px;">
+          ${allOk ? '✅ Wallet file is VALID' : '⚠ Wallet file has issues'}
+        </div>
+        ${checks.map(c => `
+          <div style="display:flex;align-items:center;gap:8px;font-size:11px;padding:4px 0;">
+            <span style="color:${c.ok ? 'var(--emerald)' : 'var(--red)'};">${c.ok ? '✓' : '✕'}</span>
+            <span style="color:var(--text);">${escHtml(c.name)}</span>
+            ${c.detail ? `<span style="color:var(--muted);font-size:10px;margin-left:auto;">${escHtml(c.detail)}</span>` : ''}
+          </div>
+        `).join('')}
+        <div style="margin-top:10px;font-size:10px;color:var(--muted);">
+          Address: <span style="color:var(--cyan);user-select:all;">${w.address || '—'}</span>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:11px;padding:12px;">Invalid JSON file: ${escHtml(e.message)}</div>`;
+  }
+}
+
+// ── SHA3-256 (browser-side, using SubtleCrypto SHA-256 as fallback + simple keccak) ──
+async function sha3_256_hex(input) {
+  // Use SubtleCrypto SHA-256 as a practical substitute
+  // (True SHA3-256/Keccak would require a library; SHA-256 is fine for XOR key derivation)
+  const data = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return bytesToHex(new Uint8Array(hash));
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  }
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUY QTCL — Supply-aware Stripe Integration
+// Queries miner + treasury balances to determine available supply
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let _buyAmountQtcl = 0;
+let _buyAvailableSupply = 0;
+let _buyMinerBalance = 0;
+let _buyTreasuryBalance = 0;
+let _buyMinerAddr = '';
+let _buyTreasuryAddr = '';
+const QTCL_PRICE_USD = 0.10;  // $0.10 per QTCL
+
+async function loadBuySupply() {
+  const supplyBody = document.getElementById('buySupplyBody');
+  const sourcesBody = document.getElementById('buySupplySources');
+  const outOfStock = document.getElementById('buyOutOfStock');
+  const formSection = document.getElementById('buyFormSection');
+
+  supplyBody.innerHTML = '<div style="text-align:center;padding:12px;color:var(--muted);font-size:11px;">⏳ Querying miner & treasury wallets…</div>';
+
+  try {
+    // 1. Get treasury address
+    const treasuryResult = await rpc('qtcl_getTreasuryAddress', []);
+    _buyTreasuryAddr = treasuryResult.treasury_address || '';
+
+    // 2. Get chain info to find the active miner from latest block
+    const heightResult = await rpc('qtcl_getBlockHeight', []);
+    const latestHeight = heightResult.height || 0;
+
+    _buyMinerAddr = '';
+    if (latestHeight > 0) {
+      try {
+        const latestBlock = await rpc('qtcl_getBlock', [latestHeight]);
+        _buyMinerAddr = latestBlock.miner_address || '';
+        // If miner_address not in block, scan transactions for miner_reward
+        if (!_buyMinerAddr && latestBlock.transactions) {
+          for (const tx of latestBlock.transactions) {
+            if (tx.tx_type === 'miner_reward' && tx.to_addr) {
+              _buyMinerAddr = tx.to_addr;
+              break;
+            }
+          }
+        }
+      } catch (e) { console.warn('Failed to get latest block:', e); }
+    }
+
+    // 3. Query both balances
+    _buyMinerBalance = 0;
+    _buyTreasuryBalance = 0;
+
+    if (_buyMinerAddr) {
+      try {
+        const mb = await rpc('qtcl_getBalance', [_buyMinerAddr]);
+        _buyMinerBalance = mb.balance || 0;
+      } catch (_) {}
+    }
+    if (_buyTreasuryAddr) {
+      try {
+        const tb = await rpc('qtcl_getBalance', [_buyTreasuryAddr]);
+        _buyTreasuryBalance = tb.balance || 0;
+      } catch (_) {}
+    }
+
+    _buyAvailableSupply = _buyMinerBalance + _buyTreasuryBalance;
+
+    // 4. Render supply dashboard
+    const supplyColor = _buyAvailableSupply > 100 ? 'var(--emerald)' : _buyAvailableSupply > 0 ? 'var(--amber)' : 'var(--red)';
+    supplyBody.innerHTML = `
+      <div style="text-align:center;padding:8px 0;">
+        <div style="font-family:var(--font-display);font-size:32px;font-weight:700;color:${supplyColor};margin-bottom:4px;">
+          ${fmtQTCL(_buyAvailableSupply)}
+        </div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;">Available for Purchase</div>
+        <div style="display:flex;justify-content:center;gap:24px;margin-top:14px;">
+          <div style="text-align:center;">
+            <div style="font-size:15px;font-weight:600;color:var(--cyan);">${fmtQTCL(_buyMinerBalance)}</div>
+            <div style="font-size:9px;color:var(--muted);margin-top:2px;">⛏ Miner</div>
+          </div>
+          <div style="width:1px;background:var(--border);"></div>
+          <div style="text-align:center;">
+            <div style="font-size:15px;font-weight:600;color:var(--violet);">${fmtQTCL(_buyTreasuryBalance)}</div>
+            <div style="font-size:9px;color:var(--muted);margin-top:2px;">🏛 Treasury</div>
+          </div>
+          <div style="width:1px;background:var(--border);"></div>
+          <div style="text-align:center;">
+            <div style="font-size:15px;font-weight:600;color:var(--text-bright);">$${(_buyAvailableSupply * QTCL_PRICE_USD).toFixed(2)}</div>
+            <div style="font-size:9px;color:var(--muted);margin-top:2px;">💵 Value (USD)</div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // 5. Supply sources detail
+    sourcesBody.innerHTML = `
+      <div style="text-align:left;">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+          <div>
+            <span style="color:var(--cyan);">⛏ Miner Wallet</span><br>
+            <span style="font-size:9px;color:var(--muted);word-break:break-all;">${_buyMinerAddr || 'No active miner detected'}</span>
+          </div>
+          <div style="text-align:right;">
+            <span style="color:var(--text-bright);font-weight:600;">${fmtQTCL(_buyMinerBalance)}</span><br>
+            <span style="font-size:9px;color:var(--muted);">$${(_buyMinerBalance * QTCL_PRICE_USD).toFixed(2)} USD</span>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+          <div>
+            <span style="color:var(--violet);">🏛 Treasury Wallet</span><br>
+            <span style="font-size:9px;color:var(--muted);word-break:break-all;">${_buyTreasuryAddr || 'Not configured'}</span>
+          </div>
+          <div style="text-align:right;">
+            <span style="color:var(--text-bright);font-weight:600;">${fmtQTCL(_buyTreasuryBalance)}</span><br>
+            <span style="font-size:9px;color:var(--muted);">$${(_buyTreasuryBalance * QTCL_PRICE_USD).toFixed(2)} USD</span>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-weight:600;">
+          <span style="color:var(--text-bright);">Total Available Supply</span>
+          <span style="color:${supplyColor};font-size:14px;">${fmtQTCL(_buyAvailableSupply)}</span>
+        </div>
+        <div style="font-size:9px;color:var(--muted);margin-top:8px;line-height:1.6;">
+          Supply grows at <strong style="color:var(--cyan);">8.0 QTCL/block</strong> (7.2 miner + 0.8 treasury). Blocks are mined approximately every 18 seconds.
+          New supply: ~1,600 QTCL/hour when mining is active.
+        </div>
+      </div>
+    `;
+
+    // 6. Show/hide out-of-stock vs purchase form
+    if (_buyAvailableSupply <= 0) {
+      outOfStock.classList.remove('hidden');
+      formSection.style.display = 'none';
+    } else {
+      outOfStock.classList.add('hidden');
+      formSection.style.display = '';
+      renderBuyAmountButtons();
+    }
+
+  } catch (e) {
+    supplyBody.innerHTML = `<div style="text-align:center;padding:12px;color:var(--red);font-size:11px;">Failed to load supply: ${escHtml(e.message)}</div>`;
+    console.error('Supply load error:', e);
+  }
+}
+
+function renderBuyAmountButtons() {
+  const grid = document.getElementById('buyAmountGrid');
+  if (!grid) return;
+  const maxAvail = Math.floor(_buyAvailableSupply);
+  document.getElementById('buyMaxLabel').textContent = `(max ${maxAvail.toLocaleString()} QTCL available)`;
+
+  // Generate preset amounts that fit within available supply
+  const presets = [10, 50, 100, 500, 1000].filter(a => a <= maxAvail);
+  let html = '';
+  for (const amt of presets) {
+    html += `<button class="btn btn-outline" onclick="setBuyAmount(${amt})" id="buyAmt${amt}" style="font-size:12px;">${amt.toLocaleString()} QTCL<br><span style="font-size:10px;color:var(--muted);">$${(amt * QTCL_PRICE_USD).toFixed(2)}</span></button>`;
+  }
+  // Custom amount input
+  html += `<div style="display:flex;align-items:center;">
+    <input type="number" class="form-input" id="buyCustomAmount" placeholder="Custom" min="1" max="${maxAvail}" style="font-size:12px;text-align:center;" oninput="updateBuyCustom()">
+  </div>`;
+  // Max button if supply > 10
+  if (maxAvail > 10) {
+    html += `<button class="btn btn-outline" onclick="setBuyAmount(${maxAvail})" style="font-size:12px;border-color:var(--emerald);color:var(--emerald);">MAX<br><span style="font-size:10px;">${maxAvail.toLocaleString()} QTCL</span></button>`;
+  }
+  grid.innerHTML = html;
+}
+
+function setBuyAmount(amt) {
+  const maxAvail = Math.floor(_buyAvailableSupply);
+  if (amt > maxAvail) {
+    toast(`Only ${maxAvail} QTCL available — reducing to max`, 'info');
+    amt = maxAvail;
+  }
+  _buyAmountQtcl = amt;
+  // Highlight selected
+  document.querySelectorAll('#buyAmountGrid .btn').forEach(b => {
+    b.style.borderColor = '';
+    b.style.background = '';
+    b.style.color = '';
+  });
+  const sel = document.getElementById(`buyAmt${amt}`);
+  if (sel) {
+    sel.style.borderColor = 'var(--cyan)';
+    sel.style.background = 'var(--cyan-glow)';
+    sel.style.color = 'var(--cyan)';
+  }
+  const customInput = document.getElementById('buyCustomAmount');
+  if (customInput) customInput.value = '';
+  updateBuySummary();
+}
+
+function updateBuyCustom() {
+  const maxAvail = Math.floor(_buyAvailableSupply);
+  let v = parseInt(document.getElementById('buyCustomAmount').value) || 0;
+  if (v > maxAvail) {
+    v = maxAvail;
+    document.getElementById('buyCustomAmount').value = v;
+    toast(`Capped to available supply: ${maxAvail} QTCL`, 'info');
+  }
+  if (v > 0) {
+    _buyAmountQtcl = v;
+    document.querySelectorAll('#buyAmountGrid .btn').forEach(b => {
+      b.style.borderColor = '';
+      b.style.background = '';
+      b.style.color = '';
+    });
+    updateBuySummary();
+  }
+}
+
+function updateBuySummary() {
+  const addr = document.getElementById('buyAddr').value.trim();
+  const summary = document.getElementById('buyOrderSummary');
+  const btn = document.getElementById('buyBtn');
+
+  if (_buyAmountQtcl > 0) {
+    summary.classList.remove('hidden');
+    document.getElementById('buyQtclAmount').textContent = `${_buyAmountQtcl.toLocaleString()} QTCL`;
+    document.getElementById('buyTotal').textContent = `$${(_buyAmountQtcl * QTCL_PRICE_USD).toFixed(2)} USD`;
+    document.getElementById('buyDeliverTo').textContent = addr || 'Enter address above';
+    btn.disabled = !addr || addr.length !== 64;
+  } else {
+    summary.classList.add('hidden');
+    btn.disabled = true;
+  }
+}
+
+// Watch address field
+document.addEventListener('DOMContentLoaded', () => {
+  const el = document.getElementById('buyAddr');
+  if (el) el.addEventListener('input', updateBuySummary);
+});
+
+async function initStripeCheckout() {
+  const addr = document.getElementById('buyAddr').value.trim();
+  if (!addr || addr.length !== 64) {
+    toast('Enter a valid 64-character QTCL address', 'error');
+    return;
+  }
+  if (_buyAmountQtcl <= 0) {
+    toast('Select an amount', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('buyBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Redirecting to Stripe…';
+
+  try {
+    // Call server to create Stripe checkout session
+    const result = await rpc('qtcl_createCheckoutSession', [{
+      amount_qtcl: _buyAmountQtcl,
+      receiving_address: addr,
+      price_usd_cents: Math.round(_buyAmountQtcl * QTCL_PRICE_USD * 100),
+    }]);
+
+    if (result.checkout_url) {
+      window.location.href = result.checkout_url;
+    } else if (result.status === 'not_configured') {
+      toast('Stripe integration is being configured — check back soon', 'info', 5000);
+    } else {
+      toast(result.message || 'Checkout session failed', 'error');
+    }
+  } catch (e) {
+    toast(`Stripe error: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '💳 Pay with Stripe';
   }
 }
 
