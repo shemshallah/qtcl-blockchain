@@ -4313,48 +4313,17 @@ def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
 def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMempoolStats — mempool depth and fee percentiles."""
     try:
-        logger.debug(
-            f"[RPC-METHOD] qtcl_getMempoolStats called with params={params}, id={rpc_id}"
-        )
-        # Walk resolution chain: module-level MEMPOOL → globals.get_mempool() → mempool module singleton
-        mp = None
-        _srv_globals = sys.modules[__name__].__dict__
-        mp = _srv_globals.get("MEMPOOL") or _srv_globals.get("_MEMPOOL")
+        from mempool import get_mempool
+        mp = get_mempool()
         if mp is None:
-            try:
-                import globals as _g
-
-                _gf = getattr(_g, "get_mempool", None)
-                if callable(_gf):
-                    mp = _gf()
-            except Exception:
-                pass
-        if mp is None:
-            try:
-                import mempool as _mp_mod
-
-                mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(
-                    _mp_mod, "_MEMPOOL_INSTANCE", None
-                )
-            except Exception:
-                pass
-        if mp is None:
-            logger.debug("[RPC-METHOD] qtcl_getMempoolStats: mempool not available yet")
             return _rpc_ok(
                 {"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id
             )
         try:
-            stats = (
-                mp.get_stats()
-                if hasattr(mp, "get_stats")
-                else {"depth": getattr(mp, "size", lambda: 0)()}
-            )
-            logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats success")
+            stats = mp.get_stats() if hasattr(mp, "get_stats") else {"depth": 0, "pending": 0}
             return _rpc_ok(stats, rpc_id)
         except Exception as me:
-            logger.exception(
-                f"[RPC-METHOD] qtcl_getMempoolStats: get_stats error: {me}"
-            )
+            logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats: get_stats error: {me}")
             return _rpc_error(
                 -32603,
                 f"Mempool stats failed: {str(me)}",
@@ -5739,6 +5708,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             # ── CATHEDRAL-GRADE: Transaction signature verification ──
             _tx_pubkey = tx.get("sender_public_key_hex") or tx.get("public_key", "")
+            if not _tx_pubkey:
+                _tx_pubkey = (tx.get("metadata", {}) or {}).get("sender_public_key_hex", "")
+            if not _tx_pubkey:
+                _tx_pubkey = (tx.get("metadata", {}) or {}).get("public_key", "")
             _tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
             if not _tx_pubkey:
                 return _rpc_error(
