@@ -7690,6 +7690,34 @@ def serve_agents():
         return f"Error: {e}", 500
 
 
+@app.route("/favicon.png", methods=["GET"])
+def serve_favicon_png():
+    """Serve favicon.png from repo root."""
+    try:
+        fav_path = os.path.join(os.path.dirname(__file__), "favicon.png")
+        if os.path.exists(fav_path):
+            return send_file(fav_path, mimetype="image/png")
+        return "", 204
+    except Exception:
+        return "", 204
+
+
+@app.route("/favicon.ico", methods=["GET"])
+def serve_favicon_ico():
+    """Serve favicon.ico (or fallback to .png)."""
+    try:
+        base = os.path.dirname(__file__)
+        ico_path = os.path.join(base, "favicon.ico")
+        if os.path.exists(ico_path):
+            return send_file(ico_path, mimetype="image/x-icon")
+        png_path = os.path.join(base, "favicon.png")
+        if os.path.exists(png_path):
+            return send_file(png_path, mimetype="image/png")
+        return "", 204
+    except Exception:
+        return "", 204
+
+
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
 def rpc_hlwe_system_info():
     """GET /rpc/hlwe/system-info — HypΓ cryptographic system information.
