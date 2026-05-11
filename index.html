@@ -232,6 +232,15 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 .modal-body::-webkit-scrollbar{width:4px}
 .modal-body::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
 
+/* ── CONTACT IFRAME OVERLAY ── */
+#contact-overlay{display:none;position:fixed;inset:0;z-index:600;background:rgba(2,5,9,.90);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:20px}
+#contact-overlay.open{display:flex}
+.contact-box{background:var(--card);border:1px solid var(--border2);border-radius:var(--r12);width:100%;max-width:500px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.8)}
+.contact-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.contact-title{font-family:var(--disp);font-size:9px;letter-spacing:2px;color:var(--cy)}
+.contact-body{padding:20px 18px;font-family:var(--mono);font-size:11px;color:var(--tx);line-height:1.6;text-align:center}
+.contact-name{font-size:14px;color:var(--cy);font-weight:600;margin-bottom:8px}
+
 /* ── NETWORK PAGE ── */
 .peers-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;padding:14px}
 .peer-card{background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:var(--r6);padding:10px 12px}
@@ -494,6 +503,7 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
     <div class="lp-footer-right" style="display:flex;gap:20px;align-items:center">
       <span style="color:var(--dim)">HypΓ Cryptosystem · PSL(2,ℝ) · {8,3} Tessellation</span>
       <a href="https://discord.gg/b8eMJyXw" target="_blank" rel="noopener" style="color:#7289da;text-decoration:none;letter-spacing:.5px">Discord ↗</a>
+      <a href="#" onclick="document.getElementById('contact-overlay').classList.add('open');return false;" style="color:var(--cy);text-decoration:none;letter-spacing:.5px">Contact</a>
     </div>
   </div>
 </div>
@@ -657,6 +667,23 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
       <button class="modal-close" id="modal-close">✕ CLOSE</button>
     </div>
     <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════ CONTACT OVERLAY ═══════════════════ -->
+<div id="contact-overlay">
+  <div class="contact-box">
+    <div class="contact-head">
+      <span class="contact-title">CONTACT</span>
+      <button class="modal-close" onclick="document.getElementById('contact-overlay').classList.remove('open')">✕ CLOSE</button>
+    </div>
+    <div class="contact-body">
+      <div class="contact-name">Justin Howard-Stanley</div>
+      <div style="margin-bottom:12px;color:var(--dim2)">Lead Developer · QTCL</div>
+      <div style="font-size:10px;color:var(--dim2)">
+        <a href="https://github.com/shemshallah" target="_blank" rel="noopener" style="color:var(--cy);text-decoration:none">github.com/shemshallah</a>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1357,6 +1384,13 @@ document.getElementById('modal-close').addEventListener('click', () => {
 document.getElementById('tx-modal').addEventListener('click', e => {
   if (e.target === document.getElementById('tx-modal')) {
     document.getElementById('tx-modal').classList.remove('open');
+  }
+});
+
+// ── Contact overlay dismiss ──
+document.getElementById('contact-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('contact-overlay')) {
+    document.getElementById('contact-overlay').classList.remove('open');
   }
 });
 

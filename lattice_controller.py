@@ -3106,9 +3106,10 @@ class BlockManager:
         self.seal_requested = False
         self.total_txs_processed = 0
         self.blocks_sealed = 0
-        # Testing mode: seal immediately on every single TX (no timeout)
-        self.seal_on_every_tx = True
-        logger.info("✅ BlockManager initialized (seal_on_every_tx=True)")
+        # Seal when block reaches MAX_BLOCK_TX transactions (or on explicit request/timeout)
+        self.max_block_tx = 100
+        self.seal_on_every_tx = False
+        logger.info(f"✅ BlockManager initialized (max_block_tx={self.max_block_tx}, seal_on_every_tx=False)")
 
     def start(self):
         """Start block manager"""
@@ -3297,12 +3298,12 @@ class BlockManager:
                 self.total_txs_processed += 1
                 logger.debug(f"📥 TX {tx.tx_id[:16]}… → mempool")
 
-                # 1 TX = 1 block in testing mode — seal immediately
-                if self.seal_on_every_tx:
+                # Seal when block reaches max_block_tx threshold
+                if len(self.pending_block.transactions) >= self.max_block_tx:
                     self._seal_current_block()
                     return True
 
-                # Normal mode: signal monitor to seal
+                # Signal monitor for timeout-based sealing
                 self.seal_requested = True
                 return True
         except Exception as e:
@@ -3328,29 +3329,39 @@ class BlockManager:
             self.seal_monitor_thread.join(timeout=5)
 
     def _seal_monitor_worker(self):
-        """IF timeout reached OR seal requested → THEN seal block"""
+        """Seal on timeout (60s) or on explicit seal_requested with threshold+."""
+        BLOCK_SEAL_TIMEOUT = 60.0
         while self.monitor_running:
             try:
-                time_since_last = time.time() - self.last_block_time
                 with self.lock:
                     if not self.monitor_running:
                         break
-                    # In seal_on_every_tx mode: only seal on explicit request
-                    # (receive_transaction() handles immediate sealing directly)
-                    if (
+                    if not self.pending_block or len(self.pending_block.transactions) == 0:
+                        self.seal_requested = False
+                    elif (
                         self.seal_requested
-                        and self.pending_block
-                        and len(self.pending_block.transactions) > 0
+                        and (time.time() - self.last_block_time) >= BLOCK_SEAL_TIMEOUT
                     ):
                         logger.info(
-                            f"🔐 SEALING BLOCK #{self.pending_block.block_height}"
+                            f"⏱️ SEALING BLOCK #{self.pending_block.block_height} "
+                            f"(timeout, {len(self.pending_block.transactions)} TXs)"
                         )
                         self._seal_current_block()
                         self.seal_requested = False
-                time.sleep(0.1)
+                    elif (
+                        self.seal_requested
+                        and len(self.pending_block.transactions) >= self.max_block_tx
+                    ):
+                        logger.info(
+                            f"📦 SEALING BLOCK #{self.pending_block.block_height} "
+                            f"({len(self.pending_block.transactions)} TXs, full)"
+                        )
+                        self._seal_current_block()
+                        self.seal_requested = False
+                time.sleep(0.5)
             except Exception as e:
                 logger.error(f"❌ Monitor error: {e}")
-                time.sleep(0.5)
+                time.sleep(1.0)
 
     def _seal_current_block(self):
         """ATOMIC SEALING OPERATION — compute, finalise, persist."""
@@ -3847,6 +3858,25 @@ class BlockManager:
                 "pending_txs": len(self.pending_block.transactions)
                 if self.pending_block
                 else 0,
+            }
+
+    def get_pending_block(self) -> Optional[Dict[str, Any]]:
+        """Get the current in-progress block (not yet sealed)."""
+        with self.lock:
+            if not self.pending_block:
+                return None
+            txs = []
+            for tx in self.pending_block.transactions:
+                txd = tx.to_dict()
+                txs.append(txd)
+            return {
+                "block_height": self.pending_block.block_height,
+                "parent_hash": self.pending_block.parent_hash,
+                "miner_address": self.pending_block.miner_address,
+                "transactions": txs,
+                "tx_count": len(txs),
+                "timestamp_s": int(time.time()),
+                "max_block_tx": self.max_block_tx,
             }
 
 

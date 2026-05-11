@@ -83,6 +83,7 @@ _RPC_INLINE_METHODS: frozenset = frozenset(
         "qtcl_getLatestDMSnapshot",
         "qtcl_getLatestDMSnapshots",
         "qtcl_getMempoolStats",
+        "qtcl_getPendingBlock",
         "qtcl_getHealth",
         "qtcl_getPeers",
         "qtcl_getPeersByNatGroup",
@@ -3398,6 +3399,17 @@ def _get_canonical_node() -> Optional[dict]:
     except Exception:
         return None
 
+
+def _rpc_getPendingBlock(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getPendingBlock — get the current in-progress (unsealed) block."""
+    try:
+        if LATTICE is None or not getattr(LATTICE, 'block_manager', None):
+            return _rpc_ok(None, rpc_id)
+        pb = LATTICE.block_manager.get_pending_block()
+        return _rpc_ok(pb, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getPendingBlock error: {e}")
+        return _rpc_ok(None, rpc_id)
 
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
@@ -7177,6 +7189,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getPythPrice": _rpc_getPythPrice,
     "qtcl_getMempoolStats": _rpc_getMempoolStats,
     "qtcl_getMempool": _rpc_getMempool,
+    "qtcl_getPendingBlock": _rpc_getPendingBlock,
     "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
     "qtcl_walletAuth": _rpc_walletAuth,
