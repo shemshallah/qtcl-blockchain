@@ -6517,6 +6517,19 @@ def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
         return _rpc_ok([], rpc_id)
 
 
+def _rpc_clearMempool(params: Any, rpc_id: Any) -> dict:
+    """qtcl_clearMempool — purge all pending transactions (admin tool)."""
+    try:
+        from mempool import get_mempool as _get_mp
+        mp = _get_mp()
+        count = mp.clear()
+        logger.info(f"[RPC-METHOD] qtcl_clearMempool: purged {count} TXs")
+        return _rpc_ok({"cleared": count, "status": "ok"}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_clearMempool: {e}")
+        return _rpc_error(-32603, f"Mempool clear failed: {str(e)}", rpc_id)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTERPRISE P2P NETWORK — Inline Implementation (no external files)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7166,6 +7179,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getPythPrice": _rpc_getPythPrice,
     "qtcl_getMempoolStats": _rpc_getMempoolStats,
     "qtcl_getMempool": _rpc_getMempool,
+    "qtcl_clearMempool": _rpc_clearMempool,
     "qtcl_getPendingBlock": _rpc_getPendingBlock,
     "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
@@ -8372,7 +8386,7 @@ logger.info(
 
 # Defer mempool sync to background thread (avoids blocking on DB initialization)
 def _deferred_mempool_sync():
-    """Background thread: Sync mempool DB pool without blocking Flask init."""
+    """Background thread: Sync mempool DB pool + purge stale TXs on startup."""
     try:
         import mempool as _mp_sync
 
@@ -8382,6 +8396,12 @@ def _deferred_mempool_sync():
         logger.info(
             "[DB] Mempool database pool synchronized with server (museum-grade sync)"
         )
+
+        # Purge stale transactions — crypto code may have changed since last run
+        import time as _t; _t.sleep(8)  # wait for hlwe engine to warm up
+        mp = _mp_sync.get_mempool()
+        cleared = mp.clear()
+        logger.info(f"[MEMPOOL] Startup purge: {cleared} stale TXs cleared")
     except Exception as _sync_err:
         logger.warning(f"[DB] Mempool sync failed: {_sync_err}")
 

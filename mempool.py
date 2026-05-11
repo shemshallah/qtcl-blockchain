@@ -1045,6 +1045,19 @@ class Mempool:
         if self._notifier:
             self._notifier.close()
 
+    def clear(self) -> int:
+        """Purge all pending transactions from the mempool. Returns count cleared."""
+        with self._lock:
+            count = len(self._index)
+            self._heap.clear()
+            self._index.clear()
+            self._by_sender.clear()
+            self._evicted.clear()
+            self._nonces = NonceOracle()
+            self._balances = BalanceOracle()
+        logger.info(f"[MEMPOOL] 🧹 CLEARED — {count} transactions purged")
+        return count
+
     # ─── Main entry point: accept a transaction ──────────────────────────
 
     def accept(self, raw: Dict[str, Any]) -> Tuple[AcceptResult, str, Optional[MempoolTx]]:
