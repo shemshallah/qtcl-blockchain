@@ -5216,7 +5216,7 @@ def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
                 "private_key": kp.private_key,
                 "public_key": kp.public_key,
                 "address": kp.address,
-                "timestamp": kp.timestamp,
+                "timestamp": getattr(kp, "timestamp", datetime.now(timezone.utc).isoformat()),
             },
             rpc_id,
         )
