@@ -6841,10 +6841,16 @@ def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
 
         address = wallet_data.get("address", "")
         public_key_hex = wallet_data.get("public_key", "") or wallet_data.get("public_key_hex", "")
-        encrypted_pk = wallet_data.get("encrypted_private_key", "")
+        encrypted_pk_raw = wallet_data.get("encrypted_private_key", "")
         vault_version = wallet_data.get("vault_version") or wallet_data.get("version", "1.0")
         encryption_info = wallet_data.get("encryption", {})
         encryption_algo = encryption_info.get("algorithm", "").upper() if isinstance(encryption_info, dict) else ""
+
+        # Normalize encrypted_pk to string — some wallet formats nest it in an object
+        if isinstance(encrypted_pk_raw, dict):
+            encrypted_pk = encrypted_pk_raw.get("data", "") or encrypted_pk_raw.get("ciphertext", "") or str(encrypted_pk_raw)
+        else:
+            encrypted_pk = str(encrypted_pk_raw) if encrypted_pk_raw else ""
 
         if not encrypted_pk:
             return _rpc_ok({"valid": False, "reason": "Wallet missing encrypted_private_key"}, rpc_id)
@@ -6975,9 +6981,17 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             except json.JSONDecodeError:
                 return _rpc_error(-32602, "wallet_data must be valid JSON", rpc_id)
 
-        encrypted_pk = wallet_data.get("encrypted_private_key", "")
+        encrypted_pk_raw = wallet_data.get("encrypted_private_key", "")
         public_key_hex = wallet_data.get("public_key", "") or wallet_data.get("public_key_hex", "")
         wallet_addr = wallet_data.get("address", "") or tx_fields.get("from_address", "")
+        encryption_info = wallet_data.get("encryption", {})
+        encryption_algo = encryption_info.get("algorithm", "").upper() if isinstance(encryption_info, dict) else ""
+
+        # Normalize encrypted_pk to string
+        if isinstance(encrypted_pk_raw, dict):
+            encrypted_pk = encrypted_pk_raw.get("data", "") or encrypted_pk_raw.get("ciphertext", "") or ""
+        else:
+            encrypted_pk = str(encrypted_pk_raw) if encrypted_pk_raw else ""
 
         if not encrypted_pk:
             return _rpc_error(-32602, "Wallet file missing encrypted_private_key", rpc_id)
@@ -6986,17 +7000,33 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         try:
             engine = _init_hlwe_engine()
 
-            # Derive decryption key from password via SHA3-256
-            password_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
+            # Check if it's an unencrypted alpha wallet (raw base-4 walk)
+            is_raw_base4 = len(encrypted_pk) == 512 and all(c in '0123' for c in encrypted_pk)
 
-            # Decrypt: XOR the encrypted_pk with password-derived key stream
-            # This matches the client-side encryption in qtcl_client.py
-            enc_bytes = bytes.fromhex(encrypted_pk)
-            key_bytes = bytes.fromhex(password_hash)
-            # Extend key to match encrypted data length
-            key_stream = (key_bytes * ((len(enc_bytes) // len(key_bytes)) + 1))[:len(enc_bytes)]
-            private_key_bytes = bytes(a ^ b for a, b in zip(enc_bytes, key_stream))
-            private_key_hex = private_key_bytes.hex()
+            if is_raw_base4:
+                private_key_hex = encrypted_pk
+            else:
+                # Derive decryption key — match the hash used during encryption
+                if "SHA-256" in encryption_algo or encryption_algo == "XOR-SHA256":
+                    password_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+                else:
+                    password_hash = hashlib.sha3_256(password.encode("utf-8")).hexdigest()
+
+                # Decrypt: XOR the encrypted_pk with password-derived key stream
+                enc_bytes = bytes.fromhex(encrypted_pk)
+                key_bytes = bytes.fromhex(password_hash)
+                key_stream = (key_bytes * ((len(enc_bytes) // len(key_bytes)) + 1))[:len(enc_bytes)]
+                dec_bytes = bytes(a ^ b for a, b in zip(enc_bytes, key_stream))
+
+                try:
+                    private_key_hex = dec_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    return _rpc_error(-32000, "Failed to decrypt wallet — wrong password?", rpc_id,
+                                     {"reason": "password_error"})
+
+                if len(private_key_hex) != 512 or not all(c in '0123' for c in private_key_hex):
+                    return _rpc_error(-32000, "Failed to decrypt wallet — wrong password?", rpc_id,
+                                     {"reason": "password_error"})
 
             # Verify decryption: derive address from public key and check it matches
             if public_key_hex and wallet_addr:
