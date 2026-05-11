@@ -693,6 +693,19 @@ _ORACLE_INIT_EVENT = threading.Event()  # set once oracle is ready (or failed)
 _LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
 
 
+def _update_block_cache(block):
+    """Update the server's block cache when a new block is sealed."""
+    if not block:
+        return
+    
+    block_dict = block.to_dict() if hasattr(block, 'to_dict') else block
+    height = block_dict.get('block_height')
+    
+    if height is not None:
+        with _BLOCK_CACHE_LOCK:
+            _BLOCK_CACHE[height] = block_dict
+            logger.info(f"[BLOCK-CACHE] ✅ Updated cache for block #{height}")
+
 def _sync_lattice_blocks_to_cache():
     """Sync blocks from LATTICE into the server's block cache for RPC serving."""
     global LATTICE
@@ -807,6 +820,11 @@ def _deferred_lattice_init() -> None:
         logger.info(
             "[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active"
         )
+
+        # ── Register block cache update callback ──────────────────────────
+        if LATTICE.block_manager:
+            LATTICE.block_manager.on_block_sealed = _update_block_cache
+            logger.info("[BLOCK-CACHE] ✅ Registered seal callback to keep cache current")
 
         # ── SYNC GENESIS BLOCK TO SERVER CACHE ───────────────────────────────────
         _sync_lattice_blocks_to_cache()
