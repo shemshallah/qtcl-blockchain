@@ -58,7 +58,7 @@ ORACLE_HOST = os.environ.get("ORACLE_HOST", "0.0.0.0")
 NUM_ORACLES = int(os.environ.get("NUM_ORACLES", "5"))
 CONSENSUS_THRESHOLD = int(os.environ.get("CONSENSUS_THRESHOLD", "3"))
 FORCE_FINALIZE_S = float(os.environ.get("FORCE_FINALIZE_S", "120.0"))
-BLOCK_DIFFICULTY = int(os.environ.get("BLOCK_DIFFICULTY", "4"))
+BLOCK_DIFFICULTY = int(os.environ.get("BLOCK_DIFFICULTY", "5"))
 
 logger.info(f"[ORACLE-SERVER] Config: port={ORACLE_PORT} oracles={NUM_ORACLES} threshold={CONSENSUS_THRESHOLD}")
 

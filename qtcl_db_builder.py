@@ -814,7 +814,7 @@ CREATE TABLE blocks (
     w_state_hash               VARCHAR(255),
     hyp_witness                VARCHAR(255),
     miner_address              VARCHAR(255),
-    difficulty                 INT DEFAULT 6,
+    difficulty                 INT DEFAULT 5,
     nonce                      BIGINT DEFAULT 0,
     pq_curr                    INTEGER DEFAULT 1,
     pq_last                    INTEGER DEFAULT 0,
@@ -2349,11 +2349,11 @@ class QuantumTemporalCoherenceLedgerServer:
 
     def _create_genesis_block(self):
         """Insert genesis block (height 0). Structural only — no value minted.
-        Difficulty reads from BLOCK_DIFFICULTY env var (default 4).
+        Difficulty reads from BLOCK_DIFFICULTY env var (default 5).
         Block 0's miner(7.2) + treasury(0.8) are paid in block 1 to start the tx chain."""
         try:
             _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
-            genesis_diff = int(_env_diff) if _env_diff.isdigit() else 4
+            genesis_diff = int(_env_diff) if _env_diff.isdigit() else 5
             cur = self.conn.cursor()
             genesis_hash = hashlib.sha3_256(b"QTCL_GENESIS_2025").hexdigest()
             coinbase_tx_hash = hashlib.sha3_256(b"QTCL_GENESIS_COINBASE").hexdigest()

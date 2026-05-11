@@ -1330,7 +1330,7 @@ def _settle_block_rewards(
                     "height": height,
                     "block_hash": block_hash,
                     "timestamp": int(time.time()),
-                    "difficulty": 4,
+                    "difficulty": 5,
                     "miner_address": miner_address,
                     "w_state_fidelity": 0.0,
                 },
@@ -1369,7 +1369,7 @@ def _settle_block_rewards(
                     "height": height,
                     "block_hash": block_hash,
                     "timestamp": int(time.time()),
-                    "difficulty": 4,
+                    "difficulty": 5,
                     "miner_address": miner_address,
                     "w_state_fidelity": 0.0,
                 },
@@ -2484,12 +2484,12 @@ class BlockHeightCache:
                 "height": self._current_height,
                 "block_hash": self._current_hash,
                 "timestamp": time.time(),
-                "difficulty": 4,  # Default difficulty
+                    "difficulty": 5,  # Default difficulty
             }
             self.cache.set("blockchain:tip", result, ttl=1.0)
             return result
 
-    def update_height(self, height: int, block_hash: str, difficulty: int = 4):
+    def update_height(self, height: int, block_hash: str, difficulty: int = 5):
         """Update height with write-through caching"""
         with self._height_lock:
             if height > self._current_height:
@@ -2731,7 +2731,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                     "block_hash": row[1] or "",
                     "hash": row[1] or "",  # Alias for compatibility
                     "timestamp": row[2] or 0,
-                    "difficulty": row[3] or 4,
+                    "difficulty": row[3] or 5,
                 }
                 # 📝 CACHE RESULT: 1 second TTL
                 _blockchain_cache.set("blockchain:latest_block", latest, ttl=1.0)
@@ -3024,7 +3024,7 @@ def _lazy_ensure_blocks():
                     w_state_hash               VARCHAR(255),
                     hyp_witness                VARCHAR(255),
                     miner_address              VARCHAR(255),
-                    difficulty                 INT DEFAULT 6,
+                    difficulty                 INT DEFAULT 5,
                     nonce                      BIGINT DEFAULT 0,
                     pq_curr                    INTEGER DEFAULT 1,
                     pq_last                    INTEGER DEFAULT 0,
@@ -3434,7 +3434,7 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
         )
 
         _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
-        target_diff = int(_env_diff) if _env_diff.isdigit() else (int(db_tip.get("difficulty", 4)) if db_tip else 4)
+        target_diff = int(_env_diff) if _env_diff.isdigit() else 5
 
         return _rpc_ok(
             {
@@ -5538,11 +5538,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         timestamp_s = int(hdr.get("timestamp", 0))
         nonce = int(hdr.get("nonce", 0))
         miner_address = str(hdr.get("miner_address", ""))
-        difficulty_bits = int(hdr.get("difficulty", 4))
-        # BLOCK_DIFFICULTY env var overrides header difficulty
         _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
-        if _env_diff.isdigit():
-            difficulty_bits = int(_env_diff)
+        difficulty_bits = int(_env_diff) if _env_diff.isdigit() else 5
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
         logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}... processing...")

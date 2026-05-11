@@ -101,25 +101,35 @@ def extract_create_table_statements(sql_text: str) -> List[Dict]:
         # Split by comma, but be careful with nested parentheses
         parts = split_sql_columns(body)
         
-        for part in parts:
-            part = part.strip()
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        # Strip inline SQL comments (-- ...) — prevents comment text
+        # like "-- 32-byte random salt" from being treated as column names.
+        comment_pos = part.find(' -- ')
+        if comment_pos >= 0:
+            part = part[:comment_pos].strip()
             if not part:
                 continue
-                
-            # Check if it's a constraint
-            if part.upper().startswith(('CONSTRAINT ', 'PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY', 'CHECK', 'INDEX')):
-                constraints.append(part)
-            else:
-                # It's a column definition
-                columns.append(parse_column_def(part))
-        
-        tables.append({
-            'name': table_name,
-            'columns': columns,
-            'constraints': constraints,
-            'raw_sql': match.group(0)
-        })
-    
+
+        # Check if it's a constraint
+        if part.upper().startswith(('CONSTRAINT ', 'PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY', 'CHECK', 'INDEX')):
+            constraints.append(part)
+        elif part.startswith('--'):
+            # Skip pure SQL comment artifacts
+            continue
+        else:
+            # It's a column definition
+            columns.append(parse_column_def(part))
+
+    tables.append({
+        'name': table_name,
+        'columns': columns,
+        'constraints': constraints,
+        'raw_sql': match.group(0)
+    })
+
     return tables
 
 
@@ -150,8 +160,14 @@ def split_sql_columns(body: str) -> List[str]:
 
 def parse_column_def(col_def: str) -> Dict:
     """Parse a column definition string."""
+    # Strip any trailing SQL comment before parsing
+    comment_pos = col_def.find(' -- ')
+    if comment_pos >= 0:
+        col_def = col_def[:comment_pos].strip()
     # Extract column name (first word)
     parts = col_def.split(None, 1)
+    if not parts:
+        return {'name': '', 'definition': col_def, 'raw': col_def}
     col_name = parts[0].strip().strip('"')
     
     return {
@@ -270,25 +286,31 @@ def create_table_safe(cur, table_def: Dict) -> bool:
 def add_column_safe(cur, table_name: str, column_def: Dict) -> bool:
     """Add a column to an existing table if it doesn't exist."""
     col_name = column_def['name']
-    
+    if not col_name or col_name.startswith('--'):
+        return False  # Skip SQL comment artifacts
+
     cur.execute("""
         SELECT EXISTS (
             SELECT FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
         )
     """, (table_name, col_name))
-    
+
     if cur.fetchone()[0]:
         return False  # Column already exists
-    
+
     # Extract type and constraints from definition
-    def_parts = column_def['definition'].split(None, 1)
+    raw_def = column_def['definition']
+    comment_pos = raw_def.find(' -- ')
+    if comment_pos >= 0:
+        raw_def = raw_def[:comment_pos].strip()
+    def_parts = raw_def.split(None, 1)
     if len(def_parts) < 2:
         logger.warning(f"  ⚠️  Cannot parse column definition: {column_def['definition']}")
         return False
-    
+
     col_type = def_parts[1]
-    
+
     sql = f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
     
     try:
@@ -420,16 +442,16 @@ def update_database(conn, schema_sql: str) -> Dict[str, int]:
                  genesis_hash[:64], genesis_hash[:64], treasury_addr, 0, 4,
                  1.0, 1.0, 1, 0, 0, int(time.time())),
             )
-            logger.info("  ✅ Genesis block (height 0) created: diff=4")
+            logger.info("  ✅ Genesis block (height 0) created: diff=5")
         else:
-            # Ensure existing genesis has difficulty >= 4
+            # Ensure existing genesis has difficulty >= 5
             cur.execute("SELECT difficulty FROM blocks WHERE height = 0")
             row = cur.fetchone()
-            if row and row[0] is not None and row[0] < 4:
-                cur.execute("UPDATE blocks SET difficulty = 4 WHERE height = 0")
-                logger.info("  ✅ Genesis difficulty updated from %s to 4" % row[0])
+            if row and row[0] is not None and row[0] < 5:
+                cur.execute("UPDATE blocks SET difficulty = 5 WHERE height = 0")
+                logger.info("  ✅ Genesis difficulty updated from %s to 5" % row[0])
             else:
-                logger.info("  ⏭️  Genesis block already exists with difficulty >= 4")
+                logger.info("  ⏭️  Genesis block already exists with difficulty >= 5")
 
         conn.commit()
         logger.info("\n✅ Schema update committed successfully")
@@ -515,11 +537,14 @@ def load_schema_comprehensive(builder_path: str) -> str:
     # Find all ALTER TABLE blocks
     alter_pattern = r'(ALTER\s+TABLE\s+\w+\s+.*?;)'
     for match in re.finditer(alter_pattern, content, re.DOTALL | re.IGNORECASE):
-        # Filter out comments
         stmt = match.group(1)
-        if not stmt.strip().startswith('--'):
-            schema_parts.append(stmt)
-    
+        # Skip SQL comments and Python f-string interpolations (e.g. ALTER TABLE inside
+        # cur.execute(f"ALTER TABLE ... {col} {dtype}") — these are runtime, not schema SQL).
+        clean = stmt.strip()
+        if clean.startswith('--') or '{' in clean or '}' in clean:
+            continue
+        schema_parts.append(stmt)
+
     return '\n\n'.join(schema_parts)
 
 

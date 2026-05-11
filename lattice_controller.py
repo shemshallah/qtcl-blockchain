@@ -2948,7 +2948,7 @@ class QuantumBlock:
     w_entropy_hash: str = ""
     pq_curr: int = 0
     pq_last: int = 0
-    difficulty_bits: int = 5
+    difficulty_bits: int = field(default_factory=lambda: int(os.environ.get("BLOCK_DIFFICULTY", "5")))
     nonce: int = 0
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -3256,7 +3256,7 @@ class BlockManager:
                     )
                     if success:
                         logger.info(
-                            "[GENESIS] ✅ Genesis block persisted to DB (difficulty=6)"
+                            "[GENESIS] ✅ Genesis block persisted to DB (from BLOCK_DIFFICULTY)"
                         )
                     else:
                         logger.warning(
