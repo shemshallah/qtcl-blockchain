@@ -3048,9 +3048,36 @@ class IndividualValidator:
         except Exception as e:
             return False, str(e)
 
-    # _compute_merkle_root and _compute_block_hash removed.
-    # Merkle: use qtcl_merkle_root() from qtcl_client C layer (qtcl_accel.so).
-    # Block hash: computed in server.py submit_block with full canonical fields.
+    # Merkle root and block hash — canonical SHA3-256², same as server.py submit_block
+    @staticmethod
+    def _compute_merkle_root(tx_hashes: list) -> str:
+        """Compute Merkle tree root from transaction hash hex strings."""
+        if not tx_hashes:
+            return "0" * 64
+        hashes = [bytes.fromhex(h) for h in tx_hashes]
+        while len(hashes) > 1:
+            if len(hashes) % 2 == 1:
+                hashes.append(hashes[-1])
+            hashes = [
+                hashlib.sha3_256(hashes[i] + hashes[i + 1]).digest()
+                for i in range(0, len(hashes), 2)
+            ]
+        return hashes[0].hex()
+
+    @staticmethod
+    def _compute_block_hash(block: QuantumBlock) -> str:
+        """Compute deterministic SHA3-256² block hash from canonical fields."""
+        payload = (
+            f"{block.block_height}:"
+            f"{block.parent_hash}:"
+            f"{block.merkle_root}:"
+            f"{block.timestamp_s}:"
+            f"{block.miner_address}:"
+            f"{block.w_state_hash}:"
+            f"{block.hyp_witness}:"
+            f"{block.pq_curr}:{block.pq_last}"
+        )
+        return hashlib.sha3_256(hashlib.sha3_256(payload.encode()).digest()).hexdigest()
 
 
 class BlockManager:
@@ -3257,6 +3284,15 @@ class BlockManager:
                     z = math.sinh(t)
                     tx.spatial_position = (x, y, z)
                 self.mempool[tx.tx_id] = tx
+
+                if self.pending_block is None:
+                    logger.warning("[BLOCK] pending_block not ready — creating default")
+                    self.pending_block = QuantumBlock(
+                        block_height=self.chain_height,
+                        parent_hash=self.current_block_hash or "0" * 64,
+                        miner_address=self.validator.miner_address,
+                    )
+
                 self.pending_block.transactions.append(tx)
                 self.total_txs_processed += 1
                 logger.debug(f"📥 TX {tx.tx_id[:16]}… → mempool")

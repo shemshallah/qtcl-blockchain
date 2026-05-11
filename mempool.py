@@ -1231,12 +1231,16 @@ class Mempool:
                 # ── CONSTRUCT TX ───────────────────────────────────────────
                 sig_json = sig_raw if isinstance(sig_raw, str) else json.dumps(sig_raw)
                 meta = dict(metadata)
+                _pubkey = (raw.get("sender_public_key_hex") or raw.get("public_key", "")
+                           or raw.get("signature", {}).get("public_key_hex", "")
+                           or raw.get("signature", {}).get("public_key", ""))
                 meta.update({
                     'fee_qtcl'       : fee_base / 100,
                     'amount_qtcl'    : amount_base / 100,
                     'oracle_signed'  : sig_valid,
                     'submitted_at_ns': timestamp_ns,
                     'client_tx_id'   : client_tx_id,
+                    'sender_public_key_hex': _pubkey,
                 })
 
                 tx = MempoolTx(
@@ -1784,16 +1788,24 @@ class Mempool:
             from lattice_controller import QuantumTransaction
             qt = tx.to_quantum_tx()
             if qt is None:
+                logger.warning(f"[MEMPOOL] to_quantum_tx() returned None for {tx.tx_hash[:16]}…")
                 return
-            # Import the live LATTICE singleton from server context
             try:
                 from server import LATTICE
-                if LATTICE and getattr(LATTICE, 'block_manager', None):
-                    LATTICE.block_manager.receive_transaction(qt)
-            except (ImportError, AttributeError):
-                pass
+                if LATTICE is None:
+                    logger.warning(f"[MEMPOOL] LATTICE not yet initialised — TX {tx.tx_hash[:16]}… queued in mempool only")
+                    return
+                bm = getattr(LATTICE, 'block_manager', None)
+                if bm is None:
+                    logger.warning(f"[MEMPOOL] BlockManager not available — TX {tx.tx_hash[:16]}… queued in mempool only")
+                    return
+                success = bm.receive_transaction(qt)
+                if not success:
+                    logger.warning(f"[MEMPOOL] BlockManager rejected TX {tx.tx_hash[:16]}…")
+            except (ImportError, AttributeError) as exc:
+                logger.warning(f"[MEMPOOL] Cannot reach BlockManager: {exc}")
         except Exception as exc:
-            logger.debug(f"[MEMPOOL] BlockManager feed skipped: {exc}")
+            logger.error(f"[MEMPOOL] BlockManager feed error for {tx.tx_hash[:16]}…: {exc}")
 
     def _notify_peers(self, tx: MempoolTx) -> None:
         """
