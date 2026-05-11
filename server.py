@@ -5699,10 +5699,17 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         for tx in _non_coinbase_txs:
             # Every non-coinbase must have a valid signature
             _sig = tx.get("signature") or tx.get("hyp_sig") or tx.get("sig", {})
-            if not _sig:
+            # Parse JSON string if needed (signatures stored as JSON strings in transit)
+            if isinstance(_sig, str) and _sig.strip():
+                try:
+                    _sig = json.loads(_sig)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if not _sig or not isinstance(_sig, dict):
                 return _rpc_error(
                     -32003,
-                    f"Transaction {tx.get('tx_id', '?')[:16]}... has no signature — all non-coinbase txs must be signed",
+                    f"Transaction {tx.get('tx_id', '?')[:16]}... has no valid signature "
+                    f"(type={type(_sig).__name__}) — all non-coinbase txs must be signed",
                     rpc_id,
                 )
 

@@ -2867,6 +2867,8 @@ class QuantumTransaction:
     signature: Optional[str] = None
     inputs: list = None
     outputs: list = None
+    sender_public_key_hex: str = ""
+    tx_type: str = "transfer"
 
     def __post_init__(self):
         if self.inputs is None:
@@ -2880,17 +2882,18 @@ class QuantumTransaction:
         return int(self.amount * 100)
 
     def to_dict(self) -> Dict[str, Any]:
-        tx_type = self.tx_type if hasattr(self, "tx_type") else "transfer"
+        tx_type = self.tx_type
         is_coinbase = tx_type in ("coinbase", "miner_reward", "treasury_reward")
         _amount_base = self.amount_base
 
-        # Auto-generate UTXO inputs/outputs if not explicitly set
-        _inputs = getattr(self, "inputs", None) or []
-        _outputs = getattr(self, "outputs", None) or []
+        _inputs = self.inputs or []
+        _outputs = self.outputs or []
         if not _inputs and is_coinbase:
             _inputs = [{"prev_tx_hash": "0" * 64, "prev_output_index": 0xFFFFFFFF, "script_sig": {"height": self.nonce, "type": tx_type}}]
         if not _outputs and self.receiver_addr and _amount_base > 0:
             _outputs = [{"address": self.receiver_addr, "amount_base": _amount_base, "script_pubkey": "OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG"}]
+
+        _pk = self.sender_public_key_hex or getattr(self, "sender_public_key_hex", "")
 
         return {
             "tx_id": self.tx_id,
@@ -2910,6 +2913,8 @@ class QuantumTransaction:
             "fee": self.fee,
             "fee_base": self.fee,
             "signature": self.signature,
+            "sender_public_key_hex": _pk,
+            "public_key": _pk,
             "inputs": _inputs,
             "outputs": _outputs,
         }

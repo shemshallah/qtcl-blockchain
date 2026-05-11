@@ -264,6 +264,7 @@ class MempoolTx:
 
     # ── Serialisation ──────────────────────────────────────────────────────
     def to_dict(self) -> Dict[str, Any]:
+        _pk = self.metadata.get('sender_public_key_hex', '') if self.metadata else ''
         return {
             'tx_hash'        : self.tx_hash,
             'from_address'   : self.from_address,
@@ -276,6 +277,8 @@ class MempoolTx:
             'fee_rate'       : round(self.fee_rate, 6),
             'nonce'          : self.nonce,
             'signature'      : self.signature,
+            'sender_public_key_hex': _pk,
+            'public_key'     : _pk,
             'w_entropy_hash' : self.w_entropy_hash,
             'timestamp_ns'   : self.timestamp_ns,
             'tx_type'        : self.tx_type,
@@ -316,6 +319,8 @@ class MempoolTx:
                 spatial_position = (x, y, z),
                 fee              = self.fee_base,
                 signature        = self.signature,
+                sender_public_key_hex = self.metadata.get('sender_public_key_hex', ''),
+                tx_type          = self.tx_type,
             )
         except ImportError:
             return None
