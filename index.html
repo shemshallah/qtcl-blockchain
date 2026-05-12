@@ -1159,9 +1159,10 @@ async function fetchChain() {
     _chainBlocks = blocks;
 
     if (blocks.length > 0) {
-      const maxH = Math.max(...blocks.map(b => b.height));
-      _exMaxHeight = Math.max(_exMaxHeight, maxH);
-      document.getElementById('s-height').textContent = _exMaxHeight.toLocaleString();
+      const validHeights = blocks.map(b => b.height).filter(h => h !== undefined && h !== null && !isNaN(h));
+      const maxH = validHeights.length ? Math.max(...validHeights) : 0;
+      _exMaxHeight = Math.max(_exMaxHeight || 0, maxH);
+      document.getElementById('s-height').textContent = (_exMaxHeight || 0).toLocaleString();
       document.getElementById('s-height-sub').textContent = `blocks confirmed`;
       const latest = blocks.find(b => b.height === maxH);
       if (latest) {
@@ -1171,11 +1172,11 @@ async function fetchChain() {
         // Avg block time
         const sorted = [...blocks].sort((a, b) => a.height - b.height).filter(b => b.timestamp || b.timestamp_s);
         if (sorted.length >= 2) {
-          const tFirst = sorted[0].timestamp || sorted[0].timestamp_s;
-          const tLast = sorted[sorted.length-1].timestamp || sorted[sorted.length-1].timestamp_s;
-          if (tFirst && tLast && tLast > tFirst) {
+          const tFirst = sorted[0].timestamp || sorted[0].timestamp_s || 0;
+          const tLast = sorted[sorted.length-1].timestamp || sorted[sorted.length-1].timestamp_s || 0;
+          if (tFirst && tLast && tLast > tFirst && !isNaN(tLast - tFirst)) {
             const avg = (tLast - tFirst) / (sorted.length - 1);
-            document.getElementById('s-blocktime').textContent = avg.toFixed(1);
+            document.getElementById('s-blocktime').textContent = (isNaN(avg) ? '—' : avg.toFixed(1));
           }
         }
       }
@@ -1254,13 +1255,15 @@ async function fetchExplorerPage() {
 
     // Update max height if we learned more from this page
     if (blocks.length > 0) {
-      const maxSeen = Math.max(...blocks.map(b => b.height));
-      _exMaxHeight = Math.max(_exMaxHeight, maxSeen);
+      const validHeights = blocks.map(b => b.height).filter(h => h !== undefined && h !== null && !isNaN(h));
+      const maxSeen = validHeights.length ? Math.max(...validHeights) : 0;
+      _exMaxHeight = Math.max(_exMaxHeight || 0, maxSeen);
     }
 
     renderExTable(blocks);
-    document.getElementById('ex-count').textContent = `${_exMaxHeight + 1} blocks`;
-    const totalPages = Math.max(1, Math.ceil((_exMaxHeight + 1) / EX_PER_PAGE));
+    const safeMax = isNaN(_exMaxHeight) ? 0 : (_exMaxHeight || 0);
+    document.getElementById('ex-count').textContent = `${safeMax + 1} blocks`;
+    const totalPages = Math.max(1, Math.ceil((safeMax + 1) / EX_PER_PAGE));
     document.getElementById('ex-page-info').textContent = `Page ${_exPage + 1} / ${totalPages}`;
     document.getElementById('ex-prev').disabled = _exPage === 0;
     document.getElementById('ex-next').disabled = _exPage >= totalPages - 1;

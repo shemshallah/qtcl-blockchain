@@ -1357,11 +1357,12 @@ class Mempool:
             # CPFP: boost effective fee_rate for TXs whose descendants pay more
             selected = self._apply_cpfp(selected_raw)
 
-        coinbase = self._build_coinbase(block_height, miner_address, block_reward_base)
         # Always build treasury coinbase (slot 1) from canonical schedule
+        # Deferred treasury: block N pays treasury reward from block N-1
+        _treasury_src_h = max(0, block_height - 1)
         try:
             from globals import TessellationRewardSchedule as _TRS_mp
-            _treasury_base = _TRS_mp.get_treasury_reward_base(block_height)
+            _treasury_base = _TRS_mp.get_treasury_reward_base(_treasury_src_h)
             _treasury_addr = _TRS_mp.TREASURY_ADDRESS
         except Exception:
             _treasury_base = 800 - block_reward_base   # fallback: remainder
@@ -1369,11 +1370,14 @@ class Mempool:
                 'TREASURY_ADDRESS',
                 'e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b'
             )
-        # Collect all donations (formerly fees) for the treasury
+        # Fee split: 50% miner, 50% treasury (matches server validation)
         total_donations = sum(tx.fee_base for tx in selected)
+        _miner_fee_share = total_donations // 2
+        _treasury_fee_share = total_donations - _miner_fee_share
+        coinbase = self._build_coinbase(block_height, miner_address, block_reward_base + _miner_fee_share)
         
         treasury_coinbase = self._build_treasury_coinbase(
-            block_height, _treasury_base + total_donations, _treasury_addr
+            block_height, _treasury_base + _treasury_fee_share, _treasury_addr
         )
         return selected, coinbase, treasury_coinbase
 

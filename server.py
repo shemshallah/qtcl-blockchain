@@ -1277,7 +1277,7 @@ def _settle_block_rewards(
                     )
                     balance_deltas[addr] = balance_deltas.get(addr, 0) + amount_base
 
-                # For non-coinbase: deduct sender balance too
+                # For non-coinbase: deduct sender balance (fees already baked into coinbase outputs)
                 if not is_coinbase:
                     from_addr = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
                     total_out = sum((o.get("amount_base", 0) for o in (outputs or [])), 0)
@@ -1288,8 +1288,6 @@ def _settle_block_rewards(
                         fee_base = int(fee_base)
                     except (ValueError, TypeError):
                         fee_base = 0
-                    if fee_base > 0 and _treasury_addr:
-                        balance_deltas[_treasury_addr] = balance_deltas.get(_treasury_addr, 0) + fee_base
                     if from_addr:
                         balance_deltas[from_addr] = balance_deltas.get(from_addr, 0) - total_out - fee_base
 
@@ -6054,7 +6052,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "tx_ids": [
                     tx.get("tx_id", tx.get("tx_hash", "")) for tx in (txs or [])
                 ],
-                "total_fees": _total_fees if "_total_fees" in dir() else 0,
+                "total_fees": _total_fees,
             }
             # Broadcast via available P2P mechanisms
             _broadcast_block_to_peers(compact_block)
@@ -6107,7 +6105,17 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # FAIL THE RPC CALL — don't hide settlement errors
             return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
 
-        # Push block event + finalization to SSE clients
+        # Push block event + finalization to SSE clients (include full transaction list)
+        _sse_tx_list = []
+        for _stx in (txs or []):
+            _sse_tx_list.append({
+                "tx_id": _stx.get("tx_id") or _stx.get("tx_hash", ""),
+                "from_addr": _stx.get("from_addr") or _stx.get("from_address") or _stx.get("from", ""),
+                "to_addr": _stx.get("to_addr") or _stx.get("to_address") or _stx.get("to", ""),
+                "amount": _stx.get("amount_base") or _stx.get("amount", 0),
+                "tx_type": _stx.get("tx_type", "transfer"),
+                "status": "confirmed",
+            })
         try:
             _push_to_sse_service("/push/block", {
                 "height": height,
@@ -6119,6 +6127,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "difficulty": difficulty_bits,
                 "tx_count": len(txs) if txs else 0,
                 "w_entropy_hash": w_entropy_hex,
+                "w_state_fidelity": w_state_fidelity,
+                "transactions": _sse_tx_list,
             })
         except Exception:
             pass
