@@ -132,6 +132,7 @@ try:
         _snapshot_channel,
         _blocks_channel,
         _oracle_consensus_channel,
+        _mempool_channel,
         register_sse_routes,
     )
 except Exception as _sse_init_err:
@@ -157,6 +158,8 @@ def _push_to_sse_service(path: str, payload: dict) -> None:
             _blocks_channel.fan_out(payload)
         elif path == "/push/oracle_consensus" and _oracle_consensus_channel:
             _oracle_consensus_channel.fan_out(payload)
+        elif path == "/push/mempool" and _mempool_channel:
+            _mempool_channel.fan_out(payload)
     except Exception:
         pass
 
@@ -4318,7 +4321,18 @@ def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
                 {"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id
             )
         try:
-            stats = mp.get_stats() if hasattr(mp, "get_stats") else {"depth": 0, "pending": 0}
+            raw_stats = mp.stats() if hasattr(mp, "stats") else {"size": 0}
+            stats = {
+                "depth": raw_stats.get("size", 0),
+                "pending": raw_stats.get("size", 0),
+                "size": raw_stats.get("size", 0),
+                "total_fee_base": raw_stats.get("total_fee_base", 0),
+                "avg_fee_rate": raw_stats.get("avg_fee_rate", 0),
+                "total_accepted": raw_stats.get("total_accepted", 0),
+                "total_rejected": raw_stats.get("total_rejected", 0),
+                "total_confirmed": raw_stats.get("total_confirmed", 0),
+                "uptime_s": raw_stats.get("uptime_s", 0),
+            }
             return _rpc_ok(stats, rpc_id)
         except Exception as me:
             logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats: get_stats error: {me}")
@@ -6478,6 +6492,19 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
         result_code, message, tx = get_mempool().accept(tx_data)
 
         if tx:
+            # Push new TX to SSE mempool channel — miners listen for real-time TX inclusion
+            try:
+                _push_to_sse_service("/push/mempool", {
+                    "event_type": "new_tx",
+                    "tx_hash": tx.tx_hash,
+                    "from_address": tx.from_address,
+                    "to_address": tx.to_address,
+                    "amount_base": tx.amount_base,
+                    "fee_base": tx.fee_base,
+                    "timestamp": int(time.time()),
+                })
+            except Exception:
+                pass
             return _rpc_ok(
                 {
                     "status": "accepted",
@@ -6501,14 +6528,16 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getMempool — pending transaction list for block building."""
+    """qtcl_getMempool — pending transaction list (all by default, or limited by fee rate)."""
     try:
         from mempool import get_pending_transactions as _get_pending
 
-        max_count = 500
+        max_count = None  # default: ALL pending
         if isinstance(params, list) and params:
             try:
-                max_count = min(int(params[0]), 2000)
+                val = int(params[0])
+                if val > 0:
+                    max_count = min(val, 2000)
             except (ValueError, TypeError):
                 pass
         txs = _get_pending(max_count=max_count)
@@ -6538,6 +6567,44 @@ def _rpc_clearMempool(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_clearMempool: {e}")
         return _rpc_error(-32603, f"Mempool clear failed: {str(e)}", rpc_id)
+
+
+def _rpc_getMiningETA(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getMiningETA — estimated seconds until next block (based on current diff & hashrate)."""
+    try:
+        _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
+        difficulty_bits = int(_env_diff) if _env_diff.isdigit() else 5
+        target_hashes = 16 ** difficulty_bits  # total hash space
+        # Hash rate: read from client telemetry if available, else use recent block times
+        avg_hashrate = 0
+        avg_block_time = 0
+        try:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    "SELECT height, timestamp FROM blocks WHERE height >= (SELECT MAX(height) - 10 FROM blocks) ORDER BY height ASC"
+                )
+                rows = cur.fetchall()
+                if rows and len(rows) >= 2:
+                    t_first = int(rows[0][1]) if rows[0][1] else 0
+                    t_last = int(rows[-1][1]) if rows[-1][1] else 0
+                    n_blocks = len(rows) - 1
+                    if t_last > t_first and n_blocks > 0:
+                        avg_block_time = (t_last - t_first) / n_blocks
+                        avg_hashrate = target_hashes / avg_block_time if avg_block_time > 0 else 0
+        except Exception:
+            pass
+        # ETA = remaining hashes / hashrate, or naive estimate
+        eta_s = avg_block_time if avg_block_time > 0 else (target_hashes / 10_000.0)  # fallback: ~10K H/s
+        return _rpc_ok({
+            "eta_seconds": round(eta_s, 1),
+            "difficulty_bits": difficulty_bits,
+            "target_hashes": target_hashes,
+            "avg_hashrate": round(avg_hashrate, 0),
+            "avg_block_time_s": round(avg_block_time, 1),
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getMiningETA: {e}")
+        return _rpc_error(-32603, f"ETA failed: {str(e)}", rpc_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7190,6 +7257,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempoolStats": _rpc_getMempoolStats,
     "qtcl_getMempool": _rpc_getMempool,
     "qtcl_clearMempool": _rpc_clearMempool,
+    "qtcl_getMiningETA": _rpc_getMiningETA,
     "qtcl_getPendingBlock": _rpc_getPendingBlock,
     "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_signAndSubmitTx": _rpc_signAndSubmitTx,
