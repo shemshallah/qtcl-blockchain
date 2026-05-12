@@ -2866,11 +2866,9 @@ def get_db_cursor():
     finally:
         if conn:
             try:
-                # FIX: Always rollback before returning to ensure clean state
-                try:
-                    conn.rollback()
-                except:
-                    pass
+                # CATHEDRAL FIX: Do NOT rollback after commit — just return connection to pool
+                # The commit() at line 2857 already persisted all changes.
+                # Rollback here was rolling back successful transactions!
                 if db_pool.use_pooling and db_pool.pool:
                     db_pool.pool.putconn(conn)
                 else:
