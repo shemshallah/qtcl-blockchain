@@ -5833,16 +5833,28 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             try:
                 _engine = _init_hlwe_engine()
-                # Hash the transaction ID for signature verification
-                _tx_hash_bytes = (
-                    bytes.fromhex(_tx_id)
-                    if len(_tx_id) == 64
-                    else hashlib.sha3_256(str(_tx_id).encode()).digest()
-                )
+                # ── CATHEDRAL FIX: Reconstruct signing hash from TX fields ──
+                # Must match the signing path in qtcl_signAndSubmitTx:
+                #   sign_payload = {"sender", "recipient", "amount", "nonce"}
+                #   message_hash = sha3_256(json.dumps(sign_payload, sort_keys=True))
+                _tx_from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
+                _tx_to = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "")
+                _tx_amount = tx.get("amount") or tx.get("amount_qtcl") or 0
+                _tx_nonce = tx.get("nonce") or 0
+                
+                _sign_payload = {
+                    "sender": _tx_from,
+                    "recipient": _tx_to,
+                    "amount": _tx_amount,
+                    "nonce": _tx_nonce,
+                }
+                _sign_json = json.dumps(_sign_payload, sort_keys=True, default=str)
+                _signing_hash_bytes = hashlib.sha3_256(_sign_json.encode("utf-8")).digest()
+                
                 # Call engine's verify_signature method
                 # It expects (message_hash: bytes, sig: Dict[str, str], public_key: str)
                 _tx_sig_valid = _engine.verify_signature(
-                    _tx_hash_bytes, _sig, _tx_pubkey
+                    _signing_hash_bytes, _sig, _tx_pubkey
                 )
                 if not _tx_sig_valid:
                     logger.error(
