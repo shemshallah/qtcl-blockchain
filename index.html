@@ -1482,6 +1482,63 @@ function startBlockSSEListener() {
 
 startBlockSSEListener();
 
+// ═══ DB-SYNC SSE LISTENER ═══════════════════════════════════════════════════
+// Fires after every block settlement writes to Neon — authoritative re-fetch
+function startDbSyncListener() {
+  try {
+    const url = `${RPC.replace('/rpc', '')}/rpc/events/db_sync`;
+    const es  = new EventSource(url);
+
+    es.addEventListener('message', async (event) => {
+      try {
+        const pulse = JSON.parse(event.data);
+        const h     = pulse.height;
+        console.log(`[DB-SYNC] 🔄 Settlement confirmed h=${h} — re-fetching from Neon`);
+
+        // Always refresh chain tip + stats from authoritative DB
+        await fetchChain();
+        await fetchStats();
+
+        // If the explorer is open, refresh the explorer list
+        const exPage = document.getElementById('explorer');
+        if (exPage && exPage.classList.contains('active')) {
+          await fetchExplorerPage();
+        }
+
+        // If this exact block is open in the detail view, re-fetch with real TXs
+        if (_selectedHeight === h || _selectedHeight === null) {
+          try {
+            const block = await rpc('qtcl_getBlock', [h]);
+            if (block) {
+              const detailScroll = document.getElementById('detail-scroll');
+              if (detailScroll && detailScroll.style.display !== 'none') {
+                renderBlockDetail(block, detailScroll);
+                console.log(`[DB-SYNC] ⚡ Block detail refreshed h=${h} txs=${(block.transactions||[]).length}`);
+              }
+            }
+          } catch(e) {
+            console.debug(`[DB-SYNC] Detail refresh failed: ${e.message}`);
+          }
+        }
+      } catch(parseErr) {
+        console.debug(`[DB-SYNC] Parse error: ${parseErr}`);
+      }
+    });
+
+    es.addEventListener('error', () => {
+      es.close();
+      setTimeout(() => startDbSyncListener(), 5000);
+    });
+
+    console.log(`[DB-SYNC] 🔗 Connected to db_sync stream: ${url}`);
+  } catch(e) {
+    console.warn(`[DB-SYNC] Setup failed: ${e.message}, retry in 5s`);
+    setTimeout(() => startDbSyncListener(), 5000);
+  }
+}
+
+startDbSyncListener();
+
 // Auto-refresh chain every 8s
 setInterval(async () => {
   await fetchChain();

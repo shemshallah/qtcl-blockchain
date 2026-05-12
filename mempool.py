@@ -265,10 +265,17 @@ class MempoolTx:
     # ── Serialisation ──────────────────────────────────────────────────────
     def to_dict(self) -> Dict[str, Any]:
         _pk = self.metadata.get('sender_public_key_hex', '') if self.metadata else ''
+        _outputs = self.outputs or []
+        if not _outputs and self.to_address and self.amount_base:
+            _outputs = [{'address': self.to_address, 'amount_base': self.amount_base}]
         return {
+            # canonical fields
             'tx_hash'        : self.tx_hash,
+            'tx_id'          : self.tx_hash,   # alias for miners/clients
             'from_address'   : self.from_address,
+            'from_addr'      : self.from_address,  # alias
             'to_address'     : self.to_address,
+            'to_addr'        : self.to_address,    # alias
             'amount'         : self.amount_base / 100.0,
             'amount_base'    : self.amount_base,
             'amount_qtcl'    : self.amount_base / 100.0,
@@ -285,8 +292,8 @@ class MempoolTx:
             'memo'           : self.memo,
             'client_tx_id'   : self.client_tx_id,
             'metadata'       : self.metadata,
-            'inputs'         : self.inputs,
-            'outputs'        : self.outputs,
+            'inputs'         : self.inputs or [],
+            'outputs'        : _outputs,
             'status'         : TxStatus.PENDING,
         }
 
@@ -2243,8 +2250,8 @@ def get_pending_transactions(max_count: int = None) -> List[MempoolTx]:
 def get_transaction_by_hash(tx_hash: str) -> Optional[MempoolTx]:
     return get_mempool().get(tx_hash)
 
-def mark_included_in_block(tx_hashes: List[str], block_height: int) -> bool:
-    return get_mempool().mark_included_in_block(tx_hashes, block_height) >= 0
+def mark_included_in_block(tx_hashes: List[str], block_height: int) -> int:
+    return get_mempool().mark_included_in_block(tx_hashes, block_height)
 
 def get_mempool_stats() -> Dict[str, Any]:
     return get_mempool().stats()

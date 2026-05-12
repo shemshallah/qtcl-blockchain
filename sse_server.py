@@ -207,6 +207,7 @@ _blocks_channel = SSEChannel("blocks")
 _metrics_channel = SSEChannel("metrics")
 _oracle_consensus_channel = SSEChannel("oracle_consensus")
 _mempool_channel = SSEChannel("mempool")
+_db_sync_channel = SSEChannel("db_sync")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -462,6 +463,20 @@ def push_oracle_consensus():
         return {"error": str(e)}, 500
 
 
+@app.route("/push/db_sync", methods=["POST"])
+def push_db_sync():
+    """Internal push: fires after block settlement commits to Neon DB.
+    Clients subscribed to /rpc/events/db_sync know to re-fetch authoritative state."""
+    try:
+        payload = request.get_json() or {}
+        n = _db_sync_channel.fan_out(payload)
+        logger.debug(f"[SSE] /push/db_sync fan-out to {n} clients")
+        return {"status": "ok", "clients": n}, 200
+    except Exception as e:
+        logger.error(f"[SSE] /push/db_sync error: {e}")
+        return {"error": str(e)}, 500
+
+
 def _fan_out_mempool(payload: dict) -> int:
     """Fan-out a mempool event payload to all connected /rpc/events/mempool clients."""
     return _mempool_channel.fan_out(payload)
@@ -552,6 +567,31 @@ def health():
             "consensus": dict(sorted(consensus_per_ip.items(), key=lambda x: -x[1])[:5]),
         },
     }, 200
+
+
+
+
+@app.route("/rpc/events/db_sync")
+def sse_db_sync():
+    """SSE stream: fires after every block settlement commits to Neon.
+    Frontend subscribes here and re-fetches block + TX data on each pulse."""
+    def _gen():
+        q = _db_sync_channel.subscribe()
+        try:
+            while True:
+                try:
+                    item = q.get(timeout=30)
+                    import json as _json
+                    yield f"data: {_json.dumps(item)}\n\n"
+                except Exception:
+                    yield ": heartbeat\n\n"
+        finally:
+            _db_sync_channel.unsubscribe(q)
+    from flask import stream_with_context, Response
+    resp = Response(stream_with_context(_gen()), content_type="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
 
 
 if __name__ == "__main__":

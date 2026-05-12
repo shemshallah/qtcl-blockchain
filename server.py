@@ -133,11 +133,12 @@ try:
         _blocks_channel,
         _oracle_consensus_channel,
         _mempool_channel,
+        _db_sync_channel,
         register_sse_routes,
     )
 except Exception as _sse_init_err:
     logger.warning(f"[SSE] ⚠️ Could not import SSE channels: {_sse_init_err}")
-    _snapshot_channel = _blocks_channel = _oracle_consensus_channel = None
+    _snapshot_channel = _blocks_channel = _oracle_consensus_channel = _db_sync_channel = None
     register_sse_routes = None
 
 _SSE_AVAILABLE = False  # Set to True after register_sse_routes(app) succeeds
@@ -160,6 +161,8 @@ def _push_to_sse_service(path: str, payload: dict) -> None:
             _oracle_consensus_channel.fan_out(payload)
         elif path == "/push/mempool" and _mempool_channel:
             _mempool_channel.fan_out(payload)
+        elif path == "/push/db_sync" and _db_sync_channel:
+            _db_sync_channel.fan_out(payload)
     except Exception:
         pass
 
@@ -1243,32 +1246,43 @@ def _settle_block_rewards(
                 _settle_log.critical(f"[SETTLE-TEST] ❌ DB FAILED: {_test_err}")
                 return
 
-            # ── Phase 1: Create UTXOs from ALL tx outputs, track net balance deltas ──
+            # ── Phase 1: Create UTXOs, write address_transactions, track balance deltas ──
             balance_deltas: Dict[str, int] = {}
 
             for tx in txs or []:
-                tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
-                tx_type = tx.get("tx_type", "").lower()
-                outputs = tx.get("outputs", [])
+                tx_id    = tx.get("tx_id") or tx.get("tx_hash", "")
+                tx_type  = tx.get("tx_type", "").lower()
                 is_coinbase = tx_type in ("coinbase", "miner_reward", "treasury_reward")
+                from_addr = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
+                to_addr   = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "")
+
+                # Synthesize outputs when missing (simple transfer or coinbase with top-level amount)
+                outputs = tx.get("outputs") or []
+                if not outputs and to_addr:
+                    amt = tx.get("amount_base") or 0
+                    if not amt:
+                        try:
+                            amt = int(float(tx.get("amount", 0)) * 100)
+                        except Exception:
+                            amt = 0
+                    if amt:
+                        outputs = [{"address": to_addr, "amount_base": amt}]
 
                 # For non-coinbase: mark input UTXOs as spent
                 if not is_coinbase:
-                    inputs = tx.get("inputs", [])
-                    from_addr = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
-                    for inp in inputs:
-                        prev_tx = inp.get("prev_tx_hash", "")
+                    for inp in (tx.get("inputs") or []):
+                        prev_tx  = inp.get("prev_tx_hash", "")
                         prev_idx = inp.get("prev_output_index", 0)
-                        if prev_tx:
+                        if prev_tx and tx_id:
                             cur.execute(
                                 "UPDATE address_utxos SET spent = TRUE, spent_at_height = %s, spent_in_tx_hash = %s "
                                 "WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
                                 (height, tx_id, prev_tx, prev_idx),
                             )
 
-                # Create UTXOs from outputs
-                for idx, out in enumerate(outputs or []):
-                    addr = out.get("address", "")
+                # Phase 1a: Create UTXOs + credit recipients
+                for idx, out in enumerate(outputs):
+                    addr        = out.get("address", "")
                     amount_base = out.get("amount_base", 0)
                     if not addr or not amount_base:
                         continue
@@ -1280,34 +1294,64 @@ def _settle_block_rewards(
                     )
                     balance_deltas[addr] = balance_deltas.get(addr, 0) + amount_base
 
-                # For non-coinbase: deduct sender balance (fees already baked into coinbase outputs)
-                if not is_coinbase:
-                    from_addr = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
-                    total_out = sum((o.get("amount_base", 0) for o in (outputs or [])), 0)
-                    fee_base = tx.get("fee_base", 0) or 0
-                    if not fee_base:
-                        fee_base = tx.get("fee", 0) or 0
+                # Phase 1b: Debit sender for non-coinbase TXs
+                if not is_coinbase and from_addr:
+                    total_out = sum(o.get("amount_base", 0) for o in outputs)
+                    fee_base  = tx.get("fee_base") or tx.get("fee") or 0
                     try:
                         fee_base = int(fee_base)
-                    except (ValueError, TypeError):
+                    except Exception:
                         fee_base = 0
-                    if from_addr:
-                        balance_deltas[from_addr] = balance_deltas.get(from_addr, 0) - total_out - fee_base
+                    balance_deltas[from_addr] = balance_deltas.get(from_addr, 0) - total_out - fee_base
 
-            # ── Phase 2: Update wallet_addresses from balance deltas ──
+                # Phase 1c: Write address_transactions index (IN row for recipient, OUT row for sender)
+                if to_addr and tx_id:
+                    total_amt = sum(o.get("amount_base", 0) for o in outputs if o.get("address") == to_addr) or (
+                        outputs[0].get("amount_base", 0) if outputs else 0
+                    )
+                    cur.execute("""
+                        INSERT INTO address_transactions
+                            (address, tx_hash, direction, amount, block_height, created_at)
+                        VALUES (%s, %s, 'in', %s, %s, NOW())
+                        ON CONFLICT (address, tx_hash, direction) DO UPDATE
+                            SET block_height = EXCLUDED.block_height,
+                                amount       = EXCLUDED.amount
+                    """, (to_addr, tx_id, total_amt, height))
+                if not is_coinbase and from_addr and tx_id:
+                    sent_amt = sum(o.get("amount_base", 0) for o in outputs)
+                    cur.execute("""
+                        INSERT INTO address_transactions
+                            (address, tx_hash, direction, amount, block_height, created_at)
+                        VALUES (%s, %s, 'out', %s, %s, NOW())
+                        ON CONFLICT (address, tx_hash, direction) DO UPDATE
+                            SET block_height = EXCLUDED.block_height,
+                                amount       = EXCLUDED.amount
+                    """, (from_addr, tx_id, sent_amt, height))
+
+            # ── Phase 2: Update wallet_addresses from balance deltas (credit AND debit) ──
             for addr, delta in balance_deltas.items():
                 if delta == 0:
                     continue
+                _fp = hashlib.sha256(addr.encode()).hexdigest()[:64]
                 if delta > 0:
                     cur.execute("""
-                        INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
+                        INSERT INTO wallet_addresses
+                            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
                         VALUES (%s, %s, %s, %s, 1, 'standard', NOW())
                         ON CONFLICT (address) DO UPDATE SET
-                            balance = wallet_addresses.balance + %s,
+                            balance           = GREATEST(0, wallet_addresses.balance + %s),
                             transaction_count = wallet_addresses.transaction_count + 1,
-                            updated_at = NOW()
-                    """, (addr, hashlib.sha256(addr.encode()).hexdigest()[:64],
-                          hashlib.sha256(addr.encode()).hexdigest()[:64], delta, delta))
+                            updated_at        = NOW()
+                    """, (addr, _fp, _fp, delta, delta))
+                else:
+                    # sender debit — never go below zero
+                    cur.execute("""
+                        UPDATE wallet_addresses SET
+                            balance           = GREATEST(0, balance + %s),
+                            transaction_count = transaction_count + 1,
+                            updated_at        = NOW()
+                        WHERE address = %s
+                    """, (delta, addr))
 
             # UPDATE CHAIN STATE
             cur.execute(
@@ -6119,6 +6163,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # FAIL THE RPC CALL — don't hide settlement errors
             return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
 
+        # Push db_sync pulse so block-explorer clients re-fetch from authoritative Neon
+        try:
+            _push_to_sse_service("/push/db_sync", {
+                "height": height,
+                "block_hash": block_hash,
+                "miner_address": miner_address,
+                "timestamp": int(time.time()),
+                "event": "block_settled",
+            })
+        except Exception:
+            pass
+
         # Push block event + finalization to SSE clients (include full transaction list)
         _sse_tx_list = []
         for _stx in (txs or []):
@@ -6194,21 +6250,39 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 miner_address=miner_address,
             )
             for _ptx in _pending_txs:
-                _ptx_dict = _ptx.to_dict() if hasattr(_ptx, 'to_dict') else _ptx
-                # Normalize to the format the miner expects
+                _ptx_dict = _ptx.to_dict() if hasattr(_ptx, 'to_dict') else (
+                    _ptx if isinstance(_ptx, dict) else {}
+                )
+                _p_hash  = _ptx_dict.get('tx_hash') or _ptx_dict.get('tx_id', '')
+                _p_from  = _ptx_dict.get('from_address') or _ptx_dict.get('from_addr', '')
+                _p_to    = _ptx_dict.get('to_address') or _ptx_dict.get('to_addr', '')
+                _p_amt   = _ptx_dict.get('amount_base', 0)
+                _p_fee   = _ptx_dict.get('fee_base', 0)
+                _p_outs  = _ptx_dict.get('outputs') or (
+                    [{'address': _p_to, 'amount_base': _p_amt}] if _p_to and _p_amt else []
+                )
+                _p_meta  = _ptx_dict.get('metadata') or {}
+                _p_pk    = _ptx_dict.get('sender_public_key_hex') or _p_meta.get('sender_public_key_hex', '')
                 _pending_for_next.append({
-                    "tx_id": _ptx_dict.get("tx_hash", ""),
-                    "tx_type": "transfer",
-                    "from_addr": _ptx_dict.get("from_address", ""),
-                    "to_addr": _ptx_dict.get("to_address", ""),
-                    "amount": _ptx_dict.get("amount_base", 0) / 100.0,
-                    "amount_base": _ptx_dict.get("amount_base", 0),
-                    "fee_base": _ptx_dict.get("fee_base", 0),
-                    "nonce": _ptx_dict.get("nonce", 0),
-                    "signature": _ptx_dict.get("signature", ""),
-                    "sender_public_key_hex": _ptx_dict.get("metadata", {}).get("sender_public_key_hex", ""),
-                    "inputs": _ptx_dict.get("inputs", []),
-                    "outputs": _ptx_dict.get("outputs", []),
+                    # dual-key aliases so any miner field access works
+                    'tx_hash'            : _p_hash,
+                    'tx_id'              : _p_hash,
+                    'tx_type'            : _ptx_dict.get('tx_type', 'transfer'),
+                    'from_address'       : _p_from,
+                    'from_addr'          : _p_from,
+                    'to_address'         : _p_to,
+                    'to_addr'            : _p_to,
+                    'amount'             : _p_amt / 100.0,
+                    'amount_base'        : _p_amt,
+                    'fee_base'           : _p_fee,
+                    'nonce'              : _ptx_dict.get('nonce', 0),
+                    'signature'          : _ptx_dict.get('signature', ''),
+                    'sender_public_key_hex': _p_pk,
+                    'public_key'         : _p_pk,
+                    'inputs'             : _ptx_dict.get('inputs') or [],
+                    'outputs'            : _p_outs,
+                    'metadata'           : _p_meta,
+                    'status'             : 'pending',
                 })
             if _pending_for_next:
                 logger.info(
@@ -6543,12 +6617,22 @@ def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
         txs = _get_pending(max_count=max_count)
         serialized = []
         for tx in txs:
-            if hasattr(tx, "__dict__"):
-                serialized.append(
-                    {k: v for k, v in tx.__dict__.items() if not k.startswith("_")}
-                )
+            # Use to_dict() when available (MempoolTx) — guarantees all field aliases present
+            if hasattr(tx, 'to_dict'):
+                serialized.append(tx.to_dict())
             elif isinstance(tx, dict):
-                serialized.append(tx)
+                # Normalize raw dicts to have all expected aliases
+                _tx_hash = tx.get('tx_hash') or tx.get('tx_id', '')
+                _from    = tx.get('from_address') or tx.get('from_addr') or tx.get('from', '')
+                _to      = tx.get('to_address') or tx.get('to_addr') or tx.get('to', '')
+                _amt     = tx.get('amount_base', 0)
+                _outputs = tx.get('outputs') or ([{'address': _to, 'amount_base': _amt}] if _to and _amt else [])
+                serialized.append({**tx,
+                    'tx_hash': _tx_hash, 'tx_id': _tx_hash,
+                    'from_address': _from, 'from_addr': _from,
+                    'to_address': _to,    'to_addr': _to,
+                    'outputs': _outputs,
+                })
         logger.debug(f"[RPC-METHOD] qtcl_getMempool: returning {len(serialized)} txs")
         return _rpc_ok(serialized, rpc_id)
     except Exception as e:
