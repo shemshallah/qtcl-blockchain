@@ -62,11 +62,13 @@ def register_sse_routes(flask_app) -> None:
     flask_app.add_url_rule("/rpc/blocks/stream",     view_func=rpc_blocks_stream,     methods=["GET"])
     flask_app.add_url_rule("/rpc/metrics/push",      view_func=rpc_metrics_push,      methods=["GET"])
     flask_app.add_url_rule("/rpc/oracle/consensus",  view_func=rpc_oracle_consensus,  methods=["GET", "OPTIONS"])
+    flask_app.add_url_rule("/rpc/events/mempool",   view_func=rpc_events_mempool,   methods=["GET", "OPTIONS"])
     # Internal push endpoints (for direct fan-out bypass; server.py now uses in-memory fan-out)
     flask_app.add_url_rule("/push/snapshot",         view_func=push_snapshot,         methods=["POST"])
     flask_app.add_url_rule("/push/block",            view_func=push_block,            methods=["POST"])
     flask_app.add_url_rule("/push/metric",           view_func=push_metric,           methods=["POST"])
     flask_app.add_url_rule("/push/oracle_consensus", view_func=push_oracle_consensus, methods=["POST"])
+    flask_app.add_url_rule("/push/mempool",          view_func=push_mempool,          methods=["POST"])
     logger.info(f"[SSE] Registered {len(_registered_apps)} SSE route group(s)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -204,6 +206,7 @@ _snapshot_channel = SSEChannel("snapshot")
 _blocks_channel = SSEChannel("blocks")
 _metrics_channel = SSEChannel("metrics")
 _oracle_consensus_channel = SSEChannel("oracle_consensus")
+_mempool_channel = SSEChannel("mempool")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -220,6 +223,7 @@ def _cleanup_worker():
             total_removed += _blocks_channel.cleanup_stale(max_age=60.0)
             total_removed += _metrics_channel.cleanup_stale(max_age=60.0)
             total_removed += _oracle_consensus_channel.cleanup_stale(max_age=60.0)
+            total_removed += _mempool_channel.cleanup_stale(max_age=60.0)
             
             if total_removed > 0:
                 snap_total, _ = _snapshot_channel.get_client_counts()
@@ -456,6 +460,46 @@ def push_oracle_consensus():
     except Exception as e:
         logger.error(f"[SSE] /push/oracle_consensus error: {e}")
         return {"error": str(e)}, 500
+
+
+def _fan_out_mempool(payload: dict) -> int:
+    """Fan-out a mempool event payload to all connected /rpc/events/mempool clients."""
+    return _mempool_channel.fan_out(payload)
+
+
+@app.route("/push/mempool", methods=["POST"])
+def push_mempool():
+    """Internal: mempool pushes new TX event, fan-out to all /rpc/events/mempool clients."""
+    try:
+        payload = request.get_json()
+        if not payload:
+            return {"error": "No payload"}, 400
+        n = _fan_out_mempool(payload)
+        logger.debug(f"[SSE] /push/mempool fan-out to {n} clients")
+        return {"status": "ok", "clients": n}, 200
+    except Exception as e:
+        logger.error(f"[SSE] /push/mempool error: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route("/rpc/events/mempool", methods=["GET", "POST", "OPTIONS"])
+def rpc_events_mempool():
+    """SSE stream: Real-time mempool transaction events for miners and explorers."""
+    if request.method == "OPTIONS":
+        return "", 204
+
+    client_ip = _get_client_ip()
+    client = _mempool_channel.connect(client_ip)
+
+    return Response(
+        _sse_generator(_mempool_channel, client),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 @app.route("/rpc/oracle/consensus", methods=["GET", "POST", "OPTIONS"])

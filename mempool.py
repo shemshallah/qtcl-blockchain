@@ -1525,6 +1525,15 @@ class Mempool:
             'fee_estimate_6b' : self._fee_hist.estimate(6),
         }
 
+    def all_pending(self) -> List[MempoolTx]:
+        """Return ALL pending transactions (for mempool display)."""
+        with self._lock:
+            return sorted(
+                [tx for tx in self._index.values() if tx.tx_hash not in self._evicted],
+                key=lambda tx: tx.fee_rate,
+                reverse=True,
+            )
+
     # ─── Subscription / event bus ────────────────────────────────────────
 
     def subscribe(self, callback: Callable[[str, MempoolTx], None]) -> None:
@@ -2224,8 +2233,10 @@ def add_transaction(raw: Dict[str, Any]) -> Tuple[bool, str]:
     result, msg, _ = get_mempool().accept(raw)
     return result in (AcceptResult.ACCEPTED, AcceptResult.REPLACED_BY_FEE), msg
 
-def get_pending_transactions(max_count: int = 2_000) -> List[MempoolTx]:
-    """Get pending TXs sorted by fee_rate DESC (for mining)."""
+def get_pending_transactions(max_count: int = None) -> List[MempoolTx]:
+    """Get pending TXs for mempool display. If max_count is None, returns ALL pending."""
+    if max_count is None:
+        return get_mempool().all_pending()
     txs, _coinbase, _treasury = get_mempool().get_block_transactions(max_txs=max_count)
     return txs
 
