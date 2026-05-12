@@ -3446,12 +3446,63 @@ def _get_canonical_node() -> Optional[dict]:
 
 
 def _rpc_getPendingBlock(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getPendingBlock — get the current in-progress (unsealed) block."""
+    """qtcl_getPendingBlock — current in-progress (unsealed) block.
+
+    Sources transactions from two authoritative places and merges them:
+      1. BlockManager.pending_block.transactions  — TXs already fed in-process
+      2. Mempool._index                           — ALL accepted pending TXs
+
+    The union guarantees every submitted TX appears in the current block view
+    immediately upon mempool acceptance, regardless of whether _feed_block_manager
+    succeeded (LATTICE may not be initialised yet on fresh boots).
+    """
     try:
-        if LATTICE is None or not getattr(LATTICE, 'block_manager', None):
-            return _rpc_ok(None, rpc_id)
-        pb = LATTICE.block_manager.get_pending_block()
-        return _rpc_ok(pb, rpc_id)
+        # Pull block skeleton from BlockManager (height, parent_hash, etc.)
+        bm_block = None
+        if LATTICE is not None and getattr(LATTICE, 'block_manager', None):
+            try:
+                bm_block = LATTICE.block_manager.get_pending_block()
+            except Exception:
+                pass
+
+        # Pull ALL pending TXs from mempool — authoritative source of truth
+        mp_txs_by_hash: dict = {}
+        try:
+            from mempool import get_mempool as _get_mp
+            mp = _get_mp()
+            for mtx in mp.all_pending():
+                d = mtx.to_dict() if hasattr(mtx, 'to_dict') else {}
+                d.setdefault('status', 'pending')
+                h = d.get('tx_hash', '')
+                if h:
+                    mp_txs_by_hash[h] = d
+        except Exception:
+            pass
+
+        # Merge: start with BlockManager TXs, let mempool overwrite (richer via to_dict)
+        merged: dict = {}
+        if bm_block:
+            for tx in bm_block.get('transactions', []):
+                h = tx.get('tx_hash') or tx.get('tx_id', '')
+                tx.setdefault('status', 'pending')
+                if h:
+                    merged[h] = tx
+        for h, tx in mp_txs_by_hash.items():
+            merged[h] = tx
+
+        tx_list = list(merged.values())
+        tx_list.sort(key=lambda t: t.get('fee_rate', 0), reverse=True)
+
+        result = {
+            'block_height' : (bm_block or {}).get('block_height', 0),
+            'parent_hash'  : (bm_block or {}).get('parent_hash', '0' * 64),
+            'miner_address': (bm_block or {}).get('miner_address', ''),
+            'transactions' : tx_list,
+            'tx_count'     : len(tx_list),
+            'timestamp_s'  : int(time.time()),
+            'max_block_tx' : (bm_block or {}).get('max_block_tx', 2000),
+        }
+        return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getPendingBlock error: {e}")
         return _rpc_ok(None, rpc_id)
@@ -6203,6 +6254,27 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception:
             pass
 
+        # Update in-memory block cache so qtcl_getBlockRange serves full data
+        try:
+            _cache_block({
+                "height": height,
+                "block_hash": block_hash,
+                "parent_hash": parent_hash,
+                "merkle_root": merkle_root,
+                "miner_address": miner_address,
+                "timestamp_s": timestamp_s,
+                "timestamp": timestamp_s,
+                "difficulty": difficulty_bits,
+                "nonce": nonce,
+                "tx_count": len(txs) if txs else 0,
+                "w_entropy_hash": w_entropy_hex[:64] if w_entropy_hex else "",
+                "w_state_fidelity": w_state_fidelity,
+                "finalized": True,
+                "mined": True,
+            })
+        except Exception:
+            pass
+
         # Push oracle consensus finalization event (miner listens to this to mark block done)
         try:
             _push_to_sse_service("/push/oracle_consensus", {
@@ -6566,17 +6638,12 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
         result_code, message, tx = get_mempool().accept(tx_data)
 
         if tx:
-            # Push new TX to SSE mempool channel — miners listen for real-time TX inclusion
+            # Push full TX to SSE mempool channel — dashboard renders it immediately as unconfirmed
             try:
-                _push_to_sse_service("/push/mempool", {
-                    "event_type": "new_tx",
-                    "tx_hash": tx.tx_hash,
-                    "from_address": tx.from_address,
-                    "to_address": tx.to_address,
-                    "amount_base": tx.amount_base,
-                    "fee_base": tx.fee_base,
-                    "timestamp": int(time.time()),
-                })
+                tx_dict = tx.to_dict() if hasattr(tx, 'to_dict') else {}
+                tx_dict["event_type"] = "new_tx"
+                tx_dict["status"] = "pending"
+                _push_to_sse_service("/push/mempool", tx_dict)
             except Exception:
                 pass
             return _rpc_ok(

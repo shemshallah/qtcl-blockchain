@@ -294,7 +294,7 @@ class MempoolTx:
             'metadata'       : self.metadata,
             'inputs'         : self.inputs or [],
             'outputs'        : _outputs,
-            'status'         : TxStatus.PENDING,
+            'status'         : TxStatus.PENDING.value,
         }
 
     def to_quantum_tx(self) -> Any:
@@ -1818,32 +1818,20 @@ class Mempool:
 
     def _feed_block_manager(self, tx: MempoolTx) -> None:
         """
-        Feed the BlockManager's in-process receive_transaction().
-        This is the chain entanglement point: the mempool and BlockManager
-        share the same transaction graph.
+        Best-effort feed to BlockManager's in-process transaction queue.
+        getPendingBlock now reads from the mempool directly, so this is
+        purely an optimisation — failures are silent and non-fatal.
         """
         try:
-            from lattice_controller import QuantumTransaction
             qt = tx.to_quantum_tx()
             if qt is None:
-                logger.warning(f"[MEMPOOL] to_quantum_tx() returned None for {tx.tx_hash[:16]}…")
                 return
-            try:
-                from server import LATTICE
-                if LATTICE is None:
-                    logger.warning(f"[MEMPOOL] LATTICE not yet initialised — TX {tx.tx_hash[:16]}… queued in mempool only")
-                    return
-                bm = getattr(LATTICE, 'block_manager', None)
-                if bm is None:
-                    logger.warning(f"[MEMPOOL] BlockManager not available — TX {tx.tx_hash[:16]}… queued in mempool only")
-                    return
-                success = bm.receive_transaction(qt)
-                if not success:
-                    logger.warning(f"[MEMPOOL] BlockManager rejected TX {tx.tx_hash[:16]}…")
-            except (ImportError, AttributeError) as exc:
-                logger.warning(f"[MEMPOOL] Cannot reach BlockManager: {exc}")
-        except Exception as exc:
-            logger.error(f"[MEMPOOL] BlockManager feed error for {tx.tx_hash[:16]}…: {exc}")
+            from server import LATTICE
+            bm = getattr(LATTICE, 'block_manager', None) if LATTICE else None
+            if bm:
+                bm.receive_transaction(qt)
+        except Exception:
+            pass
 
     def _notify_peers(self, tx: MempoolTx) -> None:
         """
