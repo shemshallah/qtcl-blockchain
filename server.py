@@ -4049,52 +4049,26 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         try:
             with get_db_cursor() as cur:
                 cur.execute("""
-                    SELECT height, block_hash, timestamp, w_state_hash, parent_hash,
-                           nonce, difficulty, coherence_snapshot, merkle_root, tx_count,
-                           miner_address
-                    FROM blocks WHERE height BETWEEN %s AND %s
-                    ORDER BY height ASC
+                    SELECT b.height, b.block_hash, b.timestamp, b.w_state_hash, b.parent_hash,
+                           b.nonce, b.difficulty, b.coherence_snapshot, b.merkle_root, b.tx_count,
+                           b.miner_address,
+                           (SELECT COUNT(*) FROM transactions t WHERE t.height = b.height) AS real_tx_count
+                    FROM blocks b WHERE b.height BETWEEN %s AND %s
+                    ORDER BY b.height ASC
                 """, (from_h, to_h))
                 rows = cur.fetchall()
-
-                # 🔴 FIX: Fetch transactions for ALL blocks in range in a single query
-                # This eliminates N+1 queries and ensures explorer shows full TX data.
-                tx_by_height = {}
-                if rows:
-                    cur.execute("""
-                        SELECT tx_hash, from_address, to_address, amount,
-                               transaction_index, tx_type, status,
-                               quantum_state_hash, metadata, height
-                        FROM transactions
-                        WHERE height BETWEEN %s AND %s
-                        ORDER BY height ASC, COALESCE(transaction_index, 0) ASC
-                    """, (from_h, to_h))
-                    for tr in cur.fetchall():
-                        h = tr[9]
-                        if h not in tx_by_height:
-                            tx_by_height[h] = []
-                        tx_by_height[h].append({
-                            "tx_id": tr[0],
-                            "from_addr": tr[1] or "",
-                            "to_addr": tr[2] or "",
-                            "amount": int(tr[3]) if tr[3] is not None else 0,
-                            "tx_index": int(tr[4]) if tr[4] is not None else 0,
-                            "tx_type": tr[5] or "transfer",
-                            "status": tr[6] or "confirmed",
-                            "w_proof": tr[7] or "",
-                            "metadata": tr[8] if tr[8] else None,
-                        })
         except Exception as _db_err:
             logger.warning(f"[RPC] getBlockRange DB error: {_db_err}")
             rows = []
-            tx_by_height = {}
 
         blocks = []
         for row in rows:
-            h = row[0]
-            block_txs = tx_by_height.get(h, [])
+            # 🔴 FIX: Use real_tx_count from subquery (actual persisted TXs) over
+            # the tx_count column which may be stale from the initial insert.
+            stored_tx_count = int(row[11]) if row[11] else 0
+            column_tx_count = int(row[9]) if row[9] else 0
             b = {
-                "height": h, "block_hash": row[1],
+                "height": row[0], "block_hash": row[1],
                 "timestamp": int(row[2]) if row[2] else 0,
                 "w_entropy_hash": row[3] or "",
                 "parent_hash": row[4] or ("0" * 64),
@@ -4102,9 +4076,8 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 "difficulty": int(float(row[6])) if row[6] else 5,
                 "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
                 "merkle_root": row[8] or ("0" * 64),
-                "tx_count": len(block_txs) if block_txs else (int(row[9]) if row[9] else 0),
+                "tx_count": max(stored_tx_count, column_tx_count),
                 "miner_address": row[10] or "",
-                "transactions": block_txs,
             }
             blocks.append(b)
             # Write-through cache for subsequent calls
