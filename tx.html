@@ -1638,19 +1638,43 @@ try {
 } catch(_) {}
 
 // ═══ RPC HELPER ═══
-async function rpc(method, params = []) {
-  try {
-    const r = await fetch(RPC_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', method, params, id: Date.now() })
-    });
-    const d = await r.json();
-    if (d.error) throw new Error(d.error.message || JSON.stringify(d.error));
-    return d.result;
-  } catch (e) {
-    console.error(`RPC ${method}:`, e);
-    throw e;
+async function rpc(method, params = [], retries = 3) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const r = await fetch(RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method, params, id: Date.now() }),
+        signal: AbortSignal.timeout(12000)
+      });
+      const ct = r.headers.get('content-type') || '';
+      if (!ct.includes('json')) {
+        // Non-JSON response (e.g. 503 plain text during startup)
+        const text = await r.text();
+        if (r.status === 503 && attempt < retries) {
+          await new Promise(res => setTimeout(res, 3000 + attempt * 2000));
+          continue;
+        }
+        throw new Error(`Server not ready (${r.status}): ${text.slice(0, 80)}`);
+      }
+      const d = await r.json();
+      if (d.error) {
+        if (d.error.code === -32000 && attempt < retries) {
+          // Server initializing
+          await new Promise(res => setTimeout(res, 3000 + attempt * 2000));
+          continue;
+        }
+        throw new Error(d.error.message || JSON.stringify(d.error));
+      }
+      return d.result;
+    } catch (e) {
+      if (attempt < retries && (e.name === 'AbortError' || e.name === 'TypeError' || (e.message && e.message.includes('fetch')))) {
+        await new Promise(res => setTimeout(res, 2000 + attempt * 1500));
+        continue;
+      }
+      console.error(`RPC ${method}:`, e);
+      throw e;
+    }
   }
 }
 
@@ -3189,10 +3213,43 @@ function handleUrlParams() {
 }
 
 // ═══ INIT ═══
+async function _waitForServer(maxWaitMs = 60000) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch('/health', { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (r.ok) {
+        // Probe RPC
+        const probe = await fetch(`${RPC_URL}?method=qtcl_getBlockHeight&params=%5B%5D&id=0`, {
+          method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(8000)
+        });
+        const ct = probe.headers.get('content-type') || '';
+        if (probe.ok && ct.includes('json')) {
+          const data = await probe.json();
+          const hasInitError = data.error && data.error.code === -32000;
+          const hasResult = data.result && data.result.height !== undefined;
+          if (!hasInitError && hasResult) return true;
+        }
+      }
+    } catch(e) {}
+    await new Promise(res => setTimeout(res, 3000));
+  }
+  return false;
+}
+
 async function init() {
   // ═══ SECURITY: Always start with a clean slate — no wallet persistence ═══
   _fullWalletPurge('init');
   handleUrlParams();
+
+  // Wait for server readiness before firing any RPC calls
+  // This prevents POST /rpc returning 503 plain-text which breaks JSON parsing
+  const ready = await _waitForServer(90000);
+  if (!ready) {
+    console.warn('[tx.html] Server did not become ready in time');
+    // Still attempt — rpc() has its own retry logic
+  }
+
   await refreshDashboard();
   loadRecentTxs();
 

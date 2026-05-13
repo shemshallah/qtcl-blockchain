@@ -715,17 +715,21 @@ async function waitForServer(maxWaitMs = 60000) {
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch('/health', {method: 'GET', cache: 'no-store'});
+      const res = await fetch('/health', {method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(6000)});
       if (res.ok) {
         // Health is up — now check if /rpc is ready by doing a lightweight probe
         const probe = await fetch(`${RPC}?method=qtcl_getBlockHeight&params=%5B%5D&id=0`, {
           method: 'GET',
-          cache: 'no-store'
+          cache: 'no-store',
+          signal: AbortSignal.timeout(8000)
         });
         const ct = probe.headers.get('content-type') || '';
         if (probe.ok && ct.includes('json')) {
           const data = await probe.json();
-          if (!data.error || data.error.code !== -32000) {
+          // Server is ready when: no error (or non-init-error) AND result has a height field
+          const hasInitError = data.error && data.error.code === -32000;
+          const hasResult = data.result && data.result.height !== undefined && data.result.height !== null;
+          if (!hasInitError && hasResult) {
             _serverReady = true;
             setStatus('LIVE', 'gr');
             return true;
@@ -747,10 +751,11 @@ function setStatus(text, color) {
   const dot = document.querySelector('.cd');
   const cp = document.getElementById('cp');
   if (el) el.textContent = text;
-  const colors = {gr: 'var(--gr)', am: 'var(--am)', re: 'var(--re)', cy: 'var(--cy)'};
-  const c = colors[color] || colors.cy;
-  if (dot) dot.style.background = c;
-  if (cp) cp.style.borderColor = c.replace('var(--', 'rgba(').replace(')', ', .25)');
+  // Map color keys to actual CSS var and a valid rgba border equivalent
+  const cssVar = {gr: 'var(--gr)', am: 'var(--am)', re: 'var(--re)', cy: 'var(--cy)'}[color] || 'var(--cy)';
+  const borderRgba = {gr: 'rgba(0,232,138,.25)', am: 'rgba(255,140,0,.25)', re: 'rgba(244,63,94,.25)', cy: 'rgba(0,212,255,.25)'}[color] || 'rgba(0,212,255,.25)';
+  if (dot) dot.style.background = cssVar;
+  if (cp) cp.style.borderColor = borderRgba;
 }
 
 // ── RPC Helper — GET /rpc?method=…&params=…&id=… (we ask nicely, never POST) ──
@@ -870,6 +875,10 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     this.classList.add('active');
+    // Trigger explorer page load when switching to it
+    if (id === 'explorer') {
+      setTimeout(() => fetchExplorerPage(), 50);
+    }
     // Security: notify ALL iframes that the tab changed so they can purge wallet data
     document.querySelectorAll('iframe').forEach(iframe => {
       try { iframe.contentWindow.postMessage('qtcl_tab_changed', '*'); } catch(_) {}
@@ -1530,8 +1539,16 @@ async function init() {
   setStatus('LIVE', 'gr');
   await fetchChain();
   await fetchStats();
-  await fetchExplorerPage();
+  // Only load explorer if that tab is already active (it won't be by default)
+  const exPageEl = document.getElementById('explorer');
+  if (exPageEl && exPageEl.classList.contains('active')) {
+    await fetchExplorerPage();
+  }
   fetchNetwork();
+  // Start SSE listeners only after server is confirmed ready — prevents
+  // EventSource connection flood blocking the fetch queue during startup
+  startBlockSSEListener();
+  startDbSyncListener();
 }
 
 init();
@@ -1604,7 +1621,7 @@ function startBlockSSEListener() {
   }
 }
 
-startBlockSSEListener();
+// SSE listeners are started after server is confirmed ready (see init())
 
 // ═══ DB-SYNC SSE LISTENER ═══════════════════════════════════════════════════
 // Fires after every block settlement writes to Neon — authoritative re-fetch
@@ -1666,7 +1683,7 @@ function startDbSyncListener() {
   }
 }
 
-startDbSyncListener();
+// startDbSyncListener() is called after server ready (see init())
 
 // Auto-refresh chain every 8s (guarded by _isFetching inside fetchChain)
 setInterval(async () => {

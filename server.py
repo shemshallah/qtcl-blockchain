@@ -78,26 +78,31 @@ _RPC_THREAD_POOL = _cf.ThreadPoolExecutor(
 # taking < 1ms. Wrapping them in a thread pool adds 5–20ms overhead for zero gain.
 _RPC_INLINE_METHODS: frozenset = frozenset(
     {
-        "qtcl_getBlockHeight",
+        # INLINE = zero DB access, pure in-memory reads only.
+        # DO NOT add DB-querying methods here — they will block Gunicorn workers
+        # and starve /health under Neon cold-start / connection pool exhaustion.
         "qtcl_getQuantumMetrics",
         "qtcl_getLatestDMSnapshot",
         "qtcl_getLatestDMSnapshots",
-        "qtcl_getMempoolStats",
-        "qtcl_getPendingBlock",
-        "qtcl_getHealth",
-        "qtcl_getPeers",
-        "qtcl_getPeersByNatGroup",
         "qtcl_getMyAddr",
         "qtcl_getDHTTable",
-        "qtcl_getTreasuryAddress",
         "qtcl_listMeasurementSubscribers",
         "qtcl_getEvents",
+        # Lightweight peer-list read (in-memory dict, no DB)
+        "qtcl_getPeersByNatGroup",
         "qtcl_peerHeartbeat",
     }
 )
 
 # Slow methods (DB round-trips, crypto ops) — get pool + timeout protection
 _RPC_TIMEOUT_MAP: dict = {
+    # Core chain queries — DB-bound, must not run inline on Flask worker
+    "qtcl_getBlockHeight":    5.0,
+    "qtcl_getMempoolStats":   5.0,
+    "qtcl_getPendingBlock":   6.0,
+    "qtcl_getPeers":          5.0,
+    "qtcl_getHealth":         5.0,
+    "qtcl_getTreasuryAddress":5.0,
     "qtcl_getBlockRange": 10.0,
     "qtcl_getTransactions": 10.0,
     "qtcl_getBlock": 5.0,
@@ -2304,12 +2309,12 @@ class DatabasePool:
 
                 # 🚀 WEB-SCALE: Increased pool size for 10,000 miners
                 # Each connection can handle ~200 concurrent operations with proper queuing
-                min_connections = 10
+                min_connections = 2   # Low min: avoid Neon connection-limit exhaustion on cold start
                 max_connections = int(
-                    os.getenv("DB_POOL_MAX", "100")
-                )  # 100 connections for 10k miners
+                    os.getenv("DB_POOL_MAX", "10")
+                )  # Neon free tier: ~10 total; default conservatively
                 logger.info(
-                    f"[DB] 🚀 WEB-SCALE pooling: min={min_connections}, max={max_connections} (for 10k miners)"
+                    f"[DB] Pooling: min={min_connections}, max={max_connections}"
                 )
                 logger.info(f"[DB] Connecting to Neon via DATABASE_URL")
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
@@ -3537,40 +3542,48 @@ def _rpc_getPendingBlock(params: Any, rpc_id: Any) -> dict:
         logger.exception(f"[RPC-METHOD] qtcl_getPendingBlock error: {e}")
         return _rpc_ok(None, rpc_id)
 
+# Fast in-memory cache for getBlockHeight — avoids DB hit on every call.
+# Invalidated whenever a new block is committed (see _cache_block / block commit paths).
+_HEIGHT_CACHE: dict = {"height": 0, "tip_hash": "0" * 64, "difficulty": 5, "ts": 0.0}
+_HEIGHT_CACHE_TTL: float = 2.0  # seconds; fresh enough for mining loop
+
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
 
-    🔴 CRITICAL: DB-AUTHORITATIVE, ALWAYS FRESH, NO CACHING
-    This query MUST return the actual current block height.
-    Client depends on this for mining loop progression (h → h+1 → h+2...).
+    Returns cached value if < 2s old; otherwise queries DB.
+    Cache is also invalidated by block-commit paths.
     """
     try:
-        # 🔴 BYPASS CACHE — always query DB directly for mining-critical height
-        height = 0
-        tip_hash = "0" * 64
-        difficulty = 5
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    SELECT height, block_hash, difficulty 
-                    FROM blocks ORDER BY height DESC LIMIT 1
-                """)
-                row = cur.fetchone()
-                if row:
-                    height = int(row[0])
-                    tip_hash = str(row[1] or "0" * 64)
-                    difficulty = int(float(row[2])) if row[2] else 5
-        except Exception as _db_err:
-            logger.error(f"[RPC-HEIGHT] DB query failed: {_db_err}")
-            # Fallback to cached value
-            db_tip = query_latest_block()
-            if db_tip:
-                height = int(db_tip["height"])
-                tip_hash = str(db_tip.get("hash", "") or "0" * 64)
+        now = time.time()
+        height = _HEIGHT_CACHE["height"]
+        tip_hash = _HEIGHT_CACHE["tip_hash"]
+        difficulty = _HEIGHT_CACHE["difficulty"]
 
-        # 🔴 CRITICAL LOGGING: Verify DB state
-        logger.critical(
-            f"[RPC-HEIGHT] 📊 CHAIN TIP: h={height} hash={tip_hash[:16]}… (DB-authoritative, always fresh)"
+        if now - _HEIGHT_CACHE["ts"] > _HEIGHT_CACHE_TTL:
+            # Cache stale — query DB
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        SELECT height, block_hash, difficulty 
+                        FROM blocks ORDER BY height DESC LIMIT 1
+                    """)
+                    row = cur.fetchone()
+                    if row:
+                        height = int(row[0])
+                        tip_hash = str(row[1] or "0" * 64)
+                        difficulty = int(float(row[2])) if row[2] else 5
+                        _HEIGHT_CACHE.update({"height": height, "tip_hash": tip_hash,
+                                              "difficulty": difficulty, "ts": now})
+            except Exception as _db_err:
+                logger.error(f"[RPC-HEIGHT] DB query failed: {_db_err}")
+                # Fallback to query_latest_block cache
+                db_tip = query_latest_block()
+                if db_tip:
+                    height = int(db_tip["height"])
+                    tip_hash = str(db_tip.get("hash", "") or "0" * 64)
+
+        logger.debug(
+            f"[RPC-HEIGHT] h={height} hash={tip_hash[:16]}…"
         )
 
         _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
@@ -3937,6 +3950,13 @@ def _cache_block(block_dict, txs=None):
     (tx_id, from_addr, to_addr, amount, tx_type, status) that the frontend
     expects.  Otherwise falls back to querying the DB.
     """
+    # Invalidate height cache when a new block is cached — keeps getBlockHeight fresh
+    try:
+        _new_h = block_dict.get("height")
+        if _new_h is not None and int(_new_h) >= _HEIGHT_CACHE.get("height", 0):
+            _HEIGHT_CACHE["ts"] = 0.0  # force refresh on next call
+    except Exception:
+        pass
     with _BLOCK_CACHE_LOCK:
         h = block_dict.get("height")
         if h is not None:
