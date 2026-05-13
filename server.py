@@ -3470,6 +3470,22 @@ def _rpc_getPendingBlock(params: Any, rpc_id: Any) -> dict:
     succeeded (LATTICE may not be initialised yet on fresh boots).
     """
     try:
+        # 🔴 RESYNC: Get DB-authoritative tip first so pending is always tip+1
+        db_tip_height = 0
+        db_tip_hash = "0" * 64
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("SELECT height, block_hash FROM blocks ORDER BY height DESC LIMIT 1")
+                row = cur.fetchone()
+                if row:
+                    db_tip_height = int(row[0])
+                    db_tip_hash = str(row[1] or "0" * 64)
+        except Exception:
+            pass
+
+        pending_height = db_tip_height + 1
+        pending_parent = db_tip_hash
+
         # Pull block skeleton from BlockManager (height, parent_hash, etc.)
         bm_block = None
         if LATTICE is not None and getattr(LATTICE, 'block_manager', None):
@@ -3506,9 +3522,10 @@ def _rpc_getPendingBlock(params: Any, rpc_id: Any) -> dict:
         tx_list = list(merged.values())
         tx_list.sort(key=lambda t: t.get('fee_rate', 0), reverse=True)
 
+        # 🔴 Use DB-authoritative height/parent, NOT in-memory which can drift
         result = {
-            'block_height' : (bm_block or {}).get('block_height', 0),
-            'parent_hash'  : (bm_block or {}).get('parent_hash', '0' * 64),
+            'block_height' : pending_height,
+            'parent_hash'  : pending_parent,
             'miner_address': (bm_block or {}).get('miner_address', ''),
             'transactions' : tx_list,
             'tx_count'     : len(tx_list),
@@ -3528,14 +3545,28 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     Client depends on this for mining loop progression (h → h+1 → h+2...).
     """
     try:
-        db_tip = query_latest_block()
-
-        if db_tip is None:
-            height = 0
-            tip_hash = "0" * 64
-        else:
-            height = int(db_tip["height"])
-            tip_hash = str(db_tip.get("hash", "") or "0" * 64)
+        # 🔴 BYPASS CACHE — always query DB directly for mining-critical height
+        height = 0
+        tip_hash = "0" * 64
+        difficulty = 5
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT height, block_hash, difficulty 
+                    FROM blocks ORDER BY height DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+                if row:
+                    height = int(row[0])
+                    tip_hash = str(row[1] or "0" * 64)
+                    difficulty = int(float(row[2])) if row[2] else 5
+        except Exception as _db_err:
+            logger.error(f"[RPC-HEIGHT] DB query failed: {_db_err}")
+            # Fallback to cached value
+            db_tip = query_latest_block()
+            if db_tip:
+                height = int(db_tip["height"])
+                tip_hash = str(db_tip.get("hash", "") or "0" * 64)
 
         # 🔴 CRITICAL LOGGING: Verify DB state
         logger.critical(
@@ -3543,7 +3574,7 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
         )
 
         _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
-        target_diff = int(_env_diff) if _env_diff.isdigit() else 5
+        target_diff = int(_env_diff) if _env_diff.isdigit() else difficulty
 
         return _rpc_ok(
             {
@@ -4025,14 +4056,45 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                     ORDER BY height ASC
                 """, (from_h, to_h))
                 rows = cur.fetchall()
+
+                # 🔴 FIX: Fetch transactions for ALL blocks in range in a single query
+                # This eliminates N+1 queries and ensures explorer shows full TX data.
+                tx_by_height = {}
+                if rows:
+                    cur.execute("""
+                        SELECT tx_hash, from_address, to_address, amount,
+                               transaction_index, tx_type, status,
+                               quantum_state_hash, metadata, height
+                        FROM transactions
+                        WHERE height BETWEEN %s AND %s
+                        ORDER BY height ASC, COALESCE(transaction_index, 0) ASC
+                    """, (from_h, to_h))
+                    for tr in cur.fetchall():
+                        h = tr[9]
+                        if h not in tx_by_height:
+                            tx_by_height[h] = []
+                        tx_by_height[h].append({
+                            "tx_id": tr[0],
+                            "from_addr": tr[1] or "",
+                            "to_addr": tr[2] or "",
+                            "amount": int(tr[3]) if tr[3] is not None else 0,
+                            "tx_index": int(tr[4]) if tr[4] is not None else 0,
+                            "tx_type": tr[5] or "transfer",
+                            "status": tr[6] or "confirmed",
+                            "w_proof": tr[7] or "",
+                            "metadata": tr[8] if tr[8] else None,
+                        })
         except Exception as _db_err:
             logger.warning(f"[RPC] getBlockRange DB error: {_db_err}")
             rows = []
+            tx_by_height = {}
 
         blocks = []
         for row in rows:
+            h = row[0]
+            block_txs = tx_by_height.get(h, [])
             b = {
-                "height": row[0], "block_hash": row[1],
+                "height": h, "block_hash": row[1],
                 "timestamp": int(row[2]) if row[2] else 0,
                 "w_entropy_hash": row[3] or "",
                 "parent_hash": row[4] or ("0" * 64),
@@ -4040,8 +4102,9 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 "difficulty": int(float(row[6])) if row[6] else 5,
                 "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
                 "merkle_root": row[8] or ("0" * 64),
-                "tx_count": int(row[9]) if row[9] else 0,
+                "tx_count": len(block_txs) if block_txs else (int(row[9]) if row[9] else 0),
                 "miner_address": row[10] or "",
+                "transactions": block_txs,
             }
             blocks.append(b)
             # Write-through cache for subsequent calls
@@ -6406,18 +6469,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # 🔴 CRITICAL: ADVANCE THE LATTICE CONTROLLER'S CHAIN STATE
         # After a block is inserted, the pending block must advance to N+1
         # so the miner sees the correct target and the explorer shows it.
+        # This is the SINGLE AUTHORITATIVE place where chain_height advances.
         try:
             if LATTICE is not None and LATTICE.block_manager is not None:
                 bm = LATTICE.block_manager
                 next_height = height + 1
-                prev_treasury_base = 80
-                try:
-                    from globals import TessellationRewardSchedule as _TRS
-                    prev_treasury_base = _TRS.get_treasury_reward_base(height)
-                except Exception:
-                    pass
 
                 with bm.lock:
+                    # 🔴 AUTHORITATIVE ADVANCE: DB tip is now `height`, so
+                    # chain_height → height+1, current_block_hash → this block's hash.
+                    # This overwrites any stale in-memory state from template sealing.
                     bm.chain_height = next_height
                     bm.current_block_hash = block_hash
 
@@ -6431,6 +6492,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     )
 
                     # Add treasury coinbase (deferred from previous block)
+                    prev_treasury_base = 80
+                    try:
+                        from globals import TessellationRewardSchedule as _TRS
+                        prev_treasury_base = _TRS.get_treasury_reward_base(height)
+                    except Exception:
+                        pass
+
                     treasury_addr = os.environ.get('TREASURY_ADDRESS', '') or (
                         TessellationRewardSchedule.TREASURY_ADDRESS
                         if TessellationRewardSchedule

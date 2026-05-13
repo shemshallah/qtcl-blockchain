@@ -3534,7 +3534,8 @@ class BlockManager:
             # ── Update in-memory chain ────────────────────────────────────────
             self.sealed_blocks.append(block)
             self.block_by_height[block.block_height] = block
-            self.current_block_hash = block.block_hash
+            # 🔴 DO NOT update self.current_block_hash here — template hashes are
+            # ephemeral (nonce=0). The authoritative hash is set by submitBlock.
 
             for tx in block.transactions:
                 self.mempool.pop(tx.tx_id, None)
@@ -3543,33 +3544,32 @@ class BlockManager:
             # 🔴 CRITICAL: The `blocks` table must ONLY contain PoW-validated blocks
             # submitted by miners via `_rpc_submitBlock`. The lattice controller
             # creates template blocks with nonce=0 — these must NEVER touch the DB.
-            # If we insert here, the miner's valid submission gets rejected as a "fork"
-            # because a row already exists at this height with a different hash.
             logger.info(
                 f"[SEAL] Block #{block.block_height} template sealed in-memory "
                 f"(nonce=0, awaiting miner PoW submission to persist to DB)"
             )
 
             # ── DO NOT PERSIST TRANSACTIONS TO DB ──────────────────────────────
-            # Transactions are persisted by `_rpc_submitBlock` when the miner submits
-            # the PoW-validated block. Persisting here would create orphaned TX rows
-            # referencing a block_hash that may never exist in the blocks table.
             logger.info(
                 f"[SEAL] {len(block.transactions)} transactions held in-memory for block #{block.block_height} "
                 f"(will persist on miner PoW submission)"
             )
 
-            # ── Create next pending block ─────────────────────────────────────
-            self.pending_block = QuantumBlock(
-                block_height=self.chain_height,
-                parent_hash=self.current_block_hash,
-                miner_address=self.validator.miner_address,
-            )
+            # ── DO NOT ADVANCE chain_height OR create next pending block ──────
+            # 🔴 CRITICAL FIX: chain_height MUST ONLY advance when a REAL
+            # PoW-validated block is persisted to DB via _rpc_submitBlock.
+            # Advancing here causes a race: the lattice races ahead of the DB,
+            # creating gaps (e.g. chain shows 84→86, block 85 vanishes).
+            # _rpc_submitBlock calls bm.chain_height = height+1 and creates the
+            # next pending block with the correct parent_hash from DB.
+            #
+            # The pending_block stays at the CURRENT height so getPendingBlock
+            # returns it to the miner/explorer until the miner solves PoW.
+            # Once submitBlock processes, it creates a fresh pending at height+1.
 
             seal_time = time.time() - self.last_block_time
             self.block_seal_times.append(seal_time)
             self.last_block_time = time.time()
-            self.chain_height += 1
             self.blocks_sealed += 1
 
             # ── Build transaction list for broadcast ─────────────────────────
@@ -3862,10 +3862,41 @@ class BlockManager:
             }
 
     def get_pending_block(self) -> Optional[Dict[str, Any]]:
-        """Get the current in-progress block (not yet sealed)."""
+        """Get the current in-progress block (not yet sealed).
+
+        Resyncs chain_height from DB to ensure pending block is always
+        at the correct height (DB tip + 1). This is the SINGLE source
+        of truth for what height the next block should be.
+        """
         with self.lock:
-            if not self.pending_block:
-                return None
+            # 🔴 RESYNC from DB — ensures pending block height matches reality
+            if self.db is not None:
+                try:
+                    rows = self.db.execute_fetch_all(
+                        "SELECT height, block_hash FROM blocks ORDER BY height DESC LIMIT 1"
+                    )
+                    if rows:
+                        db_h = int(rows[0]["height"])
+                        db_hash = str(rows[0]["block_hash"])
+                        expected_next = db_h + 1
+                        if self.chain_height != expected_next:
+                            logger.info(
+                                f"[PENDING] resync: chain_h={self.chain_height}→{expected_next} "
+                                f"tip={self.current_block_hash[:12] if self.current_block_hash else '?'}→{db_hash[:12]}"
+                            )
+                            self.chain_height = expected_next
+                            self.current_block_hash = db_hash
+                except Exception as _e:
+                    logger.debug(f"[PENDING] DB resync skipped: {_e}")
+
+            # Ensure pending_block exists and is at the right height
+            if self.pending_block is None or self.pending_block.block_height != self.chain_height:
+                self.pending_block = QuantumBlock(
+                    block_height=self.chain_height,
+                    parent_hash=self.current_block_hash or "0" * 64,
+                    miner_address=self.validator.miner_address if self.validator else "",
+                )
+
             txs = []
             for tx in self.pending_block.transactions:
                 txd = tx.to_dict()

@@ -968,7 +968,14 @@ async function selectBlock(height) {
         }
       } catch(e) {}
     } else {
-      block = await rpc('qtcl_getBlock', [height]);
+      // Try cached chain data first (now includes full TX data from getBlockRange)
+      const cachedBlock = _chainBlocks.find(b => b.height === height && !b._pending);
+      if (cachedBlock && cachedBlock.transactions && cachedBlock.transactions.length > 0) {
+        block = cachedBlock;
+      } else {
+        // Fetch from DB for full transaction data
+        block = await rpc('qtcl_getBlock', [height]);
+      }
     }
     if (!block) throw new Error('Block not found');
     renderBlockDetail(block, detailScroll);
