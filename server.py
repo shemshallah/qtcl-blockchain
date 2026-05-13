@@ -5526,9 +5526,13 @@ def qtcl_pow_hash(
     logger.info(f"[qtcl_pow_hash] miner='{miner_address}' → bytes={_ph_miner.hex()}")
     logger.info(f"[qtcl_pow_hash] entropy={w_entropy_seed.hex()}")
 
-    scratchpad = hashlib.shake_256(_POW_SCRATCHPAD_PFX + w_entropy_seed).digest(
-        _POW_SCRATCHPAD_BYTES
-    )
+    # 🔴 CRITICAL: Include epoch in scratchpad seed — must match miner's _make_scratchpad(epoch)
+    # Miner rotates scratchpad every 524,288 nonces: epoch = nonce // 524288
+    _SCRATCHPAD_EPOCH_NONCES = 524_288
+    _epoch = nonce // _SCRATCHPAD_EPOCH_NONCES
+    scratchpad = hashlib.shake_256(
+        _POW_SCRATCHPAD_PFX + w_entropy_seed + _epoch.to_bytes(8, "big")
+    ).digest(_POW_SCRATCHPAD_BYTES)
     sp_mv = memoryview(scratchpad)
 
     WIN_OFFSETS = [i * _POW_WINDOW_BYTES for i in range(_POW_N_WINDOWS)]
