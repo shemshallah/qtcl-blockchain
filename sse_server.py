@@ -63,6 +63,7 @@ def register_sse_routes(flask_app) -> None:
     flask_app.add_url_rule("/rpc/metrics/push",      view_func=rpc_metrics_push,      methods=["GET"])
     flask_app.add_url_rule("/rpc/oracle/consensus",  view_func=rpc_oracle_consensus,  methods=["GET", "OPTIONS"])
     flask_app.add_url_rule("/rpc/events/mempool",   view_func=rpc_events_mempool,   methods=["GET", "OPTIONS"])
+    flask_app.add_url_rule("/rpc/events/db_sync",   view_func=sse_db_sync,          methods=["GET"])
     # Internal push endpoints (for direct fan-out bypass; server.py now uses in-memory fan-out)
     flask_app.add_url_rule("/push/snapshot",         view_func=push_snapshot,         methods=["POST"])
     flask_app.add_url_rule("/push/block",            view_func=push_block,            methods=["POST"])
@@ -185,6 +186,15 @@ class SSEChannel:
                 self._close_client(c, reason="stale")
             return len(stale)
     
+    def subscribe(self, client_ip="0.0.0.0"):
+        """Subscribe a client — alias for connect(). Returns an SSEClient whose
+        queue can be consumed via client.queue.get()."""
+        return self.connect(client_ip)
+
+    def unsubscribe(self, client):
+        """Unsubscribe a client — alias for disconnect()."""
+        self.disconnect(client)
+
     def fan_out(self, payload):
         """Send payload to all connected clients."""
         with self.lock:
@@ -578,23 +588,18 @@ def health():
 def sse_db_sync():
     """SSE stream: fires after every block settlement commits to Neon.
     Frontend subscribes here and re-fetches block + TX data on each pulse."""
-    def _gen():
-        q = _db_sync_channel.subscribe()
-        try:
-            while True:
-                try:
-                    item = q.get(timeout=30)
-                    import json as _json
-                    yield f"data: {_json.dumps(item)}\n\n"
-                except Exception:
-                    yield ": heartbeat\n\n"
-        finally:
-            _db_sync_channel.unsubscribe(q)
-    from flask import stream_with_context, Response
-    resp = Response(stream_with_context(_gen()), content_type="text/event-stream")
-    resp.headers["Cache-Control"] = "no-cache"
-    resp.headers["X-Accel-Buffering"] = "no"
-    return resp
+    client_ip = _get_client_ip()
+    client = _db_sync_channel.connect(client_ip)
+
+    return Response(
+        _sse_generator(_db_sync_channel, client),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 if __name__ == "__main__":

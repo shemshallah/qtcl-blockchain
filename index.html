@@ -702,6 +702,9 @@ let _chainBlocks = [];
 let _exPage = 0;
 const EX_PER_PAGE = 20;
 let _exMaxHeight = 0;
+let _isFetching = false;
+let _isExploringFetching = false;
+let _abortFetch = false;
 
 // ── Server readiness state ───────────────────────────────────────────
 let _serverReady = false;
@@ -861,6 +864,7 @@ setInterval(() => {
 // ── Tab Navigation ───────────────────────────────────────────────────
 document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', function() {
+    _abortFetch = true;
     const id = this.dataset.page;
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1145,6 +1149,9 @@ function renderTxCard(tx, idx) {
 // ═══════════════════════════════════════════════════════════════════
 
 async function fetchChain() {
+  if (_isFetching) return;
+  _isFetching = true;
+  _abortFetch = false;
   try {
     // 1. Get authoritative tip height from DB first — ALWAYS
     let tipHeight = 0;
@@ -1173,6 +1180,7 @@ async function fetchChain() {
         console.log(`[Chain] Range sparse (${blocks.length} < ${Math.min(5, toH - fromH + 1)}), falling back to sequential fetches`);
         const fetched = [];
         for (let h = toH; h >= fromH; h--) {
+          if (_abortFetch) break;
           try {
             const block = await rpc('qtcl_getBlock', [h]);
             if (block) fetched.push(block);
@@ -1248,10 +1256,16 @@ async function fetchChain() {
     console.error('Chain fetch error:', e);
     setStatus('ERROR', 're');
     document.getElementById('chain-scroll').innerHTML = `<div class="error-msg" style="margin:10px">Chain sync error: ${e.message}</div>`;
+  } finally {
+    _isFetching = false;
   }
 }
 
+let _isFetchingStats = false;
+
 async function fetchStats() {
+  if (_isFetchingStats) return;
+  _isFetchingStats = true;
   try {
     // Peers
     const peersRes = await rpc('qtcl_getPeers', [50]);
@@ -1264,7 +1278,9 @@ async function fetchStats() {
       const mp = mempoolRes && (mempoolRes.count !== undefined ? mempoolRes.count : mempoolRes.size || 0);
       document.getElementById('s-mempool').textContent = mp;
     } catch(e) {}
-  } catch(e) {}
+  } catch(e) {} finally {
+    _isFetchingStats = false;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1272,6 +1288,9 @@ async function fetchStats() {
 // ═══════════════════════════════════════════════════════════════════
 
 async function fetchExplorerPage() {
+  if (_isExploringFetching) return;
+  _isExploringFetching = true;
+  _abortFetch = false;
   const tbody = document.getElementById('ex-tbody');
   tbody.innerHTML = `<tr><td colspan="9"><div class="loading"><div class="spinner"></div>Loading...</div></td></tr>`;
 
@@ -1306,6 +1325,7 @@ async function fetchExplorerPage() {
       console.log(`[Explorer] Range sparse (${blocks.length} < ${Math.min(3, toH - fromH + 1)}), falling back to individual fetches`);
       const fetched = [];
       for (let h = toH; h >= fromH; h--) {
+        if (_abortFetch) break;
         try {
           const block = await rpc('qtcl_getBlock', [h]);
           if (block) fetched.push(block);
@@ -1361,6 +1381,8 @@ async function fetchExplorerPage() {
     document.getElementById('ex-next').disabled = _exPage >= totalPages - 1;
   } catch(e) {
     tbody.innerHTML = `<tr><td colspan="9"><div class="error-msg" style="margin:10px">Load failed: ${e.message}</div></td></tr>`;
+  } finally {
+    _isExploringFetching = false;
   }
 }
 
@@ -1514,14 +1536,21 @@ async function init() {
 
 init();
 
+let _blockSSE = null;
+let _dbSyncSSE = null;
+
 // ═══ SSE BLOCK STREAM LISTENER ═══════════════════════════════════════════════════
 // Real-time block events: when a new block is confirmed, immediately refresh display
 function startBlockSSEListener() {
+  if (_blockSSE) {
+    try { _blockSSE.close(); } catch(e) {}
+    _blockSSE = null;
+  }
   try {
     const sseUrl = `${RPC.replace('/rpc', '')}/rpc/events/blocks`;
-    const blockSSE = new EventSource(sseUrl);
+    _blockSSE = new EventSource(sseUrl);
     
-    blockSSE.addEventListener('message', async (event) => {
+    _blockSSE.addEventListener('message', async (event) => {
       try {
         const blockEvent = JSON.parse(event.data);
         const txCount = blockEvent.tx_count || (blockEvent.transactions ? blockEvent.transactions.length : 0);
@@ -1561,9 +1590,10 @@ function startBlockSSEListener() {
       }
     });
     
-    blockSSE.addEventListener('error', (err) => {
+    _blockSSE.addEventListener('error', (err) => {
       console.warn(`[SSE-BLOCK] Connection error, will retry in 3s...`);
-      blockSSE.close();
+      try { _blockSSE.close(); } catch(e) {}
+      _blockSSE = null;
       setTimeout(() => startBlockSSEListener(), 3000);
     });
     
@@ -1579,11 +1609,15 @@ startBlockSSEListener();
 // ═══ DB-SYNC SSE LISTENER ═══════════════════════════════════════════════════
 // Fires after every block settlement writes to Neon — authoritative re-fetch
 function startDbSyncListener() {
+  if (_dbSyncSSE) {
+    try { _dbSyncSSE.close(); } catch(e) {}
+    _dbSyncSSE = null;
+  }
   try {
     const url = `${RPC.replace('/rpc', '')}/rpc/events/db_sync`;
-    const es  = new EventSource(url);
+    _dbSyncSSE = new EventSource(url);
 
-    es.addEventListener('message', async (event) => {
+    _dbSyncSSE.addEventListener('message', async (event) => {
       try {
         const pulse = JSON.parse(event.data);
         const h     = pulse.height;
@@ -1619,8 +1653,9 @@ function startDbSyncListener() {
       }
     });
 
-    es.addEventListener('error', () => {
-      es.close();
+    _dbSyncSSE.addEventListener('error', () => {
+      try { _dbSyncSSE.close(); } catch(e) {}
+      _dbSyncSSE = null;
       setTimeout(() => startDbSyncListener(), 5000);
     });
 
@@ -1633,32 +1668,37 @@ function startDbSyncListener() {
 
 startDbSyncListener();
 
-// Auto-refresh chain every 8s
+// Auto-refresh chain every 8s (guarded by _isFetching inside fetchChain)
 setInterval(async () => {
-  await fetchChain();
-  await fetchStats();
-  // Refresh current detail if selected
-  if (_selectedHeight !== null) {
-    try {
-      const block = await rpc('qtcl_getBlock', [_selectedHeight]);
-      if (block) {
-        const detailScroll = document.getElementById('detail-scroll');
-        if (detailScroll.style.display !== 'none') renderBlockDetail(block, detailScroll);
-      }
-    } catch(e) {}
-  }
+  try {
+    await fetchChain();
+    await fetchStats();
+    if (_selectedHeight !== null) {
+      try {
+        const block = await rpc('qtcl_getBlock', [_selectedHeight]);
+        if (block) {
+          const detailScroll = document.getElementById('detail-scroll');
+          if (detailScroll && detailScroll.style.display !== 'none') renderBlockDetail(block, detailScroll);
+        }
+      } catch(e) {}
+    }
+  } catch(e) {}
 }, 8000);
 
-// Explorer page refresh every 15s if active
+// Explorer page refresh every 15s if active (guarded by _isExploringFetching inside fetchExplorerPage)
 setInterval(async () => {
-  const exPage = document.getElementById('explorer');
-  if (exPage.classList.contains('active')) await fetchExplorerPage();
+  try {
+    const exPage = document.getElementById('explorer');
+    if (exPage && exPage.classList.contains('active')) await fetchExplorerPage();
+  } catch(e) {}
 }, 15000);
 
 // Network refresh every 30s
 setInterval(async () => {
-  const netPage = document.getElementById('network');
-  if (netPage.classList.contains('active')) await fetchNetwork();
+  try {
+    const netPage = document.getElementById('network');
+    if (netPage && netPage.classList.contains('active')) await fetchNetwork();
+  } catch(e) {}
 }, 30000);
 </script>
 </body>
