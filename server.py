@@ -3982,7 +3982,11 @@ def _broadcast_block_event(block_event: dict) -> None:
 
 
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockRange — return cached blocks ONLY (no DB blocking)
+    """qtcl_getBlockRange — return confirmed blocks, DB-authoritative
+
+    🔴 CRITICAL: Always queries PostgreSQL as primary source. _BLOCK_CACHE
+    is used only as write-through AFTER DB fetch to speed subsequent calls.
+    This ensures newly submitted blocks are ALWAYS visible immediately.
 
     params: [from_height, to_height]
     Negative to_height means "from end" (e.g., [-20, -1] = last 20 blocks)
@@ -3993,58 +3997,60 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         from_h = int(params[0])
         to_h = int(params[1])
 
-        blocks = []
-        with _BLOCK_CACHE_LOCK:
-            # Handle negative to_height: "from end"
-            if to_h < 0:
-                max_height = max(_BLOCK_CACHE.keys()) if _BLOCK_CACHE else 0
-                to_h = max_height
-                from_h = max(
-                    0, to_h + from_h + 1
-                )
-
-            if to_h - from_h > 99:
-                to_h = from_h + 99
-            if from_h < 0:
-                from_h = 0
-
-            for h in range(from_h, to_h + 1):
-                if h in _BLOCK_CACHE:
-                    blocks.append(_BLOCK_CACHE[h])
-
-        # Fill gaps from DB
-        if len(blocks) < (to_h - from_h + 1):
-            missing = [h for h in range(from_h, to_h + 1) if h not in _BLOCK_CACHE]
+        # Resolve negative to_height using DB tip
+        if to_h < 0:
             try:
                 with get_db_cursor() as cur:
-                    for h in missing:
-                        cur.execute(
-                            "SELECT height, block_hash, timestamp, w_state_hash, parent_hash, "
-                            "nonce, difficulty, coherence_snapshot, merkle_root, tx_count, "
-                            "miner_address "
-                            "FROM blocks WHERE height = %s LIMIT 1", (h,))
-                        row = cur.fetchone()
-                        if row:
-                            b = {
-                                "height": row[0], "block_hash": row[1],
-                                "timestamp": int(row[2]) if row[2] else 0,
-                                "w_entropy_hash": row[3] or "",
-                                "parent_hash": row[4] or ("0" * 64),
-                                "nonce": int(row[5]) if row[5] else 0,
-                                "difficulty": int(float(row[6])) if row[6] else 5,
-                                "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
-                                "merkle_root": row[8] or ("0" * 64),
-                                "tx_count": int(row[9]) if row[9] else 0,
-                                "miner_address": row[10] or "",
-                            }
-                            _cache_block(b)
-                            with _BLOCK_CACHE_LOCK:
-                                if h in _BLOCK_CACHE:
-                                    blocks.append(_BLOCK_CACHE[h])
+                    cur.execute("SELECT MAX(height) FROM blocks")
+                    row = cur.fetchone()
+                    max_h = int(row[0]) if row and row[0] else 0
+            except Exception:
+                max_h = 0
+            to_h = max_h
+            from_h = max(0, to_h + from_h + 1)
+
+        if to_h - from_h > 99:
+            to_h = from_h + 99
+        if from_h < 0:
+            from_h = 0
+
+        # DB query: authoritative source
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT height, block_hash, timestamp, w_state_hash, parent_hash,
+                           nonce, difficulty, coherence_snapshot, merkle_root, tx_count,
+                           miner_address
+                    FROM blocks WHERE height BETWEEN %s AND %s
+                    ORDER BY height ASC
+                """, (from_h, to_h))
+                rows = cur.fetchall()
+        except Exception as _db_err:
+            logger.warning(f"[RPC] getBlockRange DB error: {_db_err}")
+            rows = []
+
+        blocks = []
+        for row in rows:
+            b = {
+                "height": row[0], "block_hash": row[1],
+                "timestamp": int(row[2]) if row[2] else 0,
+                "w_entropy_hash": row[3] or "",
+                "parent_hash": row[4] or ("0" * 64),
+                "nonce": int(row[5]) if row[5] else 0,
+                "difficulty": int(float(row[6])) if row[6] else 5,
+                "w_state_fidelity": float(row[7]) if row[7] is not None else 0.0,
+                "merkle_root": row[8] or ("0" * 64),
+                "tx_count": int(row[9]) if row[9] else 0,
+                "miner_address": row[10] or "",
+            }
+            blocks.append(b)
+            # Write-through cache for subsequent calls
+            try:
+                _cache_block(b)
             except Exception:
                 pass
 
-        logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks")
+        logger.info(f"[RPC] getBlockRange({from_h}, {to_h}) -> {len(blocks)} blocks from DB")
         return _rpc_ok(
             {
                 "blocks": blocks,
