@@ -3369,45 +3369,42 @@ class BlockManager:
                 time.sleep(1.0)
 
     def _seal_current_block(self):
-        """ATOMIC SEALING OPERATION — compute, finalise, persist."""
+        """ATOMIC SEALING OPERATION — seal template block in-memory only.
+
+        Template block has:
+        - Treasury coinbase (previous block's deferred treasury reward)
+        - All pending user transactions from mempool
+        - NO miner reward (added by miner on solve)
+
+        This block is NEVER persisted to DB — only lives in-memory for the
+        pending block API and miner to consume.
+        """
         try:
             if not self.pending_block or len(self.pending_block.transactions) == 0:
                 return
             block = self.pending_block
             block.timestamp_s = int(time.time())
 
-            # ── Generate coinbase transactions ──────────────────────────────────
-            # Get miner reward for this block height (default: 7.20 QTCL)
-            MINER_REWARD_BASE = 720  # in base units (7.20 QTCL)
-            TREASURY_REWARD_BASE = 80  # in base units (0.80 QTCL)
+            # ── Treasury coinbase only (no miner reward) ──────────────────────
+            # The treasury gets paid the PREVIOUS block's deferred treasury amount.
+            # The miner reward is added by the miner when solving.
             TREASURY_ADDRESS = os.environ.get(
                 'TREASURY_ADDRESS',
                 'e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b'
             )
+            _prev_treasury_base = 80  # default: 0.80 QTCL
+            try:
+                from globals import TessellationRewardSchedule as _TRS
+                if block.block_height > 0:
+                    _prev_treasury_base = _TRS.get_treasury_reward_base(block.block_height - 1)
+            except Exception:
+                pass
 
-            miner_reward = MINER_REWARD_BASE
-            treasury_reward = TREASURY_REWARD_BASE
-
-            # Miner coinbase (pay block reward to miner)
-            miner_coinbase = QuantumTransaction(
-                tx_id=f"coinbase_{block.block_height}_{block.miner_address[:8]}",
-                sender_addr="COINBASE",
-                receiver_addr=block.miner_address,
-                amount=Decimal(miner_reward) / 100,
-                nonce=block.block_height,
-                timestamp_ns=int(time.time() * 1e9),
-                fee=0,
-                tx_type="miner_reward",
-            )
-            miner_coinbase.from_addr = miner_coinbase.sender_addr
-            miner_coinbase.to_addr = miner_coinbase.receiver_addr
-
-            # Treasury coinbase (pay treasury share)
             treasury_coinbase = QuantumTransaction(
                 tx_id=f"treasury_{block.block_height}",
                 sender_addr="COINBASE",
                 receiver_addr=TREASURY_ADDRESS,
-                amount=Decimal(treasury_reward) / 100,
+                amount=Decimal(_prev_treasury_base) / 100,
                 nonce=block.block_height,
                 timestamp_ns=int(time.time() * 1e9),
                 fee=0,
@@ -3416,11 +3413,11 @@ class BlockManager:
             treasury_coinbase.from_addr = treasury_coinbase.sender_addr
             treasury_coinbase.to_addr = treasury_coinbase.receiver_addr
 
-            # Prepend coinbase transactions to block
-            block.transactions = [
-                miner_coinbase,
-                treasury_coinbase,
-            ] + block.transactions
+            # Prepend treasury coinbase to block (miner reward NOT included)
+            block.transactions = [treasury_coinbase] + [
+                tx for tx in block.transactions
+                if getattr(tx, 'tx_type', '') not in ('treasury_reward', 'miner_reward', 'coinbase')
+            ]
 
             block.tx_count = len(block.transactions)
 
