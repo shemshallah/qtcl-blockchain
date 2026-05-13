@@ -1216,12 +1216,15 @@ async function fetchChain() {
     _chainBlocks = blocks;
 
     if (blocks.length > 0) {
-      const validHeights = blocks.map(b => b.height).filter(h => h !== undefined && h !== null && !isNaN(h));
+      // CRITICAL: Filter out pending blocks for height stats —
+      // only confirmed blocks contribute to s-height and _exMaxHeight
+      const confirmedOnly = blocks.filter(b => !b._pending);
+      const validHeights = confirmedOnly.map(b => b.height).filter(h => h !== undefined && h !== null && !isNaN(h));
       const maxH = validHeights.length ? Math.max(...validHeights) : 0;
       _exMaxHeight = Math.max(_exMaxHeight || 0, maxH);
       document.getElementById('s-height').textContent = (_exMaxHeight || 0).toLocaleString();
       document.getElementById('s-height-sub').textContent = `blocks confirmed`;
-      const latest = blocks.find(b => b.height === maxH);
+      const latest = confirmedOnly.find(b => b.height === maxH) || blocks.find(b => b.height === maxH);
       if (latest) {
         document.getElementById('s-diff').textContent = latest.difficulty || '—';
         const qf = latest.w_state_fidelity || latest.quantum_fidelity || 0;
@@ -1273,7 +1276,18 @@ async function fetchExplorerPage() {
   tbody.innerHTML = `<tr><td colspan="9"><div class="loading"><div class="spinner"></div>Loading...</div></td></tr>`;
 
   try {
-    const toH   = Math.max(0, _exMaxHeight - _exPage * EX_PER_PAGE);
+    // 0. Always fetch fresh tip height — don't rely on stale _exMaxHeight
+    let tipHeight = 0;
+    try {
+      const heightRes = await rpc('qtcl_getBlockHeight', []);
+      tipHeight = (heightRes && heightRes.height !== undefined) ? parseInt(heightRes.height) : 0;
+      if (tipHeight > (_exMaxHeight || 0)) {
+        _exMaxHeight = tipHeight;
+      }
+    } catch(e) { console.warn('[Explorer] Height fetch failed:', e.message); }
+
+    const safeMax = Math.max(_exMaxHeight || 0, tipHeight);
+    const toH   = Math.max(0, safeMax - _exPage * EX_PER_PAGE);
     const fromH = Math.max(0, toH - EX_PER_PAGE + 1);
 
     // Try getBlockRange first — single call, DB-authoritative, real heights
@@ -1331,10 +1345,10 @@ async function fetchExplorerPage() {
       } catch(e) {}
     }
 
-    // Update max height if we learned more from this page
+    // Update max height from CONFIRMED blocks only (exclude pending)
     if (blocks.length > 0) {
-      const validHeights = blocks.map(b => b.height).filter(h => h !== undefined && h !== null && !isNaN(h));
-      const maxSeen = validHeights.length ? Math.max(...validHeights) : 0;
+      const confirmedHeights = blocks.filter(b => !b._pending).map(b => b.height).filter(h => h !== undefined && h !== null && !isNaN(h));
+      const maxSeen = confirmedHeights.length ? Math.max(...confirmedHeights) : 0;
       _exMaxHeight = Math.max(_exMaxHeight || 0, maxSeen);
     }
 
