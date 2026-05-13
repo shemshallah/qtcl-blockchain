@@ -110,8 +110,8 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_getTransaction": 4.0,
     "qtcl_submitBlock": 30.0,
     "qtcl_submitTransaction": 6.0,
-    "qtcl_signAndSubmitTx": 10.0,
-    "qtcl_walletAuth": 15.0,
+    "qtcl_signAndSubmitTx": 90.0,
+    "qtcl_walletAuth": 60.0,
     "qtcl_submitOracleReg": 6.0,
     "qtcl_getOracleRegistry": 5.0,
     "qtcl_getOracleRecord": 4.0,
@@ -1390,46 +1390,8 @@ def _settle_block_rewards(
             _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
 
     except Exception as err:
-        _settle_log.error(f"[SETTLE] ❌ h={height} settlement failed: {err}", exc_info=True)
-
-        # ── Update chain state ───────────────────────────────────────────────
-        try:
-            _lazy_ensure_chain_state()
-            with get_db_cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
-                    VALUES (1, %s, %s, 0.0, NOW())
-                    ON CONFLICT (state_id) DO UPDATE SET
-                        chain_height = EXCLUDED.chain_height,
-                        head_block_hash = EXCLUDED.head_block_hash,
-                        latest_coherence = EXCLUDED.latest_coherence,
-                        updated_at = NOW()
-                """,
-                    (height, block_hash),
-                )
-            _settle_log.debug(f"[SETTLE] ✅ Chain state updated: h={height}")
-        except Exception as cs_err:
-            _settle_log.warning(f"[SETTLE] ⚠️  Chain state update: {cs_err}")
-
-        # ── Cache block ──────────────────────────────────────────────────
-        try:
-            _cache_block(
-                {
-                    "height": height,
-                    "block_hash": block_hash,
-                    "timestamp": int(time.time()),
-                    "difficulty": 5,
-                    "miner_address": miner_address,
-                    "w_state_fidelity": 0.0,
-                },
-                txs=txs,
-            )
-            _settle_log.debug(f"[SETTLE] ✅ Block cached: h={height}")
-        except Exception as cache_err:
-            _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
-
-        _settle_log.info(f"[SETTLE] ✅ Block h={height} settlement complete")
+        _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED, RE-RAISING: {err}", exc_info=True)
+        raise  # CRITICAL: do not silently swallow — caller MUST see failure
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -6081,8 +6043,21 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             ),
                         )
                         _block_rowcount = cur.rowcount
-                        _verify_row = cur.fetchone() if False else None  # skip verify for replacement
-                        _block_insert_result = "inserted"
+                        # Verify replacement succeeded
+                        cur.execute(
+                            "SELECT block_hash FROM blocks WHERE height = %s", (height,)
+                        )
+                        _verify_row = cur.fetchone()
+                        if _verify_row and _verify_row[0] == block_hash:
+                            logger.critical(
+                                f"[RPC-submitBlock] ✅ TEMPLATE REPLACED: h={height} hash={block_hash[:16]}…"
+                            )
+                            _block_insert_result = "inserted"
+                        else:
+                            logger.error(
+                                f"[RPC-submitBlock] ❌ TEMPLATE REPLACE FAILED: h={height}"
+                            )
+                            _block_insert_result = "error"
                     else:
                         # DIFFERENT HASH AT HEIGHT — genuine fork attempt
                         logger.critical(
@@ -6365,6 +6340,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # Settlement FAILURE = RPC FAILURE (no silent failures)
         # ═══════════════════════════════════════════════════════════════════════════════
         logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height} miner={miner_address[:16]}…")
+        _settle_ok = True
         try:
             _settle_block_rewards(
                 height, block_hash, miner_address, txs or [], _non_coinbase_txs
@@ -6372,8 +6348,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height}")
         except Exception as settle_err:
             logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
-            # FAIL THE RPC CALL — don't hide settlement errors
-            return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
+            # Fallback: enqueue for background settlement worker
+            try:
+                _BLOCK_SETTLE_Q.put({"height": height, "block_hash": block_hash,
+                                     "miner_address": miner_address, "txs": txs or [],
+                                     "non_coinbase_txs": _non_coinbase_txs}, timeout=1.0)
+                logger.critical(f"[RPC-submitBlock] 📥 Settlement h={height} enqueued to background worker")
+                _settle_ok = False
+            except Exception as _q_err:
+                logger.critical(f"[RPC-submitBlock] ❌ Background queue also failed: {_q_err}")
+                return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
 
         # Push db_sync pulse so block-explorer clients re-fetch from authoritative Neon
         try:
@@ -6628,10 +6612,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "mempool_drained": _mempool_drained,
                 "pending_mempool_txs": _pending_for_next,
                 "pending_mempool_count": len(_pending_for_next),
+                "settlement_sync": _settle_ok,
                 "diagnostic": {
                     "block_rowcount": _block_rowcount,
                     "persistence_verified": True,
-                    "settlement": "sync",
+                    "settlement": "sync" if _settle_ok else "queued",
                 },
             },
             rpc_id,

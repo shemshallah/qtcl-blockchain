@@ -1641,12 +1641,15 @@ try {
 async function rpc(method, params = [], retries = 3) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
+      const abortCtrl = new AbortController();
+      const timeoutId = setTimeout(() => abortCtrl.abort(), 120000);
       const r = await fetch(RPC_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', method, params, id: Date.now() }),
-        signal: AbortSignal.timeout(12000)
+        signal: abortCtrl.signal
       });
+      clearTimeout(timeoutId);
       const ct = r.headers.get('content-type') || '';
       if (!ct.includes('json')) {
         // Non-JSON response (e.g. 503 plain text during startup)
