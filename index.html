@@ -1286,8 +1286,8 @@ async function fetchExplorerPage() {
       }
     } catch(e) { console.warn('[Explorer] Height fetch failed:', e.message); }
 
-    const safeMax = Math.max(_exMaxHeight || 0, tipHeight);
-    const toH   = Math.max(0, safeMax - _exPage * EX_PER_PAGE);
+    const rangeTip = Math.max(_exMaxHeight || 0, tipHeight);
+    const toH   = Math.max(0, rangeTip - _exPage * EX_PER_PAGE);
     const fromH = Math.max(0, toH - EX_PER_PAGE + 1);
 
     // Try getBlockRange first — single call, DB-authoritative, real heights
