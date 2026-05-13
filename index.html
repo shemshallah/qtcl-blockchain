@@ -110,6 +110,9 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 .block-card.selected{border-color:var(--cy);background:var(--cy3);box-shadow:0 0 20px rgba(0,212,255,.08)}
 .block-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--vi)}
 .block-card.selected::before{background:var(--cy)}
+.block-card.pending-block{border-color:rgba(245,158,11,.3);background:rgba(245,158,11,.04);animation:pulse-border 2s ease-in-out infinite}
+.block-card.pending-block::before{background:var(--am)}
+@keyframes pulse-border{0%,100%{border-color:rgba(245,158,11,.3)}50%{border-color:rgba(245,158,11,.6)}}
 .bc-head{padding:10px 12px 8px 16px;display:flex;justify-content:space-between;align-items:flex-start}
 .bc-height{font-family:var(--disp);font-size:11px;font-weight:700;color:var(--cy);letter-spacing:1px}
 .bc-time{font-family:var(--mono);font-size:8px;color:var(--dim2)}
@@ -887,18 +890,19 @@ function renderChainRail(blocks) {
     const hash = b.block_hash || b.hash || '';
     const parent = b.parent_hash || b.previous_hash || '';
     const isGenesis = b.height === 0;
+    const isPending = b._pending === true;
     return `
-      <div class="block-card${_selectedHeight === b.height ? ' selected' : ''}"
+      <div class="block-card${_selectedHeight === b.height ? ' selected' : ''}${isPending ? ' pending-block' : ''}"
            data-height="${b.height}" onclick="selectBlock(${b.height})">
         <div class="bc-head">
           <div>
-            <div class="bc-height">BLOCK #${b.height}</div>
+            <div class="bc-height">BLOCK #${b.height}${isPending ? ' <span style="color:var(--am);font-size:8px">⏳ BUILDING</span>' : ''}</div>
           </div>
           <div class="bc-time">${fmtTime(b.timestamp || b.timestamp_s)}</div>
         </div>
         <div class="bc-hash-row">
           <div class="bc-hash-label">Block Hash</div>
-          <div class="bc-hash">${hash || 'pending'}</div>
+          <div class="bc-hash" style="${isPending ? 'color:var(--am);font-style:italic' : ''}">${hash || 'pending'}</div>
         </div>
         <div class="bc-link-row">
           <span class="bc-link-icon">↳</span>
@@ -909,10 +913,10 @@ function renderChainRail(blocks) {
         </div>
         <div class="bc-meta">
           <div class="bc-meta-item"><div class="bc-meta-label">Diff</div><div class="bc-meta-val" style="color:var(--go)">${b.difficulty || '—'}</div></div>
-          <div class="bc-meta-item"><div class="bc-meta-label">Nonce</div><div class="bc-meta-val">${b.nonce !== undefined ? b.nonce.toLocaleString() : '—'}</div></div>
+          <div class="bc-meta-item"><div class="bc-meta-label">Nonce</div><div class="bc-meta-val">${b.nonce !== undefined && b.nonce !== '—' ? (typeof b.nonce === 'number' ? b.nonce.toLocaleString() : b.nonce) : '—'}</div></div>
           <div class="bc-meta-item"><div class="bc-meta-label">TXNs</div><div class="bc-meta-val" style="color:var(--vi)">${b.tx_count || (b.transactions ? b.transactions.length : 0)}</div></div>
           <div class="bc-meta-item"><div class="bc-meta-label">QF</div><div class="bc-meta-val" style="color:var(--gr)">${(b.w_state_fidelity || b.quantum_fidelity || 0).toFixed(4)}</div></div>
-          ${b.miner_address ? `<div class="bc-meta-item" style="grid-column:1/-1"><div class="bc-meta-label">⛏ Miner</div><div class="bc-meta-val" style="color:var(--am);font-size:7.5px;word-break:break-all">${b.miner_address}</div></div>` : ''}
+          ${b.miner_address ? `<div class="bc-meta-item" style="grid-column:1/-1"><div class="bc-meta-label">${isPending ? '🎯 Target' : '⛏ Miner'}</div><div class="bc-meta-val" style="color:var(--am);font-size:7.5px;word-break:break-all">${b.miner_address}</div></div>` : ''}
         </div>
       </div>
       ${!isLast ? '<div class="bc-connector"><div class="bc-connector-line"></div></div>' : ''}
@@ -939,7 +943,33 @@ async function selectBlock(height) {
   badge.textContent = `BLOCK #${height}`;
 
   try {
-    const block = await rpc('qtcl_getBlock', [height]);
+    // Check if this is the pending block from our chain/explorer data
+    const pendingBlock = _chainBlocks.find(b => b.height === height && b._pending);
+    let block;
+    if (pendingBlock) {
+      block = pendingBlock;
+      // Fetch fresh pending data with full transactions
+      try {
+        const pendingRes = await rpc('qtcl_getPendingBlock', []);
+        if (pendingRes) {
+          block = {
+            height: pendingRes.block_height,
+            block_hash: '⏳ Mining... (no PoW yet)',
+            parent_hash: pendingRes.parent_hash || '—',
+            miner_address: pendingRes.miner_address || '',
+            timestamp: pendingRes.timestamp_s || Math.floor(Date.now()/1000),
+            difficulty: '—',
+            nonce: '—',
+            tx_count: pendingRes.tx_count || 0,
+            transactions: pendingRes.transactions || [],
+            w_state_fidelity: 0,
+            _pending: true
+          };
+        }
+      } catch(e) {}
+    } else {
+      block = await rpc('qtcl_getBlock', [height]);
+    }
     if (!block) throw new Error('Block not found');
     renderBlockDetail(block, detailScroll);
   } catch(e) {
@@ -953,6 +983,7 @@ function renderBlockDetail(b, container) {
   const merkle = b.merkle_root || '';
   const txs = b.transactions || [];
   const isGenesis = b.height === 0;
+  const isPending = b._pending === true;
   const qf = (b.w_state_fidelity || b.quantum_fidelity || 0).toFixed(6);
   const wHash = b.w_entropy_hash || b.w_state_hash || '';
 
@@ -960,10 +991,12 @@ function renderBlockDetail(b, container) {
     <!-- DETAIL HEADER -->
     <div class="detail-head">
       <div class="detail-title">
-        <div class="detail-height">BLOCK #${b.height}</div>
+        <div class="detail-height">BLOCK #${b.height}${isPending ? ' ⏳' : ''}</div>
         <div class="detail-status">
-          <span class="badge badge-gr">FINALIZED</span>
-          ${b.mined ? '<span class="badge badge-cy">MINED</span>' : ''}
+          ${isPending
+            ? '<span class="badge" style="background:rgba(245,158,11,.15);color:var(--am);border:1px solid rgba(245,158,11,.3)">⏳ BUILDING — AWAITING PoW</span>'
+            : `<span class="badge badge-gr">FINALIZED</span>${b.mined ? ' <span class="badge badge-cy">MINED</span>' : ''}`
+          }
         </div>
       </div>
 
@@ -1156,6 +1189,30 @@ async function fetchChain() {
       }
     }
 
+    // 4. Fetch the CURRENT PENDING block being built (has treasury coinbase + mempool TXs)
+    try {
+      const pendingRes = await rpc('qtcl_getPendingBlock', []);
+      if (pendingRes && pendingRes.block_height > 0) {
+        const pendingBlock = {
+          height: pendingRes.block_height,
+          block_hash: '⏳ Mining...',
+          parent_hash: pendingRes.parent_hash || '—',
+          miner_address: pendingRes.miner_address || '',
+          timestamp: pendingRes.timestamp_s || Math.floor(Date.now()/1000),
+          difficulty: '—',
+          nonce: '—',
+          tx_count: pendingRes.tx_count || 0,
+          transactions: pendingRes.transactions || [],
+          w_state_fidelity: 0,
+          _pending: true
+        };
+        // Only add if not already in confirmed blocks
+        if (!blocks.find(b => b.height === pendingBlock.height)) {
+          blocks.unshift(pendingBlock);
+        }
+      }
+    } catch(e) { console.debug('[Chain] Pending block fetch skipped:', e.message); }
+
     _chainBlocks = blocks;
 
     if (blocks.length > 0) {
@@ -1253,6 +1310,27 @@ async function fetchExplorerPage() {
 
     blocks.sort((a, b) => b.height - a.height);
 
+    // Fetch CURRENT PENDING block and prepend to first page only
+    if (_exPage === 0) {
+      try {
+        const pendingRes = await rpc('qtcl_getPendingBlock', []);
+        if (pendingRes && pendingRes.block_height > 0 && !blocks.find(b => b.height === pendingRes.block_height)) {
+          blocks.unshift({
+            height: pendingRes.block_height,
+            block_hash: '⏳ Mining...',
+            parent_hash: pendingRes.parent_hash || '—',
+            miner_address: pendingRes.miner_address || '',
+            timestamp: pendingRes.timestamp_s || Math.floor(Date.now()/1000),
+            difficulty: '—',
+            nonce: '—',
+            tx_count: pendingRes.tx_count || 0,
+            w_state_fidelity: 0,
+            _pending: true
+          });
+        }
+      } catch(e) {}
+    }
+
     // Update max height if we learned more from this page
     if (blocks.length > 0) {
       const validHeights = blocks.map(b => b.height).filter(h => h !== undefined && h !== null && !isNaN(h));
@@ -1284,10 +1362,12 @@ function renderExTable(blocks) {
     const miner = b.miner_address || '—';
     const qf = (b.w_state_fidelity || b.quantum_fidelity || 0).toFixed(4);
     const txCount = b.tx_count || (b.transactions ? b.transactions.length : 0);
+    const isPending = b._pending === true;
+    const rowStyle = isPending ? 'style="background:rgba(245,158,11,.06);border-left:3px solid var(--am)"' : '';
     return `
-      <tr onclick="selectBlockFromExplorer(${b.height})" ${_selectedHeight === b.height ? 'class="selected"' : ''}>
-        <td class="height-cell">#${b.height}</td>
-        <td class="hash-cell">${hash}</td>
+      <tr onclick="selectBlockFromExplorer(${b.height})" ${_selectedHeight === b.height ? 'class="selected"' : ''} ${rowStyle}>
+        <td class="height-cell">#${b.height}${isPending ? ' ⏳' : ''}</td>
+        <td class="hash-cell" style="${isPending ? 'color:var(--am);font-style:italic' : ''}">${hash}</td>
         <td class="parent-cell">${parent}</td>
         <td class="hash-cell" style="color:var(--am);opacity:.9;max-width:160px">${miner !== '—' ? shortAddr(miner) : '—'}</td>
         <td class="time-cell">${fmtTime(b.timestamp || b.timestamp_s)}</td>
