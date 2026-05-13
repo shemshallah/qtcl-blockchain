@@ -5906,6 +5906,35 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             f"[RPC-submitBlock] ✅ Transaction validation passed: {len(_coinbase_txs)} coinbase, {len(_non_coinbase_txs)} transfers, {_total_fees} base units in fees"
         )
 
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # PROOF-OF-WORK VALIDATION — Verify nonce produces valid hash with required difficulty
+        # ═══════════════════════════════════════════════════════════════════════════════
+        if height > 0 and nonce == 0:
+            logger.error(f"[RPC-submitBlock] ❌ REJECTED: nonce=0 for non-genesis block h={height}")
+            return _rpc_error(-32003, f"Invalid nonce: nonce=0 is not allowed for non-genesis blocks (h={height})", rpc_id)
+
+        if height > 0:
+            try:
+                _w_entropy_bytes = bytes.fromhex(w_entropy_hex) if w_entropy_hex and len(w_entropy_hex) >= 64 else b'\x00' * 32
+                _pow_valid, _pow_reason = qtcl_pow_verify(
+                    height=height,
+                    parent_hash=parent_hash,
+                    merkle_root=merkle_root,
+                    timestamp_s=timestamp_s,
+                    difficulty_bits=difficulty_bits,
+                    nonce=nonce,
+                    miner_address=miner_address,
+                    w_entropy_seed=_w_entropy_bytes,
+                    claimed_hash=block_hash,
+                )
+                if not _pow_valid:
+                    logger.error(f"[RPC-submitBlock] ❌ PoW verification FAILED for h={height}: {_pow_reason}")
+                    return _rpc_error(-32003, f"Proof-of-Work verification failed: {_pow_reason}", rpc_id)
+                logger.info(f"[RPC-submitBlock] ✅ PoW verified for h={height} nonce={nonce} hash={block_hash[:16]}…")
+            except Exception as _pow_err:
+                logger.error(f"[RPC-submitBlock] ❌ PoW verification error for h={height}: {_pow_err}")
+                return _rpc_error(-32003, f"PoW verification error: {str(_pow_err)}", rpc_id)
+
         # ── Persist block with PROPER conflict handling ─────────────────────────
         _block_insert_result = None  # 'inserted', 'duplicate', 'fork', or 'error'
         _existing_block_hash = None
@@ -6284,6 +6313,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             })
         except Exception:
             pass
+
+        # 🔴 CRITICAL: Invalidate stale height/tip caches so all miners see the new tip immediately
+        try:
+            _blockchain_cache.delete("blockchain:latest_block")
+            _blockchain_cache.delete("blockchain:tip")
+            _height_cache.update_height(height, block_hash, difficulty_bits)
+            logger.info(f"[RPC-submitBlock] 🔄 Cache invalidated + height updated to h={height}")
+        except Exception as _cache_inv_err:
+            logger.warning(f"[RPC-submitBlock] Cache invalidation warning: {_cache_inv_err}")
 
         # Push oracle consensus finalization event (miner listens to this to mark block done)
         try:

@@ -3543,6 +3543,9 @@ class BlockManager:
                 self.mempool.pop(tx.tx_id, None)
 
             # ── Persist to DB ─────────────────────────────────────────────────
+            # 🔴 CRITICAL: Use ON CONFLICT DO NOTHING to avoid overwriting properly
+            # mined blocks (which have valid nonces) with un-mined template blocks (nonce=0).
+            # Only insert if no block exists at this height yet.
             if self.db is not None:
                 try:
                     self.db.execute(
@@ -3550,19 +3553,9 @@ class BlockManager:
                         INSERT INTO blocks
                             (height, block_hash, parent_hash, w_state_hash, hyp_witness,
                              timestamp, tx_count, merkle_root, coherence_snapshot, fidelity_snapshot,
-                             finalized, finalized_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (height) DO UPDATE SET
-                            block_hash        = EXCLUDED.block_hash,
-                            w_state_hash      = EXCLUDED.w_state_hash,
-                            hyp_witness       = EXCLUDED.hyp_witness,
-                            timestamp         = EXCLUDED.timestamp,
-                            tx_count          = EXCLUDED.tx_count,
-                            merkle_root       = EXCLUDED.merkle_root,
-                            coherence_snapshot = EXCLUDED.coherence_snapshot,
-                            fidelity_snapshot  = EXCLUDED.fidelity_snapshot,
-                            finalized         = EXCLUDED.finalized,
-                            finalized_at      = EXCLUDED.finalized_at
+                             finalized, finalized_at, nonce, difficulty, miner_address)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (height) DO NOTHING
                         """,
                         (
                             block.block_height,
@@ -3577,12 +3570,50 @@ class BlockManager:
                             block.fidelity_snapshot,
                             block.finalized,
                             block.finalized_at,
+                            0,  # nonce=0 — template block, not yet mined
+                            block.difficulty_bits,
+                            block.miner_address,
                         ),
                     )
                 except Exception as db_err:
                     logger.warning(
                         f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}"
                     )
+
+            # ── Persist transactions to DB ──────────────────────────────────────
+            # Use DO NOTHING to avoid overwriting transactions already confirmed by miner
+            if self.db is not None:
+                for tx_idx, tx in enumerate(block.transactions):
+                    try:
+                        tx_id = tx.tx_id
+                        _to = tx.to_addr or tx.receiver_addr or ""
+                        _from = tx.from_addr or (tx.sender_addr if tx.sender_addr != "COINBASE" else "COINBASE") or ""
+                        _amount_base = tx.amount_base
+                        _tx_type = tx.tx_type.lower()
+                        _w_proof = getattr(tx, "quantum_state_hash", "") or ""
+                        _metadata = json.dumps(tx.to_dict())
+                        self.db.execute(
+                            """
+                            INSERT INTO transactions
+                            (tx_hash, from_address, to_address, amount,
+                             transaction_index, tx_type, status, height,
+                             block_hash, quantum_state_hash, metadata, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, 'confirmed', %s, %s, %s, %s, NOW())
+                            ON CONFLICT (tx_hash) DO NOTHING
+                            """,
+                            (
+                                tx_id, _from, _to, _amount_base, tx_idx, _tx_type,
+                                block.block_height, block.block_hash, _w_proof, _metadata,
+                            ),
+                        )
+                        logger.debug(f"[SEAL] TX persisted: {tx_id[:16]}… type={_tx_type}")
+                    except Exception as tx_persist_err:
+                        logger.warning(
+                            f"[SEAL] TX persist failed {tx.tx_id[:16]}…: {tx_persist_err}"
+                        )
+                logger.info(
+                    f"[SEAL] {len(block.transactions)} transactions persisted for block #{block.block_height}"
+                )
 
             # ── Create next pending block ─────────────────────────────────────
             self.pending_block = QuantumBlock(
@@ -3597,31 +3628,52 @@ class BlockManager:
             self.chain_height += 1
             self.blocks_sealed += 1
 
+            # ── Build transaction list for broadcast ─────────────────────────
+            _tx_broadcast = []
+            for tx in block.transactions:
+                _tx_broadcast.append({
+                    "tx_id":     tx.tx_id,
+                    "tx_hash":   tx.tx_id,
+                    "from_addr": tx.from_addr or tx.sender_addr or "",
+                    "to_addr":   tx.to_addr or tx.receiver_addr or "",
+                    "amount":    tx.amount_base,
+                    "amount_base": tx.amount_base,
+                    "tx_index":  0,
+                    "tx_type":   tx.tx_type,
+                    "status":    "confirmed",
+                    "w_proof":   getattr(tx, "quantum_state_hash", "") or "",
+                })
+
             # ── Broadcast sealed block to native SSE subscribers + legacy SSE service ──
             try:
                 import sys
 
                 _srv = sys.modules.get("server")
                 block_event = {
-                    "height": block.block_height,
-                    "block_hash": block.block_hash,
-                    "parent_hash": block.parent_hash,
-                    "timestamp_s": block.timestamp_s,
-                    "tx_count": block.tx_count,
+                    "height":          block.block_height,
+                    "block_hash":      block.block_hash,
+                    "parent_hash":     block.parent_hash,
+                    "merkle_root":     block.merkle_root,
+                    "miner_address":   block.miner_address,
+                    "timestamp_s":     block.timestamp_s,
+                    "timestamp":       block.timestamp_s,
+                    "difficulty":      block.difficulty_bits,
+                    "nonce":           block.nonce,
+                    "tx_count":        block.tx_count,
                     "w_state_fidelity": getattr(block, "w_state_fidelity", None),
-                    "hyp_signature": block.hyp_signature
-                    if block.hyp_signature
-                    else None,
-                    "miner_public_key_hex": block.miner_public_key_hex
-                    if block.miner_public_key_hex
-                    else None,
-                    "signature_verified": block.signature_verified,
+                    "w_entropy_hash":  block.w_entropy_hash or "",
+                    "hyp_signature":   block.hyp_signature if block.hyp_signature else None,
+                    "miner_public_key_hex": block.miner_public_key_hex if block.miner_public_key_hex else None,
+                    "signature_verified":   block.signature_verified,
+                    "finalized":       True,
+                    "mined":           True,
+                    "transactions":    _tx_broadcast,
                 }
                 # Native fan-out (Neon PostgreSQL nodes + dashboard clients)
                 if _srv and hasattr(_srv, "_broadcast_block_event"):
                     _srv._broadcast_block_event(block_event)
                     logger.debug(
-                        f"[BLOCK-BRD] ✅ Native fan-out block #{block.block_height}"
+                        f"[BLOCK-BRD] ✅ Native fan-out block #{block.block_height} ({len(_tx_broadcast)} TXs)"
                     )
                 # Legacy external SSE service (optional)
                 if _srv and hasattr(_srv, "_push_to_sse_service"):
