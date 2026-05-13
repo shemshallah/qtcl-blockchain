@@ -3112,6 +3112,21 @@ def _lazy_ensure_blocks():
                     f"[SCHEMA] 🌱 Genesis block auto-created: h=0  hash={genesis_hash[:16]}…"
                 )
 
+            # 🔴 CLEANUP: Delete any orphaned nonce=0 blocks (from old lattice controller bug)
+            # These blocks have no valid PoW and block the miner from submitting real blocks
+            cur.execute("DELETE FROM blocks WHERE height > 0 AND nonce = 0")
+            _cleaned = cur.rowcount
+            if _cleaned > 0:
+                logger.warning(f"[SCHEMA] 🧹 Cleaned {_cleaned} orphaned nonce=0 blocks from DB")
+                # Also clean up orphaned transactions referencing those blocks
+                cur.execute("""
+                    DELETE FROM transactions
+                    WHERE height > 0 AND height NOT IN (SELECT height FROM blocks)
+                """)
+                _tx_cleaned = cur.rowcount
+                if _tx_cleaned > 0:
+                    logger.warning(f"[SCHEMA] 🧹 Cleaned {_tx_cleaned} orphaned transactions")
+
         # Create quantum_field_distribution table with triggers for neighbor broadcast
         try:
             cur.execute("""
@@ -5953,22 +5968,63 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
                 # Step 1: Check if block already exists at this height
                 cur.execute(
-                    "SELECT block_hash FROM blocks WHERE height = %s", (height,)
+                    "SELECT block_hash, nonce FROM blocks WHERE height = %s", (height,)
                 )
                 _existing_row = cur.fetchone()
 
                 if _existing_row:
                     _existing_block_hash = _existing_row[0]
+                    _existing_nonce = int(_existing_row[1]) if _existing_row[1] else 0
                     if _existing_block_hash == block_hash:
                         # TRUE DUPLICATE: Same hash, already accepted
                         logger.critical(
                             f"[RPC-submitBlock] 🔁 DUPLICATE DETECTED: h={height} hash matches={block_hash[:16]}…"
                         )
                         _block_insert_result = "duplicate"
-                    else:
-                        # DIFFERENT HASH AT HEIGHT — fork attempt
+                    elif _existing_nonce == 0 and nonce > 0:
+                        # 🔴 EXISTING BLOCK HAS nonce=0 (template from lattice controller)
+                        # Miner's PoW-validated block MUST replace it
                         logger.critical(
-                            f"[RPC-submitBlock] ⚠️  DIFFERENT HASH AT HEIGHT: h={height} new={block_hash[:16]}… db={_existing_block_hash[:16]}…"
+                            f"[RPC-submitBlock] 🔄 REPLACING nonce=0 template at h={height} "
+                            f"with mined block nonce={nonce} hash={block_hash[:16]}…"
+                        )
+                        cur.execute(
+                            "DELETE FROM blocks WHERE height = %s AND nonce = 0", (height,)
+                        )
+                        cur.execute(
+                            """
+                            INSERT INTO blocks
+                            (height, block_hash, parent_hash, merkle_root, timestamp,
+                             oracle_w_state_hash, miner_address, nonce,
+                             difficulty, coherence_snapshot, fidelity_snapshot,
+                             pq_curr, pq_last, finalized, finalized_at, tx_count)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s)
+                        """,
+                            (
+                                height,
+                                block_hash,
+                                parent_hash,
+                                merkle_root,
+                                timestamp_s,
+                                w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
+                                miner_address,
+                                nonce,
+                                difficulty_bits,
+                                w_state_fidelity,
+                                w_state_fidelity,
+                                height,
+                                max(0, height - 1),
+                                int(time.time()),
+                                len(txs or []),
+                            ),
+                        )
+                        _block_rowcount = cur.rowcount
+                        _verify_row = cur.fetchone() if False else None  # skip verify for replacement
+                        _block_insert_result = "inserted"
+                    else:
+                        # DIFFERENT HASH AT HEIGHT — genuine fork attempt
+                        logger.critical(
+                            f"[RPC-submitBlock] ⚠️  DIFFERENT HASH AT HEIGHT: h={height} new={block_hash[:16]}… db={_existing_block_hash[:16]}… (existing_nonce={_existing_nonce})"
                         )
                         logger.warning(
                             f"[RPC-submitBlock] ⚠️  FORK DETECTED: h={height} new={block_hash[:16]}… existing={_existing_block_hash[:16]}…"

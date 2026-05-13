@@ -3542,78 +3542,25 @@ class BlockManager:
             for tx in block.transactions:
                 self.mempool.pop(tx.tx_id, None)
 
-            # ── Persist to DB ─────────────────────────────────────────────────
-            # 🔴 CRITICAL: Use ON CONFLICT DO NOTHING to avoid overwriting properly
-            # mined blocks (which have valid nonces) with un-mined template blocks (nonce=0).
-            # Only insert if no block exists at this height yet.
-            if self.db is not None:
-                try:
-                    self.db.execute(
-                        """
-                        INSERT INTO blocks
-                            (height, block_hash, parent_hash, w_state_hash, hyp_witness,
-                             timestamp, tx_count, merkle_root, coherence_snapshot, fidelity_snapshot,
-                             finalized, finalized_at, nonce, difficulty, miner_address)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (height) DO NOTHING
-                        """,
-                        (
-                            block.block_height,
-                            block.block_hash,
-                            block.parent_hash,
-                            block.w_state_hash,
-                            block.hyp_witness,
-                            block.timestamp_s,
-                            block.tx_count,
-                            block.merkle_root,
-                            block.coherence_snapshot,
-                            block.fidelity_snapshot,
-                            block.finalized,
-                            block.finalized_at,
-                            0,  # nonce=0 — template block, not yet mined
-                            block.difficulty_bits,
-                            block.miner_address,
-                        ),
-                    )
-                except Exception as db_err:
-                    logger.warning(
-                        f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}"
-                    )
+            # ── DO NOT PERSIST TO DB ──────────────────────────────────────────
+            # 🔴 CRITICAL: The `blocks` table must ONLY contain PoW-validated blocks
+            # submitted by miners via `_rpc_submitBlock`. The lattice controller
+            # creates template blocks with nonce=0 — these must NEVER touch the DB.
+            # If we insert here, the miner's valid submission gets rejected as a "fork"
+            # because a row already exists at this height with a different hash.
+            logger.info(
+                f"[SEAL] Block #{block.block_height} template sealed in-memory "
+                f"(nonce=0, awaiting miner PoW submission to persist to DB)"
+            )
 
-            # ── Persist transactions to DB ──────────────────────────────────────
-            # Use DO NOTHING to avoid overwriting transactions already confirmed by miner
-            if self.db is not None:
-                for tx_idx, tx in enumerate(block.transactions):
-                    try:
-                        tx_id = tx.tx_id
-                        _to = tx.to_addr or tx.receiver_addr or ""
-                        _from = tx.from_addr or (tx.sender_addr if tx.sender_addr != "COINBASE" else "COINBASE") or ""
-                        _amount_base = tx.amount_base
-                        _tx_type = tx.tx_type.lower()
-                        _w_proof = getattr(tx, "quantum_state_hash", "") or ""
-                        _metadata = json.dumps(tx.to_dict())
-                        self.db.execute(
-                            """
-                            INSERT INTO transactions
-                            (tx_hash, from_address, to_address, amount,
-                             transaction_index, tx_type, status, height,
-                             block_hash, quantum_state_hash, metadata, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, 'confirmed', %s, %s, %s, %s, NOW())
-                            ON CONFLICT (tx_hash) DO NOTHING
-                            """,
-                            (
-                                tx_id, _from, _to, _amount_base, tx_idx, _tx_type,
-                                block.block_height, block.block_hash, _w_proof, _metadata,
-                            ),
-                        )
-                        logger.debug(f"[SEAL] TX persisted: {tx_id[:16]}… type={_tx_type}")
-                    except Exception as tx_persist_err:
-                        logger.warning(
-                            f"[SEAL] TX persist failed {tx.tx_id[:16]}…: {tx_persist_err}"
-                        )
-                logger.info(
-                    f"[SEAL] {len(block.transactions)} transactions persisted for block #{block.block_height}"
-                )
+            # ── DO NOT PERSIST TRANSACTIONS TO DB ──────────────────────────────
+            # Transactions are persisted by `_rpc_submitBlock` when the miner submits
+            # the PoW-validated block. Persisting here would create orphaned TX rows
+            # referencing a block_hash that may never exist in the blocks table.
+            logger.info(
+                f"[SEAL] {len(block.transactions)} transactions held in-memory for block #{block.block_height} "
+                f"(will persist on miner PoW submission)"
+            )
 
             # ── Create next pending block ─────────────────────────────────────
             self.pending_block = QuantumBlock(
