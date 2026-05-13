@@ -6397,6 +6397,78 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception:
             pass
 
+        # 🔴 CRITICAL: ADVANCE THE LATTICE CONTROLLER'S CHAIN STATE
+        # After a block is inserted, the pending block must advance to N+1
+        # so the miner sees the correct target and the explorer shows it.
+        try:
+            if LATTICE is not None and LATTICE.block_manager is not None:
+                bm = LATTICE.block_manager
+                next_height = height + 1
+                prev_treasury_base = 80
+                try:
+                    from globals import TessellationRewardSchedule as _TRS
+                    prev_treasury_base = _TRS.get_treasury_reward_base(height)
+                except Exception:
+                    pass
+
+                with bm.lock:
+                    bm.chain_height = next_height
+                    bm.current_block_hash = block_hash
+
+                    from lattice_controller import QuantumBlock, QuantumTransaction
+                    from decimal import Decimal
+
+                    new_pending = QuantumBlock(
+                        block_height=next_height,
+                        parent_hash=block_hash,
+                        miner_address=bm.validator.miner_address if bm.validator else "",
+                    )
+
+                    # Add treasury coinbase (deferred from previous block)
+                    treasury_addr = os.environ.get('TREASURY_ADDRESS', '') or (
+                        TessellationRewardSchedule.TREASURY_ADDRESS
+                        if TessellationRewardSchedule
+                        else "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b"
+                    )
+                    if treasury_addr:
+                        treasury_tx = QuantumTransaction(
+                            tx_id=f"treasury_{next_height}",
+                            sender_addr="COINBASE",
+                            receiver_addr=treasury_addr,
+                            amount=Decimal(prev_treasury_base) / 100,
+                            nonce=next_height,
+                            timestamp_ns=int(time.time() * 1_000_000_000),
+                            fee=0,
+                            tx_type="treasury_reward",
+                        )
+                        treasury_tx.from_addr = treasury_tx.sender_addr
+                        treasury_tx.to_addr = treasury_tx.receiver_addr
+                        new_pending.transactions.append(treasury_tx)
+
+                    # Feed remaining mempool TXs into the new pending block
+                    try:
+                        from mempool import get_mempool as _get_mp
+                        mp = _get_mp()
+                        remaining, _, _ = mp.get_block_transactions(
+                            max_txs=500, block_height=next_height, miner_address=miner_address,
+                        )
+                        for rtx in remaining:
+                            new_pending.transactions.append(rtx)
+                            logger.debug(
+                                f"[RPC-submitBlock] 📥 Fed mempool TX {rtx.tx_id[:16] if hasattr(rtx, 'tx_id') else '?'}… → pending h={next_height}"
+                            )
+                    except Exception as mp_feed_err:
+                        logger.debug(f"[RPC-submitBlock] Mempool feed warning: {mp_feed_err}")
+
+                    new_pending.tx_count = len(new_pending.transactions)
+                    bm.pending_block = new_pending
+                    logger.info(
+                        f"[RPC-submitBlock] ✅ Lattice advanced to h={next_height} "
+                        f"pending_block={next_height} txs={new_pending.tx_count}"
+                    )
+        except Exception as _lat_err:
+            logger.warning(f"[RPC-submitBlock] Lattice advance warning: {_lat_err}")
+
         # ── Drain confirmed transactions from mempool ──────────────────────────
         # After successful settlement, remove included TXs from mempool so they
         # don't get re-included in the next block.

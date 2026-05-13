@@ -338,8 +338,11 @@ def rpc_blocks_stream():
                     if block:
                         formatted = {
                             "height": block.get("height", 0),
-                            "hash": block.get("hash", ""),
-                            "timestamp": block.get("timestamp", 0),
+                            "hash": block.get("hash") or block.get("block_hash", ""),
+                            "block_hash": block.get("hash") or block.get("block_hash", ""),
+                            "timestamp": block.get("timestamp") or block.get("timestamp_s", 0),
+                            "timestamp_s": block.get("timestamp") or block.get("timestamp_s", 0),
+                            "miner_address": block.get("miner_address", ""),
                         }
                         yield f"data: {json.dumps(formatted)}\n\n"
                 except queue.Empty:
