@@ -21,14 +21,14 @@
 ║  ELITE BLOCKCHAIN ADDITIONS:                                                                           ║
 ║  🔗 Individual Validator System (Bitcoin-style, no oracle consensus)                                   ║
 ║  📦 Block Manager with dynamic block sizing (no 100 TX constraint for depth 0)                        ║
-║  💾 PostgreSQL/Supabase persistence (enterprise-grade)                                                ║
+║  💾 PostgreSQL/Neon persistence (enterprise-grade)                                                ║
 ║  ⚡ IF/THEN block sealing logic (timeout/explicit/network triggered)                                 ║
 ║  🔐 HypΓ post-quantum block witnesses (GeodesicLWE, tessellation, LDPC)                             ║
 ║  📊 Mempool management with fee-based priority                                                        ║
 ║  🔄 Transaction ordering in spatial-temporal field                                                    ║
 ║  ✨ Atomic block sealing with Merkle proofs                                                           ║
 ║                                                                                                          ║
-║  DATABASE: PostgreSQL (Supabase) with environment variable passwords (SECURE!)                        ║
+║  DATABASE: PostgreSQL (Neon) with environment variable passwords (SECURE!)                        ║
 ║  VALIDATORS: Each peer validates independently (like Bitcoin full nodes)                              ║
 ║  BLOCKS: Variable size, sealed by timeout (12s default) or explicit request                          ║
 ║  FINALITY: HypΓ GeodesicLWE witnesses provide immediate post-quantum cryptographic finality          ║
@@ -701,7 +701,7 @@ class NoiseChannelType(Enum):
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# DATABASE CONFIGURATION (PostgreSQL/Supabase)
+# DATABASE CONFIGURATION (PostgreSQL/Neon)
 # ════════════════════════════════════════════════════════════════════════════════
 
 
@@ -760,7 +760,7 @@ class DatabaseConfig:
             logger.error("   Set one of those variables and restart.")
             raise ValueError(
                 "Database password not configured. "
-                "Set POOLER_PASSWORD (Supabase/Koyeb) or DB_PASSWORD."
+                "Set POOLER_PASSWORD (Neon/Koyeb) or DB_PASSWORD."
             )
 
         logger.info(
@@ -941,7 +941,7 @@ class SpatialTemporalField:
 
 
 class QuantumDatabaseConnector:
-    """Async quantum metrics streaming to PostgreSQL/Supabase."""
+    """Async quantum metrics streaming to PostgreSQL/Neon."""
 
     def __init__(self, config: DatabaseConfig = None):
         self.config = config or DatabaseConfig()

@@ -1322,6 +1322,16 @@ _tx_worker_daemon.start()
 # (DB settlement_log handles cross-restart idempotency)
 _SETTLED_HEIGHTS: set = set()
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CRITICAL: Ensure UTXO/wallet/settlement tables exist BEFORE any blocks arrive.
+# Previously this function was defined but NEVER called — settlement silently
+# failed because address_utxos, wallet_addresses, settlement_log did not exist.
+# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    _ensure_wallet_addresses_table()
+except Exception as _ewat_err:
+    logger.warning(f"[STARTUP] ⚠️  UTXO table creation deferred: {_ewat_err}")
+
 def _settle_block_rewards(
     height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list
 ) -> None:
@@ -1375,12 +1385,28 @@ def _settle_block_rewards(
 
     try:
         with get_db_cursor() as cur:
-            # ── IDEMPOTENCY GUARD: only skip if settlement_log AND UTXOs both present ──
-            # BUG-FIX: old guard skipped re-settlement even when UTXOs were never written
-            # (HTTP auto-commit mode: settlement_log INSERT committed even if UTXO INSERTs
-            # returned 0 rows due to constraint conflict or silent PostgREST failure).
-            # NEW: verify miner actually has unspent UTXOs at this height before skipping.
+            # ── CRITICAL: Verify tables exist before any settlement SQL ────────
+            # If tables are missing, CREATE them now — settlement cannot proceed without them.
             try:
+                cur.execute("SELECT 1 FROM address_utxos LIMIT 0")
+            except Exception:
+                try:
+                    cur.execute("ROLLBACK")
+                except Exception:
+                    pass
+                _settle_log.critical(f"[SETTLE] ⚠️  UTXO tables missing — creating now")
+                try:
+                    _ensure_wallet_addresses_table()
+                except Exception as _tbl_err:
+                    _settle_log.critical(f"[SETTLE] ❌ Cannot create UTXO tables: {_tbl_err}")
+                    return
+                # Re-acquire cursor after table creation (old cursor may be in bad state)
+                raise RuntimeError("RETRY_SETTLEMENT_AFTER_TABLE_CREATION")
+
+            # ── IDEMPOTENCY GUARD: only skip if settlement_log AND UTXOs both present ──
+            # Wrapped in SAVEPOINT so a missing settlement_log table doesn't poison the cursor.
+            try:
+                cur.execute("SAVEPOINT settle_idempotency_check")
                 cur.execute("SELECT height FROM settlement_log WHERE height = %s", (height,))
                 if cur.fetchone():
                     # settlement_log says done — but verify UTXOs actually exist
@@ -1398,6 +1424,10 @@ def _settle_block_rewards(
                         _settle_log.warning(
                             f"[SETTLE] ⏭  h={height} already settled ({_utxo_at_height} UTXOs in DB) — skipping"
                         )
+                        try:
+                            cur.execute("RELEASE SAVEPOINT settle_idempotency_check")
+                        except Exception:
+                            pass
                         return
                     else:
                         # settlement_log present but UTXOs missing — delete poisoned log entry and re-run
@@ -1410,8 +1440,21 @@ def _settle_block_rewards(
                         except Exception as _del_err:
                             _settle_log.warning(f"[SETTLE] settlement_log delete non-fatal: {_del_err}")
                         _SETTLED_HEIGHTS.discard(height)
+                try:
+                    cur.execute("RELEASE SAVEPOINT settle_idempotency_check")
+                except Exception:
+                    pass
             except Exception as _sl_err:
                 _settle_log.debug(f"[SETTLE] settlement_log check skipped: {_sl_err}")
+                # CRITICAL: Rollback to savepoint to clear InFailedSqlTransaction
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT settle_idempotency_check")
+                except Exception:
+                    pass
+                try:
+                    cur.execute("RELEASE SAVEPOINT settle_idempotency_check")
+                except Exception:
+                    pass
 
             # ── Verify DB connectivity ────────────────────────────────────────
             try:
@@ -1428,7 +1471,7 @@ def _settle_block_rewards(
             touched_addrs: set = set()
             utxo_rows_written: int = 0  # track actual DB rows inserted
 
-            for tx in txs or []:
+            for _tx_settle_idx, tx in enumerate(txs or []):
                 tx_id       = tx.get("tx_id") or tx.get("tx_hash", "")
                 tx_type     = tx.get("tx_type", "").lower()
                 is_coinbase = tx_type in ("coinbase", "miner_reward", "treasury_reward")
@@ -1451,81 +1494,103 @@ def _settle_block_rewards(
                     _settle_log.warning(f"[SETTLE] h={height} tx missing tx_id — skipping")
                     continue
 
-                # Phase 1a: Mark input UTXOs spent (non-coinbase only)
-                if not is_coinbase:
-                    for inp in (tx.get("inputs") or []):
-                        prev_tx  = inp.get("prev_tx_hash", "")
-                        prev_idx = inp.get("prev_output_index", 0)
-                        if prev_tx and prev_idx != 0xFFFFFFFF:  # skip coinbase sentinel
-                            cur.execute(
-                                "UPDATE address_utxos SET spent = TRUE, spent_at_height = %s, "
-                                "spent_in_tx_hash = %s WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
-                                (height, tx_id, prev_tx, prev_idx),
+                # SAVEPOINT per-TX: one bad TX cannot kill the entire settlement
+                _sp_settle = f"sp_settle_{_tx_settle_idx}"
+                try:
+                    cur.execute(f"SAVEPOINT {_sp_settle}")
+
+                    # Phase 1a: Mark input UTXOs spent (non-coinbase only)
+                    if not is_coinbase:
+                        for inp in (tx.get("inputs") or []):
+                            prev_tx  = inp.get("prev_tx_hash", "")
+                            prev_idx = inp.get("prev_output_index", 0)
+                            if prev_tx and prev_idx != 0xFFFFFFFF:  # skip coinbase sentinel
+                                cur.execute(
+                                    "UPDATE address_utxos SET spent = TRUE, spent_at_height = %s, "
+                                    "spent_in_tx_hash = %s WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
+                                    (height, tx_id, prev_tx, prev_idx),
+                                )
+
+                    # Phase 1b: INSERT output UTXOs
+                    for idx, out in enumerate(outputs):
+                        addr        = out.get("address", "")
+                        amount_base = out.get("amount_base", 0)
+                        if not addr or not amount_base:
+                            _settle_log.warning(
+                                f"[SETTLE] h={height} tx={tx_id[:16]}… output[{idx}] missing addr or amount "
+                                f"(addr={addr!r} amount_base={amount_base}) — skipping UTXO"
                             )
-
-                # Phase 1b: INSERT output UTXOs
-                for idx, out in enumerate(outputs):
-                    addr        = out.get("address", "")
-                    amount_base = out.get("amount_base", 0)
-                    if not addr or not amount_base:
-                        _settle_log.warning(
-                            f"[SETTLE] h={height} tx={tx_id[:16]}… output[{idx}] missing addr or amount "
-                            f"(addr={addr!r} amount_base={amount_base}) — skipping UTXO"
+                            continue
+                        cur.execute(
+                            "INSERT INTO address_utxos "
+                            "(address, tx_hash, output_index, amount, spent, created_at_height) "
+                            "VALUES (%s, %s, %s, %s, FALSE, %s) "
+                            "ON CONFLICT (tx_hash, output_index) DO NOTHING",
+                            (addr, tx_id, idx, amount_base, height),
                         )
-                        continue
-                    cur.execute(
-                        "INSERT INTO address_utxos "
-                        "(address, tx_hash, output_index, amount, spent, created_at_height) "
-                        "VALUES (%s, %s, %s, %s, FALSE, %s) "
-                        "ON CONFLICT (tx_hash, output_index) DO NOTHING",
-                        (addr, tx_id, idx, amount_base, height),
-                    )
-                    _rows_inserted = getattr(cur, "rowcount", -1)
-                    if _rows_inserted == 0:
-                        # ON CONFLICT DO NOTHING fired — UTXO already exists, still counts
-                        _settle_log.debug(
-                            f"[SETTLE] h={height} UTXO already exists tx={tx_id[:16]}… out[{idx}] addr={addr[:16]}… — OK (idempotent)"
+                        _rows_inserted = getattr(cur, "rowcount", -1)
+                        if _rows_inserted == 0:
+                            # ON CONFLICT DO NOTHING fired — UTXO already exists, still counts
+                            _settle_log.debug(
+                                f"[SETTLE] h={height} UTXO already exists tx={tx_id[:16]}… out[{idx}] addr={addr[:16]}… — OK (idempotent)"
+                            )
+                            utxo_rows_written += 1  # existing UTXO counts as settled
+                        else:
+                            utxo_rows_written += 1
+                        touched_addrs.add(addr)
+
+                    if not is_coinbase and from_addr:
+                        touched_addrs.add(from_addr)
+
+                    # Phase 1c: address_transactions index
+                    if to_addr and tx_id:
+                        total_amt = (
+                            sum(o.get("amount_base", 0) for o in outputs if _norm_address(o.get("address", "")) == to_addr)
+                            or (outputs[0].get("amount_base", 0) if outputs else 0)
                         )
-                        utxo_rows_written += 1  # existing UTXO counts as settled
-                    else:
-                        utxo_rows_written += 1
-                    touched_addrs.add(addr)
+                        try:
+                            cur.execute("""
+                                INSERT INTO address_transactions
+                                    (address, tx_hash, direction, amount, block_height, created_at)
+                                VALUES (%s, %s, 'in', %s, %s, NOW())
+                                ON CONFLICT (address, tx_hash, direction) DO UPDATE
+                                    SET block_height = EXCLUDED.block_height,
+                                        amount       = EXCLUDED.amount
+                            """, (to_addr, tx_id, total_amt, height))
+                        except Exception as _atx_err:
+                            _settle_log.warning(f"[SETTLE] addr_tx insert (in) non-fatal: {_atx_err}")
 
-                if not is_coinbase and from_addr:
-                    touched_addrs.add(from_addr)
+                    if not is_coinbase and from_addr and tx_id:
+                        sent_amt = sum(o.get("amount_base", 0) for o in outputs)
+                        try:
+                            cur.execute("""
+                                INSERT INTO address_transactions
+                                    (address, tx_hash, direction, amount, block_height, created_at)
+                                VALUES (%s, %s, 'out', %s, %s, NOW())
+                                ON CONFLICT (address, tx_hash, direction) DO UPDATE
+                                    SET block_height = EXCLUDED.block_height,
+                                        amount       = EXCLUDED.amount
+                            """, (from_addr, tx_id, sent_amt, height))
+                        except Exception as _atx_err:
+                            _settle_log.warning(f"[SETTLE] addr_tx insert (out) non-fatal: {_atx_err}")
 
-                # Phase 1c: address_transactions index
-                # BUG-1/BUG-5 FIX: ON CONFLICT now matches UNIQUE(address, tx_hash, direction)
-                if to_addr and tx_id:
-                    total_amt = (
-                        sum(o.get("amount_base", 0) for o in outputs if _norm_address(o.get("address", "")) == to_addr)
-                        or (outputs[0].get("amount_base", 0) if outputs else 0)
+                    # Release SAVEPOINT on success — fires for ALL tx types (coinbase + transfer)
+                    try:
+                        cur.execute(f"RELEASE SAVEPOINT {_sp_settle}")
+                    except Exception:
+                        pass
+                except Exception as _tx_settle_err:
+                    _settle_log.warning(
+                        f"[SETTLE] h={height} TX {tx_id[:16] if tx_id else '?'}… settlement failed: {_tx_settle_err}"
                     )
                     try:
-                        cur.execute("""
-                            INSERT INTO address_transactions
-                                (address, tx_hash, direction, amount, block_height, created_at)
-                            VALUES (%s, %s, 'in', %s, %s, NOW())
-                            ON CONFLICT (address, tx_hash, direction) DO UPDATE
-                                SET block_height = EXCLUDED.block_height,
-                                    amount       = EXCLUDED.amount
-                        """, (to_addr, tx_id, total_amt, height))
-                    except Exception as _atx_err:
-                        _settle_log.warning(f"[SETTLE] addr_tx insert (in) non-fatal: {_atx_err}")
-
-                if not is_coinbase and from_addr and tx_id:
-                    sent_amt = sum(o.get("amount_base", 0) for o in outputs)
+                        cur.execute(f"ROLLBACK TO SAVEPOINT {_sp_settle}")
+                    except Exception:
+                        pass
                     try:
-                        cur.execute("""
-                            INSERT INTO address_transactions
-                                (address, tx_hash, direction, amount, block_height, created_at)
-                            VALUES (%s, %s, 'out', %s, %s, NOW())
-                            ON CONFLICT (address, tx_hash, direction) DO UPDATE
-                                SET block_height = EXCLUDED.block_height,
-                                    amount       = EXCLUDED.amount
-                        """, (from_addr, tx_id, sent_amt, height))
-                    except Exception as _atx_err:
-                        _settle_log.warning(f"[SETTLE] addr_tx insert (out) non-fatal: {_atx_err}")
+                        cur.execute(f"RELEASE SAVEPOINT {_sp_settle}")
+                    except Exception:
+                        pass
 
             # ── Phase 2: Recompute wallet_addresses.balance from SUM(unspent UTXOs) ──
             # BUG-3 FIX: additive delta re-apply on duplicate settle doubles balance.
@@ -1645,6 +1710,15 @@ def _settle_block_rewards(
         except Exception as _cache_err:
             _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {_cache_err}")
 
+    except RuntimeError as _rt_err:
+        if "RETRY_SETTLEMENT_AFTER_TABLE_CREATION" in str(_rt_err):
+            _settle_log.critical(f"[SETTLE] 🔄 Retrying h={height} after table creation")
+            _SETTLED_HEIGHTS.discard(height)
+            # Recursive retry (once) — tables now exist
+            _settle_block_rewards(height, block_hash, miner_address, txs, non_coinbase_txs)
+            return
+        _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED: {_rt_err}", exc_info=True)
+        raise
     except Exception as err:
         _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED: {err}", exc_info=True)
         raise  # caller must see failure
@@ -1706,7 +1780,7 @@ logger.info("[TX-WORKER] Dedicated transaction query thread started (port 6543)"
 #   primary   → Koyeb main       (ORACLE_ID=koyeb-primary)
 #   secondary → PythonAnywhere   (ORACLE_ID=pa-secondary)
 #   tertiary  → Koyeb account 2  (ORACLE_ID=koyeb-tertiary)
-# All instances share the same Supabase DB — they are peers, not replicas.
+# All instances share the same Neon DB — they are peers, not replicas.
 ORACLE_ID = os.getenv("ORACLE_ID", "koyeb-primary")
 ORACLE_ROLE = os.getenv("ORACLE_ROLE", "primary")
 # Peer oracle URLs — other oracle instances this one will cross-register with
@@ -2012,7 +2086,7 @@ def _http_post_json(url, headers, payload, timeout=30, retries=3):
                 import json as _j
 
                 return _j.loads(text)
-            last = RuntimeError(f"Supabase RPC HTTP {status}: {text}")
+            last = RuntimeError(f"Neon RPC HTTP {status}: {text}")
         except (OSError, TimeoutError) as e:
             last = e
             logger.warning(f"[SUPHTTP] attempt {attempt + 1}/{retries}: {e}")
@@ -2182,7 +2256,7 @@ def _suphttp_exec_write(sql):
 
 
 class _SupHTTPCursor:
-    """psycopg2-compatible cursor backed by Supabase PostgREST HTTPS RPC."""
+    """psycopg2-compatible cursor backed by Neon HTTP RPC."""
 
     def __init__(self):
         self._rows: List[tuple] = []
@@ -2269,7 +2343,7 @@ class _SupHTTPCursor:
 
 
 class _SupHTTPConn:
-    """psycopg2-compatible connection backed by Supabase PostgREST HTTPS RPC.
+    """psycopg2-compatible connection backed by Neon HTTP RPC.
     commit()/rollback() are no-ops — PostgREST RPC is auto-committed per call.
     .closed mirrors psycopg2 int semantics: 0=open, 1=closed, 2=lost."""
 
@@ -2394,7 +2468,7 @@ def _suphttp_test_connection() -> bool:
 
 class DatabasePool:
     """Thread-safe connection pool.  Transparently switches between:
-       • psycopg2 TCP pool (Koyeb / any server with direct Supabase TCP access)
+       • psycopg2 TCP pool (Koyeb / any server with direct Neon TCP access)
        • _SupHTTPPool  HTTP pool (PythonAnywhere where outbound TCP 5432/6543 is blocked)
     Controlled by USE_HTTP_DB=1 environment variable."""
 
@@ -2971,7 +3045,7 @@ def get_db_connection():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CHAIN QUERY FUNCTIONS (Supabase PostgreSQL only — source of truth)
+# CHAIN QUERY FUNCTIONS (Neon PostgreSQL only — source of truth)
 # Clients maintain their own SQLite mirrors, synced via P2P broadcasts
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3020,7 +3094,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
 
 
 def query_block_by_height(height: int) -> Optional[Dict[str, Any]]:
-    """Get block by height from Supabase PostgreSQL (authoritative source)."""
+    """Get block by height from Neon PostgreSQL (authoritative source)."""
     try:
         with get_db_cursor() as cur:
             cur.execute("SELECT * FROM blocks WHERE height = %s", (height,))
@@ -3112,7 +3186,7 @@ _SCHEMA_ENSURED_BLOCKS = False
 
 
 def _lazy_ensure_oracle_registry():
-    """Ensure oracle_registry table exists in Supabase."""
+    """Ensure oracle_registry table exists in Neon PostgreSQL."""
     global _SCHEMA_ENSURED_ORACLE_REGISTRY
     if _SCHEMA_ENSURED_ORACLE_REGISTRY:
         return
@@ -3159,7 +3233,7 @@ def _lazy_ensure_oracle_registry():
 
 
 def _lazy_ensure_chain_state():
-    """Ensure chain_state table exists in Supabase."""
+    """Ensure chain_state table exists in Neon PostgreSQL."""
     global _SCHEMA_ENSURED_CHAIN_STATE
     if _SCHEMA_ENSURED_CHAIN_STATE:
         return
@@ -3180,7 +3254,7 @@ def _lazy_ensure_chain_state():
 
 
 def _lazy_ensure_peer_registry():
-    """Ensure peer_registry and peer_devices tables exist in Supabase with correct schema."""
+    """Ensure peer_registry and peer_devices tables exist in Neon PostgreSQL with correct schema."""
     global _SCHEMA_ENSURED_PEER_REGISTRY
     if _SCHEMA_ENSURED_PEER_REGISTRY:
         return
