@@ -97,8 +97,6 @@ _RPC_INLINE_METHODS: frozenset = frozenset(
         # DO NOT add DB-querying methods here — they will block Gunicorn workers
         # and starve /health under Neon cold-start / connection pool exhaustion.
         "qtcl_getQuantumMetrics",
-        "qtcl_getLatestDMSnapshot",
-        "qtcl_getLatestDMSnapshots",
         "qtcl_getMyAddr",
         "qtcl_getDHTTable",
         "qtcl_listMeasurementSubscribers",
@@ -132,14 +130,11 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_submitOracleReg": 6.0,
     "qtcl_getOracleRegistry": 5.0,
     "qtcl_getOracleRecord": 4.0,
-    "qtcl_pushOracleDM": 4.0,
-    "qtcl_getPythPrice": 5.0,
     "qtcl_registerPeer": 4.0,
     "qtcl_receiveDHTTable": 3.0,
     "qtcl_registerMeasurementSubscriber": 3.0,
     "qtcl_unregisterMeasurementSubscriber": 3.0,
     "qtcl_getDeviceChain": 4.0,
-    "qtcl_getMerminTest": 20.0,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -1375,18 +1370,47 @@ def _settle_block_rewards(
     _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} miner={miner_address[:20]}… treasury={_treasury_addr[:16]}…")
     miner_fp    = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
     treasury_fp = hashlib.sha256(_treasury_addr.encode()).hexdigest()[:64]
+    _final_utxo_count: int = 0
+    _phase2_addrs: set = set()
 
     try:
         with get_db_cursor() as cur:
-            # ── BUG-2 FIX: DB-level idempotency guard (survives restarts) ────
+            # ── IDEMPOTENCY GUARD: only skip if settlement_log AND UTXOs both present ──
+            # BUG-FIX: old guard skipped re-settlement even when UTXOs were never written
+            # (HTTP auto-commit mode: settlement_log INSERT committed even if UTXO INSERTs
+            # returned 0 rows due to constraint conflict or silent PostgREST failure).
+            # NEW: verify miner actually has unspent UTXOs at this height before skipping.
             try:
                 cur.execute("SELECT height FROM settlement_log WHERE height = %s", (height,))
                 if cur.fetchone():
-                    _SETTLED_HEIGHTS.add(height)
-                    _settle_log.warning(f"[SETTLE] ⏭  h={height} in settlement_log — skipping duplicate")
-                    return
+                    # settlement_log says done — but verify UTXOs actually exist
+                    try:
+                        cur.execute(
+                            "SELECT COUNT(*) FROM address_utxos WHERE created_at_height = %s AND spent = FALSE",
+                            (height,),
+                        )
+                        _utxo_check = cur.fetchone()
+                        _utxo_at_height = int(_utxo_check[0]) if _utxo_check else 0
+                    except Exception:
+                        _utxo_at_height = -1  # unknown → re-run to be safe
+                    if _utxo_at_height > 0:
+                        _SETTLED_HEIGHTS.add(height)
+                        _settle_log.warning(
+                            f"[SETTLE] ⏭  h={height} already settled ({_utxo_at_height} UTXOs in DB) — skipping"
+                        )
+                        return
+                    else:
+                        # settlement_log present but UTXOs missing — delete poisoned log entry and re-run
+                        _settle_log.critical(
+                            f"[SETTLE] ⚠️  h={height} in settlement_log but {_utxo_at_height} UTXOs found — "
+                            f"deleting poisoned log entry and re-running settlement"
+                        )
+                        try:
+                            cur.execute("DELETE FROM settlement_log WHERE height = %s", (height,))
+                        except Exception as _del_err:
+                            _settle_log.warning(f"[SETTLE] settlement_log delete non-fatal: {_del_err}")
+                        _SETTLED_HEIGHTS.discard(height)
             except Exception as _sl_err:
-                # settlement_log table may not exist on first run — non-fatal
                 _settle_log.debug(f"[SETTLE] settlement_log check skipped: {_sl_err}")
 
             # ── Verify DB connectivity ────────────────────────────────────────
@@ -1402,6 +1426,7 @@ def _settle_block_rewards(
             # which ones to recompute in Phase 2. Values are not used for balance
             # update (BUG-3 fix — we SUM UTXOs instead).
             touched_addrs: set = set()
+            utxo_rows_written: int = 0  # track actual DB rows inserted
 
             for tx in txs or []:
                 tx_id       = tx.get("tx_id") or tx.get("tx_hash", "")
@@ -1455,6 +1480,15 @@ def _settle_block_rewards(
                         "ON CONFLICT (tx_hash, output_index) DO NOTHING",
                         (addr, tx_id, idx, amount_base, height),
                     )
+                    _rows_inserted = getattr(cur, "rowcount", -1)
+                    if _rows_inserted == 0:
+                        # ON CONFLICT DO NOTHING fired — UTXO already exists, still counts
+                        _settle_log.debug(
+                            f"[SETTLE] h={height} UTXO already exists tx={tx_id[:16]}… out[{idx}] addr={addr[:16]}… — OK (idempotent)"
+                        )
+                        utxo_rows_written += 1  # existing UTXO counts as settled
+                    else:
+                        utxo_rows_written += 1
                     touched_addrs.add(addr)
 
                 if not is_coinbase and from_addr:
@@ -1497,11 +1531,22 @@ def _settle_block_rewards(
             # BUG-3 FIX: additive delta re-apply on duplicate settle doubles balance.
             # Authoritative balance = SUM of unspent UTXO amounts in DB.
             # This is idempotent: running twice gives same result.
-            if touched_addrs:
+            #
+            # CRITICAL FIX: Always include miner_address and treasury even if touched_addrs
+            # is empty (can happen if all outputs were DO NOTHING / already existed).
+            # touched_addrs may miss addresses if UTXO inserts were all idempotent no-ops.
+            _phase2_addrs = set(touched_addrs)
+            if miner_address:
+                _phase2_addrs.add(miner_address)
+            if _treasury_addr:
+                _phase2_addrs.add(_treasury_addr)
+
+            if _phase2_addrs:
                 _settle_log.critical(
-                    f"[SETTLE] Phase 2: recomputing balances for {len(touched_addrs)} addresses"
+                    f"[SETTLE] Phase 2: recomputing balances for {len(_phase2_addrs)} addresses "
+                    f"(utxo_rows_written={utxo_rows_written})"
                 )
-            for addr in touched_addrs:
+            for addr in _phase2_addrs:
                 _fp = hashlib.sha256(addr.encode()).hexdigest()[:64]
                 try:
                     cur.execute(
@@ -1553,21 +1598,41 @@ def _settle_block_rewards(
             except Exception as _cs_err:
                 _settle_log.warning(f"[SETTLE] chain_state update non-fatal: {_cs_err}")
 
-            # ── BUG-2 FIX: Record settlement completion in settlement_log ─────
+            # ── BUG-FIX: Record settlement completion in settlement_log ─────────
+            # ONLY write settlement_log if UTXOs actually exist in DB for this height.
+            # This prevents the "poisoned log" bug: HTTP auto-commit could write settlement_log
+            # even when UTXO INSERTs returned 0 rows (constraint DO NOTHING or PostgREST error).
             try:
                 cur.execute(
-                    "INSERT INTO settlement_log (height, block_hash, tx_count, addresses_updated) "
-                    "VALUES (%s, %s, %s, %s) ON CONFLICT (height) DO NOTHING",
-                    (height, block_hash, len(txs or []), len(touched_addrs)),
+                    "SELECT COUNT(*) FROM address_utxos WHERE created_at_height = %s AND spent = FALSE",
+                    (height,),
                 )
-            except Exception as _log_err:
-                _settle_log.warning(f"[SETTLE] settlement_log write non-fatal: {_log_err}")
+                _final_utxo_count = int((cur.fetchone() or [0])[0])
+            except Exception as _vc_err:
+                _final_utxo_count = utxo_rows_written  # fallback to tracked count
+                _settle_log.debug(f"[SETTLE] UTXO verification query failed: {_vc_err}")
 
-        # Mark settled in-process after successful DB commit
-        _SETTLED_HEIGHTS.add(height)
+            if _final_utxo_count > 0:
+                try:
+                    cur.execute(
+                        "INSERT INTO settlement_log (height, block_hash, tx_count, addresses_updated) "
+                        "VALUES (%s, %s, %s, %s) ON CONFLICT (height) DO NOTHING",
+                        (height, block_hash, len(txs or []), len(_phase2_addrs)),
+                    )
+                except Exception as _log_err:
+                    _settle_log.warning(f"[SETTLE] settlement_log write non-fatal: {_log_err}")
+            else:
+                _settle_log.critical(
+                    f"[SETTLE] ⚠️  h={height} NOT writing settlement_log — "
+                    f"final_utxo_count={_final_utxo_count} (would poison idempotency guard)"
+                )
+
+        # Mark settled in-process only if UTXOs confirmed in DB
+        if _final_utxo_count > 0:
+            _SETTLED_HEIGHTS.add(height)
         _settle_log.warning(
-            f"[SETTLE] ✅ h={height}: {len(touched_addrs)} addresses recomputed, "
-            f"txs={len(txs or [])}, block_hash={block_hash[:16]}…"
+            f"[SETTLE] ✅ h={height}: {len(_phase2_addrs)} addresses recomputed, "
+            f"txs={len(txs or [])}, utxos_at_height={_final_utxo_count}, block_hash={block_hash[:16]}…"
         )
 
         # Cache block for getBlockRange queries
@@ -2104,8 +2169,14 @@ def _suphttp_exec_write(sql):
     if isinstance(raw, list) and raw:
         raw = raw[0]
     if isinstance(raw, dict):
+        # PostgREST error: {"code":"...", "message":"...", "details":...}
+        if "message" in raw and "code" in raw and "exec_sql_write" not in raw:
+            raise RuntimeError(f"PostgREST exec_sql_write error: {raw.get('message')} (code={raw.get('code')})")
         inner = raw.get("exec_sql_write") or raw
         if isinstance(inner, dict):
+            # Propagate DB-level errors returned inside the RPC envelope
+            if "message" in inner and "code" in inner:
+                raise RuntimeError(f"exec_sql_write DB error: {inner.get('message')} (code={inner.get('code')})")
             return int(inner.get("affected_rows", 0))
     return 0
 
@@ -7202,159 +7273,6 @@ def _broadcast_block_to_peers(compact_block: dict) -> int:
         logger.warning(f"[P2P-BROADCAST] Failed: {e}")
         return 0
 
-
-def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
-    """
-    qtcl_pushOracleDM — accept a fused tripartite DM frame from a client oracle node.
-
-    Params (dict):
-        density_tensor_hex  str   — 262144 hex chars: 32³ float32 volumetric (REQUIRED)
-        fidelity            float — W-state fidelity of the pushed DM  (0..1)
-        oracle_type         str   — e.g. 'tripartite_client'
-        node_ip             str   — caller self-reported WAN IP (advisory)
-        oracle_addr         str   — oracle signing address (64-char hex)
-
-    Server action:
-        1. Validate 32³ tensor hex (length, finite values).
-        2. Upsert into _CLIENT_DM_POOL keyed by oracle_addr.
-        3. Evict oldest entries if pool > _CLIENT_POOL_MAX.
-        4. Re-average pool -> _client_consensus_dm_re/_im/_fid.
-        5. Return {accepted, pool_size, client_consensus_fidelity}.
-    """
-    global _client_consensus_dm_re, _client_consensus_dm_im
-    global _client_consensus_fid, _client_pool_count
-
-    try:
-        if not isinstance(params, dict):
-            return _rpc_error(-32602, "params must be a dict", rpc_id)
-
-        tensor_hex = params.get("density_tensor_hex", "")
-        fidelity = float(params.get("fidelity", 0.0))
-        oracle_addr = str(params.get("oracle_addr", "") or f"anon_{int(time.time())}")
-        node_ip = str(params.get("node_ip", ""))
-        oracle_type = str(params.get("oracle_type", "tripartite_client"))
-
-        # -- 1. Validate 32³ tensor hex ----------------------------------------
-        # 32×32×32 float32 = 32768 floats × 4 bytes = 131072 bytes = 262144 hex
-        _EXPECTED_TENSOR_HEX = 32 * 32 * 32 * 4 * 2  # 262144
-        if not tensor_hex or len(tensor_hex) != _EXPECTED_TENSOR_HEX:
-            return _rpc_error(
-                -32602,
-                f"density_tensor_hex must be {_EXPECTED_TENSOR_HEX} hex chars "
-                f"(32³ float32); got {len(tensor_hex)}",
-                rpc_id,
-            )
-        try:
-            tbytes = bytes.fromhex(tensor_hex)
-        except ValueError as _ve:
-            return _rpc_error(
-                -32602, f"density_tensor_hex not valid hex: {_ve}", rpc_id
-            )
-
-        # Sanity: tensor values must be finite, non-negative
-        t_arr = np.frombuffer(tbytes, dtype=np.float32).reshape(32, 32, 32)
-        if not np.all(np.isfinite(t_arr)) or float(t_arr.min()) < -1e-4:
-            return _rpc_error(
-                -32602, "density_tensor_hex contains invalid values", rpc_id
-            )
-        t_max = float(t_arr.max())
-        if t_max < 1e-12:
-            return _rpc_error(-32602, "density_tensor_hex is all-zero", rpc_id)
-
-        tensor_valid = True
-
-        # -- 2 & 3. Upsert into pool, evict oldest if needed ------------------
-        with _CLIENT_DM_POOL_LOCK:
-            _CLIENT_DM_POOL[oracle_addr] = {
-                "tensor_hex": tensor_hex,
-                "fidelity": max(0.0, min(1.0, fidelity)),
-                "ts": time.time(),
-                "node_ip": node_ip,
-                "oracle_type": oracle_type,
-                "tensor_dim": 32,
-            }
-            if len(_CLIENT_DM_POOL) > _CLIENT_POOL_MAX:
-                _oldest = min(_CLIENT_DM_POOL, key=lambda k: _CLIENT_DM_POOL[k]["ts"])
-                del _CLIENT_DM_POOL[_oldest]
-
-            # -- 4. Compute pool fidelity average ----------------------------
-            fresh = [
-                v
-                for v in _CLIENT_DM_POOL.values()
-                if (time.time() - v["ts"]) < _CLIENT_DM_STALE_S
-            ]
-            _pool_size = len(fresh)
-            _cons_fid = (
-                sum(v["fidelity"] for v in fresh) / _pool_size if _pool_size else 0.0
-            )
-            _client_consensus_fid = _cons_fid
-            _client_pool_count = _pool_size
-
-        # -- 5. Fuse client consensus with server 5-oracle snapshot -----------
-        try:
-            with _snapshot_lock:
-                _srv_snap = dict(_latest_snapshot) if _latest_snapshot else {}
-        except Exception:
-            _srv_snap = {}
-
-        _srv_fid = float(_srv_snap.get("w_state_fidelity") or 0.0)
-        _srv_tensor_hex = _srv_snap.get("density_tensor_hex", "")
-
-        try:
-            _w_client = min(_cons_fid * 0.35, 0.35)
-            _w_server = 1.0 - _w_client
-
-            if _srv_tensor_hex and len(_srv_tensor_hex) == _EXPECTED_TENSOR_HEX:
-                # Weighted average of server + client 32³ tensors
-                _st = np.frombuffer(bytes.fromhex(_srv_tensor_hex), dtype=np.float32)
-                _ct = np.frombuffer(bytes.fromhex(tensor_hex), dtype=np.float32)
-                fused_t = (_w_server * _st + _w_client * _ct).astype(np.float32)
-                tm = float(fused_t.max())
-                if tm > 1e-12:
-                    fused_t /= tm
-                fused_tensor_hex = fused_t.tobytes().hex()
-                fused_fid = _w_server * _srv_fid + _w_client * _cons_fid
-            else:
-                fused_tensor_hex = tensor_hex
-                fused_fid = fidelity
-
-            composite = {
-                **_srv_snap,
-                "density_tensor_hex": fused_tensor_hex,
-                "tensor_dim": 32,
-                "w_state_fidelity": fused_fid,
-                "fidelity": fused_fid,
-                "client_fused_fidelity": _cons_fid,
-                "client_oracle_count": _pool_size,
-                "pq0_oracle_fidelity": params.get("pq0_oracle_fidelity", fidelity),
-                "pq0_IV_fidelity": params.get("pq0_IV_fidelity", fidelity),
-                "pq0_V_fidelity": params.get("pq0_V_fidelity", fidelity),
-                "source": "server+client_tripartite",
-                "ready": True,
-                "timestamp_ns": int(time.time() * 1e9),
-            }
-            _broadcast_snapshot_to_database(composite)
-        except Exception as _fe:
-            logger.debug(f"[PUSH-TENSOR] fuse error: {_fe}")
-
-        logger.debug(
-            f"[PUSH-DM] ok oracle_addr={oracle_addr[:16]} fid={fidelity:.4f} "
-            f"pool={_pool_size} cons_fid={_cons_fid:.4f}"
-        )
-        return _rpc_ok(
-            {
-                "accepted": True,
-                "pool_size": _pool_size,
-                "client_consensus_fidelity": _cons_fid,
-            },
-            rpc_id,
-        )
-
-    except Exception as e:
-        logger.exception(f"[RPC] qtcl_pushOracleDM: {e}")
-        return _rpc_error(-32603, f"pushOracleDM failed: {e}", rpc_id)
-
-
 def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitTransaction — validate and accept a transaction into the mempool."""
     try:
@@ -9084,9 +9002,6 @@ import threading as _threading_module
 # ════════════════════════════════════════════════════════════════════════════════
 _latest_unified_snapshot = {}
 _snapshot_cache_lock = _threading_module.RLock()
-
-# Removed: old SSE multiplexer infrastructure. SSE handled by external sse_server.py.
-# Removed: old 64³ snapshot generation. Clients fetch unified 16³ snapshots via RPC.
 
 # SSE snapshot endpoint removed — now handled by external sse_server.py
 # Main server pushes snapshots to SSE service via _push_to_sse_service()
