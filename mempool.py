@@ -1824,9 +1824,9 @@ class Mempool:
             with _db.cursor() as cur:
                 cur.execute("""
                     INSERT INTO transactions
-                        (tx_hash, from_address, to_address, amount, nonce,
+                        (tx_hash, from_address, to_address, amount, fee_base, nonce,
                          tx_type, status, quantum_state_hash, commitment_hash, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
                     ON CONFLICT (tx_hash) DO UPDATE
                         SET status     = CASE WHEN transactions.status = 'confirmed'
                                               THEN 'confirmed' ELSE 'pending' END,
@@ -1837,6 +1837,7 @@ class Mempool:
                     tx.from_address,
                     tx.to_address,
                     tx.amount_base,
+                    tx.fee_base,
                     tx.nonce,
                     tx.tx_type,
                     tx.w_entropy_hash,

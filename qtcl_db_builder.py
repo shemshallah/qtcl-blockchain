@@ -1602,6 +1602,7 @@ CREATE TABLE transactions (
     from_address VARCHAR(255) NOT NULL,
     to_address VARCHAR(255) NOT NULL,
     amount NUMERIC(30, 0) NOT NULL,
+    fee_base NUMERIC(30, 0) DEFAULT 0,
     nonce BIGINT,
     height BIGINT,
     block_hash VARCHAR(255),
@@ -3614,27 +3615,34 @@ def get_comprehensive_trigger_functions_sql() -> Dict[str, str]:
     RETURNS TRIGGER AS $$
     DECLARE
         _sender_balance NUMERIC(30,0);
-        _total_cost NUMERIC(30,0);
+        _fee_base       NUMERIC(30,0);
+        _total_cost     NUMERIC(30,0);
     BEGIN
         -- Skip validation for coinbase transactions
         IF NEW.tx_type IN ('coinbase', 'miner_reward', 'treasury_reward') THEN
             RETURN NEW;
         END IF;
-        
-        -- Get sender balance
+
+        -- Skip validation on block-finalization path (confirmed inserts bypass balance check)
+        IF NEW.status = 'confirmed' THEN
+            RETURN NEW;
+        END IF;
+
+        -- Get sender balance (stored in base units)
         SELECT COALESCE(balance, 0) INTO _sender_balance
         FROM wallet_addresses
         WHERE address = NEW.from_address;
-        
-        -- Calculate total cost (amount + fee)
-        _total_cost := NEW.amount + COALESCE(NEW.fee, 0);
-        
-        -- Validate sufficient balance
+
+        -- fee_base column stores fee in base units; amount is also base units
+        _fee_base   := COALESCE(NEW.fee_base, 0);
+        _total_cost := NEW.amount + _fee_base;
+
+        -- Validate sufficient balance (both in base units)
         IF _sender_balance < _total_cost THEN
-            RAISE EXCEPTION 'Insufficient balance: sender % has % but needs %',
+            RAISE EXCEPTION 'Insufficient balance: sender % has % base but needs %',
                 NEW.from_address, _sender_balance, _total_cost;
         END IF;
-        
+
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
