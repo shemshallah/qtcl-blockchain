@@ -1353,6 +1353,9 @@ def _settle_block_rewards(
     _settle_log = logging.getLogger("SETTLE")
     global _SETTLED_HEIGHTS
 
+    # Ensure chain_state table exists before we try to write it
+    _lazy_ensure_chain_state()
+
     # Normalize the miner address (strip any legacy prefix, ensure raw hex)
     miner_address = _norm_address(miner_address)
 
@@ -1647,8 +1650,9 @@ def _settle_block_rewards(
                 except Exception as _bal_err:
                     _settle_log.error(f"[SETTLE] balance recompute for {addr[:20]}… failed: {_bal_err}")
 
-            # ── Update chain_state ────────────────────────────────────────────
+            # ── Update chain_state (SAVEPOINT-isolated so failure never poisons tx) ──
             try:
+                cur.execute("SAVEPOINT sp_chain_state")
                 cur.execute(
                     "INSERT INTO chain_state "
                     "(state_id, chain_height, head_block_hash, latest_coherence, updated_at) "
@@ -1660,7 +1664,13 @@ def _settle_block_rewards(
                     "updated_at = NOW()",
                     (height, block_hash),
                 )
+                cur.execute("RELEASE SAVEPOINT sp_chain_state")
             except Exception as _cs_err:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_chain_state")
+                    cur.execute("RELEASE SAVEPOINT sp_chain_state")
+                except Exception:
+                    pass
                 _settle_log.warning(f"[SETTLE] chain_state update non-fatal: {_cs_err}")
 
             # ── BUG-FIX: Record settlement completion in settlement_log ─────────
