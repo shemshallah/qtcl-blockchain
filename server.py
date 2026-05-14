@@ -6353,7 +6353,19 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             "UPDATE blocks SET tx_count = (SELECT COUNT(*) FROM transactions WHERE height = %s) WHERE height = %s",
                             (height, height)
                         )
-                        logger.info(f"[RPC-submitBlock] ✅ Block tx_count synced from transactions table for h={height}")
+                        # Diagnostic: verify what actually persisted
+                        cur.execute(
+                            "SELECT tx_hash, tx_type, amount, to_address FROM transactions WHERE height = %s ORDER BY transaction_index",
+                            (height,)
+                        )
+                        _persisted_rows = cur.fetchall()
+                        _persisted_types = [r[1] for r in _persisted_rows]
+                        logger.critical(
+                            f"[RPC-submitBlock] 📊 TX PERSISTENCE AUDIT h={height}: "
+                            f"{len(_persisted_rows)} rows in DB — types={_persisted_types} "
+                            f"(submitted {len(txs or [])} txs: "
+                            f"{len(_coinbase_txs)} coinbase + {len(_non_coinbase_txs)} transfers)"
+                        )
                     except Exception as _tc_err:
                         logger.warning(f"[RPC-submitBlock] tx_count sync warning: {_tc_err}")
 
@@ -7132,7 +7144,8 @@ def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
                     'to_address': _to,    'to_addr': _to,
                     'outputs': _outputs,
                 })
-        logger.debug(f"[RPC-METHOD] qtcl_getMempool: returning {len(serialized)} txs")
+        logger.info(f"[RPC-METHOD] qtcl_getMempool: returning {len(serialized)} txs"
+                    + (f" — types={[t.get('tx_type','?') for t in serialized[:5]]}" if serialized else ""))
         return _rpc_ok(serialized, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getMempool: {e}")
@@ -7746,9 +7759,12 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             result_code, message, accepted_tx = get_mempool().accept(tx_raw)
 
             if accepted_tx:
-                logger.info(
-                    f"[SIGN-TX] ✅ TX submitted to mempool: {tx_hash[:16]}… "
-                    f"from={from_addr[:16]}… to={to_addr[:16]}… amount={amount_qtcl} QTCL"
+                # Verify tx is actually in the mempool
+                _mp_size = get_mempool().size() if hasattr(get_mempool(), 'size') else '?'
+                logger.critical(
+                    f"[SIGN-TX] ✅ TX IN MEMPOOL: {tx_hash[:16]}… "
+                    f"from={from_addr[:16]}… to={to_addr[:16]}… amount={amount_qtcl} QTCL "
+                    f"mempool_size={_mp_size}"
                 )
                 return _rpc_ok(
                     {
