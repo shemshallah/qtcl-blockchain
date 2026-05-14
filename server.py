@@ -3900,97 +3900,137 @@ def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBalance — address QTCL balance via direct DB query."""
+    """qtcl_getBalance — address QTCL balance via direct DB query.
+
+    FIX-6: double fetchone() crash removed — single call with row assignment.
+    FIX-7: fallback SUM(unspent UTXOs) if wallet_addresses row missing or stale.
+    """
     try:
         if not isinstance(params, (list, dict)):
             return _rpc_error(-32602, "params must be list or object", rpc_id)
         address = (
             (params[0] if isinstance(params, list) else params.get("address", ""))
-            if params
-            else ""
+            if params else ""
         )
         if not address:
             return _rpc_error(-32602, "address required", rpc_id)
 
-        _diagnostic = {
-            "address_queried": address[:24] + "…" if len(address) > 24 else address
-        }
+        _diagnostic = {"address_queried": address[:24] + "…" if len(address) > 24 else address}
+        wallet = None
 
         try:
             with get_db_cursor() as cur:
-                # Check if wallet_addresses table exists
-                try:
-                    cur.execute("""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.tables 
-                            WHERE table_name = 'wallet_addresses'
-                        )
-                    """)
-                    _table_exists = cur.fetchone()[0] if cur.fetchone() else False
-                    _diagnostic["table_exists"] = bool(_table_exists)
-                except Exception as _te:
-                    _diagnostic["table_check_error"] = str(_te)
+                # FIX-6: single fetchone() call — assign first, then check
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'wallet_addresses'
+                    )
+                """)
+                _exists_row = cur.fetchone()
+                _table_exists = bool(_exists_row[0]) if _exists_row else False
+                _diagnostic["table_exists"] = _table_exists
 
-                # Query balance
-                cur.execute(
-                    "SELECT balance, transaction_count, address_type FROM wallet_addresses WHERE address = %s",
-                    (address,),
-                )
-                row = cur.fetchone()
-                if row:
-                    wallet = {
-                        "address": address,
-                        "balance": row[0],
-                        "tx_count": row[1],
-                        "address_type": row[2] if len(row) > 2 else "unknown",
-                    }
-                    _diagnostic["found_in_db"] = True
-                    _diagnostic["raw_balance_base_units"] = int(row[0]) if row[0] else 0
-                else:
-                    wallet = None
-                    _diagnostic["found_in_db"] = False
-                    # Check how many total wallet addresses exist
+                if _table_exists:
+                    cur.execute(
+                        "SELECT balance, transaction_count, address_type "
+                        "FROM wallet_addresses WHERE address = %s",
+                        (address,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        wallet = {
+                            "address": address,
+                            "balance": int(row[0]) if row[0] is not None else 0,
+                            "tx_count": int(row[1]) if row[1] is not None else 0,
+                            "address_type": row[2] if len(row) > 2 else "standard",
+                            "source": "wallet_addresses",
+                        }
+                        _diagnostic["found_in_db"] = True
+                        _diagnostic["raw_balance_base_units"] = wallet["balance"]
+                    else:
+                        _diagnostic["found_in_db"] = False
+                        try:
+                            cur.execute("SELECT COUNT(*) FROM wallet_addresses")
+                            _cr = cur.fetchone()
+                            _diagnostic["total_wallets_in_db"] = int(_cr[0]) if _cr else 0
+                        except Exception:
+                            pass
+
+                # FIX-7: authoritative fallback — compute from unspent UTXOs directly
+                # This fires when wallet_addresses row is missing (e.g. first query after
+                # settlement, or settlement wrote UTXOs but wallet row insert failed)
+                if wallet is None or wallet["balance"] == 0:
                     try:
-                        cur.execute("SELECT COUNT(*) FROM wallet_addresses")
-                        _total_wallets = cur.fetchone()[0]
-                        _diagnostic["total_wallets_in_db"] = (
-                            int(_total_wallets) if _total_wallets else 0
+                        cur.execute(
+                            "SELECT COALESCE(SUM(amount), 0), COUNT(*) "
+                            "FROM address_utxos WHERE address = %s AND spent = FALSE",
+                            (address,),
                         )
-                    except Exception:
-                        pass
+                        _utxo_row = cur.fetchone()
+                        _utxo_balance = int(_utxo_row[0]) if _utxo_row and _utxo_row[0] else 0
+                        _utxo_count   = int(_utxo_row[1]) if _utxo_row and _utxo_row[1] else 0
+                        _diagnostic["utxo_balance_base_units"] = _utxo_balance
+                        _diagnostic["utxo_count_unspent"] = _utxo_count
+                        if _utxo_balance > 0:
+                            # Backfill wallet_addresses from UTXO truth
+                            _fp = __import__('hashlib').sha256(address.encode()).hexdigest()[:64]
+                            cur.execute("""
+                                INSERT INTO wallet_addresses
+                                    (address, wallet_fingerprint, public_key, balance,
+                                     transaction_count, address_type, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, 'standard', NOW())
+                                ON CONFLICT (address) DO UPDATE SET
+                                    balance    = EXCLUDED.balance,
+                                    updated_at = NOW()
+                            """, (address, _fp, _fp, _utxo_balance, max(1, _utxo_count)))
+                            wallet = {
+                                "address": address,
+                                "balance": _utxo_balance,
+                                "tx_count": _utxo_count,
+                                "address_type": "standard",
+                                "source": "utxo_sum_backfill",
+                            }
+                            _diagnostic["balance_source"] = "utxo_sum_backfill"
+                            logger.warning(
+                                f"[RPC-getBalance] ⚡ Backfilled {address[:16]}… "
+                                f"balance={_utxo_balance/100:.4f} QTCL from {_utxo_count} UTXOs"
+                            )
+                    except Exception as _utxo_err:
+                        _diagnostic["utxo_fallback_error"] = str(_utxo_err)
+                        logger.debug(f"[RPC-getBalance] UTXO fallback: {_utxo_err}")
+
         except Exception as _wqe:
-            logger.debug(f"[RPC] query_wallet_info DB error: {_wqe}")
+            logger.debug(f"[RPC] getBalance DB error: {_wqe}")
             _diagnostic["db_error"] = str(_wqe)
             wallet = None
 
         if wallet is None:
-            # Address not yet in DB — return 0 balance with diagnostic info
             result = {
-                "address": address,
-                "balance": 0.0,
-                "symbol": "QTCL",
+                "address": address, "balance": 0.0, "symbol": "QTCL",
                 "diagnostic": _diagnostic,
-                "note": "Address not found in wallet_addresses table — no balance recorded",
+                "note": "Address not found in wallet_addresses or address_utxos",
             }
         else:
-            raw_balance = int(wallet.get("balance") or 0)
+            raw_balance = wallet["balance"]
             result = {
                 "address": address,
                 "balance": raw_balance / 100.0,
                 "symbol": "QTCL",
                 "raw_balance_base_units": raw_balance,
                 "transaction_count": wallet.get("tx_count", 0),
-                "address_type": wallet.get("address_type", "unknown"),
+                "address_type": wallet.get("address_type", "standard"),
+                "balance_source": wallet.get("source", "wallet_addresses"),
                 "diagnostic": _diagnostic,
             }
-        logger.debug(
-            f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}…, balance={result['balance']}, found={_diagnostic.get('found_in_db', False)}"
+        logger.info(
+            f"[RPC-METHOD] qtcl_getBalance: address={address[:16]}… "
+            f"balance={result['balance']} source={result.get('balance_source','?')}"
         )
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
-
 
 def _rpc_getTransactionVolume(params: Any, rpc_id: Any) -> dict:
     """qtcl_getTransactionVolume — total QTCL volume settled on-chain.
