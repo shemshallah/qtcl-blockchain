@@ -995,7 +995,7 @@ threading.Thread(
 
 
 def _ensure_wallet_addresses_table() -> None:
-    """Ensure wallet_addresses, address_utxos, and transactions tables exist at startup."""
+    """Ensure wallet_addresses, address_utxos, address_transactions tables exist."""
     try:
         with get_db_cursor() as cur:
             cur.execute("""
@@ -1052,22 +1052,89 @@ def _ensure_wallet_addresses_table() -> None:
                     finalized_at TIMESTAMPTZ
                 )
             """)
+            # address_transactions — BUG-1/BUG-5 FIX: include direction in unique constraint
+            # so ON CONFLICT (address, tx_hash, direction) is valid for both 'in' and 'out' rows
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS address_transactions (
+                    id BIGSERIAL PRIMARY KEY,
+                    address VARCHAR(255) NOT NULL,
+                    tx_hash VARCHAR(255) NOT NULL,
+                    direction VARCHAR(10) NOT NULL DEFAULT 'in',
+                    from_address VARCHAR(255),
+                    to_address VARCHAR(255),
+                    amount NUMERIC(30, 0),
+                    block_height BIGINT,
+                    block_hash VARCHAR(255),
+                    block_timestamp BIGINT,
+                    tx_status VARCHAR(50) DEFAULT 'pending',
+                    notes TEXT,
+                    label VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    UNIQUE(address, tx_hash, direction)
+                )
+            """)
+            # settlement_log — BUG-2 FIX: idempotency table so re-submitted blocks
+            # do not double-credit balances
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS settlement_log (
+                    height BIGINT PRIMARY KEY,
+                    block_hash VARCHAR(255) NOT NULL,
+                    settled_at TIMESTAMPTZ DEFAULT NOW(),
+                    tx_count INTEGER DEFAULT 0,
+                    addresses_updated INTEGER DEFAULT 0
+                )
+            """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_address ON address_utxos(address)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_unspent ON address_utxos(address, spent) WHERE spent = FALSE")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_tx ON address_utxos(tx_hash, output_index)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_utxo_height ON address_utxos(created_at_height)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_tx_height ON transactions(height)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_tx_hash ON transactions(tx_hash)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(tx_type)")
-        logger.info("[STARTUP] ✅ wallet_addresses + address_utxos + transactions tables ready")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_addrtx_addr ON address_transactions(address)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_addrtx_height ON address_transactions(block_height)")
+            # MIGRATION: if address_transactions already exists with old UNIQUE(address, tx_hash)
+            # the CREATE TABLE IF NOT EXISTS will no-op; apply the constraint migration here
+            try:
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        -- Drop old 2-column constraint if present (was preventing direction split)
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.table_constraints
+                            WHERE table_name = 'address_transactions'
+                              AND constraint_type = 'UNIQUE'
+                              AND constraint_name NOT LIKE '%direction%'
+                        ) THEN
+                            -- Find and drop any unique constraint on (address, tx_hash) only
+                            EXECUTE (
+                                SELECT 'ALTER TABLE address_transactions DROP CONSTRAINT ' || conname
+                                FROM pg_constraint c
+                                JOIN pg_class t ON c.conrelid = t.oid
+                                WHERE t.relname = 'address_transactions'
+                                  AND c.contype = 'u'
+                                  AND array_length(c.conkey, 1) = 2
+                                LIMIT 1
+                            );
+                        END IF;
+                        -- Add 3-column constraint if missing
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint c
+                            JOIN pg_class t ON c.conrelid = t.oid
+                            WHERE t.relname = 'address_transactions'
+                              AND c.contype = 'u'
+                              AND array_length(c.conkey, 1) = 3
+                        ) THEN
+                            ALTER TABLE address_transactions
+                                ADD CONSTRAINT addr_tx_direction_unique UNIQUE (address, tx_hash, direction);
+                        END IF;
+                    END$$;
+                """)
+            except Exception as _mig_err:
+                logger.warning(f"[STARTUP] address_transactions migration non-fatal: {_mig_err}")
+        logger.info("[STARTUP] ✅ wallet_addresses + address_utxos + address_transactions + settlement_log tables ready")
     except Exception as e:
         logger.warning(f"[STARTUP] ⚠️  wallet_addresses DDL: {e}")
-
-
-threading.Thread(
-    target=_ensure_wallet_addresses_table,
-    daemon=True,
-    name="WalletTableInit",
-).start()
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & CONSTANTS
@@ -1240,45 +1307,71 @@ _tx_worker_daemon.start()
 # ═════════════════════════════════════════════════════════════════════════════════
 
 
+
+# In-process idempotency cache — prevents double-settle within same process lifetime
+# (DB settlement_log handles cross-restart idempotency)
+_SETTLED_HEIGHTS: set = set()
+
 def _settle_block_rewards(
     height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list
 ) -> None:
-    """🔗 UTXO SETTLEMENT — Creates UTXOs from tx outputs, updates wallet digests.
+    """UTXO SETTLEMENT — Creates UTXOs from tx outputs, updates wallet balances.
 
     UTXO Model:
       - Coinbase TXs: INSERT UTXOs from each output (amount from output.amount_base)
       - Regular TXs:  Mark input UTXOs spent, INSERT output UTXOs
-      - wallet_addresses: Digest of summed unspent UTXOs (for fast balance queries)
+      - wallet_addresses: Recomputed from SUM(unspent UTXOs) — NOT additive delta
+
+    Idempotency:
+      - In-process: _SETTLED_HEIGHTS set — O(1) skip for same-process duplicates
+      - Cross-restart: settlement_log DB table — check before processing
 
     Deferred Reward Pattern (matching qtcl_miner):
       - Block 1 includes genesis miner reward (720 extra)
       - Treasury coinbase pays PREVIOUS block's treasury reward
     """
     _settle_log = logging.getLogger("SETTLE")
+    global _SETTLED_HEIGHTS
 
+    # ── BUG-2 FIX: in-process idempotency guard ──────────────────────────────
+    if height in _SETTLED_HEIGHTS:
+        _settle_log.warning(f"[SETTLE] ⏭  h={height} already settled in this process — skipping")
+        return
+
+    if not miner_address or len(str(miner_address).strip()) < 10:
+        _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address!r}")
+        return
+
+    # ── BUG-4 FIX: treasury missing is WARNING not hard-reject ───────────────
     try:
-        _treasury_addr = (
-            TessellationRewardSchedule.TREASURY_ADDRESS
-            if TessellationRewardSchedule else ""
-        )
+        _treasury_addr = (TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else "")
     except Exception:
         _treasury_addr = ""
+    if not _treasury_addr or len(str(_treasury_addr).strip()) < 10:
+        _treasury_addr = os.environ.get(
+            "TREASURY_ADDRESS",
+            "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b",
+        )
+        _settle_log.warning(f"[SETTLE] ⚠️  treasury addr from env fallback: {_treasury_addr[:16]}…")
+
+    _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} miner={miner_address[:20]}… treasury={_treasury_addr[:16]}…")
+    miner_fp    = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
+    treasury_fp = hashlib.sha256(_treasury_addr.encode()).hexdigest()[:64]
 
     try:
-        _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} SETTLEMENT EXECUTING NOW")
-        _settle_log.critical(f"   miner={miner_address}  treasury={_treasury_addr}")
-
-        if not miner_address or len(str(miner_address).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address}")
-            return
-        if not _treasury_addr or len(str(_treasury_addr).strip()) < 10:
-            _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid treasury: {_treasury_addr}")
-            return
-
-        miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
-        treasury_fp = hashlib.sha256(_treasury_addr.encode()).hexdigest()[:64]
-
         with get_db_cursor() as cur:
+            # ── BUG-2 FIX: DB-level idempotency guard (survives restarts) ────
+            try:
+                cur.execute("SELECT height FROM settlement_log WHERE height = %s", (height,))
+                if cur.fetchone():
+                    _SETTLED_HEIGHTS.add(height)
+                    _settle_log.warning(f"[SETTLE] ⏭  h={height} in settlement_log — skipping duplicate")
+                    return
+            except Exception as _sl_err:
+                # settlement_log table may not exist on first run — non-fatal
+                _settle_log.debug(f"[SETTLE] settlement_log check skipped: {_sl_err}")
+
+            # ── Verify DB connectivity ────────────────────────────────────────
             try:
                 cur.execute("SELECT COUNT(*) FROM wallet_addresses")
                 _settle_log.critical(f"[SETTLE-TEST] ✅ DB OK: {cur.fetchone()[0]} wallets")
@@ -1286,148 +1379,190 @@ def _settle_block_rewards(
                 _settle_log.critical(f"[SETTLE-TEST] ❌ DB FAILED: {_test_err}")
                 return
 
-            # ── Phase 1: Create UTXOs, write address_transactions, track balance deltas ──
-            balance_deltas: Dict[str, int] = {}
+            # ── Phase 1: Create UTXOs, write address_transactions ─────────────
+            # balance_deltas tracks which addresses were touched so we know
+            # which ones to recompute in Phase 2. Values are not used for balance
+            # update (BUG-3 fix — we SUM UTXOs instead).
+            touched_addrs: set = set()
 
             for tx in txs or []:
-                tx_id    = tx.get("tx_id") or tx.get("tx_hash", "")
-                tx_type  = tx.get("tx_type", "").lower()
+                tx_id       = tx.get("tx_id") or tx.get("tx_hash", "")
+                tx_type     = tx.get("tx_type", "").lower()
                 is_coinbase = tx_type in ("coinbase", "miner_reward", "treasury_reward")
-                from_addr = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
-                to_addr   = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "")
+                from_addr   = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
+                to_addr     = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "")
 
-                # Synthesize outputs when missing (simple transfer or coinbase with top-level amount)
+                # Synthesize outputs when missing
                 outputs = tx.get("outputs") or []
                 if not outputs and to_addr:
                     amt = tx.get("amount_base") or 0
                     if not amt:
-                        try:
-                            amt = int(float(tx.get("amount", 0)) * 100)
-                        except Exception:
-                            amt = 0
+                        try: amt = int(float(tx.get("amount", 0)) * 100)
+                        except Exception: amt = 0
                     if amt:
                         outputs = [{"address": to_addr, "amount_base": amt}]
 
-                # For non-coinbase: mark input UTXOs as spent
+                if not tx_id:
+                    _settle_log.warning(f"[SETTLE] h={height} tx missing tx_id — skipping")
+                    continue
+
+                # Phase 1a: Mark input UTXOs spent (non-coinbase only)
                 if not is_coinbase:
                     for inp in (tx.get("inputs") or []):
                         prev_tx  = inp.get("prev_tx_hash", "")
                         prev_idx = inp.get("prev_output_index", 0)
-                        if prev_tx and tx_id:
+                        if prev_tx and prev_idx != 0xFFFFFFFF:  # skip coinbase sentinel
                             cur.execute(
-                                "UPDATE address_utxos SET spent = TRUE, spent_at_height = %s, spent_in_tx_hash = %s "
-                                "WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
+                                "UPDATE address_utxos SET spent = TRUE, spent_at_height = %s, "
+                                "spent_in_tx_hash = %s WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
                                 (height, tx_id, prev_tx, prev_idx),
                             )
 
-                # Phase 1a: Create UTXOs + credit recipients
+                # Phase 1b: INSERT output UTXOs
                 for idx, out in enumerate(outputs):
                     addr        = out.get("address", "")
                     amount_base = out.get("amount_base", 0)
                     if not addr or not amount_base:
+                        _settle_log.warning(
+                            f"[SETTLE] h={height} tx={tx_id[:16]}… output[{idx}] missing addr or amount "
+                            f"(addr={addr!r} amount_base={amount_base}) — skipping UTXO"
+                        )
                         continue
                     cur.execute(
-                        "INSERT INTO address_utxos (address, tx_hash, output_index, amount, spent, created_at_height) "
+                        "INSERT INTO address_utxos "
+                        "(address, tx_hash, output_index, amount, spent, created_at_height) "
                         "VALUES (%s, %s, %s, %s, FALSE, %s) "
                         "ON CONFLICT (tx_hash, output_index) DO NOTHING",
                         (addr, tx_id, idx, amount_base, height),
                     )
-                    balance_deltas[addr] = balance_deltas.get(addr, 0) + amount_base
+                    touched_addrs.add(addr)
 
-                # Phase 1b: Debit sender for non-coinbase TXs
                 if not is_coinbase and from_addr:
-                    total_out = sum(o.get("amount_base", 0) for o in outputs)
-                    fee_base  = tx.get("fee_base") or tx.get("fee") or 0
-                    try:
-                        fee_base = int(fee_base)
-                    except Exception:
-                        fee_base = 0
-                    balance_deltas[from_addr] = balance_deltas.get(from_addr, 0) - total_out - fee_base
+                    touched_addrs.add(from_addr)
 
-                # Phase 1c: Write address_transactions index (IN row for recipient, OUT row for sender)
+                # Phase 1c: address_transactions index
+                # BUG-1/BUG-5 FIX: ON CONFLICT now matches UNIQUE(address, tx_hash, direction)
                 if to_addr and tx_id:
-                    total_amt = sum(o.get("amount_base", 0) for o in outputs if o.get("address") == to_addr) or (
-                        outputs[0].get("amount_base", 0) if outputs else 0
+                    total_amt = (
+                        sum(o.get("amount_base", 0) for o in outputs if o.get("address") == to_addr)
+                        or (outputs[0].get("amount_base", 0) if outputs else 0)
                     )
-                    cur.execute("""
-                        INSERT INTO address_transactions
-                            (address, tx_hash, direction, amount, block_height, created_at)
-                        VALUES (%s, %s, 'in', %s, %s, NOW())
-                        ON CONFLICT (address, tx_hash, direction) DO UPDATE
-                            SET block_height = EXCLUDED.block_height,
-                                amount       = EXCLUDED.amount
-                    """, (to_addr, tx_id, total_amt, height))
+                    try:
+                        cur.execute("""
+                            INSERT INTO address_transactions
+                                (address, tx_hash, direction, amount, block_height, created_at)
+                            VALUES (%s, %s, 'in', %s, %s, NOW())
+                            ON CONFLICT (address, tx_hash, direction) DO UPDATE
+                                SET block_height = EXCLUDED.block_height,
+                                    amount       = EXCLUDED.amount
+                        """, (to_addr, tx_id, total_amt, height))
+                    except Exception as _atx_err:
+                        _settle_log.warning(f"[SETTLE] addr_tx insert (in) non-fatal: {_atx_err}")
+
                 if not is_coinbase and from_addr and tx_id:
                     sent_amt = sum(o.get("amount_base", 0) for o in outputs)
-                    cur.execute("""
-                        INSERT INTO address_transactions
-                            (address, tx_hash, direction, amount, block_height, created_at)
-                        VALUES (%s, %s, 'out', %s, %s, NOW())
-                        ON CONFLICT (address, tx_hash, direction) DO UPDATE
-                            SET block_height = EXCLUDED.block_height,
-                                amount       = EXCLUDED.amount
-                    """, (from_addr, tx_id, sent_amt, height))
+                    try:
+                        cur.execute("""
+                            INSERT INTO address_transactions
+                                (address, tx_hash, direction, amount, block_height, created_at)
+                            VALUES (%s, %s, 'out', %s, %s, NOW())
+                            ON CONFLICT (address, tx_hash, direction) DO UPDATE
+                                SET block_height = EXCLUDED.block_height,
+                                    amount       = EXCLUDED.amount
+                        """, (from_addr, tx_id, sent_amt, height))
+                    except Exception as _atx_err:
+                        _settle_log.warning(f"[SETTLE] addr_tx insert (out) non-fatal: {_atx_err}")
 
-            # ── Phase 2: Update wallet_addresses from balance deltas (credit AND debit) ──
-            for addr, delta in balance_deltas.items():
-                if delta == 0:
-                    continue
+            # ── Phase 2: Recompute wallet_addresses.balance from SUM(unspent UTXOs) ──
+            # BUG-3 FIX: additive delta re-apply on duplicate settle doubles balance.
+            # Authoritative balance = SUM of unspent UTXO amounts in DB.
+            # This is idempotent: running twice gives same result.
+            if touched_addrs:
+                _settle_log.critical(
+                    f"[SETTLE] Phase 2: recomputing balances for {len(touched_addrs)} addresses"
+                )
+            for addr in touched_addrs:
                 _fp = hashlib.sha256(addr.encode()).hexdigest()[:64]
-                if delta > 0:
+                try:
+                    cur.execute(
+                        "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
+                        "WHERE address = %s AND spent = FALSE",
+                        (addr,),
+                    )
+                    row = cur.fetchone()
+                    true_balance = int(row[0]) if row and row[0] is not None else 0
+
+                    cur.execute(
+                        "SELECT COUNT(*) FROM address_transactions WHERE address = %s",
+                        (addr,),
+                    )
+                    tx_count_row = cur.fetchone()
+                    tx_count = int(tx_count_row[0]) if tx_count_row else 1
+
                     cur.execute("""
                         INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
-                        VALUES (%s, %s, %s, %s, 1, 'standard', NOW())
+                            (address, wallet_fingerprint, public_key, balance,
+                             transaction_count, address_type, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, 'standard', NOW())
                         ON CONFLICT (address) DO UPDATE SET
-                            balance           = GREATEST(0, wallet_addresses.balance + %s),
-                            transaction_count = wallet_addresses.transaction_count + 1,
+                            balance           = EXCLUDED.balance,
+                            transaction_count = EXCLUDED.transaction_count,
                             updated_at        = NOW()
-                    """, (addr, _fp, _fp, delta, delta))
-                else:
-                    # sender debit — never go below zero
-                    cur.execute("""
-                        UPDATE wallet_addresses SET
-                            balance           = GREATEST(0, balance + %s),
-                            transaction_count = transaction_count + 1,
-                            updated_at        = NOW()
-                        WHERE address = %s
-                    """, (delta, addr))
+                    """, (addr, _fp, _fp, true_balance, max(1, tx_count)))
 
-            # UPDATE CHAIN STATE
-            cur.execute(
-                "INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at) "
-                "VALUES (1, %s, %s, 0.0, NOW()) ON CONFLICT (state_id) DO UPDATE SET "
-                "chain_height = EXCLUDED.chain_height, head_block_hash = EXCLUDED.head_block_hash, "
-                "latest_coherence = EXCLUDED.latest_coherence, updated_at = NOW()",
-                (height, block_hash),
-            )
+                    _settle_log.critical(
+                        f"[SETTLE] ✅ {addr[:20]}… balance={true_balance/100:.4f} QTCL "
+                        f"({true_balance} base) tx_count={tx_count}"
+                    )
+                except Exception as _bal_err:
+                    _settle_log.error(f"[SETTLE] balance recompute for {addr[:20]}… failed: {_bal_err}")
 
-        # Log settlement summary
-        total_settled = sum(balance_deltas.values()) // 2  # rough: total positive
+            # ── Update chain_state ────────────────────────────────────────────
+            try:
+                cur.execute(
+                    "INSERT INTO chain_state "
+                    "(state_id, chain_height, head_block_hash, latest_coherence, updated_at) "
+                    "VALUES (1, %s, %s, 0.0, NOW()) "
+                    "ON CONFLICT (state_id) DO UPDATE SET "
+                    "chain_height = GREATEST(chain_state.chain_height, EXCLUDED.chain_height), "
+                    "head_block_hash = CASE WHEN EXCLUDED.chain_height >= chain_state.chain_height "
+                    "THEN EXCLUDED.head_block_hash ELSE chain_state.head_block_hash END, "
+                    "updated_at = NOW()",
+                    (height, block_hash),
+                )
+            except Exception as _cs_err:
+                _settle_log.warning(f"[SETTLE] chain_state update non-fatal: {_cs_err}")
+
+            # ── BUG-2 FIX: Record settlement completion in settlement_log ─────
+            try:
+                cur.execute(
+                    "INSERT INTO settlement_log (height, block_hash, tx_count, addresses_updated) "
+                    "VALUES (%s, %s, %s, %s) ON CONFLICT (height) DO NOTHING",
+                    (height, block_hash, len(txs or []), len(touched_addrs)),
+                )
+            except Exception as _log_err:
+                _settle_log.warning(f"[SETTLE] settlement_log write non-fatal: {_log_err}")
+
+        # Mark settled in-process after successful DB commit
+        _SETTLED_HEIGHTS.add(height)
         _settle_log.warning(
-            f"[SETTLE] ✅ h={height}: {len(balance_deltas)} addresses updated, {total_settled/100:.2f} QTCL net, txs={len(txs or [])}"
+            f"[SETTLE] ✅ h={height}: {len(touched_addrs)} addresses recomputed, "
+            f"txs={len(txs or [])}, block_hash={block_hash[:16]}…"
         )
 
         # Cache block for getBlockRange queries
         try:
             _cache_block(
-                {
-                    "height": height,
-                    "block_hash": block_hash,
-                    "timestamp": int(time.time()),
-                    "difficulty": 5,
-                    "miner_address": miner_address,
-                    "w_state_fidelity": 0.0,
-                },
+                {"height": height, "block_hash": block_hash, "timestamp": int(time.time()),
+                 "difficulty": 5, "miner_address": miner_address, "w_state_fidelity": 0.0},
                 txs=txs,
             )
-        except Exception as cache_err:
-            _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {cache_err}")
+        except Exception as _cache_err:
+            _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {_cache_err}")
 
     except Exception as err:
-        _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED, RE-RAISING: {err}", exc_info=True)
-        raise  # CRITICAL: do not silently swallow — caller MUST see failure
-
+        _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED: {err}", exc_info=True)
+        raise  # caller must see failure
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # BLOCK SETTLEMENT WORKER — async settlement after block is persisted
