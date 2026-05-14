@@ -1660,7 +1660,18 @@ class Mempool:
         try:
             pub_key_hex = sig_dict.get('public_key_hex') or sig_dict.get('public_key', '')
             if not pub_key_hex:
+                logger.error(f"[MEMPOOL-SIG] ❌ missing_public_key — sig keys: {list(sig_dict.keys())[:12]}")
                 return False, "missing_public_key_in_signature"
+
+            # 🔍 DIAGNOSTIC: log which canonical fields are present
+            _has_R = 'R' in sig_dict and isinstance(sig_dict.get('R'), dict) and bool(sig_dict['R'])
+            _has_Z = 'Z' in sig_dict and isinstance(sig_dict.get('Z'), dict) and bool(sig_dict['Z'])
+            _has_cf = 'c_full' in sig_dict and bool(sig_dict.get('c_full'))
+            logger.info(
+                f"[MEMPOOL-SIG] 🔍 sig dict keys={list(sig_dict.keys())[:10]} "
+                f"R={_has_R} Z={_has_Z} c_full={_has_cf} "
+                f"c_exp={sig_dict.get('c_exp','?')}"
+            )
 
             # 1. Reconstruct signing hash (the actual bytes signed by client)
             # Client signs: sha3_256(json.dumps({'sender':..., 'recipient':..., 'amount':..., 'nonce':...}))
@@ -1671,20 +1682,41 @@ class Mempool:
                 'nonce': norm['nonce']
             }
             tx_json = json.dumps(tx_data, sort_keys=True, default=str)
-            logger.debug(f"[MEMPOOL-SIG] Reconstructed JSON: {tx_json}")
+            logger.info(f"[MEMPOOL-SIG] 🔍 verifier payload: {tx_json[:120]}")
             signing_hash_bytes = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
             signing_hash_hex = signing_hash_bytes.hex()
-            logger.debug(f"[MEMPOOL-SIG] Signing hash: {signing_hash_hex}")
+            logger.info(f"[MEMPOOL-SIG] 🔍 signing hash: {signing_hash_hex[:32]}…")
 
-            # 2. Verify via Oracle
+            # 2. Verify via Oracle (preferred) or direct engine (fallback)
             if _ORACLE_AVAILABLE:
                 # Pass the ACTUAL signing hash to the oracle
                 ok, reason = ORACLE.verify_transaction(signing_hash_hex, sig_dict, from_address)
                 if ok:
                     return True, "valid"
+                logger.warning(
+                    f"[MEMPOOL-SIG] Oracle verification failed: {reason} — "
+                    f"sig_keys={list(sig_dict.keys())[:12]}"
+                )
                 return False, reason
-            
-            return False, "oracle_unavailable"
+
+            # Fallback: direct engine verification (no oracle available)
+            try:
+                from hlwe.hyp_engine import HypGammaEngine
+                engine = HypGammaEngine()
+                is_valid = engine.verify_signature(
+                    signing_hash_bytes,
+                    sig_dict,
+                    pub_key_hex
+                )
+                if is_valid:
+                    return True, "valid_direct_engine"
+                return False, "hyp_signature_invalid_direct"
+            except ImportError:
+                logger.warning("[MEMPOOL-SIG] ⚠️ Neither oracle nor engine available")
+                return False, "no_verification_backend"
+            except Exception as eng_err:
+                logger.error(f"[MEMPOOL-SIG] Direct engine verify error: {eng_err}")
+                return False, f"engine_verification_error: {str(eng_err)}"
 
         except Exception as e:
             logger.error(f"[MEMPOOL-SIG] Verification error: {e}")

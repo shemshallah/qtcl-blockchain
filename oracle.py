@@ -1063,9 +1063,27 @@ class _OracleFacade:
             from hyp_engine_compat import get_hyp_engine
             engine = get_hyp_engine()
             msg_bytes = bytes.fromhex(tx_hash_hex)
+            import logging as _log_oracle
+            _log = _log_oracle.getLogger("ORACLE")
+
+            _has_R = isinstance(sig_dict.get('R'), dict) and bool(sig_dict['R'])
+            _has_Z = isinstance(sig_dict.get('Z'), dict) and bool(sig_dict['Z'])
+            _has_cf = bool(sig_dict.get('c_full'))
+            _has_rc = bool(sig_dict.get('R_canonical') or sig_dict.get('R_canonical_hex'))
+            _log.info(
+                f"[ORACLE-VERIFY] 🔍 engine.verify_signature() — "
+                f"pub_key={pub_key_hex[:20]}… msg_hash={tx_hash_hex[:24]}… "
+                f"R={_has_R} Z={_has_Z} c_full={_has_cf} R_canon={_has_rc} "
+                f"sig_keys={list(sig_dict.keys())[:12]}"
+            )
             valid = engine.verify_signature(msg_bytes, sig_dict, pub_key_hex)
+            _log.info(f"[ORACLE-VERIFY] {'✅ VALID' if valid else '❌ INVALID'} after engine.verify_signature")
             return (True, "valid") if valid else (False, "invalid_signature")
         except Exception as e:
+            import logging as _log_oracle2
+            import traceback
+            _log2 = _log_oracle2.getLogger("ORACLE")
+            _log2.error(f"[ORACLE-VERIFY] ❌ EXCEPTION: {e}\n{traceback.format_exc()}")
             return False, f"verification_error:{e}"
 
     def to_dict(self):

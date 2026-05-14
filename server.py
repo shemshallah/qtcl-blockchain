@@ -5958,8 +5958,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 #   message_hash = sha3_256(json.dumps(sign_payload, sort_keys=True))
                 _tx_from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
                 _tx_to = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "")
-                _tx_amount = tx.get("amount") or tx.get("amount_qtcl") or 0
+                _tx_amount_raw = tx.get("amount") or tx.get("amount_qtcl") or 0
                 _tx_nonce = tx.get("nonce") or 0
+
+                # Ensure amount is float QTCL (not base units) to match signing path
+                _tx_amount = float(_tx_amount_raw)
+                if _tx_amount >= 10_000:
+                    # Looks like base units — convert to QTCL
+                    _tx_amount = _tx_amount / 100.0
                 
                 _sign_payload = {
                     "sender": _tx_from,
@@ -7569,9 +7575,20 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
             sign_json = json.dumps(sign_payload, sort_keys=True, default=str)
             message_hash = hashlib.sha3_256(sign_json.encode("utf-8")).digest()
 
+            logger.info(
+                f"[SIGN-TX] 🔍 signing payload: {sign_json[:120]} "
+                f"hash={message_hash.hex()[:32]}…"
+            )
+
             sig = engine.sign_hash(message_hash, private_key_hex)
             sig["public_key_hex"] = public_key_hex
+            sig["public_key"] = public_key_hex  # redundant key for mempool verifier compat
 
+            logger.info(
+                f"[SIGN-TX] 🔍 sig keys: {list(sig.keys())[:10]} "
+                f"has_R={'R' in sig and bool(sig.get('R'))} "
+                f"has_Z={'Z' in sig and bool(sig.get('Z'))}"
+            )
             logger.info(f"[SIGN-TX] ✅ Transaction signed: {tx_hash[:16]}…")
         except Exception as sign_err:
             logger.error(f"[SIGN-TX] Signing failed: {sign_err}", exc_info=True)
