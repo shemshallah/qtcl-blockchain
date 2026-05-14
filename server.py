@@ -1508,8 +1508,7 @@ def get_consensus_oracle_address() -> str:
     """
     try:
         if not db_ready():
-            return "qtcl1consensus_all_oracles_xor"
-
+            return "0" * 64  # consensus fallback
         conn = get_db_connection()
         try:
             cursor = conn.cursor()
@@ -1532,7 +1531,7 @@ def get_consensus_oracle_address() -> str:
 
             consensus_seed = "|".join(addresses).encode()
             consensus_hash = hashlib.sha256(consensus_seed).hexdigest()[:24]
-            return f"qtcl1consensus_{consensus_hash}"
+            return f"consensus_{consensus_hash}" + "0" * (64 - len(f"consensus_{consensus_hash}"))
         finally:
             if db_pool.use_pooling and db_pool.pool:
                 db_pool.pool.putconn(conn)
@@ -1540,7 +1539,7 @@ def get_consensus_oracle_address() -> str:
                 conn.close()
     except Exception as e:
         logger.debug(f"[ORACLE-ADDRESS] Consensus lookup failed: {e}")
-        return "qtcl1consensus_all_oracles_xor"
+        return "0" * 64  # consensus fallback
 
 
 logger.info(
@@ -5177,7 +5176,7 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
         p.get("cert_auth_tag", _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32])
     )
 
-    _ora_registry_addr = "qtcl1oracle_registry_000000000000000000000000"
+    _ora_registry_addr = "0000000000000000000000000000000000000000000000000000000000000000"
     tx_payload = {
         "tx_type": "oracle_reg",
         "from_address": wallet_addr,
@@ -5852,15 +5851,23 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _miner_coinbase = None
         _treasury_coinbase = None
 
+        # ── Address normalizer: strip legacy qtcl1 prefix for comparison ──
+        def _norm_addr(addr: str) -> str:
+            """Normalize address: strip qtcl1 prefix if present → raw hex."""
+            if addr and addr.startswith("qtcl1"):
+                return addr[5:]
+            return addr
+
         for cb in _coinbase_txs:
             _outputs = cb.get("outputs", [])
             # Extract recipient from direct field or first output address
-            _to = (
+            _to_raw = (
                 cb.get("to_addr")
                 or cb.get("to_address")
                 or cb.get("to")
                 or (_outputs[0].get("address") if _outputs else "")
             )
+            _to = _norm_addr(_to_raw)
             # Extract amount from direct field or first output amount
             _amount = float(
                 cb.get("amount")
@@ -5872,7 +5879,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _outputs[0].get("amount_base", round(_amount * 100))
             )
 
-            if _to == miner_address:
+            _norm_miner = _norm_addr(miner_address)
+            _norm_treasury = _norm_addr(
+                TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else ""
+            )
+
+            if _to == _norm_miner:
                 _miner_coinbase = cb
                 # Miner reward = current block reward + genesis extra (h==1) + 50% of fees
                 # qtcl_miner defers genesis block's miner reward to block 1
@@ -5891,7 +5903,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     )
             elif (
                 TessellationRewardSchedule
-                and _to == TessellationRewardSchedule.TREASURY_ADDRESS
+                and _to == _norm_treasury
             ):
                 _treasury_coinbase = cb
                 # Treasury reward = PREVIOUS block's treasury reward + 50% of fees
@@ -5914,7 +5926,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             else:
                 return _rpc_error(
                     -32003,
-                    f"Invalid coinbase recipient: {_to}. Only miner or treasury allowed.",
+                    f"Invalid coinbase recipient: {_to_raw} (normalized: {_to}). "
+                    f"Expected miner={_norm_miner[:16]}… or treasury={_norm_treasury[:16]}…",
                     rpc_id,
                 )
 
@@ -6213,10 +6226,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             _from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "0" * 64)
 
                             if _tx_type in ("coinbase", "miner_reward", "treasury_reward"):
-                                # Derive proper type from recipient
-                                if _to == miner_address:
+                                # Derive proper type from recipient (normalize qtcl1 prefix)
+                                _to_norm = _to[5:] if _to.startswith("qtcl1") else _to
+                                _miner_norm = miner_address[5:] if miner_address.startswith("qtcl1") else miner_address
+                                _treas_addr = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else ""
+                                _treas_norm = _treas_addr[5:] if _treas_addr.startswith("qtcl1") else _treas_addr
+                                if _to_norm == _miner_norm:
                                     _tx_type = "miner_reward"
-                                elif TessellationRewardSchedule and _to == TessellationRewardSchedule.TREASURY_ADDRESS:
+                                elif _treas_norm and _to_norm == _treas_norm:
                                     _tx_type = "treasury_reward"
                                 # Extract amount from outputs[0].amount_base if top-level missing
                                 _amount_base = tx.get("amount_base") or 0
@@ -6794,7 +6811,7 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
         fidelity            float — W-state fidelity of the pushed DM  (0..1)
         oracle_type         str   — e.g. 'tripartite_client'
         node_ip             str   — caller self-reported WAN IP (advisory)
-        oracle_addr         str   — oracle signing address (qtcl1...)
+        oracle_addr         str   — oracle signing address (64-char hex)
 
     Server action:
         1. Validate 32³ tensor hex (length, finite values).
@@ -7757,7 +7774,7 @@ _RPC_METHODS: Dict[str, Any] = {
             "treasury_address": getattr(
                 TessellationRewardSchedule,
                 "TREASURY_ADDRESS",
-                "qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d",
+                "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b",
             )
         },
         rid,

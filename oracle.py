@@ -466,7 +466,7 @@ class OracleNode:
     def __init__(self, oracle_id: int, role: str, address: Optional[str] = None):
         self.oracle_id = f"oracle_{oracle_id + 1}"
         self.role = role
-        self.oracle_address = address or f"qtcl1{role.lower()[:12]}_{oracle_id + 1:02d}"
+        self.oracle_address = address or hashlib.sha3_256(f"{role.lower()}_{oracle_id + 1:02d}".encode()).hexdigest()
         self.noise_seed = (0xDEAD_BEEF + oracle_id * 0x1337) & 0xFFFF_FFFF
         self.sigma_offset = oracle_id * 8.0 / 5.0
         self._lock = threading.Lock()
@@ -1065,25 +1065,18 @@ class _OracleFacade:
             msg_bytes = bytes.fromhex(tx_hash_hex)
             import logging as _log_oracle
             _log = _log_oracle.getLogger("ORACLE")
-
-            _has_R = isinstance(sig_dict.get('R'), dict) and bool(sig_dict['R'])
-            _has_Z = isinstance(sig_dict.get('Z'), dict) and bool(sig_dict['Z'])
-            _has_cf = bool(sig_dict.get('c_full'))
-            _has_rc = bool(sig_dict.get('R_canonical') or sig_dict.get('R_canonical_hex'))
             _log.info(
                 f"[ORACLE-VERIFY] 🔍 engine.verify_signature() — "
-                f"pub_key={pub_key_hex[:20]}… msg_hash={tx_hash_hex[:24]}… "
-                f"R={_has_R} Z={_has_Z} c_full={_has_cf} R_canon={_has_rc} "
-                f"sig_keys={list(sig_dict.keys())[:12]}"
+                f"pub_key={pub_key_hex[:20]}… msg_hash={tx_hash_hex[:20]}… "
+                f"sig_keys={list(sig_dict.keys())[:10]}"
             )
             valid = engine.verify_signature(msg_bytes, sig_dict, pub_key_hex)
             _log.info(f"[ORACLE-VERIFY] {'✅ VALID' if valid else '❌ INVALID'} after engine.verify_signature")
             return (True, "valid") if valid else (False, "invalid_signature")
         except Exception as e:
             import logging as _log_oracle2
-            import traceback
             _log2 = _log_oracle2.getLogger("ORACLE")
-            _log2.error(f"[ORACLE-VERIFY] ❌ EXCEPTION: {e}\n{traceback.format_exc()}")
+            _log2.error(f"[ORACLE-VERIFY] ❌ EXCEPTION: {e}", exc_info=True)
             return False, f"verification_error:{e}"
 
     def to_dict(self):

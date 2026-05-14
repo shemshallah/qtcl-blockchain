@@ -733,7 +733,7 @@ class HypMempoolVerifier:
         Args:
             tx_hash           : hex SHA3-256 of the canonical TX payload
             signature_json    : JSON string or dict with HypΓ signature fields
-            expected_address  : the claimed sender address (64-char hex or qtcl1-prefixed)
+            expected_address  : the claimed sender address (64-char hex)
 
         Returns:
             (valid: bool, reason: str)
@@ -765,10 +765,8 @@ class HypMempoolVerifier:
             derived_address = hashlib.sha3_256(
                 hashlib.sha3_256(pub_bytes).digest()
             ).hexdigest()  # 64-char hex
-            # Also check qtcl1-prefixed form for chain compatibility
-            derived_qtcl = ADDRESS_PREFIX + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
 
-            if expected_address not in (derived_address, derived_qtcl):
+            if expected_address != derived_address:
                 return False, f"address_mismatch(derived={derived_address[:16]}…)"
 
             # ── Step 2: CATHEDRAL-GRADE — Full HypΓ cryptographic verification ──

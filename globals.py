@@ -225,7 +225,7 @@ MINING_COINBASE_REWARD = float(os.environ.get('MINER_REWARD', '7.20'))  # from e
 # Canonical null-sink burn address for oracle registration TXs.
 # No private key exists for this address — it is a pure chain commitment.
 # Mirrors the value previously defined in blockchain_entropy_mining.py.
-ORACLE_REGISTRY_ADDRESS = "qtcl1oracle_registry_000000000000000000000000"
+ORACLE_REGISTRY_ADDRESS = "0000000000000000000000000000000000000000000000000000000000000000"
 
 # ═════════════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE
