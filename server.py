@@ -66,6 +66,21 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def _norm_address(addr: str) -> str:
+    """Canonical address normalizer — strips any legacy prefix, returns raw hex.
+
+    QTCL uses raw 64-char hex addresses exclusively. Any 'qtcl1' prefix is
+    stripped here. All DB writes and reads go through this so keys are consistent.
+    """
+    if not addr or not isinstance(addr, str):
+        return ""
+    addr = addr.strip()
+    if addr.startswith("qtcl1"):
+        addr = addr[5:]
+    return addr
+
+
 # ═══ PRE-WARMED RPC THREAD POOL — shared across all dispatch calls ═══════════
 # Single 8-thread pool eliminates per-call ThreadPoolExecutor create/destroy churn.
 # Fast (cache-read) methods run INLINE — never touch the pool.
@@ -1333,6 +1348,9 @@ def _settle_block_rewards(
     _settle_log = logging.getLogger("SETTLE")
     global _SETTLED_HEIGHTS
 
+    # Normalize the miner address (strip any legacy prefix, ensure raw hex)
+    miner_address = _norm_address(miner_address)
+
     # ── BUG-2 FIX: in-process idempotency guard ──────────────────────────────
     if height in _SETTLED_HEIGHTS:
         _settle_log.warning(f"[SETTLE] ⏭  h={height} already settled in this process — skipping")
@@ -1344,14 +1362,14 @@ def _settle_block_rewards(
 
     # ── BUG-4 FIX: treasury missing is WARNING not hard-reject ───────────────
     try:
-        _treasury_addr = (TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else "")
+        _treasury_addr = _norm_address(TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else "")
     except Exception:
         _treasury_addr = ""
     if not _treasury_addr or len(str(_treasury_addr).strip()) < 10:
-        _treasury_addr = os.environ.get(
+        _treasury_addr = _norm_address(os.environ.get(
             "TREASURY_ADDRESS",
             "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b",
-        )
+        ))
         _settle_log.warning(f"[SETTLE] ⚠️  treasury addr from env fallback: {_treasury_addr[:16]}…")
 
     _settle_log.critical(f"🔥 [SETTLE-FIRE] h={height} miner={miner_address[:20]}… treasury={_treasury_addr[:16]}…")
@@ -1389,11 +1407,13 @@ def _settle_block_rewards(
                 tx_id       = tx.get("tx_id") or tx.get("tx_hash", "")
                 tx_type     = tx.get("tx_type", "").lower()
                 is_coinbase = tx_type in ("coinbase", "miner_reward", "treasury_reward")
-                from_addr   = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
-                to_addr     = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "")
+                from_addr   = _norm_address(tx.get("from_addr") or tx.get("from_address") or tx.get("from", ""))
+                to_addr     = _norm_address(tx.get("to_addr") or tx.get("to_address") or tx.get("to", ""))
 
-                # Synthesize outputs when missing
+                # Synthesize outputs when missing — use normalized to_addr
                 outputs = tx.get("outputs") or []
+                # Normalize all existing output addresses
+                outputs = [dict(o, address=_norm_address(o.get("address", ""))) for o in outputs]
                 if not outputs and to_addr:
                     amt = tx.get("amount_base") or 0
                     if not amt:
@@ -1444,7 +1464,7 @@ def _settle_block_rewards(
                 # BUG-1/BUG-5 FIX: ON CONFLICT now matches UNIQUE(address, tx_hash, direction)
                 if to_addr and tx_id:
                     total_amt = (
-                        sum(o.get("amount_base", 0) for o in outputs if o.get("address") == to_addr)
+                        sum(o.get("amount_base", 0) for o in outputs if _norm_address(o.get("address", "")) == to_addr)
                         or (outputs[0].get("amount_base", 0) if outputs else 0)
                     )
                     try:
@@ -3914,6 +3934,7 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         )
         if not address:
             return _rpc_error(-32602, "address required", rpc_id)
+        address = _norm_address(address)  # strip any legacy prefix before DB lookup
 
         _diagnostic = {"address_queried": address[:24] + "…" if len(address) > 24 else address}
         wallet = None
@@ -6089,7 +6110,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         merkle_root = str(hdr.get("merkle_root", "0" * 64))
         timestamp_s = int(hdr.get("timestamp", 0))
         nonce = int(hdr.get("nonce", 0))
-        miner_address = str(hdr.get("miner_address", ""))
+        miner_address = _norm_address(str(hdr.get("miner_address", "")))
         _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
         difficulty_bits = int(_env_diff) if _env_diff.isdigit() else 5
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
@@ -6179,13 +6200,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _miner_coinbase = None
         _treasury_coinbase = None
 
-        # ── Address normalizer: strip legacy qtcl1 prefix for comparison ──
-        def _norm_addr(addr: str) -> str:
-            """Normalize address: strip qtcl1 prefix if present → raw hex."""
-            if addr and addr.startswith("qtcl1"):
-                return addr[5:]
-            return addr
-
         for cb in _coinbase_txs:
             _outputs = cb.get("outputs", [])
             # Extract recipient from direct field or first output address
@@ -6195,7 +6209,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 or cb.get("to")
                 or (_outputs[0].get("address") if _outputs else "")
             )
-            _to = _norm_addr(_to_raw)
+            _to = _norm_address(_to_raw)
             # Extract amount from direct field or first output amount
             _amount = float(
                 cb.get("amount")
@@ -6207,8 +6221,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _outputs[0].get("amount_base", round(_amount * 100))
             )
 
-            _norm_miner = _norm_addr(miner_address)
-            _norm_treasury = _norm_addr(
+            _norm_miner = _norm_address(miner_address)
+            _norm_treasury = _norm_address(
                 TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else ""
             )
 
@@ -6559,15 +6573,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             _tx_type = tx.get("tx_type", "transfer").lower()
                             _outputs = tx.get("outputs", [])
                             _inputs = tx.get("inputs", [])
-                            _to = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "") or (_outputs[0].get("address", "") if _outputs else "")
-                            _from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "0" * 64)
+                            _to = _norm_address(tx.get("to_addr") or tx.get("to_address") or tx.get("to", "") or (_outputs[0].get("address", "") if _outputs else ""))
+                            _from = _norm_address(tx.get("from_addr") or tx.get("from_address") or tx.get("from", "0" * 64))
 
                             if _tx_type in ("coinbase", "miner_reward", "treasury_reward"):
-                                # Derive proper type from recipient (normalize qtcl1 prefix)
-                                _to_norm = _to[5:] if _to.startswith("qtcl1") else _to
-                                _miner_norm = miner_address[5:] if miner_address.startswith("qtcl1") else miner_address
+                                # Derive proper type from recipient — use module-level normalizer
+                                _to_norm = _norm_address(_to)
+                                _miner_norm = _norm_address(miner_address)
                                 _treas_addr = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else ""
-                                _treas_norm = _treas_addr[5:] if _treas_addr.startswith("qtcl1") else _treas_addr
+                                _treas_norm = _norm_address(_treas_addr)
                                 if _to_norm == _miner_norm:
                                     _tx_type = "miner_reward"
                                 elif _treas_norm and _to_norm == _treas_norm:

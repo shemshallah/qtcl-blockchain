@@ -2574,7 +2574,7 @@ def get_comprehensive_rls_sql() -> Dict[str, str]:
     
     CREATE POLICY IF NOT EXISTS balance_history_miner ON address_balance_history
         FOR SELECT TO qtcl_miner
-        USING (address LIKE 'qtcl1miner_%' OR address_type = 'miner');
+        USING (address_type = 'miner');
     
     CREATE POLICY IF NOT EXISTS balance_history_oracle ON address_balance_history
         FOR SELECT TO qtcl_oracle
