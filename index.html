@@ -1207,25 +1207,41 @@ async function fetchChain() {
     }
 
     // 4. Fetch the CURRENT PENDING block being built (has treasury coinbase + mempool TXs)
+    //    GUARD: pending_height MUST equal tipHeight+1. If it's > tipHeight+1 the server's
+    //    in-memory chain_height is stale (DB was reset but server wasn't restarted).
+    //    In that case call qtcl_flushBlockCache to resync server state, then skip the
+    //    stale pending block — the explorer will show a clean chain from block 0.
     try {
       const pendingRes = await rpc('qtcl_getPendingBlock', []);
       if (pendingRes && pendingRes.block_height > 0) {
-        const pendingBlock = {
-          height: pendingRes.block_height,
-          block_hash: '⏳ Mining...',
-          parent_hash: pendingRes.parent_hash || '—',
-          miner_address: pendingRes.miner_address || '',
-          timestamp: pendingRes.timestamp_s || Math.floor(Date.now()/1000),
-          difficulty: '—',
-          nonce: '—',
-          tx_count: pendingRes.tx_count || 0,
-          transactions: pendingRes.transactions || [],
-          w_state_fidelity: 0,
-          _pending: true
-        };
-        // Only add if not already in confirmed blocks
-        if (!blocks.find(b => b.height === pendingBlock.height)) {
-          blocks.unshift(pendingBlock);
+        const expectedPending = tipHeight + 1;
+        if (pendingRes.block_height > expectedPending) {
+          // Stale server state detected — flush and skip this pending block.
+          console.warn(
+            `[Chain] Stale pending block detected: pending_height=${pendingRes.block_height} ` +
+            `but tipHeight=${tipHeight} (expected pending=${expectedPending}). ` +
+            `Server cache is stale post-DB-reset — triggering qtcl_flushBlockCache.`
+          );
+          try { await rpc('qtcl_flushBlockCache', []); } catch(_fe) {}
+          // Do NOT inject the stale pending block — fall through.
+        } else {
+          const pendingBlock = {
+            height: pendingRes.block_height,
+            block_hash: '⏳ Mining...',
+            parent_hash: pendingRes.parent_hash || '—',
+            miner_address: pendingRes.miner_address || '',
+            timestamp: pendingRes.timestamp_s || Math.floor(Date.now()/1000),
+            difficulty: '—',
+            nonce: '—',
+            tx_count: pendingRes.tx_count || 0,
+            transactions: pendingRes.transactions || [],
+            w_state_fidelity: 0,
+            _pending: true
+          };
+          // Only add if not already in confirmed blocks
+          if (!blocks.find(b => b.height === pendingBlock.height)) {
+            blocks.unshift(pendingBlock);
+          }
         }
       }
     } catch(e) { console.debug('[Chain] Pending block fetch skipped:', e.message); }
@@ -1353,23 +1369,35 @@ async function fetchExplorerPage() {
 
     blocks.sort((a, b) => b.height - a.height);
 
-    // Fetch CURRENT PENDING block and prepend to first page only
+    // Fetch CURRENT PENDING block and prepend to first page only.
+    // GUARD: pending height must be exactly tipHeight+1. If > tipHeight+1 the server
+    // in-memory state is stale after a DB reset — flush it and skip this pending block.
     if (_exPage === 0) {
       try {
         const pendingRes = await rpc('qtcl_getPendingBlock', []);
-        if (pendingRes && pendingRes.block_height > 0 && !blocks.find(b => b.height === pendingRes.block_height)) {
-          blocks.unshift({
-            height: pendingRes.block_height,
-            block_hash: '⏳ Mining...',
-            parent_hash: pendingRes.parent_hash || '—',
-            miner_address: pendingRes.miner_address || '',
-            timestamp: pendingRes.timestamp_s || Math.floor(Date.now()/1000),
-            difficulty: '—',
-            nonce: '—',
-            tx_count: pendingRes.tx_count || 0,
-            w_state_fidelity: 0,
-            _pending: true
-          });
+        const _exExpectedPending = Math.max(_exMaxHeight || 0, tipHeight) + 1;
+        if (pendingRes && pendingRes.block_height > 0) {
+          if (pendingRes.block_height > _exExpectedPending) {
+            console.warn(
+              `[Explorer] Stale pending block h=${pendingRes.block_height} > expected=${_exExpectedPending}. ` +
+              `Flushing server block cache (DB was reset without server restart).`
+            );
+            try { await rpc('qtcl_flushBlockCache', []); } catch(_fe) {}
+            // Skip injecting stale pending block
+          } else if (!blocks.find(b => b.height === pendingRes.block_height)) {
+            blocks.unshift({
+              height: pendingRes.block_height,
+              block_hash: '⏳ Mining...',
+              parent_hash: pendingRes.parent_hash || '—',
+              miner_address: pendingRes.miner_address || '',
+              timestamp: pendingRes.timestamp_s || Math.floor(Date.now()/1000),
+              difficulty: '—',
+              nonce: '—',
+              tx_count: pendingRes.tx_count || 0,
+              w_state_fidelity: 0,
+              _pending: true
+            });
+          }
         }
       } catch(e) {}
     }

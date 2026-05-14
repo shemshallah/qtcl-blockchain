@@ -3565,7 +3565,41 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
                     """)
                     row = cur.fetchone()
                     if row:
-                        height = int(row[0])
+                        db_height = int(row[0])
+                        # ═══ DB-RESET DETECTION ═══════════════════════════════════════════════
+                        # If DB tip has REGRESSED below cached tip the DB was wiped/reset.
+                        # Purge _BLOCK_CACHE entirely so stale pre-reset blocks (h=1,2,…)
+                        # never bleed into getBlock / getBlockRange responses. Also resync
+                        # the in-memory lattice chain state so pending_block height is
+                        # db_height+1, not whatever the old session had advanced to.
+                        if db_height < _HEIGHT_CACHE.get("height", 0):
+                            with _BLOCK_CACHE_LOCK:
+                                stale_keys = [h for h in list(_BLOCK_CACHE.keys()) if h > db_height]
+                                for k in stale_keys:
+                                    del _BLOCK_CACHE[k]
+                            try:
+                                if LATTICE is not None and getattr(LATTICE, "block_manager", None):
+                                    bm = LATTICE.block_manager
+                                    with bm.lock:
+                                        bm.chain_height = db_height + 1
+                                        bm.current_block_hash = str(row[1] or "0" * 64)
+                                        bm.block_by_height = {
+                                            h: b for h, b in bm.block_by_height.items()
+                                            if h <= db_height
+                                        }
+                                        bm.sealed_blocks = [
+                                            b for b in bm.sealed_blocks
+                                            if getattr(b, "block_height", 999_999) <= db_height
+                                        ]
+                            except Exception as _latt_sync_err:
+                                logger.warning(f"[RPC-HEIGHT] Lattice resync warning: {_latt_sync_err}")
+                            logger.warning(
+                                f"[RPC-HEIGHT] 🔄 DB-RESET DETECTED: "
+                                f"cached_tip={_HEIGHT_CACHE['height']} db_tip={db_height} "
+                                f"— _BLOCK_CACHE flushed ({len(stale_keys)} stale entries evicted), "
+                                f"lattice chain_height={db_height+1}"
+                            )
+                        height = db_height
                         tip_hash = str(row[1] or "0" * 64)
                         difficulty = int(float(row[2])) if row[2] else 5
                         _HEIGHT_CACHE.update({"height": height, "tip_hash": tip_hash,
@@ -3598,6 +3632,80 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
         return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id)
+
+
+def _rpc_flushBlockCache(params: Any, rpc_id: Any) -> dict:
+    """qtcl_flushBlockCache — Flush in-memory block cache and resync chain state from DB.
+
+    Call this immediately after running qtcl_db_builder.py to reset the chain,
+    or any time the DB has been reset externally while the server is still running.
+    Performs four atomic operations:
+      1. Purges _BLOCK_CACHE entirely (all stale pre-reset blocks evicted).
+      2. Forces _HEIGHT_CACHE stale (next getBlockHeight hits DB fresh).
+      3. Resyncs LATTICE.block_manager chain_height / current_block_hash from DB tip.
+      4. Returns new DB-authoritative tip so the caller can confirm state.
+    """
+    try:
+        # Step 1: Evict entire block cache
+        evicted = 0
+        with _BLOCK_CACHE_LOCK:
+            evicted = len(_BLOCK_CACHE)
+            _BLOCK_CACHE.clear()
+
+        # Step 2: Force HEIGHT_CACHE stale so next call hits DB
+        _HEIGHT_CACHE["ts"] = 0.0
+
+        # Step 3: Read authoritative DB tip
+        db_height = 0
+        db_hash = "0" * 64
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("SELECT height, block_hash FROM blocks ORDER BY height DESC LIMIT 1")
+                row = cur.fetchone()
+                if row:
+                    db_height = int(row[0])
+                    db_hash = str(row[1] or "0" * 64)
+        except Exception as _q_err:
+            logger.warning(f"[flushBlockCache] DB tip query failed: {_q_err}")
+
+        # Step 4: Resync lattice in-memory state to DB reality
+        lattice_resynced = False
+        try:
+            if LATTICE is not None and getattr(LATTICE, "block_manager", None):
+                bm = LATTICE.block_manager
+                with bm.lock:
+                    bm.chain_height = db_height + 1
+                    bm.current_block_hash = db_hash
+                    bm.block_by_height = {
+                        h: b for h, b in bm.block_by_height.items()
+                        if h <= db_height
+                    }
+                    bm.sealed_blocks = [
+                        b for b in bm.sealed_blocks
+                        if getattr(b, "block_height", 999_999) <= db_height
+                    ]
+                lattice_resynced = True
+                logger.info(
+                    f"[flushBlockCache] ✅ Lattice resynced: "
+                    f"chain_height={db_height+1} tip={db_hash[:16]}…"
+                )
+        except Exception as _lat_err:
+            logger.warning(f"[flushBlockCache] Lattice resync warning: {_lat_err}")
+
+        logger.info(
+            f"[flushBlockCache] 🧹 Cache flushed: evicted={evicted} blocks, "
+            f"db_tip={db_height} hash={db_hash[:16]}… lattice_resynced={lattice_resynced}"
+        )
+        return _rpc_ok({
+            "flushed": evicted,
+            "db_tip_height": db_height,
+            "db_tip_hash": db_hash,
+            "lattice_resynced": lattice_resynced,
+            "pending_height": db_height + 1,
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_flushBlockCache exception: {e}")
+        return _rpc_error(-32603, f"Flush error: {str(e)}", rpc_id)
 
 
 def _rpc_forgeGenesis(params: Any, rpc_id: Any) -> dict:
@@ -3939,12 +4047,22 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
         if height is not None:
             block = _query_block_at_height(height)
 
-            # Fallback: check in-memory cache (for genesis and recently mined blocks)
+            # Fallback: check in-memory cache (for genesis and recently mined blocks).
+            # SAFETY GUARD: only serve cached blocks at heights <= DB authoritative tip.
+            # This prevents stale pre-reset cached blocks (from old chain) appearing in
+            # responses after qtcl_db_builder resets the DB without restarting the server.
             if block is None:
-                with _BLOCK_CACHE_LOCK:
-                    if height in _BLOCK_CACHE:
-                        block = _BLOCK_CACHE[height]
-                        logger.debug(f"[RPC] Block h={height} served from cache")
+                _db_tip_guard = _HEIGHT_CACHE.get("height", 0)
+                if height <= _db_tip_guard:
+                    with _BLOCK_CACHE_LOCK:
+                        if height in _BLOCK_CACHE:
+                            block = _BLOCK_CACHE[height]
+                            logger.debug(f"[RPC] Block h={height} served from cache (tip_guard={_db_tip_guard})")
+                else:
+                    logger.debug(
+                        f"[RPC] Block h={height} NOT served from cache: "
+                        f"height > db_tip={_db_tip_guard} (stale cache guard)"
+                    )
         elif block_hash:
             row = query_block_by_hash(block_hash)
             if row:
@@ -7887,6 +8005,7 @@ def _rpc_getBlockStatus(params: Any, rpc_id: Any) -> dict:
 
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock": _rpc_submitBlock,
+    "qtcl_flushBlockCache": _rpc_flushBlockCache,
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,
