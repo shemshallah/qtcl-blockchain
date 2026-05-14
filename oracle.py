@@ -729,10 +729,16 @@ class ConsensusWorker(threading.Thread):
     def _process_block(self, block: CachedBlock):
         height = block.height
         age = block.age_seconds
-        
+
+        # 🔴 GUARD: never re-process a block that's already finalized.
+        # get_pending_blocks() filters for PENDING status, but under a race the worker
+        # may have a stale reference. Re-check status under lock before doing any work.
+        if block.status != BlockStatus.PENDING:
+            return
+
         # Check force-finalize timeout
         force_finalize = age > FORCE_FINALIZE_S
-        
+
         # Generate attestations if we haven't yet
         if block.attestation_count < len(self.cluster.nodes):
             # Canonical header hash must match the blockchain server's computation

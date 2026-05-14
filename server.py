@@ -6367,7 +6367,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     "next_height": height + 1,
                     "miner_reward_qtcl": _dup_reward,
                     "oracle_consensus": "5/5",
-                    "oracle_ids": [],
+                    "oracle_ids": ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"],
                     "diagnostic": {"note": "Block already in database - settlement may have been applied"},
                 },
                 rpc_id,
@@ -6531,6 +6531,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             _blockchain_cache.delete("blockchain:latest_block")
             _blockchain_cache.delete("blockchain:tip")
             _height_cache.update_height(height, block_hash, difficulty_bits)
+            # 🔴 Also update the _HEIGHT_CACHE dict directly — _height_cache (BlockHeightCache)
+            # and _HEIGHT_CACHE (dict) are separate objects; _rpc_getBlockHeight reads the DICT.
+            # Setting ts=0 forces a DB re-query on the next call, which returns the correct tip.
+            _HEIGHT_CACHE.update({"height": height, "tip_hash": block_hash,
+                                  "difficulty": difficulty_bits, "ts": 0.0})
             logger.info(f"[RPC-submitBlock] 🔄 Cache invalidated + height updated to h={height}")
         except Exception as _cache_inv_err:
             logger.warning(f"[RPC-submitBlock] Cache invalidation warning: {_cache_inv_err}")
@@ -6543,6 +6548,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "block_hash": block_hash,
                 "miner_address": miner_address,
                 "oracle_count": 5,
+                "oracle_ids": ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"],
                 "finalized": True,
                 "timestamp": int(time.time()),
             })
@@ -6713,7 +6719,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "difficulty_bits": difficulty_bits,
                 "miner_reward_qtcl": _resp_reward,
                 "oracle_consensus": "5/5",
-                "oracle_ids": [],
+                "oracle_ids": ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"],
                 "next_height": height + 1,
                 "mempool_drained": _mempool_drained,
                 "pending_mempool_txs": _pending_for_next,
