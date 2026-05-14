@@ -6274,6 +6274,17 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 f"[RPC-submitBlock] ⚠️  TX insert failed for {tx_id[:16]}: {_tx_err}"
                             )
 
+                    # 🔴 CRITICAL: Update block's tx_count to match actual persisted transaction count.
+                    # The initial INSERT may have used the wrong count from the submitted data.
+                    try:
+                        cur.execute(
+                            "UPDATE blocks SET tx_count = (SELECT COUNT(*) FROM transactions WHERE height = %s) WHERE height = %s",
+                            (height, height)
+                        )
+                        logger.info(f"[RPC-submitBlock] ✅ Block tx_count synced from transactions table for h={height}")
+                    except Exception as _tc_err:
+                        logger.warning(f"[RPC-submitBlock] tx_count sync warning: {_tc_err}")
+
         except Exception as dbe:
             logger.exception(
                 f"[RPC-submitBlock] ❌ DB error during block persist: {dbe}"
@@ -6322,15 +6333,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             except Exception as settle_err:
                 logger.critical(f"[RPC-submitBlock] ⚠️  Settlement for duplicate failed: {settle_err}")
 
-            # Push consensus finalization SSE for duplicate too
-            try:
-                _push_to_sse_service("/push/oracle_consensus", {
-                    "event_type": "block_finalized", "height": height,
-                    "block_hash": block_hash, "miner_address": miner_address,
-                    "oracle_count": 5, "finalized": True, "timestamp": int(time.time()),
-                })
-            except Exception:
-                pass
+            # 🔴 DO NOT re-push block_finalized for duplicates — the first insertion
+            # already broadcast this event. Re-pushing causes the miner to see
+            # "FINALIZED" twice and the explorer to double-refresh.
 
             # Compute reward for duplicate response
             try:

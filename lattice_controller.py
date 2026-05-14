@@ -3588,42 +3588,16 @@ class BlockManager:
                     "w_proof":   getattr(tx, "quantum_state_hash", "") or "",
                 })
 
-            # ── Broadcast sealed block to native SSE subscribers + legacy SSE service ──
-            try:
-                import sys
-
-                _srv = sys.modules.get("server")
-                block_event = {
-                    "height":          block.block_height,
-                    "block_hash":      block.block_hash,
-                    "parent_hash":     block.parent_hash,
-                    "merkle_root":     block.merkle_root,
-                    "miner_address":   block.miner_address,
-                    "timestamp_s":     block.timestamp_s,
-                    "timestamp":       block.timestamp_s,
-                    "difficulty":      block.difficulty_bits,
-                    "nonce":           block.nonce,
-                    "tx_count":        block.tx_count,
-                    "w_state_fidelity": getattr(block, "w_state_fidelity", None),
-                    "w_entropy_hash":  block.w_entropy_hash or "",
-                    "hyp_signature":   block.hyp_signature if block.hyp_signature else None,
-                    "miner_public_key_hex": block.miner_public_key_hex if block.miner_public_key_hex else None,
-                    "signature_verified":   block.signature_verified,
-                    "finalized":       True,
-                    "mined":           True,
-                    "transactions":    _tx_broadcast,
-                }
-                # Native fan-out (Neon PostgreSQL nodes + dashboard clients)
-                if _srv and hasattr(_srv, "_broadcast_block_event"):
-                    _srv._broadcast_block_event(block_event)
-                    logger.debug(
-                        f"[BLOCK-BRD] ✅ Native fan-out block #{block.block_height} ({len(_tx_broadcast)} TXs)"
-                    )
-                # Legacy external SSE service (optional)
-                if _srv and hasattr(_srv, "_push_to_sse_service"):
-                    _srv._push_to_sse_service("/push/block", block_event)
-            except Exception as _brd_err:
-                logger.debug(f"[BLOCK-BRD] skip: {_brd_err}")
+            # ── DO NOT BROADCAST sealed template to SSE ─────────────────────────
+            # 🔴 CRITICAL FIX: _seal_block creates a TEMPLATE block (no PoW).
+            # Broadcasting here causes DUPLICATE block events — the miner sees
+            # the block twice (once from seal, once from submitBlock after PoW).
+            # Only _rpc_submitBlock should broadcast after DB persistence.
+            # The block_event data is kept in-memory for the on_block_sealed callback.
+            _tx_broadcast_data = _tx_broadcast  # preserve for callback use
+            logger.debug(
+                f"[SEAL] Template sealed h={block.block_height} — SSE broadcast deferred to submitBlock"
+            )
 
             # ── Submit to server via RPC if configured ───────────────────────────────
             try:
