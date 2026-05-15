@@ -84,6 +84,11 @@ def _init_hyp_wallet() -> bool:
     """
     Initialize wallet directly from hyp_engine — no separate module needed.
     Uses existing HypGammaEngine for key generation and signing.
+
+    Priority chain (strict):
+      1. ~/.qtcl/wallet.json  — load existing keypair
+      2. WALLET_ADDRESS env var — derive-only mode (no private key, blocks only)
+      3. Generate new keypair and persist to ~/.qtcl/wallet.json
     """
     global HYP_WALLET_AVAILABLE, HYP_ENGINE, HYP_KEYPAIR
 
@@ -91,30 +96,78 @@ def _init_hyp_wallet() -> bool:
         return True
 
     try:
-        # Import directly from existing hlwe module
         from hlwe.hyp_engine import HypEngine, HypKeyPair
 
-        # Initialize engine
         HYP_ENGINE = HypEngine()
-
-        # Generate or load keypair
-        # Check for existing wallet file at ~/.qtcl/wallet.json
-        import os
 
         _wallet_path = os.path.expanduser("~/.qtcl/wallet.json")
 
+        # ── Priority 1: load existing wallet file ───────────────────────────
         if os.path.exists(_wallet_path):
-            logger.info(f"[HYP-WALLET] 📍 Found wallet at {_wallet_path}")
+            try:
+                with open(_wallet_path, "r") as _wf:
+                    _wdata = json.load(_wf)
+                _priv = _wdata.get("private_key", "")
+                if _priv:
+                    HYP_KEYPAIR = HYP_ENGINE.keypair_from_private_key(_priv)
+                    logger.info(
+                        f"[HYP-WALLET] ✅ Loaded existing wallet from {_wallet_path} "
+                        f"| address={HYP_KEYPAIR.address[:22]}…"
+                    )
+                    HYP_WALLET_AVAILABLE = True
+                    return True
+                else:
+                    logger.error(
+                        f"[HYP-WALLET] ❌ wallet.json at {_wallet_path} missing private_key — "
+                        f"refusing to generate a new one silently. Fix the file or delete it."
+                    )
+                    return False
+            except Exception as _load_err:
+                logger.error(
+                    f"[HYP-WALLET] ❌ Failed to load wallet from {_wallet_path}: {_load_err} — "
+                    f"refusing to generate a new one silently. Fix or delete the file."
+                )
+                return False
+
+        # ── Priority 2: WALLET_ADDRESS env var (no private key available) ──
+        _env_addr = os.environ.get("WALLET_ADDRESS", "").strip()
+        if _env_addr:
             logger.info(
-                f"[HYP-WALLET]    Load with: from hlwe.hyp_engine import HypEngine; e=HypEngine(); kp=e.generate_keypair()"
+                f"[HYP-WALLET] ℹ️  No wallet file; using WALLET_ADDRESS env var "
+                f"| address={_env_addr[:22]}… (signing unavailable)"
             )
-            # Generate temporary keypair for now - proper loading requires password
-            HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
-        else:
-            # Generate new keypair
-            HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
+            # Create a minimal stub keypair with only address known
+            class _AddrOnlyKeypair:
+                address     = _env_addr
+                public_key  = ""
+                private_key = ""
+            HYP_KEYPAIR = _AddrOnlyKeypair()
+            HYP_WALLET_AVAILABLE = True
+            return True
+
+        # ── Priority 3: generate new keypair and persist ────────────────────
+        HYP_KEYPAIR = HYP_ENGINE.generate_keypair()
+        os.makedirs(os.path.dirname(_wallet_path), exist_ok=True)
+        try:
+            with open(_wallet_path, "w") as _wf:
+                json.dump(
+                    {
+                        "address":     HYP_KEYPAIR.address,
+                        "public_key":  HYP_KEYPAIR.public_key,
+                        "private_key": HYP_KEYPAIR.private_key,
+                        "created_at":  datetime.now(timezone.utc).isoformat(),
+                    },
+                    _wf,
+                    indent=2,
+                )
             logger.info(
-                f"[HYP-WALLET] ✅ Generated new keypair: {HYP_KEYPAIR.address[:22]}..."
+                f"[HYP-WALLET] ✅ Generated new keypair and saved to {_wallet_path} "
+                f"| address={HYP_KEYPAIR.address[:22]}…"
+            )
+        except Exception as _save_err:
+            logger.warning(
+                f"[HYP-WALLET] ⚠️  Generated keypair but failed to persist to "
+                f"{_wallet_path}: {_save_err} — address will change on next restart!"
             )
 
         HYP_WALLET_AVAILABLE = True

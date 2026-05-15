@@ -135,15 +135,63 @@ async def _sign_message(message_hex: str, private_key: str) -> dict:
         engine = _get_engine()
         if engine is not None:
             sig = engine.sign_hash(msg_bytes, private_key)
-            return {"signature": sig["signature"], "challenge": sig["challenge"],
-                    "auth_tag": sig.get("auth_tag", sig["challenge"]),
-                    "timestamp": sig.get("timestamp", datetime.now(timezone.utc).isoformat())}
+            sig_inner = sig["signature"]
+            # FIX: embed public_key inside the signature dict so mempool._verify_signature
+            # can find it at sig_dict.get('public_key') without a separate lookup.
+            # Derive public key from private key via engine if not already in sig.
+            pub_key = ""
+            try:
+                if hasattr(engine, "derive_public_key"):
+                    pub_key = engine.derive_public_key(private_key)
+                elif hasattr(engine, "get_public_key"):
+                    pub_key = engine.get_public_key(private_key)
+            except Exception:
+                pass
+            # sig_inner may be a JSON string (the a/b/c/d dict) or already a dict
+            if isinstance(sig_inner, str):
+                try:
+                    sig_dict = json.loads(sig_inner)
+                except Exception:
+                    sig_dict = {"raw": sig_inner}
+            elif isinstance(sig_inner, dict):
+                sig_dict = dict(sig_inner)
+            else:
+                sig_dict = {"raw": str(sig_inner)}
+            if pub_key:
+                sig_dict["public_key"] = pub_key
+                sig_dict["public_key_hex"] = pub_key
+            return {
+                "signature": json.dumps(sig_dict),
+                "challenge": sig["challenge"],
+                "auth_tag": sig.get("auth_tag", sig["challenge"]),
+                "timestamp": sig.get("timestamp", datetime.now(timezone.utc).isoformat()),
+                "valid": True,
+            }
     except Exception as e:
         logger.warning(f"[MCP] Direct sign failed ({e}), trying RPC")
     result = qtcl_rpc("qtcl_hyp_signMessage", {"message": message_hex, "private_key": private_key})
-    return {"signature": result["signature"], "challenge": result["challenge"],
-            "auth_tag": result.get("auth_tag", result["challenge"]),
-            "timestamp": result.get("timestamp", datetime.now(timezone.utc).isoformat())}
+    sig_inner = result["signature"]
+    if isinstance(sig_inner, str):
+        try:
+            sig_dict = json.loads(sig_inner)
+        except Exception:
+            sig_dict = {"raw": sig_inner}
+    elif isinstance(sig_inner, dict):
+        sig_dict = dict(sig_inner)
+    else:
+        sig_dict = {"raw": str(sig_inner)}
+    # RPC path: public_key may be returned top-level by server
+    pub_key = result.get("public_key") or result.get("public_key_hex", "")
+    if pub_key:
+        sig_dict["public_key"] = pub_key
+        sig_dict["public_key_hex"] = pub_key
+    return {
+        "signature": json.dumps(sig_dict),
+        "challenge": result["challenge"],
+        "auth_tag": result.get("auth_tag", result["challenge"]),
+        "timestamp": result.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        "valid": True,
+    }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # §6  FASTMCP SERVER FACTORY
@@ -173,7 +221,8 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         """
         Sign a 32-byte message hash with a HypΓ private key (Schnorr-Γ).
         message_hex must be 64 hex chars (SHA3-256 of your tx data).
-        Returns signature dict for use in qtcl_send_transaction.
+        Returns signature dict with public_key embedded — pass directly to
+        qtcl_send_transaction as the signature field.
         """
         if len(message_hex) != 64:
             raise ValueError(f"message_hex must be 64 hex chars; got {len(message_hex)}")
@@ -204,9 +253,32 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         Submit a signed UTXO transaction. Flat fee: 1 qsat. ~18s finality.
         Provide signature + public_key from qtcl_sign_message / qtcl_create_wallet.
         """
-        p = {"from_address": from_address, "to_address": to_address, "amount": amount}
-        for k, v in (("memo", memo), ("signature", signature), ("public_key", public_key), ("nonce", nonce)):
-            if v: p[k] = v
+        # FIX: mempool._verify_signature() requires public_key to be embedded INSIDE
+        # the signature dict at sig_dict['public_key'] / sig_dict['public_key_hex'].
+        # The top-level public_key param is used to inject it if the signature dict
+        # doesn't already carry it (which happens when using qtcl_sign_message output).
+        sig_to_send = signature
+        if public_key and signature:
+            try:
+                sig_dict = json.loads(signature) if isinstance(signature, str) else dict(signature)
+                # Only inject if the sig dict doesn't already have public_key
+                if not sig_dict.get("public_key") and not sig_dict.get("public_key_hex"):
+                    sig_dict["public_key"] = public_key
+                    sig_dict["public_key_hex"] = public_key
+                sig_to_send = json.dumps(sig_dict)
+            except (json.JSONDecodeError, TypeError):
+                pass  # sig is not JSON — leave as-is, server will reject gracefully
+
+        p: dict = {"from_address": from_address, "to_address": to_address, "amount": amount}
+        if nonce:
+            p["nonce"] = nonce
+        if memo:
+            p["memo"] = memo
+        if sig_to_send:
+            p["signature"] = sig_to_send
+        if public_key:
+            p["public_key"] = public_key       # top-level for compatibility
+            p["sender_public_key_hex"] = public_key  # mempool metadata field
         # _rpc_submitTransaction expects params[0] = tx dict
         result = qtcl_rpc("qtcl_submitTransaction", [p])
         return json.dumps(result, indent=2, default=str)

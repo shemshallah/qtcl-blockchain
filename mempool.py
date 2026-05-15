@@ -1702,10 +1702,24 @@ class Mempool:
 
         # ── CANONICAL VERIFICATION ──────────────────────────────────────
         try:
-            pub_key_hex = sig_dict.get('public_key_hex') or sig_dict.get('public_key', '')
+            pub_key_hex = (
+                sig_dict.get('public_key_hex')
+                or sig_dict.get('public_key', '')
+                # FIX: also check top-level norm fields — MCP sends public_key separately
+                or norm.get('sender_public_key_hex', '')
+                or norm.get('public_key', '')
+            )
             if not pub_key_hex:
-                logger.error(f"[MEMPOOL-SIG] ❌ missing_public_key — sig keys: {list(sig_dict.keys())[:12]}")
+                logger.error(
+                    f"[MEMPOOL-SIG] ❌ missing_public_key — sig keys: {list(sig_dict.keys())[:12]} "
+                    f"norm keys with 'key': {[k for k in norm if 'key' in k.lower()]}"
+                )
                 return False, "missing_public_key_in_signature"
+            # Inject into sig_dict so downstream engine.verify_signature has it
+            if not sig_dict.get('public_key'):
+                sig_dict['public_key'] = pub_key_hex
+            if not sig_dict.get('public_key_hex'):
+                sig_dict['public_key_hex'] = pub_key_hex
 
             # 🔍 DIAGNOSTIC: log which canonical fields are present
             _has_R = 'R' in sig_dict and isinstance(sig_dict.get('R'), dict) and bool(sig_dict['R'])
@@ -1848,6 +1862,16 @@ class Mempool:
                 'metadata'     : dict(raw.get('metadata', {})),
                 'inputs'       : inputs,
                 'outputs'      : outputs,
+                # FIX: propagate public_key fields so _verify_signature can use them
+                # when the public key is NOT embedded in the signature JSON itself.
+                'sender_public_key_hex': str(
+                    raw.get('sender_public_key_hex')
+                    or raw.get('public_key', '')
+                ),
+                'public_key'   : str(
+                    raw.get('public_key')
+                    or raw.get('sender_public_key_hex', '')
+                ),
             }
 
         except Exception as exc:
