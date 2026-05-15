@@ -135,10 +135,14 @@ async def _sign_message(message_hex: str, private_key: str) -> dict:
         engine = _get_engine()
         if engine is not None:
             sig = engine.sign_hash(msg_bytes, private_key)
-            sig_inner = sig["signature"]
-            # FIX: embed public_key inside the signature dict so mempool._verify_signature
-            # can find it at sig_dict.get('public_key') without a separate lookup.
-            # Derive public key from private key via engine if not already in sig.
+            # FIX: sign_hash() returns the full canonical sig dict at the top level:
+            #   {signature: hex(R‖Z), challenge: hex(c), R: {...}, Z: {...},
+            #    c_full: ..., c_exp: ..., R_canonical_hex: ..., R_canonical: ...}
+            # The MCP tool was previously only forwarding {signature, challenge, auth_tag,
+            # timestamp}, dropping R/Z/c_full/c_exp — making verify_signature fail with
+            # "sig missing required keys" because signature_from_dict needs the matrix fields.
+            # Fix: build sig_dict from the ENTIRE sig dict, then embed the public key.
+            sig_dict = {k: v for k, v in sig.items()}
             pub_key = ""
             try:
                 if hasattr(engine, "derive_public_key"):
@@ -147,50 +151,46 @@ async def _sign_message(message_hex: str, private_key: str) -> dict:
                     pub_key = engine.get_public_key(private_key)
             except Exception:
                 pass
-            # sig_inner may be a JSON string (the a/b/c/d dict) or already a dict
-            if isinstance(sig_inner, str):
-                try:
-                    sig_dict = json.loads(sig_inner)
-                except Exception:
-                    sig_dict = {"raw": sig_inner}
-            elif isinstance(sig_inner, dict):
-                sig_dict = dict(sig_inner)
-            else:
-                sig_dict = {"raw": str(sig_inner)}
             if pub_key:
-                sig_dict["public_key"] = pub_key
+                sig_dict["public_key"]     = pub_key
                 sig_dict["public_key_hex"] = pub_key
             return {
-                "signature": json.dumps(sig_dict),
-                "challenge": sig["challenge"],
-                "auth_tag": sig.get("auth_tag", sig["challenge"]),
+                "signature": json.dumps(sig_dict, default=str),
+                "challenge": sig.get("challenge", ""),
+                "auth_tag":  sig.get("auth_tag", sig.get("challenge", "")),
                 "timestamp": sig.get("timestamp", datetime.now(timezone.utc).isoformat()),
-                "valid": True,
+                "valid":     True,
             }
     except Exception as e:
         logger.warning(f"[MCP] Direct sign failed ({e}), trying RPC")
+    # RPC fallback — qtcl_hyp_signMessage returns the same canonical dict
     result = qtcl_rpc("qtcl_hyp_signMessage", {"message": message_hex, "private_key": private_key})
-    sig_inner = result["signature"]
-    if isinstance(sig_inner, str):
+    # result["signature"] may be a hex wire string or the full dict depending on server version
+    sig_raw = result.get("signature", "")
+    if isinstance(sig_raw, str):
         try:
-            sig_dict = json.loads(sig_inner)
+            sig_dict = json.loads(sig_raw)
         except Exception:
-            sig_dict = {"raw": sig_inner}
-    elif isinstance(sig_inner, dict):
-        sig_dict = dict(sig_inner)
+            sig_dict = {"signature": sig_raw}
+    elif isinstance(sig_raw, dict):
+        sig_dict = dict(sig_raw)
     else:
-        sig_dict = {"raw": str(sig_inner)}
-    # RPC path: public_key may be returned top-level by server
+        sig_dict = {"signature": str(sig_raw)}
+    # Carry over any canonical fields the RPC returned at top-level
+    for canon_key in ("R", "Z", "c_full", "c_exp", "R_canonical_hex", "R_canonical", "challenge"):
+        if canon_key in result and canon_key not in sig_dict:
+            sig_dict[canon_key] = result[canon_key]
+    # Embed public_key from top-level result if server returned it
     pub_key = result.get("public_key") or result.get("public_key_hex", "")
     if pub_key:
-        sig_dict["public_key"] = pub_key
+        sig_dict["public_key"]     = pub_key
         sig_dict["public_key_hex"] = pub_key
     return {
-        "signature": json.dumps(sig_dict),
-        "challenge": result["challenge"],
-        "auth_tag": result.get("auth_tag", result["challenge"]),
+        "signature": json.dumps(sig_dict, default=str),
+        "challenge": result.get("challenge", ""),
+        "auth_tag":  result.get("auth_tag", result.get("challenge", "")),
         "timestamp": result.get("timestamp", datetime.now(timezone.utc).isoformat()),
-        "valid": True,
+        "valid":     True,
     }
 
 # ═══════════════════════════════════════════════════════════════════════════════
