@@ -6043,7 +6043,14 @@ def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
 
 
 def qtcl_hyp_signMessage(params: dict, rpc_id: Any) -> dict:
-    """RPC: qtcl_hyp_signMessage — Schnorr-Γ signature."""
+    """RPC: qtcl_hyp_signMessage — Schnorr-Γ signature.
+
+    FIX v3.2: Returns ALL canonical fields from engine.sign_hash() —
+    R, Z, c_full, c_exp, R_canonical_hex are REQUIRED by verify_signature's
+    signature_from_dict path. Previous version stripped them, causing
+    "sig missing required keys" or silent verification failures when the
+    sig dict was passed through MCP → submitTransaction → mempool → engine.
+    """
     try:
         message_hex = params.get("message", "")
         private_key = params.get("private_key", "")
@@ -6052,16 +6059,34 @@ def qtcl_hyp_signMessage(params: dict, rpc_id: Any) -> dict:
         message_bytes = bytes.fromhex(message_hex)
         engine = _init_hlwe_engine()
         sig = engine.sign_hash(message_bytes, private_key)
-        return _rpc_ok(
-            {
-                "signature": sig["signature"],
-                "challenge": sig["challenge"],
-                "auth_tag": sig.get("auth_tag", sig["challenge"]),
-                "timestamp": sig["timestamp"],
-                "valid": True,
-            },
-            rpc_id,
-        )
+        # FIX: Return the FULL sig dict — R, Z, c_full, c_exp are critical for
+        # engine.verify_signature → signature_from_dict reconstruction.
+        # Stripping them caused MCP transactions to always fail verification.
+        result = {
+            "signature":       sig.get("signature", ""),
+            "challenge":       sig.get("challenge", ""),
+            "auth_tag":        sig.get("auth_tag", sig.get("challenge", "")),
+            "timestamp":       sig.get("timestamp", ""),
+            "valid":           True,
+            # Canonical matrix fields — MUST survive for verify pipeline
+            "R":               sig.get("R", {}),
+            "Z":               sig.get("Z", {}),
+            "c_full":          sig.get("c_full", sig.get("challenge", "")),
+            "c_exp":           sig.get("c_exp", 0),
+            "R_canonical_hex": sig.get("R_canonical_hex", ""),
+            "R_canonical":     sig.get("R_canonical", sig.get("R_canonical_hex", "")),
+        }
+        # Also derive public_key from private_key so callers have it
+        try:
+            pub_key = engine.derive_public_key(private_key) if hasattr(engine, 'derive_public_key') else ""
+            if not pub_key and hasattr(engine, 'get_public_key'):
+                pub_key = engine.get_public_key(private_key)
+            if pub_key:
+                result["public_key"]     = pub_key
+                result["public_key_hex"] = pub_key
+        except Exception:
+            pass  # Best-effort; caller can supply public_key separately
+        return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.error(f"[RPC-HYP-SIGN] {e}", exc_info=True)
         return _rpc_error(-32603, f"Signature creation failed: {str(e)}", rpc_id)

@@ -168,14 +168,18 @@ _TOOLS: List[Dict[str, Any]] = [
         "name": "qtcl_sign_message",
         "description": (
             "Sign a 32-byte message hash with a HypΓ private key using Schnorr-Γ. "
-            "SHA3-256 hash your transaction data → pass 64-char hex as message_hex. "
-            "Returns signature, challenge, auth_tag for use in qtcl_send_transaction."
+            "To sign a transaction, compute: SHA3-256(JSON.dumps({\"sender\": from_addr, "
+            "\"recipient\": to_addr, \"amount\": amount_float, \"nonce\": nonce_int}, "
+            "sort_keys=True)) → pass the 64-char hex as message_hex. "
+            "The nonce MUST match the nonce you will use in qtcl_send_transaction. "
+            "Returns the full signature dict (with canonical R/Z matrix fields) — "
+            "pass the entire JSON output as the signature field to qtcl_send_transaction."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "message_hex": {"type": "string", "description": "64 hex chars (32-byte SHA3-256 hash)"},
-                "private_key": {"type": "string", "description": "HypΓ private key from qtcl_create_wallet"},
+                "message_hex": {"type": "string", "description": "64 hex chars (32-byte SHA3-256 hash of tx signing payload)"},
+                "private_key": {"type": "string", "description": "HypΓ private key from qtcl_create_wallet (512-char base-4 walk)"},
             },
             "required": ["message_hex", "private_key"],
             "additionalProperties": False,
@@ -211,18 +215,20 @@ _TOOLS: List[Dict[str, Any]] = [
         "description": (
             "Submit a signed UTXO transaction to the QTCL network. "
             "Flat fee: 1 qsat. Finality: ~18 seconds. "
-            "Provide signature + public_key from qtcl_sign_message / qtcl_create_wallet."
+            "Provide the full signature JSON from qtcl_sign_message as the signature field, "
+            "and the public_key from qtcl_create_wallet. The nonce must match the nonce "
+            "used in the signing payload. If nonce is omitted, one is auto-generated."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "from_address": {"type": "string"},
-                "to_address":   {"type": "string"},
-                "amount":       {"type": "number", "description": "Amount in QTCL (not qsat)"},
-                "memo":         {"type": "string", "description": "Optional transaction memo"},
-                "signature":    {"type": "string", "description": "Schnorr-Γ signature hex"},
-                "public_key":   {"type": "string", "description": "HypΓ public key hex"},
-                "nonce":        {"type": "integer", "description": "Optional replay-prevention nonce"},
+                "from_address": {"type": "string", "description": "Sender's 64-char hex QTCL address"},
+                "to_address":   {"type": "string", "description": "Recipient's 64-char hex QTCL address"},
+                "amount":       {"type": "number", "description": "Amount in QTCL (not qsat). 1 QTCL = 100 qsat."},
+                "memo":         {"type": "string", "description": "Optional transaction memo (max 256 chars)"},
+                "signature":    {"type": "string", "description": "Full signature JSON from qtcl_sign_message (includes R, Z, challenge, c_full)"},
+                "public_key":   {"type": "string", "description": "HypΓ public key hex from qtcl_create_wallet"},
+                "nonce":        {"type": "integer", "description": "Replay-prevention nonce (must match signing payload nonce). Auto-generated if omitted."},
             },
             "required": ["from_address", "to_address", "amount"],
             "additionalProperties": False,
@@ -425,8 +431,21 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rpc_url: str) -> Dict[str, A
                 return _err("message_hex and private_key are required")
             if len(mhex) != 64:
                 return _err(f"message_hex must be 64 hex chars (32-byte hash); got {len(mhex)}")
-            # server.py qtcl_hyp_signMessage expects dict: {message, private_key}
+            # server.py qtcl_hyp_signMessage returns the full sig dict with canonical fields
             r = _rpc("qtcl_hyp_signMessage", {"message": mhex, "private_key": pk}, rpc_url)
+            # FIX: The result from RPC is a flat dict:
+            #   {signature: hex_str, challenge: hex_str, R: {...}, Z: {...}, c_full: ..., ...}
+            # The MCP caller needs to pass the ENTIRE dict (as a JSON string) as the
+            # "signature" field to qtcl_send_transaction. Package it so the caller can
+            # just use result.signature directly:
+            #   result.signature_for_tx = JSON string of the full sig dict
+            #   (plus the raw fields for inspection)
+            sig_for_tx = json.dumps(r, default=str)
+            r["signature_for_tx"] = sig_for_tx
+            r["_usage"] = (
+                "Pass 'signature_for_tx' as the 'signature' parameter to qtcl_send_transaction. "
+                "It contains the full sig dict (R, Z, c_full, challenge) needed for verification."
+            )
             return _ok(r)
 
         # ── Balance ─────────────────────────────────────────────────────────
@@ -456,10 +475,52 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rpc_url: str) -> Dict[str, A
             if not fa or not ta or am is None:
                 return _err("from_address, to_address, and amount are required")
             p: Dict[str, Any] = {"from_address": fa, "to_address": ta, "amount": float(am)}
-            for k in ("memo", "signature", "public_key", "nonce"):
-                v = args.get(k)
-                if v is not None and v != "" and v != 0:
-                    p[k] = v
+
+            # Memo
+            memo = args.get("memo", "")
+            if memo:
+                p["memo"] = memo
+
+            # Nonce — MUST pass through even if 0 (mempool requires it)
+            # FIX: old code filtered nonce==0 with `v != 0`, breaking required field
+            nonce_val = args.get("nonce")
+            if nonce_val is not None:
+                p["nonce"] = int(nonce_val)
+            else:
+                # Auto-generate nonce if not provided (nanosecond timestamp)
+                p["nonce"] = int(time.time() * 1e9)
+
+            # Signature — ensure full sig dict with canonical fields is embedded
+            # Accept signature_for_tx (from qtcl_sign_message output) as alias
+            sig_raw = args.get("signature", "") or args.get("signature_for_tx", "")
+            pub_key = args.get("public_key", "")
+            if sig_raw:
+                # Parse signature string to dict if needed
+                sig_dict = None
+                if isinstance(sig_raw, str):
+                    try:
+                        sig_dict = json.loads(sig_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        sig_dict = {"signature": sig_raw}
+                elif isinstance(sig_raw, dict):
+                    sig_dict = dict(sig_raw)
+
+                if sig_dict:
+                    # Inject public_key into sig dict if not already present
+                    if pub_key:
+                        if not sig_dict.get("public_key"):
+                            sig_dict["public_key"] = pub_key
+                        if not sig_dict.get("public_key_hex"):
+                            sig_dict["public_key_hex"] = pub_key
+                    p["signature"] = json.dumps(sig_dict, default=str)
+                else:
+                    p["signature"] = sig_raw
+
+            # Public key fields — mempool checks both top-level and inside sig
+            if pub_key:
+                p["public_key"] = pub_key
+                p["sender_public_key_hex"] = pub_key
+
             # server.py _rpc_submitTransaction: params[0] dict
             r = _rpc("qtcl_submitTransaction", [p], rpc_url)
             return _ok(r)
@@ -595,9 +656,16 @@ def _get_prompt(name: str, args: Dict[str, Any]) -> List[Dict[str, Any]]:
             text = (
                 "You are helping a user send QTCL. The workflow is:\n"
                 "1. qtcl_get_balance(from_address) — verify sufficient funds\n"
-                "2. qtcl_get_utxos(from_address) — inspect available UTXOs\n"
-                "3. qtcl_sign_message(SHA3-256_hash_of_tx_data, private_key) — authorize\n"
-                "4. qtcl_send_transaction(from, to, amount, signature, public_key) — submit\n"
+                "2. Choose a nonce (e.g. int(time.time() * 1e9) — nanosecond timestamp)\n"
+                "3. Build signing payload: JSON.dumps({\"sender\": from_addr, "
+                "\"recipient\": to_addr, \"amount\": amount_float, \"nonce\": nonce_int}, "
+                "sort_keys=True)\n"
+                "4. Compute SHA3-256 hash of that payload → 64-char hex\n"
+                "5. qtcl_sign_message(message_hex=that_hash, private_key=key) — authorize\n"
+                "6. qtcl_send_transaction(from_address, to_address, amount, "
+                "signature=full_sig_json, public_key=key, nonce=same_nonce) — submit\n"
+                "CRITICAL: The nonce in step 3 MUST match the nonce in step 6.\n"
+                "The amount in step 3 MUST match the amount in step 6 (both in QTCL, not qsat).\n"
                 "Flat fee: 1 qsat. Finality: ~18 seconds."
             )
         else:

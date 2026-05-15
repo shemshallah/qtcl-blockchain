@@ -220,9 +220,16 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
     async def qtcl_sign_message(message_hex: str, private_key: str) -> str:
         """
         Sign a 32-byte message hash with a HypΓ private key (Schnorr-Γ).
-        message_hex must be 64 hex chars (SHA3-256 of your tx data).
-        Returns signature dict with public_key embedded — pass directly to
-        qtcl_send_transaction as the signature field.
+        message_hex must be 64 hex chars — the SHA3-256 of your signing payload.
+
+        Signing payload format (must match mempool verifier exactly):
+          json.dumps({"sender": from_addr, "recipient": to_addr,
+                      "amount": amount_float, "nonce": nonce_int}, sort_keys=True)
+
+        Returns the full signature dict with canonical R/Z matrix fields and
+        public_key embedded. Pass the ENTIRE JSON output as the signature field
+        to qtcl_send_transaction. The nonce in the payload MUST match the nonce
+        you pass to qtcl_send_transaction.
         """
         if len(message_hex) != 64:
             raise ValueError(f"message_hex must be 64 hex chars; got {len(message_hex)}")
@@ -253,25 +260,29 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         Submit a signed UTXO transaction. Flat fee: 1 qsat. ~18s finality.
         Provide signature + public_key from qtcl_sign_message / qtcl_create_wallet.
         """
-        # FIX: mempool._verify_signature() requires public_key to be embedded INSIDE
-        # the signature dict at sig_dict['public_key'] / sig_dict['public_key_hex'].
-        # The top-level public_key param is used to inject it if the signature dict
-        # doesn't already carry it (which happens when using qtcl_sign_message output).
+        # FIX: mempool._verify_signature() requires public_key embedded INSIDE
+        # the signature dict AND canonical fields (R, Z, c_full, c_exp) for
+        # engine.verify_signature → signature_from_dict reconstruction.
         sig_to_send = signature
-        if public_key and signature:
+        if signature:
             try:
                 sig_dict = json.loads(signature) if isinstance(signature, str) else dict(signature)
-                # Only inject if the sig dict doesn't already have public_key
-                if not sig_dict.get("public_key") and not sig_dict.get("public_key_hex"):
-                    sig_dict["public_key"] = public_key
-                    sig_dict["public_key_hex"] = public_key
-                sig_to_send = json.dumps(sig_dict)
+                # Inject public_key if not already present
+                if public_key:
+                    if not sig_dict.get("public_key"):
+                        sig_dict["public_key"] = public_key
+                    if not sig_dict.get("public_key_hex"):
+                        sig_dict["public_key_hex"] = public_key
+                sig_to_send = json.dumps(sig_dict, default=str)
             except (json.JSONDecodeError, TypeError):
                 pass  # sig is not JSON — leave as-is, server will reject gracefully
 
         p: dict = {"from_address": from_address, "to_address": to_address, "amount": amount}
+        # FIX: nonce MUST always be present (mempool requires it). Auto-generate if 0.
         if nonce:
             p["nonce"] = nonce
+        else:
+            p["nonce"] = int(time.time() * 1e9)  # nanosecond timestamp
         if memo:
             p["memo"] = memo
         if sig_to_send:
@@ -401,10 +412,16 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         elif task == "send":
             return ("You are helping a user send QTCL. Workflow:\n"
                     "1. qtcl_get_balance(from_address) — check funds\n"
-                    "2. qtcl_get_utxos(from_address) — select inputs\n"
-                    "3. qtcl_sign_message(tx_hash, private_key) — authorize\n"
-                    "4. qtcl_send_transaction(...) — submit\n"
-                    "Flat fee is 1 qsat. ~18s finality.")
+                    "2. Pick nonce = int(time.time() * 1e9)\n"
+                    "3. Build signing payload: json.dumps({\"sender\": from_addr, "
+                    "\"recipient\": to_addr, \"amount\": amount_float, \"nonce\": nonce}, "
+                    "sort_keys=True)\n"
+                    "4. SHA3-256 hash the payload → 64 hex chars\n"
+                    "5. qtcl_sign_message(message_hex=hash, private_key=key)\n"
+                    "6. qtcl_send_transaction(from, to, amount, "
+                    "signature=full_result_json, public_key=key, nonce=SAME_nonce)\n"
+                    "CRITICAL: nonce + amount must match between step 3 and step 6.\n"
+                    "Flat fee: 1 qsat. ~18s finality.")
         return "How can I help you with QTCL today?"
 
     return mcp
