@@ -1266,6 +1266,13 @@ class Mempool:
                     'sender_public_key_hex': _pubkey,
                 })
 
+                _inputs = norm.get('inputs', raw.get('inputs', raw.get('input', [])))
+                if not isinstance(_inputs, list):
+                    _inputs = []
+                _outputs = norm.get('outputs', raw.get('outputs', raw.get('output', [])))
+                if not isinstance(_outputs, list):
+                    _outputs = []
+
                 tx = MempoolTx(
                     tx_hash        = tx_hash,
                     from_address   = from_addr,
@@ -1280,6 +1287,8 @@ class Mempool:
                     memo           = memo,
                     client_tx_id   = client_tx_id,
                     metadata       = meta,
+                    inputs         = _inputs,
+                    outputs        = _outputs,
                 )
 
                 # ── APPLY RBF EVICTION ─────────────────────────────────────
@@ -1781,6 +1790,13 @@ class Mempool:
             if not sig:
                 sig = ''
 
+            inputs = raw.get('inputs', raw.get('input', []))
+            if not isinstance(inputs, list):
+                inputs = []
+            outputs = raw.get('outputs', raw.get('output', []))
+            if not isinstance(outputs, list):
+                outputs = []
+
             return True, "ok", {
                 'from_address' : from_address,
                 'to_address'   : to_address,
@@ -1793,6 +1809,8 @@ class Mempool:
                 'memo'         : str(raw.get('memo', ''))[:256],
                 'client_tx_id' : str(raw.get('tx_id', raw.get('client_tx_id', '')))[:64],
                 'metadata'     : dict(raw.get('metadata', {})),
+                'inputs'       : inputs,
+                'outputs'      : outputs,
             }
 
         except Exception as exc:
@@ -1820,6 +1838,8 @@ class Mempool:
         persist_meta['nonce']        = tx.nonce
         persist_meta['timestamp_ns'] = tx.timestamp_ns
         persist_meta.setdefault('signature', tx.signature)
+        persist_meta['inputs']       = tx.inputs
+        persist_meta['outputs']      = tx.outputs
         try:
             with _db.cursor() as cur:
                 cur.execute("""
@@ -2120,6 +2140,12 @@ class Mempool:
                     recovered_sig = (meta.get('signature')
                                      or row.get('quantum_state_hash')
                                      or '')
+                    recovered_inputs = meta.get('inputs', [])
+                    if not isinstance(recovered_inputs, list):
+                        recovered_inputs = []
+                    recovered_outputs = meta.get('outputs', [])
+                    if not isinstance(recovered_outputs, list):
+                        recovered_outputs = []
                     tx = MempoolTx(
                         tx_hash        = row['tx_hash'],
                         from_address   = row['from_address'],
@@ -2132,6 +2158,8 @@ class Mempool:
                         timestamp_ns   = ts_ns,
                         tx_type        = row['tx_type'] or 'transfer',
                         metadata       = meta,
+                        inputs         = recovered_inputs,
+                        outputs        = recovered_outputs,
                     )
                     # Insert without full validation (already passed on first submit)
                     with self._lock:

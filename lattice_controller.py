@@ -2475,52 +2475,6 @@ class QuantumLatticeController:
             logger.error(f"Measurement failed: {e}")
             return {"error": str(e)}
 
-    # ════════════════════════════════════════════════════════════════════════════════
-    # TRANSACTION QUANTUM ENCODING — COMMENTED OUT (v13)
-    # ════════════════════════════════════════════════════════════════════════════════
-
-    # @dataclass
-    # class TransactionQuantumParameters:
-    #     tx_id: str
-    #     user_address: str
-    #     target_address: str
-    #     amount: float
-    #     timestamp: float = field(default_factory=time.time)
-    #     user_phase: float = 0.0
-    #     target_phase: float = 0.0
-    #     measurement_basis: str = 'Z'
-    #
-    # def encode_transaction(self, tx_params: TransactionQuantumParameters) -> Dict[str, Any]:
-    #     """Encode transaction as quantum state (COMMENTED OUT v13)"""
-    #     # try:
-    #     #     user_hash = hashlib.sha3_256(tx_params.user_address.encode()).digest()
-    #     #     target_hash = hashlib.sha3_256(tx_params.target_address.encode()).digest()
-    #     #     user_phase = float(int.from_bytes(user_hash[:4], 'big')) % (2 * np.pi)
-    #     #     target_phase = float(int.from_bytes(target_hash[:4], 'big')) % (2 * np.pi)
-    #     #     qc = QuantumCircuit(3, name=f"TX_{tx_params.tx_id[:8]}")
-    #     #     qc.ry(user_phase, 0)
-    #     #     qc.ry(target_phase, 1)
-    #     #     qc.cx(0, 2)
-    #     #     qc.cx(1, 2)
-    #     #     qc.measure(list(range(3)), list(range(3)))
-    #     #     return {'error': 'Transaction encoding disabled in v13'}
-    #     # except Exception as e:
-    #     #     return {'error': str(e)}
-    #     return {'error': 'Transaction encoding commented out - v13 spatial-temporal field model'}
-    #
-    # def process_transaction(self, tx_data: Dict[str, Any]) -> Dict[str, Any]:
-    #     """Process transaction (COMMENTED OUT v13)"""
-    #     # return {'error': 'Transaction processing commented out - use spatial-temporal field instead'}
-    #     return {
-    #         'error': 'Transaction processing disabled in v13',
-    #         'note': 'Use spatial-temporal field routing instead',
-    #         'recommendation': 'Create route, encode transaction in block fields'
-    #     }
-
-    # ════════════════════════════════════════════════════════════════════════════════
-    # END COMMENTED TRANSACTION CODE
-    # ════════════════════════════════════════════════════════════════════════════════
-
     def create_spatial_route(self, start_pq: int, end_pq: int) -> Optional[Route]:
         """Create a spatial route between two pseudoqubits"""
         try:

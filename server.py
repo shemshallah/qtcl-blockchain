@@ -1333,7 +1333,7 @@ except Exception as _ewat_err:
     logger.warning(f"[STARTUP] ⚠️  UTXO table creation deferred: {_ewat_err}")
 
 def _settle_block_rewards(
-    height: int, block_hash: str, miner_address: str, txs: list, non_coinbase_txs: list
+    height: int, block_hash: str, miner_address: str, txs: list
 ) -> None:
     """UTXO SETTLEMENT — Creates UTXOs from tx outputs, updates wallet balances.
 
@@ -1725,7 +1725,7 @@ def _settle_block_rewards(
             _settle_log.critical(f"[SETTLE] 🔄 Retrying h={height} after table creation")
             _SETTLED_HEIGHTS.discard(height)
             # Recursive retry (once) — tables now exist
-            _settle_block_rewards(height, block_hash, miner_address, txs, non_coinbase_txs)
+            _settle_block_rewards(height, block_hash, miner_address, txs)
             return
         _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED: {_rt_err}", exc_info=True)
         raise
@@ -1765,7 +1765,7 @@ def _block_settle_worker_thread():
             try:
                 # Delegate to _settle_block_rewards function
                 _settle_block_rewards(
-                    height, block_hash, miner_address, txs, non_coinbase_txs
+                    height, block_hash, miner_address, txs
                 )
                 _settle_log.critical(f"[SETTLE-WORKER] ✅ Job completed: h={height}")
             except Exception as settle_err:
@@ -3531,244 +3531,9 @@ def _set_app_ready():
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 
-class SafeFieldConverter:
-    """⚛️  Autonomous diagnostic field converter with fallback recovery."""
-
-    _errors = {}  # Track which fields fail across requests for autonomous healing
-
-    @staticmethod
-    def safe_int(value, field_name="unknown", default=0):
-        """Convert to int with diagnostic logging."""
-        try:
-            if value is None:
-                return default
-            return int(value)
-        except (ValueError, TypeError) as e:
-            SafeFieldConverter._errors[f"int_{field_name}"] = str(e)
-            logger.warning(f"[CONVERTER] int({field_name})={value} failed: {e}")
-            return default
-
-    @staticmethod
-    def safe_float(value, field_name="unknown", default=0.0):
-        """Convert to float with diagnostic logging."""
-        try:
-            if value is None:
-                return default
-            return float(value)
-        except (ValueError, TypeError) as e:
-            SafeFieldConverter._errors[f"float_{field_name}"] = str(e)
-            logger.warning(f"[CONVERTER] float({field_name})={value} failed: {e}")
-            return default
-
-    @staticmethod
-    def safe_str(value, field_name="unknown", default=""):
-        """Convert to str with diagnostic logging."""
-        try:
-            if value is None:
-                return default
-            return str(value)
-        except (ValueError, TypeError) as e:
-            SafeFieldConverter._errors[f"str_{field_name}"] = str(e)
-            logger.warning(f"[CONVERTER] str({field_name})={value} failed: {e}")
-            return default
-
-    @staticmethod
-    def safe_bool(value, field_name="unknown", default=False):
-        """Convert to bool with diagnostic logging."""
-        try:
-            if value is None:
-                return default
-            return bool(value)
-        except (ValueError, TypeError) as e:
-            SafeFieldConverter._errors[f"bool_{field_name}"] = str(e)
-            logger.warning(f"[CONVERTER] bool({field_name})={value} failed: {e}")
-            return default
-
-    @staticmethod
-    def get_error_report():
-        """Return accumulated conversion errors for autonomous healing."""
-        return dict(SafeFieldConverter._errors)
-
-    @staticmethod
-    def clear_errors():
-        """Clear error history for next diagnostic cycle."""
-        SafeFieldConverter._errors.clear()
-
-
-class SnapshotAutonomousHealer:
-    """⚛️  Autonomous diagnostic & healing loop for snapshot failures."""
-
-    _last_valid_snapshot = {}  # Cache last valid state for fallback
-    _healing_cycles = 0
-    _healing_lock = threading.Lock()
-
-    @staticmethod
-    def build_from_row(row, diag_label="oracle_snapshot_json"):
-        """Build snapshot with autonomous error detection & recovery."""
-        if not row:
-            return None, {"error": "row_is_none", "ready": False}
-
-        diag = {"cycles": 0, "errors": [], "recovered": []}
-        SafeFieldConverter.clear_errors()
-
-        try:
-            # ⚛️  Phase 1: Parse oracle measurements (most failure-prone)
-            oracles = []
-            try:
-                if isinstance(row[18], list):
-                    oracles = row[18]
-                elif isinstance(row[18], str):
-                    oracles = json.loads(row[18])
-                else:
-                    oracles = []
-            except (json.JSONDecodeError, TypeError) as e:
-                diag["errors"].append(f"oracle_measurements: {str(e)[:50]}")
-                logger.warning(f"[HEALER] Oracle measurements parse failed: {e}")
-                oracles = []
-
-            # ⚛️  Phase 2: Parse mermin result (nullable)
-            mermin_result = None
-            if row[10] is not None:
-                try:
-                    m_val = SafeFieldConverter.safe_float(row[10], "mermin_M")
-                    mermin_result = {
-                        "M_value": m_val,
-                        "M": m_val,
-                        "is_quantum": SafeFieldConverter.safe_bool(
-                            row[11], "mermin_is_quantum"
-                        ),
-                        "verdict": SafeFieldConverter.safe_str(
-                            row[12], "mermin_verdict"
-                        ),
-                    }
-                except Exception as e:
-                    diag["errors"].append(f"mermin_result: {str(e)[:50]}")
-                    logger.warning(f"[HEALER] Mermin result construction failed: {e}")
-                    mermin_result = None
-
-            # ⚛️  Phase 3: Safe numeric conversions with field-level diagnostics
-            ts_ns = SafeFieldConverter.safe_int(row[1], "timestamp_ns")
-            chirp = SafeFieldConverter.safe_int(row[2], "chirp_number")
-            lat_f = SafeFieldConverter.safe_float(row[3], "lattice_fidelity")
-            lat_c = SafeFieldConverter.safe_float(row[4], "lattice_coherence")
-            lat_cy = SafeFieldConverter.safe_int(row[5], "lattice_cycle")
-            lat_s8 = SafeFieldConverter.safe_int(row[6], "lattice_sigma_mod8")
-            cons_f = SafeFieldConverter.safe_float(row[7], "consensus_fidelity")
-            cons_c = SafeFieldConverter.safe_float(row[8], "consensus_coherence")
-            cons_p = SafeFieldConverter.safe_float(row[9], "consensus_purity")
-            pq0_o = SafeFieldConverter.safe_float(row[13], "pq0_oracle_fidelity")
-            pq0_i = SafeFieldConverter.safe_float(row[14], "pq0_IV_fidelity")
-            pq0_v = SafeFieldConverter.safe_float(row[15], "pq0_V_fidelity")
-            pq_c = SafeFieldConverter.safe_int(row[16], "pq_curr")
-            pq_l = SafeFieldConverter.safe_int(row[17], "pq_last")
-            phase = SafeFieldConverter.safe_str(row[19], "phase_name")
-
-            # ⚛️  Collect conversion errors for autonomous healing
-            conv_errors = SafeFieldConverter.get_error_report()
-            if conv_errors:
-                diag["errors"].extend([f"{k}" for k in conv_errors.keys()])
-                logger.warning(
-                    f"[HEALER] Conversion errors detected: {len(conv_errors)}"
-                )
-
-            # ⚛️  Phase 4: Construct snapshot with all safe values
-            snapshot = {
-                "timestamp_ns": ts_ns,
-                "chirp_number": chirp,
-                "lattice_quantum": {
-                    "fidelity": lat_f,
-                    "coherence": lat_c,
-                    "cycle_count": lat_cy,
-                    "lattice_sigma_mod8": lat_s8,
-                    "phase_name": phase,
-                    "lattice_status": "online",
-                },
-                "consensus": {
-                    "w_state_fidelity": cons_f,
-                    "coherence": cons_c,
-                    "purity": cons_p,
-                },
-                "mermin_test": mermin_result,
-                "bell_test": mermin_result,
-                "pq0_components": {
-                    "pq0_oracle_fidelity": pq0_o,
-                    "pq0_IV_fidelity": pq0_i,
-                    "pq0_V_fidelity": pq0_v,
-                },
-                "pq_curr": pq_c,
-                "pq_last": pq_l,
-                "oracle_measurements": oracles,
-                "fidelity": cons_f,
-                "coherence": cons_c,
-                "lattice_cycle": lat_cy,
-                "source": "neon_snapshot_healed",
-                "ready": True,
-                "_diagnostics": {
-                    "errors": diag["errors"],
-                    "recovered_with_defaults": bool(conv_errors),
-                    "conversion_errors": conv_errors,
-                },
-            }
-
-            # ⚛️  Cache this as last valid state for future fallback
-            with SnapshotAutonomousHealer._healing_lock:
-                SnapshotAutonomousHealer._last_valid_snapshot = snapshot.copy()
-                SnapshotAutonomousHealer._healing_cycles += 1
-
-            if not diag["errors"]:
-                logger.debug(
-                    f"[HEALER] Snapshot built clean (cycle {SnapshotAutonomousHealer._healing_cycles})"
-                )
-            else:
-                logger.info(
-                    f"[HEALER] Snapshot built with {len(diag['errors'])} recovered fields (cycle {SnapshotAutonomousHealer._healing_cycles})"
-                )
-
-            return snapshot, diag
-
-        except Exception as e:
-            # ⚛️  Catastrophic failure — fall back to cached state
-            logger.error(f"[HEALER] Snapshot construction catastrophically failed: {e}")
-            with SnapshotAutonomousHealer._healing_lock:
-                if SnapshotAutonomousHealer._last_valid_snapshot:
-                    logger.warning(
-                        f"[HEALER] Falling back to last valid cached snapshot"
-                    )
-                    return SnapshotAutonomousHealer._last_valid_snapshot.copy(), {
-                        "error": "catastrophic_fallback",
-                        "fallback_source": "cache",
-                        "ready": True,
-                    }
-            return None, {
-                "error": "catastrophic_failure",
-                "details": str(e),
-                "ready": False,
-            }
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # JSON-RPC 2.0 FLASK ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
-def _get_canonical_node() -> Optional[dict]:
-    """Fallback: fetch canonical node state from module or globals (in-memory)."""
-    try:
-        import globals as _g
-
-        gn = getattr(_g, "get_canonical_node", None)
-        if callable(gn):
-            return gn()
-    except Exception:
-        pass
-
-    # Last resort: check module-level state
-    try:
-        _srv = sys.modules[__name__].__dict__
-        cn = _srv.get("_canonical_node") or _srv.get("canonical_node")
-        return cn if isinstance(cn, dict) else None
-    except Exception:
-        return None
-
-
 def _rpc_getPendingBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_getPendingBlock — current in-progress (unsealed) block.
 
@@ -6511,9 +6276,14 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             # Validate sender has sufficient balance by tracing unspent outputs
             _from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
-            _amount = float(tx.get("amount") or tx.get("amount_base") or 0)
+            _fee_base = int(tx.get("fee_base", 0) or 0)
+            _amount_base = tx.get("amount_base")
+            if _amount_base is None or _amount_base == 0:
+                _amount_raw = tx.get("amount", 0)
+                _amount_f = float(_amount_raw) if _amount_raw else 0.0
+                _amount_base = int(round(_amount_f * 100)) if 0 < _amount_f < 10_000 else int(_amount_f)
 
-            # Query sender's confirmed balance from DB
+            # Query sender's confirmed balance from DB (balance stored in base units)
             try:
                 with get_db_cursor() as cur:
                     cur.execute(
@@ -6521,20 +6291,19 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         (_from,),
                     )
                     _row = cur.fetchone()
-                    _confirmed_balance = float(_row[0]) if _row else 0.0
+                    _confirmed_balance = int(_row[0]) if _row and _row[0] else 0
 
-                    if _confirmed_balance < _amount:
+                    if _confirmed_balance < (_amount_base + _fee_base):
                         return _rpc_error(
                             -32003,
-                            f"Insufficient balance: {_from[:16]}... has {_confirmed_balance:.2f} QTCL, "
-                            f"tried to send {_amount:.2f} QTCL",
+                            f"Insufficient balance: {_from[:16]}... has {_confirmed_balance} base units, "
+                            f"needs {_amount_base} base units",
                             rpc_id,
                         )
             except Exception as _be:
                 logger.warning(
                     f"[RPC-submitBlock] Balance check failed for {_from[:16]}...: {_be}"
                 )
-                # Fail-safe: reject if we can't verify balance
                 return _rpc_error(
                     -32003, f"Could not verify balance for {_from[:16]}...", rpc_id
                 )
@@ -6861,7 +6630,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             logger.critical(f"[RPC-submitBlock] 🔥 RUNNING SETTLEMENT FOR DUPLICATE h={height}")
             try:
                 _settle_block_rewards(
-                    height, block_hash, miner_address, txs or [], _non_coinbase_txs
+                    height, block_hash, miner_address, txs or []
                 )
                 logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height}")
             except Exception as settle_err:
@@ -6966,7 +6735,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _settle_ok = True
         try:
             _settle_block_rewards(
-                height, block_hash, miner_address, txs or [], _non_coinbase_txs
+                height, block_hash, miner_address, txs or []
             )
             logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height}")
         except Exception as settle_err:
@@ -7768,7 +7537,7 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
                         "tx_type": tr[4] or "transfer",
                     })
                 if txs:
-                    _settle_block_rewards(h, bh, miner, txs, [])
+                    _settle_block_rewards(h, bh, miner, txs)
                     settled += 1
         return _rpc_ok({"settled": settled, "total": len(rows)}, rpc_id)
     except Exception as e:
