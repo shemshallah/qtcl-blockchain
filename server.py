@@ -3973,6 +3973,52 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
+def _rpc_getUTXOs(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getUTXOs — list unspent transaction outputs for an address."""
+    try:
+        if isinstance(params, list) and len(params) >= 1:
+            address = params[0] if isinstance(params[0], str) else (params[0].get("address", "") if isinstance(params[0], dict) else "")
+        elif isinstance(params, dict):
+            address = params.get("address", "")
+        else:
+            return _rpc_error(-32602, "address required", rpc_id)
+        if not address:
+            return _rpc_error(-32602, "address required", rpc_id)
+        address = _norm_address(address)
+        limit = 500
+        if isinstance(params, dict):
+            limit = min(int(params.get("limit", 500)), 2000)
+        elif isinstance(params, list) and len(params) >= 2:
+            limit = min(int(params[1]) if isinstance(params[1], (int, str)) else 500, 2000)
+
+        with get_db_cursor() as cur:
+            cur.execute(
+                "SELECT tx_hash, output_index, amount, spent, created_at_height "
+                "FROM address_utxos WHERE address = %s AND spent = FALSE "
+                "ORDER BY created_at_height DESC LIMIT %s",
+                (address, limit),
+            )
+            rows = cur.fetchall()
+            utxos = []
+            for row in rows:
+                utxos.append({
+                    "tx_hash": row[0],
+                    "output_index": int(row[1]) if row[1] is not None else 0,
+                    "amount": int(row[2]) if row[2] is not None else 0,
+                    "spent": bool(row[3]) if row[3] is not None else False,
+                    "created_at_height": int(row[4]) if row[4] is not None else 0,
+                })
+            return _rpc_ok({
+                "address": address,
+                "utxos": utxos,
+                "count": len(utxos),
+                "total_balance_base": sum(u["amount"] for u in utxos),
+                "total_balance_qtcl": sum(u["amount"] for u in utxos) / 100.0,
+            }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getUTXOs: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
 def _rpc_getTransactionVolume(params: Any, rpc_id: Any) -> dict:
     """qtcl_getTransactionVolume — total QTCL volume settled on-chain.
 
@@ -7969,6 +8015,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,
+    "qtcl_getUTXOs": _rpc_getUTXOs,
     "qtcl_retroSettle": _rpc_retroSettle,
     "qtcl_getTransaction": _rpc_getTransaction,
     "qtcl_getTransactionVolume": _rpc_getTransactionVolume,
