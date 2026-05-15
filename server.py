@@ -1387,7 +1387,9 @@ def _settle_block_rewards(
     _phase2_addrs: set = set()
 
     try:
+        _settle_log.critical(f"[SETTLE] 🔓 Acquiring DB cursor for settlement h={height}…")
         with get_db_cursor() as cur:
+            _settle_log.critical(f"[SETTLE] ✅ DB cursor acquired h={height}")
             # ── CRITICAL: Verify tables exist before any settlement SQL ────────
             # If tables are missing, CREATE them now — settlement cannot proceed without them.
             try:
