@@ -127,22 +127,38 @@ async def _wallet_create(label: str = "") -> dict:
 
 
 async def _sign_message(message_hex: str, private_key: str) -> dict:
-    """Sign a 32-byte message hash with HypΓ private key."""
+    """
+    Sign a 32-byte message hash with HypΓ private key.
+
+    Returns a flat dict where 'signature_for_tx' is the COMPLETE canonical sig dict
+    JSON-encoded and ready to pass verbatim as the 'signature' parameter to
+    qtcl_send_transaction.  All canonical fields (R, Z, c_full, c_exp,
+    R_canonical_hex, public_key) are present at the top level of 'signature_for_tx'
+    so that mempool._verify_signature → engine.verify_signature → signature_from_dict
+    hits the canonical path (not the legacy placeholder path) and succeeds.
+
+    Root-cause of previous 'sig missing required keys' failure:
+      Old code returned {"signature": json.dumps(sig_dict), "challenge": ..., "valid": ...}.
+      qtcl_send_transaction json.parsed this outer dict and passed IT to the mempool.
+      The outer dict has 'signature' (a nested JSON string) and 'challenge' — it passes
+      HypGammaEngine's top-level key check but then signature_from_dict sees
+      sig["signature"] is a STRING and goes down the legacy path, which produces
+      SchnorrSignature(R=..., Z=R, c_exp=0) — an invalid stub that always fails verify.
+    """
     msg_bytes = bytes.fromhex(message_hex)
     if len(msg_bytes) != 32:
         raise ValueError(f"message_hex must be 32 bytes; got {len(msg_bytes)}")
+
+    canonical_sig_dict: Optional[dict] = None
+
     try:
         engine = _get_engine()
         if engine is not None:
             sig = engine.sign_hash(msg_bytes, private_key)
-            # FIX: sign_hash() returns the full canonical sig dict at the top level:
-            #   {signature: hex(R‖Z), challenge: hex(c), R: {...}, Z: {...},
-            #    c_full: ..., c_exp: ..., R_canonical_hex: ..., R_canonical: ...}
-            # The MCP tool was previously only forwarding {signature, challenge, auth_tag,
-            # timestamp}, dropping R/Z/c_full/c_exp — making verify_signature fail with
-            # "sig missing required keys" because signature_from_dict needs the matrix fields.
-            # Fix: build sig_dict from the ENTIRE sig dict, then embed the public key.
-            sig_dict = {k: v for k, v in sig.items()}
+            # sig is the canonical dict: {signature, challenge, auth_tag, timestamp,
+            #   R, Z, c_full, c_exp, R_canonical_hex, R_canonical}
+            canonical_sig_dict = {k: v for k, v in sig.items()}
+            # Derive + embed public key so mempool never has to hunt for it
             pub_key = ""
             try:
                 if hasattr(engine, "derive_public_key"):
@@ -152,45 +168,60 @@ async def _sign_message(message_hex: str, private_key: str) -> dict:
             except Exception:
                 pass
             if pub_key:
-                sig_dict["public_key"]     = pub_key
-                sig_dict["public_key_hex"] = pub_key
-            return {
-                "signature": json.dumps(sig_dict, default=str),
-                "challenge": sig.get("challenge", ""),
-                "auth_tag":  sig.get("auth_tag", sig.get("challenge", "")),
-                "timestamp": sig.get("timestamp", datetime.now(timezone.utc).isoformat()),
-                "valid":     True,
-            }
+                canonical_sig_dict["public_key"]     = pub_key
+                canonical_sig_dict["public_key_hex"] = pub_key
     except Exception as e:
         logger.warning(f"[MCP] Direct sign failed ({e}), trying RPC")
-    # RPC fallback — qtcl_hyp_signMessage returns the same canonical dict
-    result = qtcl_rpc("qtcl_hyp_signMessage", {"message": message_hex, "private_key": private_key})
-    # result["signature"] may be a hex wire string or the full dict depending on server version
-    sig_raw = result.get("signature", "")
-    if isinstance(sig_raw, str):
-        try:
-            sig_dict = json.loads(sig_raw)
-        except Exception:
-            sig_dict = {"signature": sig_raw}
-    elif isinstance(sig_raw, dict):
-        sig_dict = dict(sig_raw)
-    else:
-        sig_dict = {"signature": str(sig_raw)}
-    # Carry over any canonical fields the RPC returned at top-level
-    for canon_key in ("R", "Z", "c_full", "c_exp", "R_canonical_hex", "R_canonical", "challenge"):
-        if canon_key in result and canon_key not in sig_dict:
-            sig_dict[canon_key] = result[canon_key]
-    # Embed public_key from top-level result if server returned it
-    pub_key = result.get("public_key") or result.get("public_key_hex", "")
-    if pub_key:
-        sig_dict["public_key"]     = pub_key
-        sig_dict["public_key_hex"] = pub_key
+
+    if canonical_sig_dict is None:
+        # RPC fallback — qtcl_hyp_signMessage returns the canonical dict
+        result = qtcl_rpc("qtcl_hyp_signMessage", {"message": message_hex, "private_key": private_key})
+        # Unwrap any nested JSON in result["signature"]
+        sig_raw = result.get("signature", "")
+        if isinstance(sig_raw, str):
+            try:
+                inner = json.loads(sig_raw)
+                if isinstance(inner, dict):
+                    sig_raw = inner
+            except Exception:
+                pass
+        canonical_sig_dict = dict(sig_raw) if isinstance(sig_raw, dict) else {"signature": str(sig_raw)}
+        # Carry over canonical fields from top-level RPC result
+        for canon_key in ("R", "Z", "c_full", "c_exp", "R_canonical_hex", "R_canonical", "challenge", "auth_tag", "timestamp"):
+            if canon_key in result and canon_key not in canonical_sig_dict:
+                canonical_sig_dict[canon_key] = result[canon_key]
+        pub_key = result.get("public_key") or result.get("public_key_hex", "")
+        if pub_key:
+            canonical_sig_dict["public_key"]     = pub_key
+            canonical_sig_dict["public_key_hex"] = pub_key
+
+    challenge = canonical_sig_dict.get("challenge", canonical_sig_dict.get("c_full", ""))
+    timestamp = canonical_sig_dict.get("timestamp", datetime.now(timezone.utc).isoformat())
+
+    # signature_for_tx: the ENTIRE canonical sig dict JSON-encoded.
+    # Pass this verbatim as 'signature' to qtcl_send_transaction.
+    # Marked separately so callers don't have to guess which field to use.
+    sig_for_tx_json = json.dumps(canonical_sig_dict, default=str)
+
     return {
-        "signature": json.dumps(sig_dict, default=str),
-        "challenge": result.get("challenge", ""),
-        "auth_tag":  result.get("auth_tag", result.get("challenge", "")),
-        "timestamp": result.get("timestamp", datetime.now(timezone.utc).isoformat()),
-        "valid":     True,
+        # For human inspection — the raw fields
+        "R":                canonical_sig_dict.get("R", {}),
+        "Z":                canonical_sig_dict.get("Z", {}),
+        "c_full":           canonical_sig_dict.get("c_full", challenge),
+        "c_exp":            canonical_sig_dict.get("c_exp", 0),
+        "R_canonical_hex":  canonical_sig_dict.get("R_canonical_hex", ""),
+        "public_key":       canonical_sig_dict.get("public_key", ""),
+        "public_key_hex":   canonical_sig_dict.get("public_key_hex", ""),
+        "challenge":        challenge,
+        "auth_tag":         canonical_sig_dict.get("auth_tag", challenge),
+        "timestamp":        timestamp,
+        "valid":            True,
+        # THE FIELD TO USE IN qtcl_send_transaction:
+        # Pass signature_for_tx verbatim as the 'signature' argument.
+        "signature_for_tx": sig_for_tx_json,
+        # Legacy alias — same value; kept for backward compat with callers
+        # that already read 'signature' from the response.
+        "signature":        sig_for_tx_json,
     }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -262,18 +293,66 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         """
         # FIX: mempool._verify_signature() requires public_key embedded INSIDE
         # the signature dict AND canonical fields (R, Z, c_full, c_exp) for
-        # engine.verify_signature → signature_from_dict reconstruction.
+        # engine.verify_signature → signature_from_dict to hit the canonical
+        # path (not the legacy placeholder path that sets Z=R, c_exp=0).
+        #
+        # _sign_message now returns {"signature": json.dumps(canonical_sig_dict), ...}
+        # where canonical_sig_dict has R, Z, c_full, c_exp, public_key.
+        # The user passes the ENTIRE JSON output of qtcl_sign_message here, OR
+        # just the "signature" / "signature_for_tx" field — we handle both.
         sig_to_send = signature
         if signature:
             try:
-                sig_dict = json.loads(signature) if isinstance(signature, str) else dict(signature)
-                # Inject public_key if not already present
+                outer = json.loads(signature) if isinstance(signature, str) else dict(signature)
+
+                # Detect if outer is the _sign_message wrapper dict (has "valid", "signature_for_tx")
+                # or if it IS already the canonical sig dict (has "R", "Z", "c_full").
+                canonical_sig = None
+
+                if isinstance(outer, dict):
+                    if "R" in outer and "Z" in outer and "c_full" in outer:
+                        # Already the canonical sig dict — use directly
+                        canonical_sig = outer
+                    elif "signature_for_tx" in outer:
+                        # _sign_message wrapper: use the pre-built canonical JSON
+                        inner_raw = outer["signature_for_tx"]
+                        canonical_sig = json.loads(inner_raw) if isinstance(inner_raw, str) else inner_raw
+                    elif "signature" in outer and "challenge" in outer:
+                        # May be the wrapper (signature = json.dumps(canonical)) or
+                        # may be an old-format sig where "signature" is a matrix JSON.
+                        inner_raw = outer.get("signature", "")
+                        if isinstance(inner_raw, str):
+                            try:
+                                inner = json.loads(inner_raw)
+                                if isinstance(inner, dict) and ("R" in inner or "c_full" in inner):
+                                    # Double-wrapped canonical — unwrap one level
+                                    canonical_sig = inner
+                                    # Carry over top-level fields not in inner
+                                    for k in ("challenge", "auth_tag", "timestamp", "public_key", "public_key_hex", "R_canonical_hex"):
+                                        if k in outer and k not in canonical_sig:
+                                            canonical_sig[k] = outer[k]
+                                else:
+                                    # inner is a matrix dict (legacy "signature" = R matrix)
+                                    canonical_sig = outer
+                            except (json.JSONDecodeError, TypeError):
+                                canonical_sig = outer
+                        elif isinstance(inner_raw, dict):
+                            # "signature" field is already a dict (canonical or matrix)
+                            canonical_sig = inner_raw if ("R" in inner_raw and "Z" in inner_raw) else outer
+                        else:
+                            canonical_sig = outer
+
+                if canonical_sig is None:
+                    canonical_sig = outer
+
+                # Inject public_key from argument if not already embedded
                 if public_key:
-                    if not sig_dict.get("public_key"):
-                        sig_dict["public_key"] = public_key
-                    if not sig_dict.get("public_key_hex"):
-                        sig_dict["public_key_hex"] = public_key
-                sig_to_send = json.dumps(sig_dict, default=str)
+                    if not canonical_sig.get("public_key"):
+                        canonical_sig["public_key"] = public_key
+                    if not canonical_sig.get("public_key_hex"):
+                        canonical_sig["public_key_hex"] = public_key
+
+                sig_to_send = json.dumps(canonical_sig, default=str)
             except (json.JSONDecodeError, TypeError):
                 pass  # sig is not JSON — leave as-is, server will reject gracefully
 

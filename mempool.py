@@ -1721,6 +1721,27 @@ class Mempool:
             if not sig_dict.get('public_key_hex'):
                 sig_dict['public_key_hex'] = pub_key_hex
 
+            # ── Normalize sig_dict: unwrap any double-nested JSON from MCP pipeline ──
+            # Handles the case where sig_dict["signature"] is a JSON string encoding
+            # the full canonical dict (R/Z/c_full/c_exp) instead of a matrix dict.
+            # Without this, signature_from_dict hits the legacy path → Z=R placeholder
+            # → verify always fails regardless of how sign was done.
+            try:
+                _sig_field = sig_dict.get('signature')
+                if isinstance(_sig_field, str) and _sig_field.startswith('{'):
+                    try:
+                        _inner = json.loads(_sig_field)
+                        if isinstance(_inner, dict) and 'R' in _inner and 'Z' in _inner and 'c_full' in _inner:
+                            # Double-wrapped canonical — unwrap and merge
+                            _merged = dict(sig_dict)
+                            _merged.update(_inner)
+                            sig_dict = _merged
+                            logger.info("[MEMPOOL-SIG] 🔧 unwrapped double-nested canonical sig dict")
+                    except (ValueError, TypeError):
+                        pass
+            except Exception as _norm_err:
+                logger.debug(f"[MEMPOOL-SIG] sig normalization skipped: {_norm_err}")
+
             # 🔍 DIAGNOSTIC: log which canonical fields are present
             _has_R = 'R' in sig_dict and isinstance(sig_dict.get('R'), dict) and bool(sig_dict['R'])
             _has_Z = 'Z' in sig_dict and isinstance(sig_dict.get('Z'), dict) and bool(sig_dict['Z'])
