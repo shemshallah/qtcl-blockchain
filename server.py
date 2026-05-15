@@ -1334,8 +1334,10 @@ except Exception as _ewat_err:
 
 def _settle_block_rewards(
     height: int, block_hash: str, miner_address: str, txs: list
-) -> None:
+) -> float:
     """UTXO SETTLEMENT — Creates UTXOs from tx outputs, updates wallet balances.
+
+    Returns the miner's balance in QTCL after settlement, or 0.0 on failure.
 
     UTXO Model:
       - Coinbase TXs: INSERT UTXOs from each output (amount from output.amount_base)
@@ -1362,11 +1364,11 @@ def _settle_block_rewards(
     # ── BUG-2 FIX: in-process idempotency guard ──────────────────────────────
     if height in _SETTLED_HEIGHTS:
         _settle_log.warning(f"[SETTLE] ⏭  h={height} already settled in this process — skipping")
-        return
+        return 0.0
 
     if not miner_address or len(str(miner_address).strip()) < 10:
         _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address!r}")
-        return
+        return 0.0
 
     # ── BUG-4 FIX: treasury missing is WARNING not hard-reject ───────────────
     try:
@@ -1404,7 +1406,7 @@ def _settle_block_rewards(
                     _ensure_wallet_addresses_table()
                 except Exception as _tbl_err:
                     _settle_log.critical(f"[SETTLE] ❌ Cannot create UTXO tables: {_tbl_err}")
-                    return
+                    return 0.0
                 # Re-acquire cursor after table creation (old cursor may be in bad state)
                 raise RuntimeError("RETRY_SETTLEMENT_AFTER_TABLE_CREATION")
 
@@ -1426,14 +1428,14 @@ def _settle_block_rewards(
                         _utxo_at_height = -1  # unknown → re-run to be safe
                     if _utxo_at_height > 0:
                         _SETTLED_HEIGHTS.add(height)
-                        _settle_log.warning(
+                        _settle_log.critical(
                             f"[SETTLE] ⏭  h={height} already settled ({_utxo_at_height} UTXOs in DB) — skipping"
                         )
                         try:
                             cur.execute("RELEASE SAVEPOINT settle_idempotency_check")
                         except Exception:
                             pass
-                        return
+                        return 0.0
                     else:
                         # settlement_log present but UTXOs missing — delete poisoned log entry and re-run
                         _settle_log.critical(
@@ -1467,7 +1469,7 @@ def _settle_block_rewards(
                 _settle_log.critical(f"[SETTLE-TEST] ✅ DB OK: {cur.fetchone()[0]} wallets")
             except Exception as _test_err:
                 _settle_log.critical(f"[SETTLE-TEST] ❌ DB FAILED: {_test_err}")
-                return
+                return 0.0
 
             # ── Phase 1: Create UTXOs, write address_transactions ─────────────
             # balance_deltas tracks which addresses were touched so we know
@@ -1705,12 +1707,28 @@ def _settle_block_rewards(
                 )
 
         # Mark settled in-process only if UTXOs confirmed in DB
+        _miner_balance = 0.0
         if _final_utxo_count > 0:
             _SETTLED_HEIGHTS.add(height)
         _settle_log.warning(
             f"[SETTLE] ✅ h={height}: {len(_phase2_addrs)} addresses recomputed, "
             f"txs={len(txs or [])}, utxos_at_height={_final_utxo_count}, block_hash={block_hash[:16]}…"
         )
+
+        # Query miner balance on SAME cursor so read-replica lag doesn't return stale 0
+        try:
+            cur.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
+                "WHERE address = %s AND spent = FALSE",
+                (miner_address,),
+            )
+            _mbr = cur.fetchone()
+            _miner_balance = (int(_mbr[0]) if _mbr and _mbr[0] else 0) / 100.0
+            _settle_log.critical(
+                f"[SETTLE] 💰 Miner balance on settlement cursor: {_miner_balance:.8f} QTCL"
+            )
+        except Exception as _mbq_err:
+            _settle_log.warning(f"[SETTLE] Balance query on settlement cursor: {_mbq_err}")
 
         # Cache block for getBlockRange queries
         try:
@@ -1722,13 +1740,13 @@ def _settle_block_rewards(
         except Exception as _cache_err:
             _settle_log.warning(f"[SETTLE] ⚠️  Cache error: {_cache_err}")
 
+        return _miner_balance
+
     except RuntimeError as _rt_err:
         if "RETRY_SETTLEMENT_AFTER_TABLE_CREATION" in str(_rt_err):
             _settle_log.critical(f"[SETTLE] 🔄 Retrying h={height} after table creation")
             _SETTLED_HEIGHTS.discard(height)
-            # Recursive retry (once) — tables now exist
-            _settle_block_rewards(height, block_hash, miner_address, txs)
-            return
+            return _settle_block_rewards(height, block_hash, miner_address, txs)
         _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED: {_rt_err}", exc_info=True)
         raise
     except Exception as err:
@@ -6778,34 +6796,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ═══════════════════════════════════════════════════════════════════════════════
         # MANDATORY SYNCHRONOUS SETTLEMENT — NOT QUEUED, RUNS IMMEDIATELY
         # Settlement FAILURE = RPC FAILURE (no silent failures)
+        # Settlement returns miner balance queried on SAME cursor — avoids read-replica lag
         # ═══════════════════════════════════════════════════════════════════════════════
         logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height} miner={miner_address[:16]}…")
         _settle_ok = True
         _miner_balance_qtcl = 0.0
         try:
-            _settle_block_rewards(
+            _miner_balance_qtcl = _settle_block_rewards(
                 height, block_hash, miner_address, txs or []
             )
-            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height}")
-
-            # Query miner balance atomically from same DB connection pool
-            # so the response includes the authoritative post-settlement balance.
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute(
-                        "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
-                        "WHERE address = %s AND spent = FALSE",
-                        (miner_address,),
-                    )
-                    _bal_row = cur.fetchone()
-                    _miner_bal_base = int(_bal_row[0]) if _bal_row and _bal_row[0] else 0
-                    _miner_balance_qtcl = _miner_bal_base / 100.0
-                    logger.critical(
-                        f"[RPC-submitBlock] 💰 Miner balance post-settlement: "
-                        f"{_miner_balance_qtcl:.8f} QTCL ({_miner_bal_base} base)"
-                    )
-            except Exception as _bal_query_err:
-                logger.warning(f"[RPC-submitBlock] Post-settlement balance query: {_bal_query_err}")
+            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height} miner_balance={_miner_balance_qtcl:.4f} QTCL")
         except Exception as settle_err:
             logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
             # Fallback: enqueue for background settlement worker
