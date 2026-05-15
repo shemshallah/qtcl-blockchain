@@ -919,22 +919,59 @@ class BalanceOracle:
         self._lock = threading.RLock()
 
     def confirmed_balance(self, address: str) -> int:
-        """Fetch confirmed balance from address_utxos (UTXO model)."""
+        """Fetch confirmed balance — UTXO table primary, wallet_addresses + tx-table fallback.
+
+        Three-tier lookup:
+          1. address_utxos SUM(unspent) — canonical UTXO model (fastest)
+          2. wallet_addresses.balance  — settlement cache (catches pre-UTXO-fix blocks)
+          3. transactions net          — SUM(inbound confirmed) - SUM(outbound confirmed)
+             Used when address_utxos AND wallet_addresses both empty (brand-new address).
+        """
         if not _db.available:
             return 0
         try:
             with _db.cursor() as cur:
+                # Tier 1: authoritative UTXO set
                 cur.execute("""
                     SELECT COALESCE(SUM(amount), 0) AS balance
                     FROM address_utxos
                     WHERE address = %s AND spent = FALSE
                 """, (address,))
                 row = cur.fetchone()
-                if not row:
+                utxo_bal = int(row[0] if isinstance(row, (list, tuple)) else row.get('balance', 0)) if row else 0
+                if utxo_bal > 0:
+                    return utxo_bal
+
+                # Tier 2: wallet_addresses settlement cache
+                try:
+                    cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (address,))
+                    wa_row = cur.fetchone()
+                    wa_bal = int(wa_row[0] if isinstance(wa_row, (list, tuple)) else wa_row.get('balance', 0)) if wa_row else 0
+                    if wa_bal > 0:
+                        return wa_bal
+                except Exception:
+                    pass
+
+                # Tier 3: transactions table net balance (last resort)
+                try:
+                    cur.execute("""
+                        SELECT COALESCE(SUM(amount), 0) FROM transactions
+                        WHERE to_address = %s AND status = 'confirmed'
+                    """, (address,))
+                    r_in = cur.fetchone()
+                    inbound = int(r_in[0] if isinstance(r_in, (list, tuple)) else r_in.get('coalesce', 0)) if r_in else 0
+
+                    cur.execute("""
+                        SELECT COALESCE(SUM(amount), 0) FROM transactions
+                        WHERE from_address = %s AND status = 'confirmed'
+                          AND tx_type NOT IN ('miner_reward','treasury_reward','coinbase')
+                    """, (address,))
+                    r_out = cur.fetchone()
+                    outbound = int(r_out[0] if isinstance(r_out, (list, tuple)) else r_out.get('coalesce', 0)) if r_out else 0
+
+                    return max(0, inbound - outbound)
+                except Exception:
                     return 0
-                if isinstance(row, dict):
-                    return int(row.get('balance', 0))
-                return int(row[0])
         except Exception as exc:
             logger.debug(f"[BALANCE] DB read failed for {address[:12]}: {exc}")
             return 0

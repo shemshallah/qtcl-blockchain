@@ -1498,14 +1498,28 @@ def _settle_block_rewards(
                 from_addr   = _norm_address(tx.get("from_addr") or tx.get("from_address") or tx.get("from", ""))
                 to_addr     = _norm_address(tx.get("to_addr") or tx.get("to_address") or tx.get("to", ""))
 
-                # Synthesize outputs when missing — use normalized to_addr
+                # Synthesize outputs — check top-level, then metadata.outputs, then reconstruct
                 outputs = tx.get("outputs") or []
-                # Normalize all existing output addresses
-                outputs = [dict(o, address=_norm_address(o.get("address", ""))) for o in outputs]
+                # Pull from metadata.outputs if top-level is missing (confirmed tx from DB)
+                if not outputs:
+                    _meta = tx.get("metadata") or {}
+                    if isinstance(_meta, str):
+                        try: _meta = json.loads(_meta)
+                        except Exception: _meta = {}
+                    outputs = _meta.get("outputs") or []
+                # Normalize all output addresses
+                outputs = [dict(o, address=_norm_address(o.get("address") or o.get("addr", ""))) for o in outputs]
+                # Synthesize single output from to_addr + amount when still empty
                 if not outputs and to_addr:
                     amt = tx.get("amount_base") or 0
                     if not amt:
-                        try: amt = int(float(tx.get("amount", 0)) * 100)
+                        _meta2 = tx.get("metadata") or {}
+                        if isinstance(_meta2, str):
+                            try: _meta2 = json.loads(_meta2)
+                            except Exception: _meta2 = {}
+                        amt = _meta2.get("amount_base") or 0
+                    if not amt:
+                        try: amt = int(round(float(tx.get("amount") or tx.get("amount_qtcl") or 0) * 100))
                         except Exception: amt = 0
                     if amt:
                         outputs = [{"address": to_addr, "amount_base": amt}]
@@ -4128,10 +4142,18 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 def _rpc_getUTXOs(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getUTXOs — list unspent transaction outputs for an address."""
+    """qtcl_getUTXOs — list unspent transaction outputs for an address.
+
+    Primary source: address_utxos table (materialized UTXO set).
+    Fallback:       synthesize virtual UTXOs from confirmed transactions table when
+                    address_utxos is empty (pre-settlement blocks or fresh deployment).
+                    Virtual UTXOs mark confirmed inbound transfers not yet offset by
+                    outbound spends — best-effort, triggers background retroSettle.
+    """
     try:
         if isinstance(params, list) and len(params) >= 1:
-            address = params[0] if isinstance(params[0], str) else (params[0].get("address", "") if isinstance(params[0], dict) else "")
+            address = params[0] if isinstance(params[0], str) else (
+                params[0].get("address", "") if isinstance(params[0], dict) else "")
         elif isinstance(params, dict):
             address = params.get("address", "")
         else:
@@ -4146,6 +4168,7 @@ def _rpc_getUTXOs(params: Any, rpc_id: Any) -> dict:
             limit = min(int(params[1]) if isinstance(params[1], (int, str)) else 500, 2000)
 
         with get_db_cursor() as cur:
+            # ── Primary: address_utxos table ─────────────────────────────────────
             cur.execute(
                 "SELECT tx_hash, output_index, amount, spent, created_at_height "
                 "FROM address_utxos WHERE address = %s AND spent = FALSE "
@@ -4153,21 +4176,62 @@ def _rpc_getUTXOs(params: Any, rpc_id: Any) -> dict:
                 (address, limit),
             )
             rows = cur.fetchall()
-            utxos = []
-            for row in rows:
-                utxos.append({
-                    "tx_hash": row[0],
-                    "output_index": int(row[1]) if row[1] is not None else 0,
-                    "amount": int(row[2]) if row[2] is not None else 0,
-                    "spent": bool(row[3]) if row[3] is not None else False,
-                    "created_at_height": int(row[4]) if row[4] is not None else 0,
-                })
+            utxos = [{"tx_hash": r[0], "output_index": int(r[1] or 0),
+                       "amount": int(r[2] or 0), "spent": bool(r[3]),
+                       "created_at_height": int(r[4] or 0)} for r in rows]
+
+            # ── Fallback: synthesize from transactions when UTXO set empty ───────
+            if not utxos:
+                # Trigger background retro-settlement so future calls hit primary path
+                def _bg_retro():
+                    try: _rpc_retroSettle([], None)
+                    except Exception: pass
+                threading.Thread(target=_bg_retro, daemon=True, name="RetroSettleBG").start()
+
+                # Compute net confirmed balance: SUM(inbound confirmed) - SUM(outbound confirmed)
+                try:
+                    cur.execute("""
+                        SELECT COALESCE(SUM(amount), 0)
+                        FROM transactions
+                        WHERE to_address = %s AND status = 'confirmed'
+                    """, (address,))
+                    _inbound = int((cur.fetchone() or [0])[0])
+
+                    cur.execute("""
+                        SELECT COALESCE(SUM(amount), 0)
+                        FROM transactions
+                        WHERE from_address = %s AND status = 'confirmed'
+                          AND tx_type NOT IN ('miner_reward','treasury_reward','coinbase')
+                    """, (address,))
+                    _outbound = int((cur.fetchone() or [0])[0])
+
+                    _net = max(0, _inbound - _outbound)
+                    if _net > 0:
+                        # Return a single synthetic UTXO representing net spendable balance
+                        # Use the most recent inbound tx_hash as the UTXO anchor
+                        cur.execute("""
+                            SELECT tx_hash, height FROM transactions
+                            WHERE to_address = %s AND status = 'confirmed'
+                            ORDER BY height DESC LIMIT 1
+                        """, (address,))
+                        _anchor = cur.fetchone()
+                        _anchor_hash = _anchor[0] if _anchor else ("0" * 64)
+                        _anchor_height = int(_anchor[1]) if _anchor and _anchor[1] else 0
+                        utxos = [{"tx_hash": _anchor_hash, "output_index": 0,
+                                  "amount": _net, "spent": False,
+                                  "created_at_height": _anchor_height,
+                                  "virtual": True,  # flag: synthesized, will materialize after retro-settle
+                                  "note": "synthesized_pending_settlement"}]
+                except Exception as _fb_err:
+                    logger.debug(f"[RPC-getUTXOs] tx-fallback: {_fb_err}")
+
+            total_base = sum(u["amount"] for u in utxos)
             return _rpc_ok({
                 "address": address,
                 "utxos": utxos,
                 "count": len(utxos),
-                "total_balance_base": sum(u["amount"] for u in utxos),
-                "total_balance_qtcl": sum(u["amount"] for u in utxos) / 100.0,
+                "total_balance_base": total_base,
+                "total_balance_qtcl": total_base / 100.0,
             }, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getUTXOs: {e}")
@@ -7787,42 +7851,94 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
 
 
 def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
-    """Retroactively settle all blocks that have no wallet_addresses entry."""
+    """Retroactively settle all blocks whose miner has zero UTXOs in address_utxos.
+    Reconstructs full tx output vectors from transactions.metadata so Phase 1b UTXO
+    inserts fire correctly. Also clears poisoned settlement_log entries so idempotency
+    guard does not skip blocks that have wallet_addresses rows but zero UTXOs.
+    """
     try:
         settled = 0
+        skipped = 0
+        errors  = 0
         with get_db_cursor() as cur:
+            # Find blocks where address_utxos has zero unspent rows at that height
             cur.execute("""
                 SELECT b.height, b.block_hash, b.miner_address
                 FROM blocks b
                 WHERE b.height > 0
-                AND NOT EXISTS (
-                    SELECT 1 FROM wallet_addresses w
-                    WHERE w.address = b.miner_address
-                    AND w.balance > 0
-                )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM address_utxos u
+                      WHERE u.created_at_height = b.height AND u.spent = FALSE
+                  )
                 ORDER BY b.height
             """)
             rows = cur.fetchall()
-            for row in rows:
-                h, bh, miner = row
-                if not miner or len(miner.strip()) < 10:
-                    continue
-                cur.execute(
-                    "SELECT tx_hash, from_address, to_address, amount, tx_type, metadata "
-                    "FROM transactions WHERE block_hash = %s", (bh,))
-                tx_rows = cur.fetchall()
+
+        for row in rows:
+            h, bh, miner = row[0], row[1], row[2]
+            if not miner or len(str(miner).strip()) < 10:
+                skipped += 1
+                continue
+            try:
+                with get_db_cursor() as cur2:
+                    # Clear poisoned settlement_log entry so idempotency guard re-runs
+                    cur2.execute("SAVEPOINT sp_retro_del")
+                    try:
+                        cur2.execute("DELETE FROM settlement_log WHERE height = %s", (h,))
+                        cur2.execute("RELEASE SAVEPOINT sp_retro_del")
+                    except Exception:
+                        try: cur2.execute("ROLLBACK TO SAVEPOINT sp_retro_del")
+                        except Exception: pass
+                        try: cur2.execute("RELEASE SAVEPOINT sp_retro_del")
+                        except Exception: pass
+
+                    cur2.execute(
+                        "SELECT tx_hash, from_address, to_address, amount, tx_type, metadata "
+                        "FROM transactions WHERE height = %s ORDER BY transaction_index", (h,))
+                    tx_rows = cur2.fetchall()
+
                 txs = []
                 for tr in tx_rows:
-                    meta = tr[5] if isinstance(tr[5], dict) else {}
-                    txs.append({
-                        "tx_id": tr[0], "from_address": tr[1] or "",
-                        "to_address": tr[2] or "", "amount": float(tr[3] or 0),
-                        "tx_type": tr[4] or "transfer",
-                    })
+                    tx_hash_r, from_addr_r, to_addr_r, amount_r, tx_type_r, meta_r = tr
+                    # Parse metadata JSON if stored as string
+                    if isinstance(meta_r, str) and meta_r.strip():
+                        try: meta_r = json.loads(meta_r)
+                        except Exception: meta_r = {}
+                    elif not isinstance(meta_r, dict):
+                        meta_r = {}
+                    # Extract outputs — prefer metadata.outputs, fall back to reconstruct
+                    raw_outputs = meta_r.get("outputs") or []
+                    if not raw_outputs and to_addr_r:
+                        amt_base = int(amount_r) if amount_r else 0
+                        if amt_base:
+                            raw_outputs = [{"address": to_addr_r, "amount_base": amt_base}]
+                    tx_dict = {
+                        "tx_id":       tx_hash_r,
+                        "tx_hash":     tx_hash_r,
+                        "from_addr":   from_addr_r or "",
+                        "to_addr":     to_addr_r or "",
+                        "amount":      float(amount_r or 0) / 100.0,
+                        "amount_base": int(amount_r or 0),
+                        "tx_type":     tx_type_r or "transfer",
+                        "outputs":     raw_outputs,
+                        "inputs":      meta_r.get("inputs") or [],
+                        "metadata":    meta_r,
+                    }
+                    txs.append(tx_dict)
+
                 if txs:
+                    # Discard in-process idempotency cache so re-run fires
+                    _SETTLED_HEIGHTS.discard(h)
                     _settle_block_rewards(h, bh, miner, txs)
                     settled += 1
-        return _rpc_ok({"settled": settled, "total": len(rows)}, rpc_id)
+                else:
+                    skipped += 1
+            except Exception as _re:
+                logger.error(f"[RETRO-SETTLE] h={h} failed: {_re}")
+                errors += 1
+
+        return _rpc_ok({"settled": settled, "skipped": skipped, "errors": errors,
+                        "total_blocks_needing_settlement": len(rows)}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] retroSettle error: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
@@ -9493,6 +9609,28 @@ threading.Thread(
     daemon=True,
     name="MempoolSync",
 ).start()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEFERRED RETRO-SETTLEMENT — heals pre-fix blocks with missing UTXOs
+# Runs 20s after startup to give DB pool time to warm up.
+# ═══════════════════════════════════════════════════════════════════════════════
+def _deferred_retro_settle():
+    """Background: settle all blocks with missing UTXOs. Self-healing on restart."""
+    try:
+        import time as _t; _t.sleep(20)
+        logger.critical("[RETRO-SETTLE] 🔥 Auto retro-settlement starting on startup…")
+        result = _rpc_retroSettle([], None)
+        r = result.get("result", {})
+        logger.critical(
+            f"[RETRO-SETTLE] ✅ Complete: settled={r.get('settled',0)} "
+            f"skipped={r.get('skipped',0)} errors={r.get('errors',0)} "
+            f"total={r.get('total_blocks_needing_settlement',0)}"
+        )
+    except Exception as _rse:
+        logger.warning(f"[RETRO-SETTLE] Startup retro-settle failed: {_rse}")
+
+threading.Thread(target=_deferred_retro_settle, daemon=True, name="RetroSettle").start()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
