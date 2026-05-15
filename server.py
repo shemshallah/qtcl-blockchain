@@ -1357,6 +1357,7 @@ def _settle_block_rewards(
 
     # Ensure chain_state table exists before we try to write it
     _lazy_ensure_chain_state()
+    _lazy_ensure_settlement_log()
 
     # Normalize the miner address (strip any legacy prefix, ensure raw hex)
     miner_address = _norm_address(miner_address)
@@ -1693,13 +1694,20 @@ def _settle_block_rewards(
 
             if _final_utxo_count > 0:
                 try:
+                    cur.execute("SAVEPOINT sp_settlement_log")
                     cur.execute(
                         "INSERT INTO settlement_log (height, block_hash, tx_count, addresses_updated) "
                         "VALUES (%s, %s, %s, %s) ON CONFLICT (height) DO NOTHING",
                         (height, block_hash, len(txs or []), len(_phase2_addrs)),
                     )
+                    cur.execute("RELEASE SAVEPOINT sp_settlement_log")
                 except Exception as _log_err:
                     _settle_log.warning(f"[SETTLE] settlement_log write non-fatal: {_log_err}")
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_settlement_log")
+                        cur.execute("RELEASE SAVEPOINT sp_settlement_log")
+                    except Exception:
+                        pass
             else:
                 _settle_log.critical(
                     f"[SETTLE] ⚠️  h={height} NOT writing settlement_log — "
@@ -3281,6 +3289,28 @@ def _lazy_ensure_chain_state():
         _SCHEMA_ENSURED_CHAIN_STATE = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_chain_state failed: {e}")
+
+_SCHEMA_ENSURED_SETTLEMENT_LOG = False
+
+def _lazy_ensure_settlement_log():
+    global _SCHEMA_ENSURED_SETTLEMENT_LOG
+    if _SCHEMA_ENSURED_SETTLEMENT_LOG:
+        return
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS settlement_log (
+                    height               BIGINT PRIMARY KEY,
+                    block_hash           VARCHAR(128) NOT NULL,
+                    tx_count             INTEGER DEFAULT 0,
+                    addresses_updated    INTEGER DEFAULT 0,
+                    created_at           TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        _SCHEMA_ENSURED_SETTLEMENT_LOG = True
+        logger.info("[SCHEMA] ✅ settlement_log table ready")
+    except Exception as e:
+        logger.warning(f"[SCHEMA] _lazy_ensure_settlement_log failed: {e}")
 
 
 def _lazy_ensure_peer_registry():
