@@ -750,13 +750,27 @@ class HypMempoolVerifier:
             else:
                 return False, "invalid_signature_type"
 
-            # HypΓ signature fields: signature (R‖Z hex), challenge (c hex), public_key (PSL hex)
+            # ── Normalize: unwrap MCP wrapper / canonical / legacy variants ──
+            # _normalize_sig_dict handles all nesting patterns; call it here so
+            # the key-presence checks below see the final unwrapped form and so
+            # engine.verify_signature receives a clean dict (avoiding double-norm).
+            try:
+                from hlwe.hyp_engine import _normalize_sig_dict as _norm
+                sig_dict = _norm(sig_dict)
+            except Exception:
+                pass  # normalization is best-effort; engine re-normalizes internally
+
             pub_key_hex = sig_dict.get('public_key') or sig_dict.get('public_key_hex', '')
             if not pub_key_hex:
                 return False, "signature_missing_public_key"
-            if not sig_dict.get('signature'):
+
+            # Accept EITHER canonical path (R/Z/c_full) OR legacy path (signature/challenge)
+            has_canonical = bool(sig_dict.get('R') and sig_dict.get('Z') and sig_dict.get('c_full'))
+            has_legacy    = bool(sig_dict.get('signature') and sig_dict.get('challenge'))
+            if not has_canonical and not has_legacy:
                 return False, "signature_missing_commitment_R_Z"
-            if not sig_dict.get('challenge'):
+            # Ensure challenge is present for legacy path; c_full satisfies it for canonical
+            if not has_canonical and not sig_dict.get('challenge'):
                 return False, "signature_missing_challenge_c"
 
             pub_bytes = bytes.fromhex(pub_key_hex)
