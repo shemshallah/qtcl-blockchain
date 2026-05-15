@@ -453,13 +453,62 @@ class _InMemoryBlockchainIndex:
     and used for O(1) tx lookups without a DB round-trip.
 
     Thread-safe via RLock.  Bounded to MAX_CACHED_TXS entries (LRU eviction).
+    On first get_transaction() miss, bootstraps from the DB (last 500 TXs)
+    so post-restart lookups succeed without a full re-index.
     """
 
-    MAX_CACHED_TXS = 50_000
+    MAX_CACHED_TXS  = 50_000
+    BOOTSTRAP_LIMIT = 500   # TXs to pre-warm from DB on first cold miss
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._tx_index: Dict[str, Dict[str, Any]] = {}   # tx_hash -> tx dict
+        self._bootstrapped = False   # True after first DB pre-warm
+
+    def _bootstrap_from_db(self) -> None:
+        """Pre-warm index from recent confirmed TXs in PostgreSQL. Called once on cold miss."""
+        if self._bootstrapped:
+            return
+        self._bootstrapped = True   # set before query so concurrent calls don't pile up
+        try:
+            # Import here to avoid circular import at module load time
+            from server import get_db_cursor as _gdc
+            with _gdc() as cur:
+                cur.execute(
+                    """SELECT tx_hash, from_address, to_address, amount,
+                              transaction_index, tx_type, status, block_height,
+                              metadata, timestamp_ns
+                       FROM transactions
+                       ORDER BY block_height DESC NULLS LAST
+                       LIMIT %s""",
+                    (self.BOOTSTRAP_LIMIT,),
+                )
+                rows = cur.fetchall()
+                for row in rows:
+                    tx_hash = row[0]
+                    if tx_hash:
+                        self._tx_index[tx_hash] = {
+                            "tx_hash":      row[0],
+                            "tx_id":        row[0],
+                            "from_address": row[1] or "",
+                            "from_addr":    row[1] or "",
+                            "to_address":   row[2] or "",
+                            "to_addr":      row[2] or "",
+                            "amount":       float(row[3]) / 100.0 if row[3] else 0.0,
+                            "amount_base":  int(row[3]) if row[3] else 0,
+                            "transaction_index": row[4],
+                            "tx_type":      row[5] or "transfer",
+                            "status":       row[6] or "confirmed",
+                            "block_height": int(row[7]) if row[7] else None,
+                            "metadata":     row[8] or {},
+                            "timestamp_ns": int(row[9]) if row[9] else None,
+                            "source":       "db_bootstrap",
+                        }
+                logger.info(
+                    f"[GLOBALS] In-memory blockchain index bootstrapped: {len(rows)} TXs from DB"
+                )
+        except Exception as _boot_err:
+            logger.warning(f"[GLOBALS] blockchain index bootstrap failed (non-fatal): {_boot_err}")
 
     def index_block(self, block_height: int, transactions: list) -> None:
         """Index all transactions from a newly accepted block."""
@@ -475,9 +524,13 @@ class _InMemoryBlockchainIndex:
                     del self._tx_index[old_key]
 
     def get_transaction(self, tx_hash: str) -> Optional[Dict[str, Any]]:
-        """Return cached tx dict or None if not in index (caller falls back to DB)."""
+        """Return cached tx dict, bootstrapping from DB on first cold miss."""
         with self._lock:
-            return self._tx_index.get(tx_hash)
+            result = self._tx_index.get(tx_hash)
+            if result is None and not self._bootstrapped:
+                self._bootstrap_from_db()
+                result = self._tx_index.get(tx_hash)
+            return result
 
     def __len__(self) -> int:
         with self._lock:

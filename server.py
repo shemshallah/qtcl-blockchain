@@ -4046,6 +4046,55 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                     _diagnostic["utxo_fallback_error"] = str(_utxo_err)
                     logger.debug(f"[RPC-getBalance] UTXO fallback: {_utxo_err}")
 
+                # ── FINAL FALLBACK: scan transactions table directly ──────────
+                # Catches the case where settlement ran but UTXO indexing lagged
+                # (e.g. multi-worker Gunicorn: block mined on worker-1, balance
+                # queried on worker-2 whose in-process settlement never ran).
+                _final_balance = (wallet["balance"] if wallet else 0)
+                if _final_balance == 0:
+                    try:
+                        cur.execute(
+                            """SELECT COALESCE(SUM(amount), 0), COUNT(*)
+                               FROM transactions
+                               WHERE to_address = %s
+                                 AND status IN ('confirmed', 'included', 'approved', 'APPROVED')""",
+                            (address,),
+                        )
+                        _tx_row = cur.fetchone()
+                        _tx_balance = int(_tx_row[0]) if _tx_row and _tx_row[0] else 0
+                        _tx_count   = int(_tx_row[1]) if _tx_row and _tx_row[1] else 0
+                        _diagnostic["tx_table_balance_base_units"] = _tx_balance
+                        _diagnostic["tx_table_count"] = _tx_count
+                        if _tx_balance > 0:
+                            # Deduct outgoing confirmed TXs
+                            cur.execute(
+                                """SELECT COALESCE(SUM(amount), 0)
+                                   FROM transactions
+                                   WHERE from_address = %s
+                                     AND status IN ('confirmed', 'included', 'approved', 'APPROVED')""",
+                                (address,),
+                            )
+                            _out_row = cur.fetchone()
+                            _out_amt = int(_out_row[0]) if _out_row and _out_row[0] else 0
+                            _net_balance = max(0, _tx_balance - _out_amt)
+                            _diagnostic["tx_table_net_balance_base_units"] = _net_balance
+                            if _net_balance > 0:
+                                wallet = {
+                                    "address": address,
+                                    "balance": _net_balance,
+                                    "tx_count": _tx_count,
+                                    "address_type": "standard",
+                                    "source": "transactions_table",
+                                }
+                                _diagnostic["balance_source"] = "transactions_table"
+                                logger.info(
+                                    f"[RPC-getBalance] ⚡ transactions-table fallback: "
+                                    f"addr={address[:16]}… net={_net_balance} base units"
+                                )
+                    except Exception as _tx_fb_err:
+                        _diagnostic["tx_table_fallback_error"] = str(_tx_fb_err)
+                        logger.debug(f"[RPC-getBalance] transactions table fallback: {_tx_fb_err}")
+
         except Exception as _wqe:
             logger.debug(f"[RPC] getBalance DB error: {_wqe}")
             _diagnostic["db_error"] = str(_wqe)
@@ -4178,23 +4227,86 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
             logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx_hash missing or empty")
             return _rpc_error(-32602, "tx_hash required", rpc_id)
         try:
+            # ── Step 1: fast in-memory index lookup ───────────────────────────
             from globals import get_blockchain
-
             bc = get_blockchain()
-            if bc is None:
-                logger.warning(
-                    f"[RPC-METHOD] qtcl_getTransaction: blockchain not initialized"
-                )
-                return _rpc_error(-32003, "Blockchain not synced", rpc_id)
-            tx = bc.get_transaction(tx_hash)
+            tx = bc.get_transaction(tx_hash) if bc is not None else None
+
+            # ── Step 2: DB fallback — CRITICAL for post-restart lookups ───────
+            # The in-memory index is cold after a server restart; the TX lives
+            # in PostgreSQL. Always fall through to DB when the index misses.
             if tx is None:
                 logger.debug(
-                    f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})"
+                    f"[RPC-METHOD] qtcl_getTransaction: not in memory index, querying DB tx_hash={tx_hash}"
+                )
+                try:
+                    with get_db_cursor() as cur:
+                        cur.execute(
+                            """SELECT tx_hash, from_address, to_address, amount,
+                                      transaction_index, tx_type, status,
+                                      block_height, metadata, timestamp_ns
+                               FROM transactions
+                               WHERE tx_hash = %s
+                               LIMIT 1""",
+                            (tx_hash,),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            tx = {
+                                "tx_hash":    row[0],
+                                "tx_id":      row[0],
+                                "from_address": row[1] or "",
+                                "from_addr":  row[1] or "",
+                                "to_address": row[2] or "",
+                                "to_addr":    row[2] or "",
+                                "amount":     float(row[3]) / 100.0 if row[3] else 0.0,
+                                "amount_base": int(row[3]) if row[3] else 0,
+                                "transaction_index": row[4],
+                                "tx_type":    row[5] or "transfer",
+                                "status":     row[6] or "confirmed",
+                                "block_height": int(row[7]) if row[7] else None,
+                                "metadata":   row[8] or {},
+                                "timestamp_ns": int(row[9]) if row[9] else None,
+                                "source":     "db",
+                            }
+                            # Backfill in-memory index so next lookup is fast
+                            if bc is not None:
+                                bc.index_block(tx["block_height"] or 0, [tx])
+                            logger.debug(
+                                f"[RPC-METHOD] qtcl_getTransaction: found in DB height={tx['block_height']}"
+                            )
+                        else:
+                            # Also check address_transactions table (may have client_tx_id)
+                            cur.execute(
+                                """SELECT tx_hash, address, direction, amount, block_height
+                                   FROM address_transactions
+                                   WHERE tx_hash = %s LIMIT 1""",
+                                (tx_hash,),
+                            )
+                            addr_row = cur.fetchone()
+                            if addr_row:
+                                tx = {
+                                    "tx_hash": addr_row[0],
+                                    "tx_id":   addr_row[0],
+                                    "address": addr_row[1],
+                                    "direction": addr_row[2],
+                                    "amount":  float(addr_row[3]) / 100.0 if addr_row[3] else 0.0,
+                                    "amount_base": int(addr_row[3]) if addr_row[3] else 0,
+                                    "block_height": int(addr_row[4]) if addr_row[4] else None,
+                                    "status":  "confirmed",
+                                    "source":  "address_transactions",
+                                }
+                except Exception as _db_err:
+                    logger.warning(f"[RPC-METHOD] qtcl_getTransaction DB fallback error: {_db_err}")
+
+            if tx is None:
+                logger.debug(
+                    f"[RPC-METHOD] qtcl_getTransaction: tx not found in memory or DB (hash={tx_hash})"
                 )
                 return _rpc_error(
                     -32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash}
                 )
-            logger.debug(f"[RPC-METHOD] qtcl_getTransaction success: tx_hash={tx_hash}")
+            logger.debug(f"[RPC-METHOD] qtcl_getTransaction success: tx_hash={tx_hash} source={tx.get('source','memory')}")
             return _rpc_ok(tx, rpc_id)
         except Exception as be:
             logger.exception(
