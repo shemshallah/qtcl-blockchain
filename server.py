@@ -5856,7 +5856,8 @@ def qtcl_hyp_generateKeypair(params: dict, rpc_id: Any) -> dict:
                 "private_key": kp.private_key,
                 "public_key": kp.public_key,
                 "address": kp.address,
-                "timestamp": kp.timestamp,
+                # HypKeyPair has no .timestamp attribute — use generation time
+                "created_at": getattr(kp, "timestamp", None) or getattr(kp, "created_at", None) or time.time(),
             },
             rpc_id,
         )
