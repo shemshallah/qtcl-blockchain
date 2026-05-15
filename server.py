@@ -1714,29 +1714,32 @@ def _settle_block_rewards(
                     f"final_utxo_count={_final_utxo_count} (would poison idempotency guard)"
                 )
 
+            # ── CRITICAL FIX: Query miner balance on SAME cursor INSIDE the
+            # with-block so the connection is still open and all UTXOs just written
+            # are visible (same transaction). Previously this was outside the with
+            # block, causing the cursor to be closed and returning 0.0 every time.
+            _miner_balance = 0.0
+            try:
+                cur.execute(
+                    "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
+                    "WHERE address = %s AND spent = FALSE",
+                    (miner_address,),
+                )
+                _mbr = cur.fetchone()
+                _miner_balance = (int(_mbr[0]) if _mbr and _mbr[0] else 0) / 100.0
+                _settle_log.critical(
+                    f"[SETTLE] 💰 Miner balance on settlement cursor: {_miner_balance:.8f} QTCL"
+                )
+            except Exception as _mbq_err:
+                _settle_log.warning(f"[SETTLE] Balance query on settlement cursor: {_mbq_err}")
+
         # Mark settled in-process only if UTXOs confirmed in DB
-        _miner_balance = 0.0
         if _final_utxo_count > 0:
             _SETTLED_HEIGHTS.add(height)
         _settle_log.warning(
             f"[SETTLE] ✅ h={height}: {len(_phase2_addrs)} addresses recomputed, "
             f"txs={len(txs or [])}, utxos_at_height={_final_utxo_count}, block_hash={block_hash[:16]}…"
         )
-
-        # Query miner balance on SAME cursor so read-replica lag doesn't return stale 0
-        try:
-            cur.execute(
-                "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
-                "WHERE address = %s AND spent = FALSE",
-                (miner_address,),
-            )
-            _mbr = cur.fetchone()
-            _miner_balance = (int(_mbr[0]) if _mbr and _mbr[0] else 0) / 100.0
-            _settle_log.critical(
-                f"[SETTLE] 💰 Miner balance on settlement cursor: {_miner_balance:.8f} QTCL"
-            )
-        except Exception as _mbq_err:
-            _settle_log.warning(f"[SETTLE] Balance query on settlement cursor: {_mbq_err}")
 
         # Cache block for getBlockRange queries
         try:
@@ -3645,16 +3648,50 @@ def _rpc_getPendingBlock(params: Any, rpc_id: Any) -> dict:
         for h, tx in mp_txs_by_hash.items():
             merged[h] = tx
 
-        tx_list = list(merged.values())
-        tx_list.sort(key=lambda t: t.get('fee_rate', 0), reverse=True)
+        # ── Normalize all txs to canonical format for frontend ──────────────
+        # Frontend fmtAmount divides by 100 (base units → QTCL).
+        # Ensure every tx has: tx_id, from_addr, to_addr, amount (base units),
+        # tx_type, status — matching the DB transactions table format.
+        normalized_txs = []
+        for tx in merged.values():
+            _tx_id = tx.get('tx_hash') or tx.get('tx_id', '')
+            _from = tx.get('from_address') or tx.get('from_addr') or tx.get('from', '')
+            _to = tx.get('to_address') or tx.get('to_addr') or tx.get('to', '')
+            _tx_type = (tx.get('tx_type') or 'transfer').lower()
+            _status = tx.get('status', 'pending')
+
+            # Resolve amount to base units (integer, 1 QTCL = 100 base)
+            _amt = tx.get('amount_base') or 0
+            if not _amt:
+                _raw = tx.get('amount', 0)
+                if _raw:
+                    _fraw = float(_raw)
+                    # If it looks like QTCL (small number), convert to base
+                    if 0 < _fraw < 10_000:
+                        _amt = int(round(_fraw * 100))
+                    else:
+                        _amt = int(_fraw)
+
+            normalized_txs.append({
+                'tx_id': _tx_id,
+                'from_addr': _from,
+                'to_addr': _to,
+                'amount': _amt,
+                'tx_type': _tx_type,
+                'status': _status,
+                'fee_base': tx.get('fee_base', 0),
+                'nonce': tx.get('nonce', 0),
+            })
+
+        normalized_txs.sort(key=lambda t: t.get('fee_base', 0), reverse=True)
 
         # 🔴 Use DB-authoritative height/parent, NOT in-memory which can drift
         result = {
             'block_height' : pending_height,
             'parent_hash'  : pending_parent,
             'miner_address': (bm_block or {}).get('miner_address', ''),
-            'transactions' : tx_list,
-            'tx_count'     : len(tx_list),
+            'transactions' : normalized_txs,
+            'tx_count'     : len(normalized_txs),
             'timestamp_s'  : int(time.time()),
             'max_block_tx' : (bm_block or {}).get('max_block_tx', 2000),
         }
@@ -3948,24 +3985,26 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                         except Exception:
                             pass
 
-                # FIX-7: authoritative fallback — compute from unspent UTXOs directly
-                # This fires when wallet_addresses row is missing (e.g. first query after
-                # settlement, or settlement wrote UTXOs but wallet row insert failed)
-                if wallet is None or wallet["balance"] == 0:
-                    try:
-                        cur.execute(
-                            "SELECT COALESCE(SUM(amount), 0), COUNT(*) "
-                            "FROM address_utxos WHERE address = %s AND spent = FALSE",
-                            (address,),
-                        )
-                        _utxo_row = cur.fetchone()
-                        _utxo_balance = int(_utxo_row[0]) if _utxo_row and _utxo_row[0] else 0
-                        _utxo_count   = int(_utxo_row[1]) if _utxo_row and _utxo_row[1] else 0
-                        _diagnostic["utxo_balance_base_units"] = _utxo_balance
-                        _diagnostic["utxo_count_unspent"] = _utxo_count
-                        if _utxo_balance > 0:
-                            # Backfill wallet_addresses from UTXO truth
-                            _fp = __import__('hashlib').sha256(address.encode()).hexdigest()[:64]
+                # FIX-7+8: AUTHORITATIVE balance — ALWAYS compute from unspent UTXOs.
+                # wallet_addresses is a convenience cache that can lag behind settlement.
+                # UTXO sum is the single source of truth for balance (same as Bitcoin).
+                # If UTXO sum > 0, use it. Only fall back to wallet_addresses if UTXOs return 0
+                # (which may mean the address_utxos table doesn't exist yet on fresh deployments).
+                try:
+                    cur.execute(
+                        "SELECT COALESCE(SUM(amount), 0), COUNT(*) "
+                        "FROM address_utxos WHERE address = %s AND spent = FALSE",
+                        (address,),
+                    )
+                    _utxo_row = cur.fetchone()
+                    _utxo_balance = int(_utxo_row[0]) if _utxo_row and _utxo_row[0] else 0
+                    _utxo_count   = int(_utxo_row[1]) if _utxo_row and _utxo_row[1] else 0
+                    _diagnostic["utxo_balance_base_units"] = _utxo_balance
+                    _diagnostic["utxo_count_unspent"] = _utxo_count
+                    if _utxo_balance > 0:
+                        # Backfill wallet_addresses from UTXO truth (async-safe: ON CONFLICT)
+                        _fp = __import__('hashlib').sha256(address.encode()).hexdigest()[:64]
+                        try:
                             cur.execute("""
                                 INSERT INTO wallet_addresses
                                     (address, wallet_fingerprint, public_key, balance,
@@ -3975,21 +4014,25 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                                     balance    = EXCLUDED.balance,
                                     updated_at = NOW()
                             """, (address, _fp, _fp, _utxo_balance, max(1, _utxo_count)))
-                            wallet = {
-                                "address": address,
-                                "balance": _utxo_balance,
-                                "tx_count": _utxo_count,
-                                "address_type": "standard",
-                                "source": "utxo_sum_backfill",
-                            }
-                            _diagnostic["balance_source"] = "utxo_sum_backfill"
-                            logger.warning(
-                                f"[RPC-getBalance] ⚡ Backfilled {address[:16]}… "
-                                f"balance={_utxo_balance/100:.4f} QTCL from {_utxo_count} UTXOs"
-                            )
-                    except Exception as _utxo_err:
-                        _diagnostic["utxo_fallback_error"] = str(_utxo_err)
-                        logger.debug(f"[RPC-getBalance] UTXO fallback: {_utxo_err}")
+                        except Exception:
+                            pass  # backfill failure is non-fatal
+                        wallet = {
+                            "address": address,
+                            "balance": _utxo_balance,
+                            "tx_count": _utxo_count,
+                            "address_type": "standard",
+                            "source": "utxo_sum",
+                        }
+                        _diagnostic["balance_source"] = "utxo_sum"
+                    elif wallet is not None and wallet["balance"] > 0:
+                        # UTXO sum is 0 but wallet_addresses has a balance — keep it
+                        # (can happen if address_utxos table was just created)
+                        _diagnostic["balance_source"] = "wallet_addresses_only"
+                    elif wallet is None:
+                        _diagnostic["balance_source"] = "none"
+                except Exception as _utxo_err:
+                    _diagnostic["utxo_fallback_error"] = str(_utxo_err)
+                    logger.debug(f"[RPC-getBalance] UTXO fallback: {_utxo_err}")
 
         except Exception as _wqe:
             logger.debug(f"[RPC] getBalance DB error: {_wqe}")
@@ -6897,11 +6940,27 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # Push block event + finalization to SSE clients (include full transaction list)
         _sse_tx_list = []
         for _stx in (txs or []):
+            # Resolve amount to base units (integer) for consistent frontend rendering
+            _sse_amt = _stx.get("amount_base") or 0
+            if not _sse_amt:
+                _sse_raw = _stx.get("amount", 0)
+                if _sse_raw:
+                    _sse_fraw = float(_sse_raw)
+                    if 0 < _sse_fraw < 10_000:
+                        _sse_amt = int(round(_sse_fraw * 100))
+                    else:
+                        _sse_amt = int(_sse_fraw)
+                # Also check outputs
+                if not _sse_amt:
+                    _sse_outs = _stx.get("outputs", [])
+                    if _sse_outs:
+                        _sse_amt = _sse_outs[0].get("amount_base", 0)
+
             _sse_tx_list.append({
                 "tx_id": _stx.get("tx_id") or _stx.get("tx_hash", ""),
                 "from_addr": _stx.get("from_addr") or _stx.get("from_address") or _stx.get("from", ""),
                 "to_addr": _stx.get("to_addr") or _stx.get("to_address") or _stx.get("to", ""),
-                "amount": _stx.get("amount_base") or _stx.get("amount", 0),
+                "amount": _sse_amt,
                 "tx_type": _stx.get("tx_type", "transfer"),
                 "status": "confirmed",
             })

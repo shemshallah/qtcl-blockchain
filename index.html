@@ -1117,16 +1117,20 @@ function renderBlockDetail(b, container) {
 }
 
 function renderTxCard(tx, idx) {
-  const isCoinbase = tx.tx_type === 'coinbase' || tx.tx_type === 'miner_reward' || tx.tx_type === 'treasury_reward' || tx.from_addr === '' || tx.from_addr === 'coinbase' || tx.from_addr === 'COINBASE' || tx.from_addr === 'BLOCK_REWARD' || tx.from_addr === 'TREASURY' || (tx.from_addr && /^0{16,}$/.test(tx.from_addr));
+  const txType = (tx.tx_type || '').toLowerCase();
+  const from = tx.from_addr || tx.from_address || tx.from || '';
+  const to = tx.to_addr || tx.to_address || tx.to || '';
+  const isCoinbase = txType === 'coinbase' || txType === 'miner_reward' || txType === 'treasury_reward' || from === '' || from === 'coinbase' || from === 'COINBASE' || from === 'BLOCK_REWARD' || from === 'TREASURY' || (from && /^0{16,}$/.test(from));
   const hash = tx.tx_id || tx.tx_hash || '';
-  const from = tx.from_addr || '';
-  const to = tx.to_addr || '';
-  const amount = fmtAmount(tx.amount);
+  // Resolve amount: prefer amount_base (already base units), then amount
+  // (could be base units from DB, or QTCL from pending — fmtAmount handles both via /100)
+  const rawAmt = tx.amount_base || tx.amount || 0;
+  const amount = fmtAmount(rawAmt);
   const wProof = tx.w_proof || '';
   const typeClass = isCoinbase ? 'coinbase' : '';
-  const isTreasury = tx.tx_type === 'treasury_reward' || tx.from_addr === 'TREASURY';
-  const isMinerReward = tx.tx_type === 'miner_reward' || (tx.from_addr === 'BLOCK_REWARD' && !isTreasury);
-  const typeLabel = tx.tx_type ? (tx.tx_type === 'miner_reward' ? '⛏ MINER REWARD' : tx.tx_type === 'treasury_reward' ? '🏛 TREASURY REWARD' : (tx.tx_type || 'transfer').toUpperCase()) : 'TRANSFER';
+  const isTreasury = txType === 'treasury_reward' || from === 'TREASURY';
+  const isMinerReward = txType === 'miner_reward' || (from === 'BLOCK_REWARD' && !isTreasury);
+  const typeLabel = txType ? (txType === 'miner_reward' ? '⛏ MINER REWARD' : txType === 'treasury_reward' ? '🏛 TREASURY REWARD' : (txType || 'transfer').toUpperCase()) : 'TRANSFER';
 
   return `
     <div class="tx-card ${typeClass}">
@@ -1601,30 +1605,32 @@ function startBlockSSEListener() {
         const txCount = blockEvent.tx_count || (blockEvent.transactions ? blockEvent.transactions.length : 0);
         console.log(`[SSE-BLOCK] 📦 NEW BLOCK h=${blockEvent.height} txs=${txCount}`);
         
-        // If SSE push includes full transactions, instant-render without DB round-trip
-        if (blockEvent.transactions && blockEvent.transactions.length > 0 && _selectedHeight === blockEvent.height) {
-          try {
-            const detailScroll = document.getElementById('detail-scroll');
-            if (detailScroll && detailScroll.style.display !== 'none') {
-              renderBlockDetail(blockEvent, detailScroll);
-              console.log(`[SSE-BLOCK] ⚡ Instant render h=${blockEvent.height} (${blockEvent.transactions.length} txs from SSE push)`);
-            }
-          } catch(renderErr) {
-            console.debug(`[SSE-BLOCK] Instant render failed: ${renderErr.message}`);
-          }
-        }
+        // ── CRITICAL FIX: Track if user was viewing this height as pending ──
+        // When a pending block gets mined, _selectedHeight points at the same
+        // height but the pending block object is replaced by a new pending at N+1.
+        // We must re-select the now-confirmed block so txs don't "disappear".
+        const wasViewingThisHeight = (_selectedHeight === blockEvent.height);
         
         // Always refresh chain + stats from DB for authoritative state
         await fetchChain();
         await fetchStats();
         
-        // Re-fetch from DB for authoritative data if block detail is open
-        if (_selectedHeight === blockEvent.height) {
+        // Re-fetch the CONFIRMED block from DB for full tx data (not SSE event data
+        // which may have incomplete fields). This ensures the miner reward + all
+        // transactions are correctly displayed with proper amounts.
+        if (wasViewingThisHeight) {
           try {
             const block = await rpc('qtcl_getBlock', [blockEvent.height]);
             if (block) {
+              _selectedHeight = blockEvent.height;
               const detailScroll = document.getElementById('detail-scroll');
-              if (detailScroll.style.display !== 'none') renderBlockDetail(block, detailScroll);
+              if (detailScroll) {
+                detailScroll.style.display = 'block';
+                renderBlockDetail(block, detailScroll);
+                // Re-render chain rail to update selection highlight
+                renderChainRail(_chainBlocks);
+                console.log(`[SSE-BLOCK] ✅ Auto-selected confirmed block h=${blockEvent.height} (${(block.transactions||[]).length} txs from DB)`);
+              }
             }
           } catch(e) {
             console.debug(`[SSE-BLOCK] Detail refresh failed: ${e.message}`);
@@ -1678,15 +1684,19 @@ function startDbSyncListener() {
           await fetchExplorerPage();
         }
 
-        // If this exact block is open in the detail view, re-fetch with real TXs
+        // If this exact block is open in the detail view, or user was viewing
+        // the pending block at this height, re-fetch with full confirmed TXs
         if (_selectedHeight === h || _selectedHeight === null) {
           try {
             const block = await rpc('qtcl_getBlock', [h]);
             if (block) {
+              _selectedHeight = h;
               const detailScroll = document.getElementById('detail-scroll');
-              if (detailScroll && detailScroll.style.display !== 'none') {
+              if (detailScroll) {
+                detailScroll.style.display = 'block';
                 renderBlockDetail(block, detailScroll);
-                console.log(`[DB-SYNC] ⚡ Block detail refreshed h=${h} txs=${(block.transactions||[]).length}`);
+                renderChainRail(_chainBlocks);
+                console.log(`[DB-SYNC] ✅ Block detail refreshed h=${h} txs=${(block.transactions||[]).length}`);
               }
             }
           } catch(e) {
@@ -1720,10 +1730,34 @@ setInterval(async () => {
     await fetchStats();
     if (_selectedHeight !== null) {
       try {
-        const block = await rpc('qtcl_getBlock', [_selectedHeight]);
-        if (block) {
-          const detailScroll = document.getElementById('detail-scroll');
-          if (detailScroll && detailScroll.style.display !== 'none') renderBlockDetail(block, detailScroll);
+        const detailScroll = document.getElementById('detail-scroll');
+        if (detailScroll && detailScroll.style.display !== 'none') {
+          // Check if the selected block is the pending block
+          const isPending = _chainBlocks.find(b => b.height === _selectedHeight && b._pending);
+          if (isPending) {
+            // Refresh pending block data (has fresh mempool txs)
+            const pendingRes = await rpc('qtcl_getPendingBlock', []);
+            if (pendingRes && pendingRes.block_height === _selectedHeight) {
+              const pendingBlock = {
+                height: pendingRes.block_height,
+                block_hash: '⏳ Mining... (no PoW yet)',
+                parent_hash: pendingRes.parent_hash || '—',
+                miner_address: pendingRes.miner_address || '',
+                timestamp: pendingRes.timestamp_s || Math.floor(Date.now()/1000),
+                difficulty: '—',
+                nonce: '—',
+                tx_count: pendingRes.tx_count || 0,
+                transactions: pendingRes.transactions || [],
+                w_state_fidelity: 0,
+                _pending: true
+              };
+              renderBlockDetail(pendingBlock, detailScroll);
+            }
+          } else {
+            // Refresh confirmed block from DB
+            const block = await rpc('qtcl_getBlock', [_selectedHeight]);
+            if (block) renderBlockDetail(block, detailScroll);
+          }
         }
       } catch(e) {}
     }
