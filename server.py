@@ -6781,11 +6781,31 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ═══════════════════════════════════════════════════════════════════════════════
         logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height} miner={miner_address[:16]}…")
         _settle_ok = True
+        _miner_balance_qtcl = 0.0
         try:
             _settle_block_rewards(
                 height, block_hash, miner_address, txs or []
             )
             logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height}")
+
+            # Query miner balance atomically from same DB connection pool
+            # so the response includes the authoritative post-settlement balance.
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
+                        "WHERE address = %s AND spent = FALSE",
+                        (miner_address,),
+                    )
+                    _bal_row = cur.fetchone()
+                    _miner_bal_base = int(_bal_row[0]) if _bal_row and _bal_row[0] else 0
+                    _miner_balance_qtcl = _miner_bal_base / 100.0
+                    logger.critical(
+                        f"[RPC-submitBlock] 💰 Miner balance post-settlement: "
+                        f"{_miner_balance_qtcl:.8f} QTCL ({_miner_bal_base} base)"
+                    )
+            except Exception as _bal_query_err:
+                logger.warning(f"[RPC-submitBlock] Post-settlement balance query: {_bal_query_err}")
         except Exception as settle_err:
             logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
             # Fallback: enqueue for background settlement worker
@@ -7085,6 +7105,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "block_hash": block_hash,
                 "difficulty_bits": difficulty_bits,
                 "miner_reward_qtcl": _resp_reward,
+                "miner_balance_qtcl": _miner_balance_qtcl,
                 "oracle_consensus": "5/5",
                 "oracle_ids": ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"],
                 "next_height": height + 1,
