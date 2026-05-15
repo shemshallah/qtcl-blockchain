@@ -6636,15 +6636,70 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _amount_f = float(_amount_raw) if _amount_raw else 0.0
                 _amount_base = int(round(_amount_f * 100)) if 0 < _amount_f < 10_000 else int(_amount_f)
 
-            # Query sender's confirmed balance from DB (balance stored in base units)
+            # Query sender's confirmed balance from DB.
+            # FIX: Use the same 3-layer fallback as getBalance RPC so that addresses
+            # whose UTXOs haven't been settled yet (balance_source="transactions_table")
+            # are not incorrectly rejected with "Insufficient balance: … has 0 base units".
+            # Layer 1: wallet_addresses (fastest, populated after UTXO settlement)
+            # Layer 2: SUM(unspent UTXOs) from address_utxos
+            # Layer 3: net balance from transactions table (fallback for unsettled blocks)
             try:
                 with get_db_cursor() as cur:
+                    # Layer 1 — wallet_addresses
                     cur.execute(
                         "SELECT balance FROM wallet_addresses WHERE address = %s",
                         (_from,),
                     )
                     _row = cur.fetchone()
                     _confirmed_balance = int(_row[0]) if _row and _row[0] else 0
+
+                    # Layer 2 — UTXO sum (if layer 1 returned 0)
+                    if _confirmed_balance == 0:
+                        try:
+                            cur.execute(
+                                "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
+                                "WHERE address = %s AND spent = FALSE",
+                                (_from,),
+                            )
+                            _utxo_row = cur.fetchone()
+                            _confirmed_balance = int(_utxo_row[0]) if _utxo_row and _utxo_row[0] else 0
+                            if _confirmed_balance > 0:
+                                logger.debug(
+                                    f"[RPC-submitBlock] Layer2 UTXO balance for {_from[:16]}…: {_confirmed_balance}"
+                                )
+                        except Exception as _utxo_err:
+                            logger.debug(f"[RPC-submitBlock] UTXO sum fallback error: {_utxo_err}")
+
+                    # Layer 3 — transactions table net balance (catches unsettled blocks)
+                    if _confirmed_balance == 0:
+                        try:
+                            cur.execute(
+                                """SELECT COALESCE(SUM(amount), 0)
+                                   FROM transactions
+                                   WHERE to_address = %s
+                                     AND status IN ('confirmed', 'included', 'approved', 'APPROVED')""",
+                                (_from,),
+                            )
+                            _in_row = cur.fetchone()
+                            _in_amt = int(_in_row[0]) if _in_row and _in_row[0] else 0
+                            if _in_amt > 0:
+                                cur.execute(
+                                    """SELECT COALESCE(SUM(amount), 0)
+                                       FROM transactions
+                                       WHERE from_address = %s
+                                         AND status IN ('confirmed', 'included', 'approved', 'APPROVED')""",
+                                    (_from,),
+                                )
+                                _out_row = cur.fetchone()
+                                _out_amt = int(_out_row[0]) if _out_row and _out_row[0] else 0
+                                _confirmed_balance = max(0, _in_amt - _out_amt)
+                                if _confirmed_balance > 0:
+                                    logger.info(
+                                        f"[RPC-submitBlock] Layer3 tx-table balance for {_from[:16]}…: "
+                                        f"in={_in_amt} out={_out_amt} net={_confirmed_balance}"
+                                    )
+                        except Exception as _tx_err:
+                            logger.debug(f"[RPC-submitBlock] tx-table fallback error: {_tx_err}")
 
                     if _confirmed_balance < (_amount_base + _fee_base):
                         return _rpc_error(
