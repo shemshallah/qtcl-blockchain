@@ -301,6 +301,24 @@ def _get_client_ip():
     return request.remote_addr or "unknown"
 
 
+def _is_sse_client():
+    """Check if the client is requesting an SSE stream (Accept: text/event-stream)."""
+    accept = request.headers.get("Accept", "")
+    return "text/event-stream" in accept
+
+
+def _oneshot_json_response(data: dict):
+    """Return a single JSON response for non-SSE clients hitting SSE endpoints."""
+    return Response(
+        json.dumps(data),
+        mimetype="application/json",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
     """SSE stream: Real-time 16³ density matrix snapshots for quantum clients."""
