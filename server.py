@@ -4071,6 +4071,29 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                     _diagnostic["utxo_balance_base_units"] = _utxo_balance
                     _diagnostic["utxo_count_unspent"] = _utxo_count
                     if _utxo_balance > 0:
+                        # FIX-SEND-DEBIT: subtract any pending outgoing TXs recorded in
+                        # address_transactions (direction='out', block_height IS NULL)
+                        # so the balance drops immediately after a send, before block confirmation.
+                        # This is Neon only — vault is exclusively for vault.html.
+                        try:
+                            cur.execute(
+                                """SELECT COALESCE(SUM(amount), 0)
+                                   FROM address_transactions
+                                   WHERE address = %s AND direction = 'out'
+                                     AND block_height IS NULL""",
+                                (address,),
+                            )
+                            _pending_out_row = cur.fetchone()
+                            _pending_out_base = int(_pending_out_row[0]) if _pending_out_row and _pending_out_row[0] else 0
+                            if _pending_out_base > 0:
+                                _utxo_balance = max(0, _utxo_balance - _pending_out_base)
+                                _diagnostic["pending_out_base_units"] = _pending_out_base
+                                logger.info(
+                                    f"[RPC-getBalance] 📤 deducted {_pending_out_base} base pending-out "
+                                    f"from UTXO balance for {address[:16]}…"
+                                )
+                        except Exception as _pod_err:
+                            logger.debug(f"[RPC-getBalance] pending-out deduct: {_pod_err}")
                         # Backfill wallet_addresses from UTXO truth (async-safe: ON CONFLICT)
                         _fp = __import__('hashlib').sha256(address.encode()).hexdigest()[:64]
                         try:
@@ -4128,11 +4151,27 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                                 """SELECT COALESCE(SUM(amount), 0)
                                    FROM transactions
                                    WHERE from_address = %s
-                                     AND status IN ('confirmed', 'included', 'approved', 'APPROVED')""",
+                                     AND status IN ('confirmed', 'included', 'approved', 'APPROVED')
+                                     AND tx_type NOT IN ('miner_reward', 'treasury_reward', 'coinbase')""",
                                 (address,),
                             )
                             _out_row = cur.fetchone()
                             _out_amt = int(_out_row[0]) if _out_row and _out_row[0] else 0
+                            # FIX-SEND-DEBIT: also deduct pending outgoing TXs so balance
+                            # drops immediately when a send is accepted into the mempool,
+                            # not only after the TX is included in a confirmed block.
+                            cur.execute(
+                                """SELECT COALESCE(SUM(amount), 0)
+                                   FROM transactions
+                                   WHERE from_address = %s
+                                     AND status = 'pending'
+                                     AND tx_type NOT IN ('miner_reward', 'treasury_reward', 'coinbase')""",
+                                (address,),
+                            )
+                            _pending_out_row = cur.fetchone()
+                            _pending_out_amt = int(_pending_out_row[0]) if _pending_out_row and _pending_out_row[0] else 0
+                            _out_amt += _pending_out_amt
+                            _diagnostic["pending_out_base_units"] = _pending_out_amt
                             _net_balance = max(0, _tx_balance - _out_amt)
                             _diagnostic["tx_table_net_balance_base_units"] = _net_balance
                             if _net_balance > 0:
@@ -8368,6 +8407,25 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
                     f"[SIGN-TX] ✅ TX submitted to mempool: {tx_hash[:16]}… "
                     f"from={from_addr[:16]}… to={to_addr[:16]}… amount={amount_qtcl} QTCL"
                 )
+                # FIX-SEND-DEBIT: write a pending 'out' row to address_transactions on Neon
+                # immediately so getBalance deducts it before the TX lands in a block.
+                # This is Neon (main chain) only — vault is exclusively for vault.html.
+                try:
+                    with get_db_cursor() as _debit_cur:
+                        _debit_cur.execute("""
+                            INSERT INTO address_transactions
+                                (address, tx_hash, direction, amount, block_height, created_at)
+                            VALUES (%s, %s, 'out', %s, NULL, NOW())
+                            ON CONFLICT (address, tx_hash, direction) DO NOTHING
+                        """, (from_addr, tx_hash, amount_base + fee_base))
+                    logger.info(
+                        f"[SIGN-TX] 📤 Debit recorded: -{amount_qtcl} QTCL "
+                        f"from={from_addr[:16]}… tx={tx_hash[:16]}…"
+                    )
+                except Exception as _debit_err:
+                    # Non-fatal: getBalance pending-deduct query will still catch it
+                    # via the transactions table fallback added in FIX-SEND-DEBIT.
+                    logger.warning(f"[SIGN-TX] Debit row non-fatal: {_debit_err}")
                 return _rpc_ok(
                     {
                         "valid": True,
