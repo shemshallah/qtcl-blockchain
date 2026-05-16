@@ -2141,7 +2141,7 @@ class QuantumTemporalCoherenceLedgerServer:
             # This is idempotent-safe: nuclear DROP+CREATE handles full rebuilds;
             # this handles the case where populate_tessellation is retried after
             # a mid-run failure without a full schema rebuild.
-            logger.info(f"{CLR.WARNING}[POPULATE] Truncating pseudoqubits + hyperbolic_triangles (idempotent reset)...{CLR.E}")
+            logger.info(f"{CLR.WARN}[POPULATE] Truncating pseudoqubits + hyperbolic_triangles (idempotent reset)...{CLR.E}")
             self.cursor.execute("TRUNCATE TABLE pseudoqubits CASCADE;")
             self.cursor.execute("TRUNCATE TABLE hyperbolic_triangles CASCADE;")
             self._commit()
