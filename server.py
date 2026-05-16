@@ -130,7 +130,7 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_submitOracleReg": 6.0,
     "qtcl_getOracleRegistry": 5.0,
     "qtcl_getOracleRecord": 4.0,
-    "qtcl_registerPeer": 4.0,
+    "qtcl_registerPeer": 12.0,
     "qtcl_receiveDHTTable": 3.0,
     "qtcl_registerMeasurementSubscriber": 3.0,
     "qtcl_unregisterMeasurementSubscriber": 3.0,
@@ -3410,6 +3410,7 @@ _SCHEMA_ENSURED_PEER_REGISTRY = False
 _SCHEMA_ENSURED_ORACLE_REGISTRY = False
 _SCHEMA_ENSURED_CHAIN_STATE = False
 _SCHEMA_ENSURED_BLOCKS = False
+_SCHEMA_PEER_REGISTRY_LOCK = threading.Lock()  # Prevent concurrent DDL storms on startup
 
 
 def _lazy_ensure_oracle_registry():
@@ -3507,94 +3508,85 @@ def _lazy_ensure_peer_registry():
     global _SCHEMA_ENSURED_PEER_REGISTRY
     if _SCHEMA_ENSURED_PEER_REGISTRY:
         return
-    try:
-        # Step 1: Aggressive Rebuild if legacy schema detected
-        # We do this in a separate cursor to ensure it doesn't pollute the main one
-        with get_db_cursor() as cur:
-            cur.execute("""
-                DO $$ 
-                BEGIN 
-                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='peer_id') THEN
-                        -- If we have peer_id, we are on the legacy schema. 
-                        -- We drop it completely to ensure all constraints/NOT NULLs are cleared.
-                        DROP TABLE IF EXISTS peer_registry CASCADE;
-                    END IF;
-                END $$;
-            """)
+    with _SCHEMA_PEER_REGISTRY_LOCK:
+        # Double-checked locking — prevents concurrent DDL from P2P loop + registerPeer racing
+        if _SCHEMA_ENSURED_PEER_REGISTRY:
+            return
+        try:
+            # Step 1: Aggressive Rebuild if legacy schema detected
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='peer_id') THEN
+                            DROP TABLE IF EXISTS peer_registry CASCADE;
+                        END IF;
+                    END $$;
+                """)
 
-        # Step 2: Create/Update to the definitive schema
-        with get_db_cursor() as cur:
-            # Create table with node_id as PRIMARY KEY
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS peer_registry (
-                    node_id       TEXT PRIMARY KEY,
-                    external_addr TEXT NOT NULL,
-                    pubkey_hash   TEXT NOT NULL DEFAULT '',
-                    chain_height  BIGINT      DEFAULT 0,
-                    last_seen     TIMESTAMPTZ DEFAULT NOW(),
-                    first_seen    TIMESTAMPTZ DEFAULT NOW(),
-                    capabilities  JSONB       DEFAULT '[]',
-                    ban_score     INTEGER     DEFAULT 0,
-                    caller_ip     TEXT        DEFAULT '',
-                    mac_address   TEXT        DEFAULT '',
-                    device_id     TEXT        DEFAULT '',
-                    fingerprint   TEXT        DEFAULT ''
-                )
-            """)
-
-            # Ensure all columns exist for existing node_id-based tables (idempotency)
-            for col, dtype in [
-                ("first_seen", "TIMESTAMPTZ DEFAULT NOW()"),
-                ("capabilities", "JSONB DEFAULT '[]'"),
-                ("ban_score", "INTEGER DEFAULT 0"),
-                ("caller_ip", "TEXT DEFAULT ''"),
-                ("mac_address", "TEXT DEFAULT ''"),
-                ("device_id", "TEXT DEFAULT ''"),
-                ("fingerprint", "TEXT DEFAULT ''"),
-            ]:
-                try:
-                    cur.execute(
-                        f"ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS {col} {dtype}"
+            # Step 2: Create/Update to the definitive schema
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS peer_registry (
+                        node_id       TEXT PRIMARY KEY,
+                        external_addr TEXT NOT NULL,
+                        pubkey_hash   TEXT NOT NULL DEFAULT '',
+                        chain_height  BIGINT      DEFAULT 0,
+                        last_seen     TIMESTAMPTZ DEFAULT NOW(),
+                        first_seen    TIMESTAMPTZ DEFAULT NOW(),
+                        capabilities  JSONB       DEFAULT '[]',
+                        ban_score     INTEGER     DEFAULT 0,
+                        caller_ip     TEXT        DEFAULT '',
+                        mac_address   TEXT        DEFAULT '',
+                        device_id     TEXT        DEFAULT '',
+                        fingerprint   TEXT        DEFAULT ''
                     )
+                """)
+
+                for col, dtype in [
+                    ("first_seen", "TIMESTAMPTZ DEFAULT NOW()"),
+                    ("capabilities", "JSONB DEFAULT '[]'"),
+                    ("ban_score", "INTEGER DEFAULT 0"),
+                    ("caller_ip", "TEXT DEFAULT ''"),
+                    ("mac_address", "TEXT DEFAULT ''"),
+                    ("device_id", "TEXT DEFAULT ''"),
+                    ("fingerprint", "TEXT DEFAULT ''"),
+                ]:
+                    try:
+                        cur.execute(f"ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS {col} {dtype}")
+                    except Exception:
+                        pass
+
+                try:
+                    cur.execute("""
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'peer_registry_node_id_key') THEN
+                                ALTER TABLE peer_registry ADD CONSTRAINT peer_registry_node_id_key UNIQUE (node_id);
+                            END IF;
+                        END $$;
+                    """)
                 except Exception:
                     pass
 
-            # Ensure node_id is unique for ON CONFLICT (if not already PK)
-            try:
                 cur.execute("""
-                    DO $$ 
-                    BEGIN 
-                        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'peer_registry_node_id_key') THEN
-                            ALTER TABLE peer_registry ADD CONSTRAINT peer_registry_node_id_key UNIQUE (node_id);
-                        END IF; 
-                    END $$;
+                    CREATE TABLE IF NOT EXISTS peer_devices (
+                        fingerprint    TEXT PRIMARY KEY,
+                        node_id        TEXT NOT NULL,
+                        last_caller_ip TEXT,
+                        mac_address    TEXT,
+                        device_id      TEXT,
+                        first_seen     TIMESTAMPTZ DEFAULT NOW(),
+                        last_seen      TIMESTAMPTZ DEFAULT NOW(),
+                        trust_score    FLOAT DEFAULT 1.0
+                    )
                 """)
-            except Exception:
-                pass
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_devices_node ON peer_devices(node_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_devices_ip ON peer_devices(last_caller_ip)")
 
-            # ── 3.1 DEVICE FINGERPRINTING TABLE ─────────────────────────────────
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS peer_devices (
-                    fingerprint    TEXT PRIMARY KEY,
-                    node_id        TEXT NOT NULL,
-                    last_caller_ip TEXT,
-                    mac_address    TEXT,
-                    device_id      TEXT,
-                    first_seen     TIMESTAMPTZ DEFAULT NOW(),
-                    last_seen      TIMESTAMPTZ DEFAULT NOW(),
-                    trust_score    FLOAT DEFAULT 1.0
-                )
-            """)
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_peer_devices_node ON peer_devices(node_id)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_peer_devices_ip ON peer_devices(last_caller_ip)"
-            )
-
-        _SCHEMA_ENSURED_PEER_REGISTRY = True
-    except Exception as e:
-        logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
+            _SCHEMA_ENSURED_PEER_REGISTRY = True
+        except Exception as e:
+            logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
 
 
 def _lazy_ensure_blocks():
@@ -7785,13 +7777,15 @@ def _broadcast_block_to_peers(compact_block: dict) -> int:
                 # Non-blocking broadcast - don't wait for response
                 import threading
 
-                threading.Thread(
-                    target=lambda url, pl: (
+                def _fire_gossip(url: str, pl: dict, _nid: str) -> None:
+                    try:
                         requests.post(url, json=pl, timeout=2)
-                        if "requests" in globals()
-                        else None
-                    ),
-                    args=(gossip_url, payload),
+                    except Exception as _ge:
+                        logger.debug(f"[P2P-BROADCAST] gossip to {_nid[:16]} failed: {_ge}")
+
+                threading.Thread(
+                    target=_fire_gossip,
+                    args=(gossip_url, payload, node_id),
                     daemon=True,
                     name=f"Broadcast-{node_id[:8]}",
                 ).start()
