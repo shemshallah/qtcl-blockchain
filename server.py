@@ -8676,10 +8676,335 @@ def _rpc_repairTransferUTXOs(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, str(e), rpc_id)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# qtcl_walletAuth — Verify wallet password (PBKDF2 tag or sign-verify round-trip)
-# Used by tx.html: authenticates wallet without exposing the private key
-# ═══════════════════════════════════════════════════════════════════════════════
+def _rpc_repairSenderDebits(params: Any, rpc_id: Any) -> dict:
+    """qtcl_repairSenderDebits — Mark sender UTXOs as spent for confirmed transfers.
+
+    Fixes the case where a confirmed transfer TX debited the sender in the transactions
+    table (address_transactions 'out' row exists) but the sender's address_utxos rows
+    were never marked spent=TRUE. Causes sender balance to show higher than reality.
+
+    Algorithm per confirmed outbound transfer TX:
+      1. Compute total spend = sum(output.amount_base) + fee_base for outputs NOT going
+         back to sender (i.e. actual sends, not change outputs).
+      2. Check if address_transactions has a confirmed 'out' row for this tx.
+      3. Greedily mark sender UTXOs spent (oldest first, ASC height) until spend covered.
+      4. Create any missing change output UTXOs (outputs back to sender).
+      5. Recompute wallet_addresses.balance from SUM(unspent UTXOs) for all touched addrs.
+
+    params[0] (optional): { address: <hex> }  — restrict to one sender address
+    """
+    try:
+        _rsd_log = logging.getLogger("REPAIR-DEBIT")
+        data = {}
+        if params and isinstance(params, (list, tuple)) and len(params) > 0:
+            data = params[0] if isinstance(params[0], dict) else {}
+        elif isinstance(params, dict):
+            data = params
+        target_addr = _norm_address(data.get("address") or "")
+
+        debits_applied = 0
+        utxos_spent    = 0
+        change_created = 0
+        touched_addrs: set = set()
+        errors: list = []
+
+        # Find all confirmed outbound transfer txs where sender still has unspent UTXOs
+        # but address_transactions shows a confirmed 'out' debit for that tx_hash.
+        _addr_clause = "AND t.from_address = %s" if target_addr else ""
+        _query = f"""
+            SELECT t.tx_hash, t.from_address, t.to_address, t.amount, t.height, t.metadata
+            FROM transactions t
+            WHERE t.status = 'confirmed'
+              AND t.height IS NOT NULL
+              AND t.tx_type NOT IN ('coinbase', 'miner_reward', 'treasury_reward')
+              AND t.from_address IS NOT NULL AND t.from_address != ''
+              AND t.from_address != '0000000000000000000000000000000000000000000000000000000000000000'
+              {_addr_clause}
+            ORDER BY t.height ASC, t.transaction_index ASC
+        """
+        with get_db_cursor() as cur:
+            if target_addr:
+                cur.execute(_query, (target_addr,))
+            else:
+                cur.execute(_query)
+            tx_rows = cur.fetchall()
+
+        _rsd_log.critical(
+            f"[REPAIR-DEBIT] Scanning {len(tx_rows)} outbound TXs"
+            + (f" (filter: {target_addr[:16]}…)" if target_addr else "")
+        )
+
+        for tx_hash_r, from_addr_r, to_addr_r, amount_r, height_r, meta_r in tx_rows:
+            if not tx_hash_r or not from_addr_r or not height_r:
+                continue
+            from_addr_r = _norm_address(from_addr_r)
+
+            # Parse metadata
+            if isinstance(meta_r, str) and meta_r.strip():
+                try: meta_r = json.loads(meta_r)
+                except Exception: meta_r = {}
+            if not isinstance(meta_r, dict):
+                meta_r = {}
+
+            # Build outputs
+            outputs = meta_r.get("outputs") or []
+            if not outputs and to_addr_r:
+                amt = int(amount_r) if amount_r else 0
+                if amt > 0:
+                    outputs = [{"address": to_addr_r, "amount_base": amt}]
+            outputs_norm = [
+                {"address": _norm_address(o.get("address") or ""), "amount_base": int(o.get("amount_base") or 0)}
+                for o in outputs
+            ]
+
+            # Total spend = outputs going to addresses OTHER than sender + fee
+            fee_base = int(meta_r.get("fee_base") or 0)
+            spend_total = sum(
+                o["amount_base"] for o in outputs_norm
+                if o["address"] and o["address"] != from_addr_r
+            ) + fee_base
+            if spend_total <= 0:
+                continue
+
+            # Check if ANY of the sender's UTXOs are already spent for this tx
+            try:
+                with get_db_cursor() as _chk:
+                    _chk.execute(
+                        "SELECT COUNT(*) FROM address_utxos "
+                        "WHERE address = %s AND spent_in_tx_hash = %s AND spent = TRUE",
+                        (from_addr_r, tx_hash_r)
+                    )
+                    _already_spent = int((_chk.fetchone() or [0])[0])
+                if _already_spent > 0:
+                    # Debit already applied for this tx — skip
+                    continue
+            except Exception as _chk_err:
+                _rsd_log.debug(f"[REPAIR-DEBIT] spend-check non-fatal: {_chk_err}")
+
+            # Greedily spend sender's oldest UTXOs until spend_total covered
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT tx_hash, output_index, amount FROM address_utxos "
+                        "WHERE address = %s AND spent = FALSE "
+                        "ORDER BY created_at_height ASC, output_index ASC",
+                        (from_addr_r,)
+                    )
+                    sender_utxos = cur.fetchall()
+
+                remaining = spend_total
+                _spent_this_tx = 0
+                for _u_txh, _u_idx, _u_amt in sender_utxos:
+                    if remaining <= 0:
+                        break
+                    with get_db_cursor() as _upd:
+                        _upd.execute(
+                            "UPDATE address_utxos SET spent = TRUE, "
+                            "spent_at_height = %s, spent_in_tx_hash = %s "
+                            "WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
+                            (height_r, tx_hash_r, _u_txh, _u_idx)
+                        )
+                        _rows = getattr(_upd, "rowcount", 0)
+                    if _rows > 0:
+                        remaining -= int(_u_amt or 0)
+                        utxos_spent += 1
+                        _spent_this_tx += 1
+                        _rsd_log.critical(
+                            f"[REPAIR-DEBIT] ✅ Spent UTXO {_u_txh[:16]}…[{_u_idx}] "
+                            f"amt={_u_amt} for tx={tx_hash_r[:16]}… sender={from_addr_r[:16]}…"
+                        )
+
+                if _spent_this_tx > 0:
+                    debits_applied += 1
+                    touched_addrs.add(from_addr_r)
+                    if remaining > 0:
+                        _rsd_log.warning(
+                            f"[REPAIR-DEBIT] ⚠️  tx={tx_hash_r[:16]}… sender={from_addr_r[:16]}… "
+                            f"under-funded by {remaining} qsat (not enough UTXOs to cover spend)"
+                        )
+                elif spend_total > 0:
+                    _rsd_log.warning(
+                        f"[REPAIR-DEBIT] ⚠️  tx={tx_hash_r[:16]}… sender={from_addr_r[:16]}… "
+                        f"no UTXOs available to spend (spend_total={spend_total})"
+                    )
+
+            except Exception as _spend_err:
+                errors.append(f"tx={tx_hash_r[:16]} debit: {_spend_err}")
+                _rsd_log.error(f"[REPAIR-DEBIT] ❌ debit failed: {_spend_err}")
+
+            # Create any missing change outputs (outputs back to sender)
+            for out_idx, out in enumerate(outputs_norm):
+                if out["address"] != from_addr_r or out["amount_base"] <= 0:
+                    continue
+                try:
+                    with get_db_cursor() as _ins:
+                        _ins.execute(
+                            "INSERT INTO address_utxos "
+                            "(address, tx_hash, output_index, amount, spent, created_at_height) "
+                            "VALUES (%s, %s, %s, %s, FALSE, %s) "
+                            "ON CONFLICT (tx_hash, output_index) DO NOTHING",
+                            (from_addr_r, tx_hash_r, out_idx, out["amount_base"], height_r)
+                        )
+                        if getattr(_ins, "rowcount", 0) != 0:
+                            change_created += 1
+                            touched_addrs.add(from_addr_r)
+                except Exception as _ch_err:
+                    errors.append(f"change tx={tx_hash_r[:16]}: {_ch_err}")
+
+        # Recompute wallet_addresses balances for all touched sender addresses
+        recomputed = 0
+        for addr in touched_addrs:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT COALESCE(SUM(amount),0), COUNT(*) FROM address_utxos "
+                        "WHERE address = %s AND spent = FALSE", (addr,)
+                    )
+                    row = cur.fetchone()
+                    true_balance = int(row[0]) if row and row[0] else 0
+                    utxo_count   = int(row[1]) if row and row[1] else 0
+                    _fp = hashlib.sha256(addr.encode()).hexdigest()[:64]
+                    cur.execute("""
+                        INSERT INTO wallet_addresses
+                            (address, wallet_fingerprint, public_key, balance,
+                             transaction_count, address_type, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, 'standard', NOW())
+                        ON CONFLICT (address) DO UPDATE SET
+                            balance           = EXCLUDED.balance,
+                            transaction_count = EXCLUDED.transaction_count,
+                            updated_at        = NOW()
+                    """, (addr, _fp, _fp, true_balance, max(1, utxo_count)))
+                    recomputed += 1
+                    _rsd_log.critical(
+                        f"[REPAIR-DEBIT] ✅ Wallet {addr[:16]}… "
+                        f"balance={true_balance/100:.4f} QTCL ({utxo_count} UTXOs)"
+                    )
+            except Exception as _bal_err:
+                errors.append(f"balance {addr[:16]}: {_bal_err}")
+
+        return _rpc_ok({
+            "debits_applied":     debits_applied,
+            "utxos_spent":        utxos_spent,
+            "change_outputs":     change_created,
+            "recomputed_wallets": recomputed,
+            "affected_addresses": list(touched_addrs),
+            "txs_scanned":        len(tx_rows),
+            "errors":             errors[:20],
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] repairSenderDebits error: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+def _rpc_evictInsolventTxs(params: Any, rpc_id: Any) -> dict:
+    """qtcl_evictInsolventTxs — Evict mempool TXs whose sender lacks sufficient UTXOs.
+
+    After repairSenderDebits corrects sender balances, pending TXs that were
+    accepted when the sender appeared to have enough funds may now be insolvent.
+    This RPC scans the mempool and evicts any TX where the sender's current
+    spendable UTXO balance < tx.amount_base + tx.fee_base.
+
+    Optionally accepts params[0].tx_hash to evict a specific tx by hash.
+    """
+    try:
+        _evi_log = logging.getLogger("EVICT-INSOLVENT")
+        data = {}
+        if params and isinstance(params, (list, tuple)) and len(params) > 0:
+            data = params[0] if isinstance(params[0], dict) else {}
+        elif isinstance(params, dict):
+            data = params
+        target_tx = (data.get("tx_hash") or "").strip().lower()
+
+        from mempool import get_mempool
+        mp = get_mempool()
+
+        evicted = []
+        skipped = []
+        errors  = []
+
+        # Snapshot current mempool contents
+        try:
+            all_pending = mp.get_pending_transactions(limit=10000)
+        except Exception as _snap_err:
+            return _rpc_error(-32603, f"Mempool snapshot failed: {_snap_err}", rpc_id)
+
+        for tx in all_pending:
+            tx_hash  = tx.get("tx_hash") or tx.get("tx_id") or ""
+            from_addr = _norm_address(tx.get("from_address") or tx.get("from_addr") or "")
+            amount_base = int(tx.get("amount_base") or 0)
+            fee_base    = int(tx.get("fee_base") or round(float(tx.get("fee") or tx.get("fee_qtcl") or 0) * 100))
+            spend_needed = amount_base + fee_base
+
+            if target_tx and tx_hash != target_tx:
+                continue  # filtered to specific tx
+
+            if not from_addr or spend_needed <= 0:
+                skipped.append(tx_hash[:16] + "… (no from_addr or 0 amount)")
+                continue
+
+            # Check spendable UTXO balance for this sender
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT COALESCE(SUM(amount),0) FROM address_utxos "
+                        "WHERE address = %s AND spent = FALSE",
+                        (from_addr,)
+                    )
+                    row = cur.fetchone()
+                    utxo_bal = int(row[0]) if row and row[0] else 0
+
+                # Also subtract any OTHER pending spends for this address already in mempool
+                try:
+                    with get_db_cursor() as cur2:
+                        cur2.execute(
+                            "SELECT COALESCE(SUM(amount),0) FROM address_transactions "
+                            "WHERE address = %s AND direction = 'out' AND block_height IS NULL",
+                            (from_addr,)
+                        )
+                        pend_row = cur2.fetchone()
+                        pending_spend = int(pend_row[0]) if pend_row and pend_row[0] else 0
+                except Exception:
+                    pending_spend = 0
+
+                spendable = max(0, utxo_bal - pending_spend)
+
+                if spendable < spend_needed:
+                    # Evict this tx — sender can't cover it
+                    try:
+                        mp._remove(tx_hash)
+                        mp.unlock(from_addr, spend_needed)
+                    except Exception as _ev_err:
+                        _evi_log.warning(f"[EVICT] _remove non-fatal: {_ev_err}")
+                    # Mark tx as rejected in DB
+                    try:
+                        with get_db_cursor() as upd:
+                            upd.execute(
+                                "UPDATE transactions SET status = 'rejected', updated_at = NOW() "
+                                "WHERE tx_hash = %s AND status = 'pending'",
+                                (tx_hash,)
+                            )
+                    except Exception as _db_ev:
+                        _evi_log.warning(f"[EVICT] DB status update non-fatal: {_db_ev}")
+                    evicted.append(tx_hash)
+                    _evi_log.critical(
+                        f"[EVICT] ✅ Evicted insolvent TX {tx_hash[:16]}… "
+                        f"sender={from_addr[:16]}… spendable={spendable} < needed={spend_needed}"
+                    )
+                else:
+                    skipped.append(tx_hash[:16] + f"… (spendable={spendable} >= needed={spend_needed})")
+            except Exception as _bal_err:
+                errors.append(f"tx={tx_hash[:16]}: {_bal_err}")
+
+        return _rpc_ok({
+            "evicted":        evicted,
+            "evicted_count":  len(evicted),
+            "skipped_count":  len(skipped),
+            "scanned":        len(all_pending),
+            "errors":         errors[:10],
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] evictInsolventTxs error: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
 
 def _rpc_walletAuth(params: Any, rpc_id: Any) -> dict:
     """qtcl_walletAuth — Verify wallet password using hyp_lwe's canonical format.
@@ -9123,6 +9448,8 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_retroSettle":          _rpc_retroSettle,
     "qtcl_repairUTXOs":          _rpc_repairUTXOs,
     "qtcl_repairTransferUTXOs":  _rpc_repairTransferUTXOs,
+    "qtcl_repairSenderDebits":   _rpc_repairSenderDebits,
+    "qtcl_evictInsolventTxs":    _rpc_evictInsolventTxs,
     "qtcl_getTransaction": _rpc_getTransaction,
     "qtcl_getTransactionVolume": _rpc_getTransactionVolume,
     "qtcl_getBlock": _rpc_getBlock,
