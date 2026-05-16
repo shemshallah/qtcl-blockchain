@@ -4167,10 +4167,12 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
     try:
         if not isinstance(params, (list, dict)):
             return _rpc_error(-32602, "params must be list or object", rpc_id)
-        address = (
-            (params[0] if isinstance(params, list) else params.get("address", ""))
-            if params else ""
-        )
+        # FIX: params[0] may be dict {address:...} OR bare string. Handle both.
+        _p0 = (params[0] if isinstance(params, list) and params else params) or {}
+        if isinstance(_p0, dict):
+            address = _p0.get("address") or _p0.get("addr") or ""
+        else:
+            address = str(_p0) if _p0 else ""
         if not address:
             return _rpc_error(-32602, "address required", rpc_id)
         address = _norm_address(address)  # strip any legacy prefix before DB lookup
@@ -4527,11 +4529,8 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
         logger.debug(
             f"[RPC-METHOD] qtcl_getTransaction called with params={params}, id={rpc_id}"
         )
-        tx_hash = (
-            (params[0] if isinstance(params, list) else params.get("tx_hash", ""))
-            if params
-            else ""
-        )
+        _p0 = (params[0] if isinstance(params, list) and params else params) or {}
+        tx_hash = (_p0.get("tx_hash") or _p0.get("hash") or "") if isinstance(_p0, dict) else str(_p0 or "")
         if not tx_hash:
             logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx_hash missing or empty")
             return _rpc_error(-32602, "tx_hash required", rpc_id)
