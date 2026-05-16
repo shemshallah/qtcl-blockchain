@@ -1938,11 +1938,14 @@ class Mempool:
         persist_meta['outputs']      = tx.outputs
         try:
             with _db.cursor() as cur:
+                # FIX: transactions table schema has no fee_base or timestamp_ns columns;
+                # correct height column is 'height' not 'block_height'.
+                # fee_base already stored in persist_meta (JSONB metadata field).
                 cur.execute("""
                     INSERT INTO transactions
-                        (tx_hash, from_address, to_address, amount, fee_base, nonce,
+                        (tx_hash, from_address, to_address, amount, nonce,
                          tx_type, status, quantum_state_hash, commitment_hash, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
                     ON CONFLICT (tx_hash) DO UPDATE
                         SET status     = CASE WHEN transactions.status = 'confirmed'
                                               THEN 'confirmed' ELSE 'pending' END,
@@ -1953,7 +1956,6 @@ class Mempool:
                     tx.from_address,
                     tx.to_address,
                     tx.amount_base,
-                    tx.fee_base,
                     tx.nonce,
                     tx.tx_type,
                     tx.w_entropy_hash,
