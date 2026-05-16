@@ -6660,6 +6660,48 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         txs = data.get("transactions") or data.get("txs") or hdr.get("transactions") or hdr.get("txs") or []
         logger.info(f"[RPC-submitBlock] h={height}: {len(txs or [])} transactions in block")
 
+        # ═══════════════════════════════════════════════════════════════════════
+        # AUTO-INJECT PENDING MEMPOOL TXS INTO BLOCK
+        # ═══════════════════════════════════════════════════════════════════════
+        # Miner clients typically only pack coinbase+treasury. Any pending transfer
+        # TXs in the mempool must be auto-injected here so they get settled with
+        # the block. Without this, transfer TXs stay pending forever.
+        _injected_count = 0
+        try:
+            from mempool import get_mempool as _get_mp_inject
+            _mp_inject = _get_mp_inject()
+            _existing_tx_ids = set(
+                tx.get("tx_id") or tx.get("tx_hash", "") for tx in (txs or [])
+            )
+            _pending_all = _mp_inject.all_pending()
+            for _ptx in _pending_all:
+                if _ptx.tx_hash in _existing_tx_ids:
+                    continue  # already in block
+                if _ptx.tx_type in ("coinbase", "miner_reward", "treasury_reward"):
+                    continue
+                _ptx_dict = _ptx.to_dict()
+                # Ensure outputs are present for settlement
+                if not _ptx_dict.get("outputs"):
+                    _ptx_dict["outputs"] = [{
+                        "address": _ptx.to_address,
+                        "amount_base": _ptx.amount_base,
+                    }]
+                # Ensure inputs list carries sender info for UTXO spending
+                if not _ptx_dict.get("inputs"):
+                    _ptx_dict["inputs"] = []
+                txs.append(_ptx_dict)
+                _existing_tx_ids.add(_ptx.tx_hash)
+                _injected_count += 1
+            if _injected_count > 0:
+                logger.critical(
+                    f"[RPC-submitBlock] 📥 AUTO-INJECTED {_injected_count} pending mempool TXs "
+                    f"into block h={height} (total txs now: {len(txs)})"
+                )
+        except Exception as _mp_inject_err:
+            logger.warning(
+                f"[RPC-submitBlock] ⚠️  Mempool auto-inject failed (non-fatal): {_mp_inject_err}"
+            )
+
         # Extract W-state attestation data
         w_state_fidelity = float(data.get("w_state_fidelity", 0.0))
 

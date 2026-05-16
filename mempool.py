@@ -2130,6 +2130,7 @@ class Mempool:
             • Compact the lazy-deletion heap (purge all evicted entries)
             • Evict lowest-fee TXs when above threshold
             • Persist any in-memory TXs not yet in DB (crash recovery)
+            • Reconcile stale pending TXs against DB (settlement daemon)
             • Log mempool health
         """
         while self._bg_running:
@@ -2140,6 +2141,7 @@ class Mempool:
 
                 self._expire_old_txs()
                 self._compact_heap()
+                self._reconcile_pending_txs()
 
                 size = self.size()
                 if size > MAX_MEMPOOL_SIZE * 0.95:
@@ -2158,6 +2160,236 @@ class Mempool:
             except Exception as exc:
                 logger.error(f"[MEMPOOL] Background worker error: {exc}")
                 time.sleep(5)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PENDING TX RECONCILIATION DAEMON
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _reconcile_pending_txs(self) -> None:
+        """
+        Settlement daemon — reconciles pending transfer TXs stuck in the mempool.
+
+        Problem solved:
+            Transfer TXs accepted into the mempool are never included in miner-submitted
+            blocks because the miner client only packs coinbase+treasury. These TXs sit
+            at status='pending' with block_height=NULL forever.
+
+        Algorithm:
+            1. Query DB for transfer TXs with status='pending' older than 15s
+            2. Check if the chain has advanced past the TX's acceptance time
+            3. For each stale pending TX, mark it confirmed at the current tip height
+            4. Create receiver UTXOs, mark sender UTXOs spent, recompute balances
+
+        This runs every BACKGROUND_INTERVAL_S (30s) as part of the background worker.
+        Idempotent: UTXOs use ON CONFLICT DO NOTHING, balance is SUM(unspent).
+        """
+        if not _db.available:
+            return
+
+        _reconcile_log = logging.getLogger("MEMPOOL-RECONCILE")
+
+        try:
+            # ── Step 1: Find stale pending transfer TXs in DB ────────────────
+            stale_txs = []
+            with _db.cursor() as cur:
+                cur.execute("""
+                    SELECT tx_hash, from_address, to_address, amount, nonce,
+                           tx_type, metadata, quantum_state_hash
+                    FROM transactions
+                    WHERE status = 'pending'
+                      AND tx_type NOT IN ('coinbase', 'miner_reward', 'treasury_reward',
+                                          'attestation', 'oracle_reg', 'info_null')
+                      AND created_at < NOW() - INTERVAL '15 seconds'
+                    ORDER BY created_at ASC
+                    LIMIT 50
+                """)
+                stale_txs = cur.fetchall()
+
+            if not stale_txs:
+                return
+
+            _reconcile_log.info(
+                f"[RECONCILE] Found {len(stale_txs)} stale pending transfer TXs — settling"
+            )
+
+            # ── Step 2: Get current chain tip ────────────────────────────────
+            current_height = 0
+            current_hash = ""
+            with _db.cursor() as cur:
+                cur.execute("""
+                    SELECT height, block_hash FROM blocks
+                    WHERE finalized = TRUE
+                    ORDER BY height DESC LIMIT 1
+                """)
+                tip = cur.fetchone()
+                if tip:
+                    current_height = int(tip['height'] if isinstance(tip, dict) else tip[0])
+                    current_hash = str(tip['block_hash'] if isinstance(tip, dict) else tip[1])
+
+            if current_height < 1:
+                return  # no finalized blocks yet
+
+            # ── Step 3: Settle each stale TX ────────────────────────────────
+            settled_count = 0
+            for row in stale_txs:
+                tx_hash = row['tx_hash'] if isinstance(row, dict) else row[0]
+                from_addr = row['from_address'] if isinstance(row, dict) else row[1]
+                to_addr = row['to_address'] if isinstance(row, dict) else row[2]
+                amount_base = int(row['amount'] if isinstance(row, dict) else row[3]) if (row['amount'] if isinstance(row, dict) else row[3]) else 0
+                meta_raw = row['metadata'] if isinstance(row, dict) else row[6]
+
+                if isinstance(meta_raw, str):
+                    try:
+                        meta = json.loads(meta_raw)
+                    except Exception:
+                        meta = {}
+                elif isinstance(meta_raw, dict):
+                    meta = meta_raw
+                else:
+                    meta = {}
+
+                fee_base = int(meta.get('fee_base', 0))
+                outputs = meta.get('outputs', [])
+                if not outputs and to_addr and amount_base:
+                    outputs = [{'address': to_addr, 'amount_base': amount_base}]
+
+                try:
+                    with _db.cursor() as cur:
+                        # ── 3a: Confirm the TX in transactions table ─────────
+                        cur.execute("""
+                            UPDATE transactions
+                            SET status = 'confirmed',
+                                height = %s,
+                                block_hash = %s,
+                                updated_at = NOW()
+                            WHERE tx_hash = %s AND status = 'pending'
+                        """, (current_height, current_hash, tx_hash))
+
+                        if getattr(cur, 'rowcount', 0) == 0:
+                            continue  # already confirmed by another path
+
+                        # ── 3b: Mark sender UTXOs spent (greedy oldest-first) ─
+                        spend_total = amount_base + fee_base
+                        if from_addr and spend_total > 0:
+                            cur.execute("""
+                                SELECT tx_hash, output_index, amount
+                                FROM address_utxos
+                                WHERE address = %s AND spent = FALSE
+                                ORDER BY created_at_height ASC, output_index ASC
+                            """, (from_addr,))
+                            sender_utxos = cur.fetchall()
+                            remaining = spend_total
+                            for u_row in sender_utxos:
+                                if remaining <= 0:
+                                    break
+                                u_tx = u_row['tx_hash'] if isinstance(u_row, dict) else u_row[0]
+                                u_idx = u_row['output_index'] if isinstance(u_row, dict) else u_row[1]
+                                u_amt = int(u_row['amount'] if isinstance(u_row, dict) else u_row[2]) if (u_row['amount'] if isinstance(u_row, dict) else u_row[2]) else 0
+                                cur.execute("""
+                                    UPDATE address_utxos
+                                    SET spent = TRUE, spent_at_height = %s, spent_in_tx_hash = %s
+                                    WHERE tx_hash = %s AND output_index = %s AND spent = FALSE
+                                """, (current_height, tx_hash, u_tx, u_idx))
+                                if getattr(cur, 'rowcount', 0) > 0:
+                                    remaining -= u_amt
+
+                            if remaining > 0:
+                                _reconcile_log.warning(
+                                    f"[RECONCILE] tx={tx_hash[:16]}… sender {from_addr[:16]}… "
+                                    f"under-funded by {remaining} base units"
+                                )
+
+                        # ── 3c: Create receiver UTXOs ────────────────────────
+                        for idx, out in enumerate(outputs):
+                            addr = out.get('address', '')
+                            amt = int(out.get('amount_base', 0))
+                            if not addr or not amt:
+                                continue
+                            cur.execute("""
+                                INSERT INTO address_utxos
+                                    (address, tx_hash, output_index, amount, spent, created_at_height)
+                                VALUES (%s, %s, %s, %s, FALSE, %s)
+                                ON CONFLICT (tx_hash, output_index) DO NOTHING
+                            """, (addr, tx_hash, idx, amt, current_height))
+
+                        # ── 3d: Write address_transactions for receiver ──────
+                        if to_addr:
+                            total_to = sum(
+                                int(o.get('amount_base', 0)) for o in outputs
+                                if o.get('address') == to_addr
+                            ) or amount_base
+                            try:
+                                cur.execute("""
+                                    INSERT INTO address_transactions
+                                        (address, tx_hash, direction, amount, block_height, created_at)
+                                    VALUES (%s, %s, 'in', %s, %s, NOW())
+                                    ON CONFLICT (address, tx_hash, direction) DO UPDATE
+                                        SET block_height = EXCLUDED.block_height,
+                                            amount = EXCLUDED.amount
+                                """, (to_addr, tx_hash, total_to, current_height))
+                            except Exception:
+                                pass  # address_transactions index is non-critical
+
+                        # ── 3e: Write address_transactions for sender ────────
+                        if from_addr:
+                            try:
+                                cur.execute("""
+                                    INSERT INTO address_transactions
+                                        (address, tx_hash, direction, amount, block_height, created_at)
+                                    VALUES (%s, %s, 'out', %s, %s, NOW())
+                                    ON CONFLICT (address, tx_hash, direction) DO UPDATE
+                                        SET block_height = EXCLUDED.block_height,
+                                            amount = EXCLUDED.amount
+                                """, (from_addr, tx_hash, amount_base, current_height))
+                            except Exception:
+                                pass
+
+                        # ── 3f: Recompute wallet balances from UTXO set ──────
+                        for addr in set(filter(None, [from_addr, to_addr])):
+                            try:
+                                cur.execute("""
+                                    SELECT COALESCE(SUM(amount), 0)
+                                    FROM address_utxos
+                                    WHERE address = %s AND spent = FALSE
+                                """, (addr,))
+                                bal_row = cur.fetchone()
+                                new_bal = int(bal_row[0] if isinstance(bal_row, (list, tuple)) else bal_row.get('coalesce', 0)) if bal_row else 0
+                                cur.execute("""
+                                    UPDATE wallet_addresses SET balance = %s, updated_at = NOW()
+                                    WHERE address = %s
+                                """, (new_bal, addr))
+                            except Exception as _bal_err:
+                                _reconcile_log.debug(f"[RECONCILE] balance recompute skipped: {_bal_err}")
+
+                    settled_count += 1
+
+                except Exception as tx_err:
+                    _reconcile_log.warning(
+                        f"[RECONCILE] Failed to settle tx={tx_hash[:16]}…: {tx_err}"
+                    )
+                    continue
+
+            # ── Step 4: Remove settled TXs from in-memory mempool ────────────
+            if settled_count > 0:
+                settled_hashes = [
+                    (row['tx_hash'] if isinstance(row, dict) else row[0])
+                    for row in stale_txs[:settled_count]
+                ]
+                with self._lock:
+                    for h in settled_hashes:
+                        tx = self._index.get(h)
+                        if tx:
+                            self._balances.unlock(tx.from_address, tx.amount_base + tx.fee_base)
+                            self._remove_tx(h, TxStatus.CONFIRMED)
+                            self._stats['total_confirmed'] += 1
+
+                _reconcile_log.critical(
+                    f"[RECONCILE] ✅ Settled {settled_count}/{len(stale_txs)} pending TXs "
+                    f"at chain tip h={current_height}"
+                )
+
+        except Exception as exc:
+            _reconcile_log.error(f"[RECONCILE] Daemon error: {exc}\n{traceback.format_exc()}")
 
     def _expire_old_txs(self) -> None:
         """Remove TXs pending longer than MEMPOOL_TTL_HOURS."""
