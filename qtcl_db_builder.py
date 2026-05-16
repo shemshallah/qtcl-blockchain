@@ -751,7 +751,7 @@ CREATE TABLE address_transactions (
     notes TEXT,
     label VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(address, tx_hash)
+    UNIQUE(address, tx_hash, direction)
 );
 
 -- TABLE: address_utxos

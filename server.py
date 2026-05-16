@@ -1118,40 +1118,56 @@ def _ensure_wallet_addresses_table() -> None:
             # MIGRATION: if address_transactions already exists with old UNIQUE(address, tx_hash)
             # the CREATE TABLE IF NOT EXISTS will no-op; apply the constraint migration here
             try:
+                # MIGRATION: ensure (address, tx_hash, direction) unique constraint exists.
+                # Step 1: Drop ALL unique constraints that are NOT the 3-column target.
+                #         This handles the old UNIQUE(address, tx_hash) from qtcl_db_builder.
+                # Step 2: Add the 3-column constraint if missing.
+                # Step 3: If ADD CONSTRAINT fails due to duplicates, deduplicate first.
                 cur.execute("""
                     DO $$
+                    DECLARE
+                        _cname TEXT;
                     BEGIN
-                        -- Drop old 2-column constraint if present (was preventing direction split)
-                        IF EXISTS (
-                            SELECT 1 FROM information_schema.table_constraints
-                            WHERE table_name = 'address_transactions'
-                              AND constraint_type = 'UNIQUE'
-                              AND constraint_name NOT LIKE '%direction%'
-                        ) THEN
-                            -- Find and drop any unique constraint on (address, tx_hash) only
-                            EXECUTE (
-                                SELECT 'ALTER TABLE address_transactions DROP CONSTRAINT ' || conname
-                                FROM pg_constraint c
-                                JOIN pg_class t ON c.conrelid = t.oid
-                                WHERE t.relname = 'address_transactions'
-                                  AND c.contype = 'u'
-                                  AND array_length(c.conkey, 1) = 2
-                                LIMIT 1
-                            );
-                        END IF;
-                        -- Add 3-column constraint if missing
+                        -- Step 1: Drop any unique constraint that is NOT on exactly
+                        -- (address, tx_hash, direction). Use column ordinals to be name-safe.
+                        FOR _cname IN
+                            SELECT c.conname
+                            FROM pg_constraint c
+                            JOIN pg_class t ON c.conrelid = t.oid
+                            WHERE t.relname = 'address_transactions'
+                              AND c.contype = 'u'
+                              AND c.conname <> 'addr_tx_direction_unique'
+                              AND array_length(c.conkey, 1) <> 3
+                        LOOP
+                            EXECUTE 'ALTER TABLE address_transactions DROP CONSTRAINT ' || _cname;
+                            RAISE NOTICE 'Dropped old constraint: %', _cname;
+                        END LOOP;
+
+                        -- Step 2: Add 3-column constraint if missing
                         IF NOT EXISTS (
                             SELECT 1 FROM pg_constraint c
                             JOIN pg_class t ON c.conrelid = t.oid
                             WHERE t.relname = 'address_transactions'
                               AND c.contype = 'u'
-                              AND array_length(c.conkey, 1) = 3
+                              AND c.conname = 'addr_tx_direction_unique'
                         ) THEN
+                            -- Deduplicate before adding constraint: keep the row with
+                            -- the highest id (most recent insert) for each (addr, tx, dir)
+                            DELETE FROM address_transactions a
+                            USING address_transactions b
+                            WHERE a.address   = b.address
+                              AND a.tx_hash   = b.tx_hash
+                              AND a.direction  = b.direction
+                              AND a.id < b.id;
+
                             ALTER TABLE address_transactions
-                                ADD CONSTRAINT addr_tx_direction_unique UNIQUE (address, tx_hash, direction);
+                                ADD CONSTRAINT addr_tx_direction_unique
+                                UNIQUE (address, tx_hash, direction);
+                            RAISE NOTICE 'Added constraint addr_tx_direction_unique';
                         END IF;
                     END$$;
                 """)
+                logger.info("[STARTUP] address_transactions constraint migration OK")
             except Exception as _mig_err:
                 logger.warning(f"[STARTUP] address_transactions migration non-fatal: {_mig_err}")
         # ── MIGRATION: drop balance-check trigger that blocks pending TX inserts ──────
