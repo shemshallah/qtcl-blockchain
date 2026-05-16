@@ -1578,7 +1578,9 @@ def _settle_block_rewards(
 
                     # Phase 1a: Mark input UTXOs spent (non-coinbase only)
                     if not is_coinbase:
-                        for inp in (tx.get("inputs") or []):
+                        _inputs = tx.get("inputs") or []
+                        _utxo_rows_spent = 0
+                        for inp in _inputs:
                             prev_tx  = inp.get("prev_tx_hash", "")
                             prev_idx = inp.get("prev_output_index", 0)
                             if prev_tx and prev_idx != 0xFFFFFFFF:  # skip coinbase sentinel
@@ -1587,6 +1589,51 @@ def _settle_block_rewards(
                                     "spent_in_tx_hash = %s WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
                                     (height, tx_id, prev_tx, prev_idx),
                                 )
+                                _utxo_rows_spent += getattr(cur, "rowcount", 0)
+                        # BUG-SENDER-FIX: MCP/RPC-submitted txs arrive with inputs:[]
+                        # (no explicit UTXO refs). When no inputs were resolved, fall back to
+                        # spending the sender's oldest unspent UTXOs greedily by amount so the
+                        # sender balance is always debited correctly even without UTXO refs.
+                        if from_addr and not _utxo_rows_spent:
+                            _spend_amount = int(
+                                tx.get("amount_base")
+                                or round(float(tx.get("amount") or tx.get("amount_qtcl") or 0) * 100)
+                                or sum(o.get("amount_base", 0) for o in outputs
+                                       if _norm_address(o.get("address", "")) != from_addr)
+                                or 0
+                            )
+                            _spend_fee = int(tx.get("fee_base") or tx.get("fee") or 0)
+                            _spend_total = _spend_amount + _spend_fee
+                            if _spend_total > 0:
+                                cur.execute(
+                                    "SELECT tx_hash, output_index, amount FROM address_utxos "
+                                    "WHERE address = %s AND spent = FALSE "
+                                    "ORDER BY created_at_height ASC, output_index ASC",
+                                    (from_addr,),
+                                )
+                                _sender_utxos = cur.fetchall()
+                                _remaining = _spend_total
+                                for _u_tx, _u_idx, _u_amt in _sender_utxos:
+                                    if _remaining <= 0:
+                                        break
+                                    cur.execute(
+                                        "UPDATE address_utxos SET spent = TRUE, spent_at_height = %s, "
+                                        "spent_in_tx_hash = %s "
+                                        "WHERE tx_hash = %s AND output_index = %s AND spent = FALSE",
+                                        (height, tx_id, _u_tx, _u_idx),
+                                    )
+                                    if getattr(cur, "rowcount", 0) > 0:
+                                        _remaining -= int(_u_amt or 0)
+                                        _settle_log.debug(
+                                            f"[SETTLE] h={height} fallback-spent UTXO "
+                                            f"{_u_tx[:16]}…[{_u_idx}] amt={_u_amt} "
+                                            f"sender={from_addr[:16]}…"
+                                        )
+                                if _remaining > 0:
+                                    _settle_log.warning(
+                                        f"[SETTLE] h={height} tx={tx_id[:16]}… sender "
+                                        f"{from_addr[:16]}… under-funded by {_remaining} base units"
+                                    )
 
                     # Phase 1b: INSERT output UTXOs
                     for idx, out in enumerate(outputs):
