@@ -6595,15 +6595,38 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             )
 
             _norm_miner = _norm_address(miner_address)
-            _norm_treasury = _norm_address(
-                TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else ""
+            # BUG-1 FIX: when TessellationRewardSchedule is None (ImportError), fall back to
+            # env var then hardcoded default — same fallback chain used in _settle_block_rewards.
+            # Without this, _norm_treasury="" and ALL treasury coinbases are rejected.
+            _raw_treasury = (
+                TessellationRewardSchedule.TREASURY_ADDRESS
+                if TessellationRewardSchedule
+                else (
+                    os.environ.get(
+                        "TREASURY_ADDRESS",
+                        "e8ffb27915ac244e8257de8b7f96ad387d1e9d93c634d849a6ad2dae0da6750b",
+                    )
+                )
             )
+            _norm_treasury = _norm_address(_raw_treasury)
 
             if _to == _norm_miner:
                 _miner_coinbase = cb
                 # Miner reward = current block reward + genesis extra (h==1) + 50% of fees
-                # qtcl_miner defers genesis block's miner reward to block 1
-                _genesis_extra_base = int(round(_scheduled_miner_reward * 100)) if height == 1 else 0
+                # qtcl_miner defers genesis (h==0) miner reward to block h==1.
+                # BUG-2 FIX: genesis extra = reward for h==0, not h==1 again.
+                # Old code used _scheduled_miner_reward (which is h==1's reward), doubling it.
+                # h==0 reward is the same epoch so same value, but use get_miner_reward_base(0)
+                # for correctness and future-proofing.
+                if height == 1:
+                    try:
+                        _genesis_extra_base = int(round(
+                            TessellationRewardSchedule.get_miner_reward_qtcl(0) * 100
+                        )) if TessellationRewardSchedule else int(round(_scheduled_miner_reward * 100))
+                    except Exception:
+                        _genesis_extra_base = int(round(_scheduled_miner_reward * 100))
+                else:
+                    _genesis_extra_base = 0
                 _expected_miner = int(round(_scheduled_miner_reward * 100)) + _genesis_extra_base + (
                     _total_fees // 2
                 )
@@ -6616,17 +6639,22 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         f"(reward={_scheduled_miner_reward}*100 + genesis_extra={_genesis_extra_base}+ fees/2={_total_fees // 2})",
                         rpc_id,
                     )
-            elif (
-                TessellationRewardSchedule
-                and _to == _norm_treasury
-            ):
+            elif _to == _norm_treasury and _norm_treasury:
                 _treasury_coinbase = cb
                 # Treasury reward = PREVIOUS block's treasury reward + 50% of fees
                 # qtcl_miner defers each block's treasury reward by one block
+                # BUG-3 FIX: removed `TessellationRewardSchedule and` guard from elif —
+                # when TRS is None (ImportError on Koyeb), the old gate caused ALL treasury
+                # coinbases to fall through to the else-reject branch. _norm_treasury already
+                # has the env-fallback applied (Bug 1 fix), so matching on it is sufficient.
                 _prev_treasury_reward_base = 0
                 if height > 0:
                     try:
-                        _prev_treasury_reward_base = TessellationRewardSchedule.get_treasury_reward_base(height - 1)
+                        _prev_treasury_reward_base = (
+                            TessellationRewardSchedule.get_treasury_reward_base(height - 1)
+                            if TessellationRewardSchedule
+                            else int(round(_scheduled_treasury_reward * 100))
+                        )
                     except Exception:
                         _prev_treasury_reward_base = int(round(_scheduled_treasury_reward * 100))
                 _expected_treasury = _prev_treasury_reward_base + (
