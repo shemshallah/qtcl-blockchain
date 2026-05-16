@@ -101,6 +101,7 @@ class SSEChannel:
         self.lock = threading.RLock()
         self._next_id = 0
         self._id_lock = threading.Lock()
+        self._last_payload = None  # most recent fan-out payload for /latest
     
     def _alloc_id(self):
         with self._id_lock:
@@ -197,6 +198,7 @@ class SSEChannel:
 
     def fan_out(self, payload):
         """Send payload to all connected clients."""
+        self._last_payload = payload
         with self.lock:
             for client in list(self.clients):
                 client.touch()
@@ -336,6 +338,27 @@ def rpc_oracle_snapshot():
             "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
         },
+    )
+
+
+@app.route("/rpc/oracle/snapshot/latest", methods=["GET", "OPTIONS"])
+def rpc_oracle_snapshot_latest():
+    """GET one-shot: Return the most recent snapshot as JSON (no SSE stream)."""
+    if request.method == "OPTIONS":
+        return "", 204
+    # Return the last fanned-out payload if available, else empty
+    latest = getattr(_snapshot_channel, '_last_payload', None)
+    if latest:
+        return Response(
+            json.dumps(latest),
+            mimetype="application/json",
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+        )
+    return Response(
+        json.dumps({"status": "no_snapshot_yet"}),
+        mimetype="application/json",
+        status=204,
+        headers={"Access-Control-Allow-Origin": "*"},
     )
 
 
