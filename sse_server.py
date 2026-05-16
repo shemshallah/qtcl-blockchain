@@ -57,7 +57,8 @@ def register_sse_routes(flask_app) -> None:
         return
     _registered_apps.append(flask_app)
 
-    flask_app.add_url_rule("/rpc/oracle/snapshot",   view_func=rpc_oracle_snapshot,   methods=["GET", "OPTIONS"])
+    flask_app.add_url_rule("/rpc/oracle/snapshot",        view_func=rpc_oracle_snapshot,        methods=["GET", "OPTIONS"])
+    flask_app.add_url_rule("/rpc/oracle/snapshot/latest", view_func=rpc_oracle_snapshot_latest, methods=["GET", "OPTIONS"])
     flask_app.add_url_rule("/rpc/events/blocks",     view_func=rpc_events_blocks,     methods=["GET", "OPTIONS"])
     flask_app.add_url_rule("/rpc/blocks/stream",     view_func=rpc_blocks_stream,     methods=["GET"])
     flask_app.add_url_rule("/rpc/metrics/push",      view_func=rpc_metrics_push,      methods=["GET"])
@@ -343,6 +344,9 @@ def rpc_events_blocks():
 @app.route("/rpc/blocks/stream", methods=["GET"])
 def rpc_blocks_stream():
     """SSE stream: Real-time block information (height, hash, timestamp)."""
+    if not _is_sse_client():
+        return _oneshot_json_response({"blocks": [], "status": "ok"})
+
     client_ip = _get_client_ip()
     client = _blocks_channel.connect(client_ip)
 
@@ -366,8 +370,8 @@ def rpc_blocks_stream():
                 except queue.Empty:
                     client.touch()
                     yield ": heartbeat\n\n"
-        except GeneratorExit:
-            logger.debug(f"[SSE-blocks/stream] client {client.client_id} GeneratorExit")
+        except (GeneratorExit, BrokenPipeError, ConnectionResetError, OSError):
+            pass  # Client disconnected — normal for SSE
         finally:
             _blocks_channel.disconnect(client)
 
@@ -386,6 +390,9 @@ def rpc_blocks_stream():
 @app.route("/rpc/metrics/push", methods=["GET"])
 def rpc_metrics_push():
     """SSE stream: Metrics push (placeholder — currently streams heartbeats only)."""
+    if not _is_sse_client():
+        return _oneshot_json_response({"metrics": {}, "status": "ok"})
+
     client_ip = _get_client_ip()
     client = _metrics_channel.connect(client_ip)
 
@@ -544,6 +551,9 @@ def rpc_oracle_consensus():
     if request.method == "OPTIONS":
         return "", 204
 
+    if not _is_sse_client():
+        return _oneshot_json_response({"consensus": [], "status": "ok"})
+
     client_ip = _get_client_ip()
     client = _oracle_consensus_channel.connect(client_ip)
 
@@ -596,6 +606,9 @@ def health():
 def sse_db_sync():
     """SSE stream: fires after every block settlement commits to Neon.
     Frontend subscribes here and re-fetches block + TX data on each pulse."""
+    if not _is_sse_client():
+        return _oneshot_json_response({"status": "ok"})
+
     client_ip = _get_client_ip()
     client = _db_sync_channel.connect(client_ip)
 
