@@ -57,7 +57,8 @@ def register_sse_routes(flask_app) -> None:
         return
     _registered_apps.append(flask_app)
 
-    flask_app.add_url_rule("/rpc/oracle/snapshot",   view_func=rpc_oracle_snapshot,   methods=["GET", "OPTIONS"])
+    flask_app.add_url_rule("/rpc/oracle/snapshot",        view_func=rpc_oracle_snapshot,        methods=["GET", "OPTIONS"])
+    flask_app.add_url_rule("/rpc/oracle/snapshot/latest", view_func=rpc_oracle_snapshot_latest, methods=["GET", "OPTIONS"])
     flask_app.add_url_rule("/rpc/events/blocks",     view_func=rpc_events_blocks,     methods=["GET", "OPTIONS"])
     flask_app.add_url_rule("/rpc/blocks/stream",     view_func=rpc_blocks_stream,     methods=["GET"])
     flask_app.add_url_rule("/rpc/metrics/push",      view_func=rpc_metrics_push,      methods=["GET"])
@@ -294,9 +295,48 @@ def _get_client_ip():
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshot():
-    """SSE stream: Real-time 16³ density matrix snapshots for quantum clients."""
+    """SSE stream: Real-time 16³ density matrix snapshots for quantum clients.
+
+    Non-SSE clients (python-requests, urllib, curl without Accept: text/event-stream)
+    get the latest cached snapshot as one-shot JSON instead of opening a persistent
+    SSE connection that leaks when the client drops without closing properly.
+    """
     if request.method == "OPTIONS":
         return "", 204
+
+    # Detect non-SSE clients: if Accept header does NOT include text/event-stream,
+    # return the last snapshot as one-shot JSON. This prevents connection churn from
+    # polling clients (python-requests, urllib) that open/abandon SSE connections.
+    accept = request.headers.get("Accept", "")
+    ua = request.headers.get("User-Agent", "")
+    is_sse_client = (
+        "text/event-stream" in accept
+        or "EventSource" in ua
+        or "Mozilla" in ua  # browsers always want SSE
+    )
+
+    if not is_sse_client:
+        # One-shot JSON response — no SSE connection, no cleanup needed
+        with _last_snapshot_lock:
+            payload = _last_snapshot["payload"]
+            ts = _last_snapshot["ts"]
+        if payload:
+            return Response(
+                json.dumps(payload),
+                mimetype="application/json",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Access-Control-Allow-Origin": "*",
+                    "X-Snapshot-Age": str(round(time.time() - ts, 1)),
+                },
+            )
+        else:
+            return Response(
+                json.dumps({"status": "no_snapshot_yet"}),
+                mimetype="application/json",
+                status=200,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
 
     client_ip = _get_client_ip()
     client = _snapshot_channel.connect(client_ip)
@@ -309,6 +349,36 @@ def rpc_oracle_snapshot():
             "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
         },
+    )
+
+
+@app.route("/rpc/oracle/snapshot/latest", methods=["GET", "OPTIONS"])
+def rpc_oracle_snapshot_latest():
+    """One-shot JSON: Return the most recent snapshot without opening an SSE stream.
+
+    Use this from polling clients (python-requests, miner loops) instead of
+    /rpc/oracle/snapshot to avoid connection churn and per-IP limit evictions.
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+    with _last_snapshot_lock:
+        payload = _last_snapshot["payload"]
+        ts = _last_snapshot["ts"]
+    if payload:
+        return Response(
+            json.dumps(payload),
+            mimetype="application/json",
+            headers={
+                "Cache-Control": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+                "X-Snapshot-Age": str(round(time.time() - ts, 1)),
+            },
+        )
+    return Response(
+        json.dumps({"status": "no_snapshot_yet"}),
+        mimetype="application/json",
+        status=200,
+        headers={"Access-Control-Allow-Origin": "*"},
     )
 
 
@@ -397,8 +467,14 @@ def rpc_metrics_push():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+_last_snapshot = {"payload": None, "ts": 0.0}
+_last_snapshot_lock = threading.Lock()
+
 def _fan_out_snapshot(payload: dict) -> int:
     """Fan-out a snapshot payload to all connected /rpc/oracle/snapshot clients."""
+    with _last_snapshot_lock:
+        _last_snapshot["payload"] = payload
+        _last_snapshot["ts"] = time.time()
     return _snapshot_channel.fan_out(payload)
 
 
