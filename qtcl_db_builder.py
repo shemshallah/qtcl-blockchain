@@ -714,7 +714,7 @@ CREATE EXTENSION IF NOT EXISTS "btree_gist";
 -- ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 -- TABLE: address_balance_history
-CREATE TABLE address_balance_history (
+CREATE TABLE IF NOT EXISTS address_balance_history (
     id BIGSERIAL PRIMARY KEY,
     address VARCHAR(255) NOT NULL,
     block_height BIGINT NOT NULL,
@@ -726,7 +726,7 @@ CREATE TABLE address_balance_history (
 );
 
 -- TABLE: address_labels
-CREATE TABLE address_labels (
+CREATE TABLE IF NOT EXISTS address_labels (
     label_id BIGSERIAL PRIMARY KEY,
     address VARCHAR(255) NOT NULL,
     label VARCHAR(255) NOT NULL,
@@ -736,7 +736,7 @@ CREATE TABLE address_labels (
 );
 
 -- TABLE: address_transactions
-CREATE TABLE address_transactions (
+CREATE TABLE IF NOT EXISTS address_transactions (
     id BIGSERIAL PRIMARY KEY,
     address VARCHAR(255) NOT NULL,
     tx_hash VARCHAR(255) NOT NULL,
@@ -755,7 +755,7 @@ CREATE TABLE address_transactions (
 );
 
 -- TABLE: address_utxos
-CREATE TABLE address_utxos (
+CREATE TABLE IF NOT EXISTS address_utxos (
     utxo_id BIGSERIAL PRIMARY KEY,
     address VARCHAR(255) NOT NULL,
     tx_hash VARCHAR(255) NOT NULL,
@@ -770,7 +770,7 @@ CREATE TABLE address_utxos (
 );
 
 -- TABLE: audit_logs
-CREATE TABLE audit_logs (
+CREATE TABLE IF NOT EXISTS audit_logs (
     log_id BIGSERIAL PRIMARY KEY,
     event_type VARCHAR(100) NOT NULL,
     actor_peer_id VARCHAR(255),
@@ -784,7 +784,7 @@ CREATE TABLE audit_logs (
 );
 
 -- TABLE: block_headers_cache
-CREATE TABLE block_headers_cache (
+CREATE TABLE IF NOT EXISTS block_headers_cache (
     height BIGINT PRIMARY KEY,
     block_hash VARCHAR(255) UNIQUE NOT NULL,
     previous_hash VARCHAR(255) NOT NULL,
@@ -802,7 +802,7 @@ CREATE TABLE block_headers_cache (
 );
 
 -- TABLE: blocks
-CREATE TABLE blocks (
+CREATE TABLE IF NOT EXISTS blocks (
     height                     BIGINT PRIMARY KEY,
     block_hash                 VARCHAR(255) UNIQUE NOT NULL,
     parent_hash                VARCHAR(255) NOT NULL,
@@ -830,7 +830,7 @@ CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
 
 -- TABLE: oracle_attestations
 -- BFT consensus: each block needs >=3 valid oracle signatures to finalize
-CREATE TABLE oracle_attestations (
+CREATE TABLE IF NOT EXISTS oracle_attestations (
     attestation_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     block_hash VARCHAR(255) NOT NULL,
@@ -853,7 +853,7 @@ CREATE INDEX IF NOT EXISTS idx_utxo_unspent ON address_utxos(address, spent) WHE
 CREATE INDEX IF NOT EXISTS idx_utxo_tx ON address_utxos(tx_hash, output_index);
 
 -- TABLE: chain_reorganizations
-CREATE TABLE chain_reorganizations (
+CREATE TABLE IF NOT EXISTS chain_reorganizations (
     reorg_id BIGSERIAL PRIMARY KEY,
     timestamp BIGINT NOT NULL,
     reorg_depth INT NOT NULL,
@@ -868,7 +868,7 @@ CREATE TABLE chain_reorganizations (
 );
 
 -- TABLE: client_block_sync
-CREATE TABLE client_block_sync (
+CREATE TABLE IF NOT EXISTS client_block_sync (
     sync_id BIGSERIAL PRIMARY KEY,
     peer_id VARCHAR(255) NOT NULL,
     blocks_downloaded INT,
@@ -881,7 +881,7 @@ CREATE TABLE client_block_sync (
 );
 
 -- TABLE: client_network_metrics
-CREATE TABLE client_network_metrics (
+CREATE TABLE IF NOT EXISTS client_network_metrics (
     metric_id BIGSERIAL PRIMARY KEY,
     peer_id VARCHAR(255) NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -895,7 +895,7 @@ CREATE TABLE client_network_metrics (
 );
 
 -- TABLE: client_oracle_sync
-CREATE TABLE client_oracle_sync (
+CREATE TABLE IF NOT EXISTS client_oracle_sync (
     sync_id BIGSERIAL PRIMARY KEY,
     peer_id VARCHAR(255) NOT NULL UNIQUE,
     block_height_local BIGINT,
@@ -924,7 +924,7 @@ CREATE TABLE client_oracle_sync (
 );
 
 -- TABLE: client_sync_events
-CREATE TABLE client_sync_events (
+CREATE TABLE IF NOT EXISTS client_sync_events (
     event_id BIGSERIAL PRIMARY KEY,
     peer_id VARCHAR(255) NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -935,7 +935,7 @@ CREATE TABLE client_sync_events (
 );
 
 -- TABLE: consensus_events
-CREATE TABLE consensus_events (
+CREATE TABLE IF NOT EXISTS consensus_events (
     event_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT,
     timestamp BIGINT NOT NULL,
@@ -947,7 +947,7 @@ CREATE TABLE consensus_events (
 );
 
 -- TABLE: database_metadata
-CREATE TABLE database_metadata (
+CREATE TABLE IF NOT EXISTS database_metadata (
     metadata_id BIGSERIAL PRIMARY KEY,
     schema_version VARCHAR(50),
     build_timestamp TIMESTAMP WITH TIME ZONE,
@@ -960,7 +960,7 @@ CREATE TABLE database_metadata (
 );
 
 -- TABLE: encrypted_private_keys
-CREATE TABLE encrypted_private_keys (
+CREATE TABLE IF NOT EXISTS encrypted_private_keys (
     key_id BIGSERIAL PRIMARY KEY,
     address VARCHAR(255) NOT NULL UNIQUE,
     algorithm VARCHAR(50) DEFAULT 'HypΓ-AEAD',
@@ -981,7 +981,7 @@ CREATE TABLE encrypted_private_keys (
 );
 
 -- TABLE: entanglement_records
-CREATE TABLE entanglement_records (
+CREATE TABLE IF NOT EXISTS entanglement_records (
     entanglement_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1001,7 +1001,7 @@ CREATE TABLE entanglement_records (
 );
 
 -- TABLE: entropy_quality_log
-CREATE TABLE entropy_quality_log (
+CREATE TABLE IF NOT EXISTS entropy_quality_log (
     log_id BIGSERIAL PRIMARY KEY,
     timestamp BIGINT NOT NULL,
     anu_qrng_quality NUMERIC(5, 4),
@@ -1017,7 +1017,7 @@ CREATE TABLE entropy_quality_log (
 );
 
 -- TABLE: epoch_validators
-CREATE TABLE epoch_validators (
+CREATE TABLE IF NOT EXISTS epoch_validators (
     membership_id BIGSERIAL PRIMARY KEY,
     epoch_id BIGINT NOT NULL,
     validator_id BIGINT NOT NULL,
@@ -1029,7 +1029,7 @@ CREATE TABLE epoch_validators (
 );
 
 -- TABLE: epochs
-CREATE TABLE epochs (
+CREATE TABLE IF NOT EXISTS epochs (
     epoch_id BIGSERIAL PRIMARY KEY,
     epoch_number BIGINT UNIQUE NOT NULL,
     start_block_height BIGINT NOT NULL,
@@ -1042,7 +1042,7 @@ CREATE TABLE epochs (
 );
 
 -- TABLE: finality_records
-CREATE TABLE finality_records (
+CREATE TABLE IF NOT EXISTS finality_records (
     finality_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL UNIQUE,
     block_hash VARCHAR(255) NOT NULL,
@@ -1053,7 +1053,7 @@ CREATE TABLE finality_records (
 );
 
 -- TABLE: hyperbolic_triangles
-CREATE TABLE hyperbolic_triangles (
+CREATE TABLE IF NOT EXISTS hyperbolic_triangles (
     triangle_id BIGINT PRIMARY KEY,
     depth INT NOT NULL,
     parent_id BIGINT,
@@ -1072,7 +1072,7 @@ CREATE TABLE hyperbolic_triangles (
 );
 
 -- TABLE: lattice_sync_state
-CREATE TABLE lattice_sync_state (
+CREATE TABLE IF NOT EXISTS lattice_sync_state (
     state_id BIGSERIAL PRIMARY KEY,
     peer_id VARCHAR(255) NOT NULL,
     block_height BIGINT NOT NULL,
@@ -1092,7 +1092,7 @@ CREATE TABLE lattice_sync_state (
 );
 
 -- TABLE: merkle_proofs
-CREATE TABLE merkle_proofs (
+CREATE TABLE IF NOT EXISTS merkle_proofs (
     proof_id BIGSERIAL PRIMARY KEY,
     transaction_hash VARCHAR(255) NOT NULL,
     height BIGINT,
@@ -1106,7 +1106,7 @@ CREATE TABLE merkle_proofs (
 );
 
 -- TABLE: network_bandwidth_usage
-CREATE TABLE network_bandwidth_usage (
+CREATE TABLE IF NOT EXISTS network_bandwidth_usage (
     usage_id BIGSERIAL PRIMARY KEY,
     peer_id VARCHAR(255),
     timestamp BIGINT NOT NULL,
@@ -1121,7 +1121,7 @@ CREATE TABLE network_bandwidth_usage (
 );
 
 -- TABLE: network_events
-CREATE TABLE network_events (
+CREATE TABLE IF NOT EXISTS network_events (
     event_id BIGSERIAL PRIMARY KEY,
     timestamp BIGINT NOT NULL,
     event_type VARCHAR(100) NOT NULL,
@@ -1132,7 +1132,7 @@ CREATE TABLE network_events (
 );
 
 -- TABLE: network_partition_events
-CREATE TABLE network_partition_events (
+CREATE TABLE IF NOT EXISTS network_partition_events (
     event_id BIGSERIAL PRIMARY KEY,
     timestamp BIGINT NOT NULL,
     partition_detected BOOLEAN DEFAULT TRUE,
@@ -1144,7 +1144,7 @@ CREATE TABLE network_partition_events (
 );
 
 -- TABLE: oracle_registry
-CREATE TABLE oracle_registry (
+CREATE TABLE IF NOT EXISTS oracle_registry (
     oracle_id       VARCHAR(128)  PRIMARY KEY,
     oracle_url      VARCHAR(512)  NOT NULL DEFAULT '',
     oracle_address  VARCHAR(128)  NOT NULL DEFAULT '',
@@ -1171,7 +1171,7 @@ CREATE INDEX IF NOT EXISTS idx_oracle_registry_reg_tx        ON oracle_registry 
 CREATE INDEX IF NOT EXISTS idx_oracle_registry_registered_at ON oracle_registry (registered_at DESC);
 
 -- TABLE: oracle_coherence_metrics
-CREATE TABLE oracle_coherence_metrics (
+CREATE TABLE IF NOT EXISTS oracle_coherence_metrics (
     metric_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1190,7 +1190,7 @@ CREATE TABLE oracle_coherence_metrics (
 );
 
 -- TABLE: oracle_consensus_state
-CREATE TABLE oracle_consensus_state (
+CREATE TABLE IF NOT EXISTS oracle_consensus_state (
     consensus_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1206,7 +1206,7 @@ CREATE TABLE oracle_consensus_state (
 );
 
 -- TABLE: oracle_density_matrix_stream
-CREATE TABLE oracle_density_matrix_stream (
+CREATE TABLE IF NOT EXISTS oracle_density_matrix_stream (
     stream_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1224,7 +1224,7 @@ CREATE TABLE oracle_density_matrix_stream (
 );
 
 -- TABLE: oracle_distribution_log
-CREATE TABLE oracle_distribution_log (
+CREATE TABLE IF NOT EXISTS oracle_distribution_log (
     log_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1237,7 +1237,7 @@ CREATE TABLE oracle_distribution_log (
 );
 
 -- TABLE: oracle_entanglement_records
-CREATE TABLE oracle_entanglement_records (
+CREATE TABLE IF NOT EXISTS oracle_entanglement_records (
     entanglement_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1255,7 +1255,7 @@ CREATE TABLE oracle_entanglement_records (
 );
 
 -- TABLE: oracle_entropy_feeds
-CREATE TABLE oracle_entropy_feeds (
+CREATE TABLE IF NOT EXISTS oracle_entropy_feeds (
     feed_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1275,7 +1275,7 @@ CREATE TABLE oracle_entropy_feeds (
 );
 
 -- TABLE: oracle_pq0_state
-CREATE TABLE oracle_pq0_state (
+CREATE TABLE IF NOT EXISTS oracle_pq0_state (
     state_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1291,7 +1291,7 @@ CREATE TABLE oracle_pq0_state (
 );
 
 -- TABLE: oracle_w_state_snapshots
-CREATE TABLE oracle_w_state_snapshots (
+CREATE TABLE IF NOT EXISTS oracle_w_state_snapshots (
     snapshot_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     block_hash VARCHAR(255) NOT NULL,
@@ -1310,7 +1310,7 @@ CREATE TABLE oracle_w_state_snapshots (
 );
 
 -- TABLE: orphan_blocks
-CREATE TABLE orphan_blocks (
+CREATE TABLE IF NOT EXISTS orphan_blocks (
     block_hash VARCHAR(255) PRIMARY KEY,
     parent_hash VARCHAR(255) NOT NULL,
     block_height BIGINT,
@@ -1325,7 +1325,7 @@ CREATE TABLE orphan_blocks (
 );
 
 -- TABLE: peer_connections
-CREATE TABLE peer_connections (
+CREATE TABLE IF NOT EXISTS peer_connections (
     connection_id BIGSERIAL PRIMARY KEY,
     peer_id VARCHAR(255) NOT NULL,
     connection_state VARCHAR(50) DEFAULT 'disconnected',
@@ -1349,7 +1349,7 @@ CREATE TABLE peer_connections (
 );
 
 -- TABLE: peer_registry
-CREATE TABLE peer_registry (
+CREATE TABLE IF NOT EXISTS peer_registry (
     peer_id VARCHAR(255) PRIMARY KEY,
     public_key VARCHAR(255) UNIQUE NOT NULL,
     ip_address VARCHAR(45),
@@ -1373,7 +1373,7 @@ CREATE TABLE peer_registry (
 );
 
 -- TABLE: peer_reputation
-CREATE TABLE peer_reputation (
+CREATE TABLE IF NOT EXISTS peer_reputation (
     reputation_id BIGSERIAL PRIMARY KEY,
     peer_id VARCHAR(255) NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1385,7 +1385,7 @@ CREATE TABLE peer_reputation (
 );
 
 -- TABLE: pseudoqubits
-CREATE TABLE pseudoqubits (
+CREATE TABLE IF NOT EXISTS pseudoqubits (
     pq_id BIGINT PRIMARY KEY,
     triangle_id BIGINT NOT NULL,
     x NUMERIC(200, 150) NOT NULL,
@@ -1401,7 +1401,7 @@ CREATE TABLE pseudoqubits (
 );
 
 -- TABLE: quantum_circuit_execution
-CREATE TABLE quantum_circuit_execution (
+CREATE TABLE IF NOT EXISTS quantum_circuit_execution (
     circuit_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1418,7 +1418,7 @@ CREATE TABLE quantum_circuit_execution (
 );
 
 -- TABLE: quantum_coherence_snapshots
-CREATE TABLE quantum_coherence_snapshots (
+CREATE TABLE IF NOT EXISTS quantum_coherence_snapshots (
     snapshot_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1433,7 +1433,7 @@ CREATE TABLE quantum_coherence_snapshots (
 );
 
 -- TABLE: quantum_density_matrix_global
-CREATE TABLE quantum_density_matrix_global (
+CREATE TABLE IF NOT EXISTS quantum_density_matrix_global (
     state_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1447,7 +1447,7 @@ CREATE TABLE quantum_density_matrix_global (
 );
 
 -- TABLE: quantum_error_correction
-CREATE TABLE quantum_error_correction (
+CREATE TABLE IF NOT EXISTS quantum_error_correction (
     correction_id BIGSERIAL PRIMARY KEY,
     pq_id BIGINT NOT NULL,
     block_height BIGINT NOT NULL,
@@ -1463,7 +1463,7 @@ CREATE TABLE quantum_error_correction (
 );
 
 -- TABLE: quantum_lattice_metadata
-CREATE TABLE quantum_lattice_metadata (
+CREATE TABLE IF NOT EXISTS quantum_lattice_metadata (
     metadata_id BIGSERIAL PRIMARY KEY,
     tessellation_depth INT NOT NULL,
     total_triangles BIGINT NOT NULL,
@@ -1479,7 +1479,7 @@ CREATE TABLE quantum_lattice_metadata (
 );
 
 -- TABLE: quantum_measurements
-CREATE TABLE quantum_measurements (
+CREATE TABLE IF NOT EXISTS quantum_measurements (
     measurement_id BIGSERIAL PRIMARY KEY,
     pq_id BIGINT NOT NULL,
     block_height BIGINT NOT NULL,
@@ -1493,7 +1493,7 @@ CREATE TABLE quantum_measurements (
 );
 
 -- TABLE: quantum_phase_evolution
-CREATE TABLE quantum_phase_evolution (
+CREATE TABLE IF NOT EXISTS quantum_phase_evolution (
     phase_id BIGSERIAL PRIMARY KEY,
     pq_id BIGINT NOT NULL,
     block_height BIGINT NOT NULL,
@@ -1505,7 +1505,7 @@ CREATE TABLE quantum_phase_evolution (
 );
 
 -- TABLE: quantum_shadow_tomography
-CREATE TABLE quantum_shadow_tomography (
+CREATE TABLE IF NOT EXISTS quantum_shadow_tomography (
     shadow_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1517,7 +1517,7 @@ CREATE TABLE quantum_shadow_tomography (
 );
 
 -- TABLE: quantum_supremacy_proofs
-CREATE TABLE quantum_supremacy_proofs (
+CREATE TABLE IF NOT EXISTS quantum_supremacy_proofs (
     proof_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1532,7 +1532,7 @@ CREATE TABLE quantum_supremacy_proofs (
 );
 
 -- TABLE: state_root_updates
-CREATE TABLE state_root_updates (
+CREATE TABLE IF NOT EXISTS state_root_updates (
     update_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     new_state_root VARCHAR(255) NOT NULL,
@@ -1543,7 +1543,7 @@ CREATE TABLE state_root_updates (
 );
 
 -- TABLE: system_metrics
-CREATE TABLE system_metrics (
+CREATE TABLE IF NOT EXISTS system_metrics (
     metric_id BIGSERIAL PRIMARY KEY,
     timestamp BIGINT NOT NULL,
     db_size_mb NUMERIC(15, 2),
@@ -1559,7 +1559,7 @@ CREATE TABLE system_metrics (
 );
 
 -- TABLE: transaction_inputs
-CREATE TABLE transaction_inputs (
+CREATE TABLE IF NOT EXISTS transaction_inputs (
     input_id BIGSERIAL PRIMARY KEY,
     tx_id BIGINT NOT NULL,
     previous_tx_hash VARCHAR(255),
@@ -1570,7 +1570,7 @@ CREATE TABLE transaction_inputs (
 );
 
 -- TABLE: transaction_outputs
-CREATE TABLE transaction_outputs (
+CREATE TABLE IF NOT EXISTS transaction_outputs (
     output_id BIGSERIAL PRIMARY KEY,
     tx_id BIGINT NOT NULL,
     output_index INT NOT NULL,
@@ -1584,7 +1584,7 @@ CREATE TABLE transaction_outputs (
 );
 
 -- TABLE: transaction_receipts
-CREATE TABLE transaction_receipts (
+CREATE TABLE IF NOT EXISTS transaction_receipts (
     receipt_id BIGSERIAL PRIMARY KEY,
     tx_id BIGINT NOT NULL,
     height BIGINT,
@@ -1596,7 +1596,7 @@ CREATE TABLE transaction_receipts (
 );
 
 -- TABLE: transactions
-CREATE TABLE transactions (
+CREATE TABLE IF NOT EXISTS transactions (
     id BIGSERIAL PRIMARY KEY,
     tx_hash VARCHAR(255) UNIQUE NOT NULL,
     from_address VARCHAR(255) NOT NULL,
@@ -1625,7 +1625,7 @@ CREATE TABLE transactions (
 );
 
 -- TABLE: validator_stakes
-CREATE TABLE validator_stakes (
+CREATE TABLE IF NOT EXISTS validator_stakes (
     stake_id BIGSERIAL PRIMARY KEY,
     validator_id BIGINT NOT NULL,
     amount NUMERIC(30, 0) NOT NULL,
@@ -1638,7 +1638,7 @@ CREATE TABLE validator_stakes (
 );
 
 -- TABLE: validators
-CREATE TABLE validators (
+CREATE TABLE IF NOT EXISTS validators (
     validator_id BIGSERIAL PRIMARY KEY,
     public_key VARCHAR(255) UNIQUE NOT NULL,
     peer_id VARCHAR(255),
@@ -1658,7 +1658,7 @@ CREATE TABLE validators (
 );
 
 -- TABLE: w_state_snapshots
-CREATE TABLE w_state_snapshots (
+CREATE TABLE IF NOT EXISTS w_state_snapshots (
     snapshot_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     timestamp BIGINT NOT NULL,
@@ -1673,7 +1673,7 @@ CREATE TABLE w_state_snapshots (
 );
 
 -- TABLE: w_state_validator_states
-CREATE TABLE w_state_validator_states (
+CREATE TABLE IF NOT EXISTS w_state_validator_states (
     state_id BIGSERIAL PRIMARY KEY,
     block_height BIGINT NOT NULL,
     validator_public_key VARCHAR(255) NOT NULL,
@@ -1686,7 +1686,7 @@ CREATE TABLE w_state_validator_states (
 );
 
 -- TABLE: wallet_addresses
-CREATE TABLE wallet_addresses (
+CREATE TABLE IF NOT EXISTS wallet_addresses (
     address VARCHAR(255) PRIMARY KEY,
     wallet_fingerprint VARCHAR(64) NOT NULL,
     derivation_path VARCHAR(100),
@@ -1711,7 +1711,7 @@ CREATE TABLE wallet_addresses (
 );
 
 -- TABLE: wallet_key_rotation_history
-CREATE TABLE wallet_key_rotation_history (
+CREATE TABLE IF NOT EXISTS wallet_key_rotation_history (
     rotation_id BIGSERIAL PRIMARY KEY,
     wallet_fingerprint VARCHAR(64) NOT NULL,
     old_key_id VARCHAR(255),
@@ -1724,7 +1724,7 @@ CREATE TABLE wallet_key_rotation_history (
 );
 
 -- TABLE: wallet_seed_backup_status
-CREATE TABLE wallet_seed_backup_status (
+CREATE TABLE IF NOT EXISTS wallet_seed_backup_status (
     backup_id BIGSERIAL PRIMARY KEY,
     wallet_fingerprint VARCHAR(64) NOT NULL UNIQUE,
     seed_phrase_backed_up BOOLEAN DEFAULT FALSE,
@@ -1741,7 +1741,7 @@ CREATE TABLE wallet_seed_backup_status (
 
 
 -- V5 SEQUENTIAL ROUTING
-CREATE TABLE pq_sequential (
+CREATE TABLE IF NOT EXISTS pq_sequential (
     pq_id BIGINT PRIMARY KEY,
     next_pq_id BIGINT,
     prev_pq_id BIGINT,
@@ -1923,18 +1923,29 @@ class QuantumTemporalCoherenceLedgerServer:
         logger.info(f"{CLR.ERROR}[DROP] Dropping ALL existing tables...{CLR.E}")
         try:
             if self.db_mode == "postgres":
-                self.cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public';")
-                tables = [r[0] for r in self.cursor.fetchall()]
-                for tname in tables:
-                    self.cursor.execute(f"DROP TABLE IF EXISTS {tname} CASCADE;")
-                    self._commit()
+                # Nuclear reset: drop and recreate the entire public schema.
+                # This is the only 100%-reliable way to clear all tables, views,
+                # sequences, types, and functions that a previous partial run may
+                # have committed — including tables created mid-schema that would
+                # otherwise cause DuplicateTable errors on re-run.
+                self.cursor.execute("SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public';")
+                n_before = self.cursor.fetchone()[0]
+
+                self.cursor.execute("DROP SCHEMA public CASCADE;")
+                self.cursor.execute("CREATE SCHEMA public;")
+                # Restore default privileges so subsequent CREATE TABLE etc. work
+                self.cursor.execute("GRANT ALL ON SCHEMA public TO PUBLIC;")
+                self.cursor.execute("GRANT ALL ON SCHEMA public TO CURRENT_USER;")
+                self._commit()
+
+                logger.info(f"{CLR.OK}[DROP] Nuclear reset complete — dropped schema with {n_before} tables, schema recreated{CLR.E}")
             else:
                 self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
                 tables = [r[0] for r in self.cursor.fetchall()]
                 for tname in tables:
                     self.cursor.execute(f"DROP TABLE IF EXISTS {tname};")
-            self._commit()
-            logger.info(f"{CLR.OK}[DROP] {len(tables)} tables dropped{CLR.E}")
+                self._commit()
+                logger.info(f"{CLR.OK}[DROP] {len(tables)} SQLite tables dropped{CLR.E}")
         except Exception as e:
             logger.error(f"{CLR.ERROR}[DROP] Failed: {e}{CLR.E}")
             self.conn.rollback()
@@ -1987,11 +1998,23 @@ class QuantumTemporalCoherenceLedgerServer:
                             tables_created += 1
                             logger.info(f"[SCHEMA] ✓ Created: {s[:60]}...")
                     except Exception as e:
-                        # Log CREATE TABLE failures as errors (not just warnings)
-                        if 'CREATE TABLE' in s.upper():
+                        err_str = str(e)
+                        is_create_table = 'CREATE TABLE' in s.upper()
+                        is_duplicate = 'already exists' in err_str or 'DuplicateTable' in type(e).__name__
+                        # DuplicateTable on CREATE TABLE IF NOT EXISTS should never occur after
+                        # nuclear schema reset, but treat as warning — state is still consistent.
+                        if is_create_table and is_duplicate:
+                            self.conn.rollback()
+                            logger.warning(f"[SCHEMA] TABLE already exists (skipped): {s[:60]}... → {e}")
+                            skipped += 1
+                        elif is_create_table:
                             logger.error(f"[SCHEMA] CREATE TABLE failed: {s[:60]}... → {e}")
                             raise
                         else:
+                            try:
+                                self.conn.rollback()
+                            except Exception:
+                                pass
                             logger.info(f"[SCHEMA] Skipped: {s[:60]}... → {e}")
                             skipped += 1
             
