@@ -7763,9 +7763,17 @@ def _broadcast_block_to_peers(compact_block: dict) -> int:
         # Broadcast to each peer via HTTP POST to their /p2p/gossip endpoint
         for node_id, external_addr in peers:
             try:
-                if not external_addr or ":" not in external_addr:
+                if not external_addr:
                     continue
-                host, port = external_addr.rsplit(":", 1)
+                # Normalize: strip scheme if present, then reconstruct
+                _addr = str(external_addr).strip()
+                if _addr.startswith("http://"):
+                    _addr = _addr[7:]
+                elif _addr.startswith("https://"):
+                    _addr = _addr[8:]
+                if ":" not in _addr:
+                    continue
+                host, port = _addr.rsplit(":", 1)
                 gossip_url = f"http://{host}:{port}/p2p/gossip"
 
                 # Send the block as event type 10 (BLOCK_SOLVED_SERVER)
