@@ -459,6 +459,27 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
             "metrics": result,
         }, indent=2, default=str)
 
+    @mcp.tool()
+    async def qtcl_retro_settle() -> str:
+        """
+        Retroactively settle all blocks whose UTXOs are missing from address_utxos.
+        Safe to call repeatedly — idempotent. Returns counts of settled/skipped/error blocks.
+        Use this when miner balance is lower than expected after mining blocks.
+        """
+        result = qtcl_rpc("qtcl_retroSettle", [])
+        return json.dumps(result, indent=2, default=str)
+
+    @mcp.tool()
+    async def qtcl_repair_utxos() -> str:
+        """
+        Nuclear UTXO repair: bypasses settlement machinery and directly inserts missing
+        UTXOs from the transactions table. Use when qtcl_retro_settle reports success
+        but UTXOs are still missing. Commits per-UTXO for maximum isolation.
+        Returns repaired_blocks, repaired_utxos, recomputed_wallets counts.
+        """
+        result = qtcl_rpc("qtcl_repairUTXOs", [])
+        return json.dumps(result, indent=2, default=str)
+
     # ── Resources ───────────────────────────────────────────────────────────────
 
     @mcp.resource("chain://height")

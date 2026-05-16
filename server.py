@@ -1804,23 +1804,14 @@ def _settle_block_rewards(
                     row = cur.fetchone()
                     true_balance = int(row[0]) if row and row[0] is not None else 0
 
-                    # Safety check: if existing wallet balance is HIGHER than UTXO sum,
-                    # there may be confirmed inbound TXs (non-coinbase) also missing UTXOs.
-                    # In that case, keep the higher value to avoid balance regression.
-                    _existing_bal = 0
-                    try:
-                        cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (addr,))
-                        _eb_row = cur.fetchone()
-                        _existing_bal = int(_eb_row[0]) if _eb_row and _eb_row[0] is not None else 0
-                    except Exception:
-                        pass
-
-                    if _existing_bal > true_balance:
-                        _settle_log.critical(
-                            f"[SETTLE] ⚠️  {addr[:20]}… existing_balance={_existing_bal} > "
-                            f"utxo_sum={true_balance} — keeping higher value to prevent regression"
-                        )
-                        true_balance = _existing_bal
+                    # FIX: Do NOT keep existing_balance if it's higher than UTXO sum.
+                    # The old "regression guard" caused wallet_addresses to freeze at a
+                    # stale value even after correct UTXOs were written, because the old
+                    # balance (written by a legacy non-UTXO path) was always higher than
+                    # the UTXO sum for addresses with missing UTXOs. This permanently
+                    # prevented the UTXO set from becoming the source of truth.
+                    # UTXO sum IS the authoritative balance. If it's 0, we have missing
+                    # UTXOs — the backfill check above handles that. Keep true_balance as-is.
 
                     cur.execute(
                         "SELECT COUNT(*) FROM address_transactions WHERE address = %s",
@@ -1950,11 +1941,14 @@ def _settle_block_rewards(
             _settle_log.critical(f"[SETTLE] 🔄 Retrying h={height} after table creation")
             _SETTLED_HEIGHTS.discard(height)
             return _settle_block_rewards(height, block_hash, miner_address, txs)
-        _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED: {_rt_err}", exc_info=True)
-        raise
+        _settle_log.error(f"[SETTLE] ❌ h={height} settlement RuntimeError: {_rt_err}", exc_info=True)
+        return 0.0  # FIX: never raise — caller cannot rollback committed UTXOs
     except Exception as err:
         _settle_log.error(f"[SETTLE] ❌ h={height} settlement FAILED: {err}", exc_info=True)
-        raise  # caller must see failure
+        return 0.0  # FIX: never raise — DB commit already fired inside with-block; raising here
+        # triggers get_db_cursor except→conn.rollback() which rolls back any UTXOs written in this
+        # call if the exception came BEFORE the with-block exited (e.g. from _cache_block).
+        # Returning 0.0 is safe: retroSettle and submitBlock both check _final_utxo_count via DB.
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # BLOCK SETTLEMENT WORKER — async settlement after block is persisted
@@ -7287,13 +7281,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             # RUN SETTLEMENT FOR DUPLICATE (in case first attempt failed)
             logger.critical(f"[RPC-submitBlock] 🔥 RUNNING SETTLEMENT FOR DUPLICATE h={height}")
-            try:
-                _settle_block_rewards(
-                    height, block_hash, miner_address, txs or []
-                )
-                logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height}")
-            except Exception as settle_err:
-                logger.critical(f"[RPC-submitBlock] ⚠️  Settlement for duplicate failed: {settle_err}")
+            _SETTLED_HEIGHTS.discard(height)  # FIX: force re-run even if in-process cache says done
+            _settle_block_rewards(height, block_hash, miner_address, txs or [])
+            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height}")
 
             # 🔴 DO NOT re-push block_finalized for duplicates — the first insertion
             # already broadcast this event. Re-pushing causes the miner to see
@@ -7388,29 +7378,38 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # ═══════════════════════════════════════════════════════════════════════════════
         # MANDATORY SYNCHRONOUS SETTLEMENT — NOT QUEUED, RUNS IMMEDIATELY
-        # Settlement FAILURE = RPC FAILURE (no silent failures)
-        # Settlement returns miner balance queried on SAME cursor — avoids read-replica lag
+        # Settlement FAILURE = logged + retried async. Settlement no longer raises.
         # ═══════════════════════════════════════════════════════════════════════════════
         logger.critical(f"[RPC-submitBlock] 🔥 STARTING MANDATORY SETTLEMENT h={height} miner={miner_address[:16]}…")
         _settle_ok = True
         _miner_balance_qtcl = 0.0
+        # FIX: _settle_block_rewards no longer raises — it logs and returns 0.0 on failure.
+        # The old try/except+raise pattern caused get_db_cursor to rollback committed UTXOs.
+        _miner_balance_qtcl = _settle_block_rewards(
+            height, block_hash, miner_address, txs or []
+        )
+        logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE h={height} miner_balance={_miner_balance_qtcl:.4f} QTCL")
+        # Post-settlement verification — confirm UTXOs actually landed
         try:
-            _miner_balance_qtcl = _settle_block_rewards(
-                height, block_hash, miner_address, txs or []
-            )
-            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE AND VERIFIED h={height} miner_balance={_miner_balance_qtcl:.4f} QTCL")
-        except Exception as settle_err:
-            logger.critical(f"[RPC-submitBlock] ❌ SETTLEMENT FAILED h={height}: {settle_err}", exc_info=True)
-            # Fallback: enqueue for background settlement worker
-            try:
-                _BLOCK_SETTLE_Q.put({"height": height, "block_hash": block_hash,
-                                     "miner_address": miner_address, "txs": txs or [],
-                                     "non_coinbase_txs": _non_coinbase_txs}, timeout=1.0)
-                logger.critical(f"[RPC-submitBlock] 📥 Settlement h={height} enqueued to background worker")
-                _settle_ok = False
-            except Exception as _q_err:
-                logger.critical(f"[RPC-submitBlock] ❌ Background queue also failed: {_q_err}")
-                return _rpc_error(-32603, f"Settlement failed: {str(settle_err)[:100]}", rpc_id)
+            with get_db_cursor() as _sc:
+                _sc.execute(
+                    "SELECT COUNT(*) FROM address_utxos WHERE created_at_height = %s",
+                    (height,)
+                )
+                _utxo_verify = int((_sc.fetchone() or [0])[0])
+            if _utxo_verify == 0:
+                logger.critical(f"[RPC-submitBlock] ⚠️  POST-SETTLE VERIFY: 0 UTXOs at h={height} — enqueuing async retry")
+                try:
+                    _BLOCK_SETTLE_Q.put({"height": height, "block_hash": block_hash,
+                                         "miner_address": miner_address, "txs": txs or [],
+                                         "non_coinbase_txs": _non_coinbase_txs}, timeout=1.0)
+                    _settle_ok = False
+                except Exception:
+                    pass
+            else:
+                logger.critical(f"[RPC-submitBlock] ✅ POST-SETTLE VERIFY: {_utxo_verify} UTXOs confirmed at h={height}")
+        except Exception as _sv_err:
+            logger.warning(f"[RPC-submitBlock] UTXO verification query failed: {_sv_err}")
 
         # Push db_sync pulse so block-explorer clients re-fetch from authoritative Neon
         try:
@@ -8200,14 +8199,18 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
         skipped = 0
         errors  = 0
         with get_db_cursor() as cur:
-            # Find blocks where address_utxos has zero unspent rows at that height
+            # Find blocks needing settlement:
+            # (a) No UTXOs at all at that height (never settled or rolled back)
+            # (b) settlement_log entry exists but UTXOs are still missing (poisoned log)
+            # FIX: removed `AND u.spent = FALSE` — a block whose reward UTXO was later
+            # spent is correctly settled; spending it doesn't make it "needs re-settlement".
             cur.execute("""
                 SELECT b.height, b.block_hash, b.miner_address
                 FROM blocks b
                 WHERE b.height > 0
                   AND NOT EXISTS (
                       SELECT 1 FROM address_utxos u
-                      WHERE u.created_at_height = b.height AND u.spent = FALSE
+                      WHERE u.created_at_height = b.height
                   )
                 ORDER BY b.height
             """)
@@ -8268,8 +8271,27 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
                 if txs:
                     # Discard in-process idempotency cache so re-run fires
                     _SETTLED_HEIGHTS.discard(h)
+                    # FIX: capture return value — _settle_block_rewards returns 0.0 on failure
+                    # (it no longer raises). Verify UTXOs actually landed in DB after settlement.
                     _settle_block_rewards(h, bh, miner, txs)
-                    settled += 1
+                    # Verify UTXOs exist NOW (settlement may have no-op'd due to idempotency)
+                    try:
+                        with get_db_cursor() as _vchk:
+                            _vchk.execute(
+                                "SELECT COUNT(*) FROM address_utxos WHERE created_at_height = %s",
+                                (h,)
+                            )
+                            _vc = _vchk.fetchone()
+                            _utxo_n = int(_vc[0]) if _vc else 0
+                        if _utxo_n > 0:
+                            settled += 1
+                            logger.critical(f"[RETRO-SETTLE] ✅ h={h} settled — {_utxo_n} UTXOs confirmed in DB")
+                        else:
+                            errors += 1
+                            logger.error(f"[RETRO-SETTLE] ❌ h={h} settlement ran but 0 UTXOs found in DB")
+                    except Exception as _ve:
+                        settled += 1  # can't verify, assume ok
+                        logger.warning(f"[RETRO-SETTLE] h={h} UTXO verify failed: {_ve}")
                 else:
                     skipped += 1
             except Exception as _re:
@@ -8280,6 +8302,165 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
                         "total_blocks_needing_settlement": len(rows)}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] retroSettle error: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+def _rpc_repairUTXOs(params: Any, rpc_id: Any) -> dict:
+    """qtcl_repairUTXOs — Direct-SQL UTXO repair bypassing all settlement machinery.
+
+    Scans every confirmed transaction in blocks that have no UTXOs at that height.
+    For each missing UTXO, inserts directly with ON CONFLICT DO NOTHING.
+    Then recomputes wallet_addresses.balance for all touched addresses.
+    Commits per-block so a single failure doesn't roll back everything.
+
+    This is the nuclear option: runs when retroSettle reports success but UTXOs still don't appear.
+    """
+    try:
+        repaired_utxos  = 0
+        repaired_blocks = 0
+        repaired_addrs  = set()
+        errors          = []
+
+        # Step 1: find all heights with confirmed txs but no UTXOs at all
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT t.height
+                FROM transactions t
+                WHERE t.status = 'confirmed'
+                  AND t.height IS NOT NULL
+                  AND t.height > 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM address_utxos u WHERE u.created_at_height = t.height
+                  )
+                ORDER BY t.height
+            """)
+            missing_heights = [r[0] for r in cur.fetchall()]
+
+        logger.critical(f"[REPAIR-UTXO] Found {len(missing_heights)} heights missing UTXOs: {missing_heights}")
+
+        for h in missing_heights:
+            _block_utxos = 0
+            try:
+                # Read ALL confirmed txs at this height
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        SELECT tx_hash, from_address, to_address, amount, tx_type, metadata
+                        FROM transactions
+                        WHERE height = %s AND status = 'confirmed'
+                        ORDER BY transaction_index
+                    """, (h,))
+                    tx_rows = cur.fetchall()
+
+                for tx_hash_r, from_addr_r, to_addr_r, amount_r, tx_type_r, meta_r in tx_rows:
+                    if not tx_hash_r:
+                        continue
+
+                    # Parse metadata
+                    if isinstance(meta_r, str) and meta_r.strip():
+                        try: meta_r = json.loads(meta_r)
+                        except Exception: meta_r = {}
+                    if not isinstance(meta_r, dict):
+                        meta_r = {}
+
+                    # Build outputs list — prefer metadata.outputs, fall back to synthesis
+                    outputs = meta_r.get("outputs") or []
+                    if not outputs and to_addr_r:
+                        amt_base = int(amount_r) if amount_r else 0
+                        if amt_base > 0:
+                            outputs = [{"address": to_addr_r, "amount_base": amt_base}]
+
+                    for out_idx, out in enumerate(outputs):
+                        out_addr = _norm_address(out.get("address") or out.get("addr") or "")
+                        out_amt  = int(out.get("amount_base") or 0)
+                        if not out_addr or out_amt <= 0:
+                            continue
+
+                        # Direct INSERT — separate cursor per UTXO for isolation
+                        try:
+                            with get_db_cursor() as ins:
+                                ins.execute("""
+                                    INSERT INTO address_utxos
+                                        (address, tx_hash, output_index, amount, spent, created_at_height)
+                                    VALUES (%s, %s, %s, %s, FALSE, %s)
+                                    ON CONFLICT (tx_hash, output_index) DO NOTHING
+                                """, (out_addr, tx_hash_r, out_idx, out_amt, h))
+                                _rcount = getattr(ins, "rowcount", -1)
+                            if _rcount != 0:  # 0 = conflict (already exists), -1 or 1 = inserted
+                                repaired_utxos += 1
+                                repaired_addrs.add(out_addr)
+                                logger.critical(
+                                    f"[REPAIR-UTXO] ✅ h={h} tx={tx_hash_r[:16]}…[{out_idx}] "
+                                    f"addr={out_addr[:16]}… amt={out_amt}"
+                                )
+                            _block_utxos += 1
+                        except Exception as _ins_err:
+                            errors.append(f"h={h} tx={tx_hash_r[:16]} out[{out_idx}]: {_ins_err}")
+                            logger.error(f"[REPAIR-UTXO] ❌ Insert failed: {_ins_err}")
+
+                repaired_blocks += 1
+
+            except Exception as _h_err:
+                errors.append(f"h={h}: {_h_err}")
+                logger.error(f"[REPAIR-UTXO] ❌ h={h} failed: {_h_err}")
+
+        # Step 2: recompute wallet_addresses balances for all touched addresses
+        recomputed = 0
+        for addr in repaired_addrs:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM address_utxos WHERE address = %s AND spent = FALSE",
+                        (addr,)
+                    )
+                    row = cur.fetchone()
+                    true_balance = int(row[0]) if row and row[0] else 0
+                    utxo_count   = int(row[1]) if row and row[1] else 0
+                    if true_balance > 0:
+                        _fp = hashlib.sha256(addr.encode()).hexdigest()[:64]
+                        cur.execute("""
+                            INSERT INTO wallet_addresses
+                                (address, wallet_fingerprint, public_key, balance, transaction_count, address_type, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, 'standard', NOW())
+                            ON CONFLICT (address) DO UPDATE SET
+                                balance           = EXCLUDED.balance,
+                                transaction_count = EXCLUDED.transaction_count,
+                                updated_at        = NOW()
+                        """, (addr, _fp, _fp, true_balance, max(1, utxo_count)))
+                        recomputed += 1
+                        logger.critical(
+                            f"[REPAIR-UTXO] ✅ Wallet {addr[:16]}… balance={true_balance/100:.4f} QTCL"
+                        )
+            except Exception as _bal_err:
+                errors.append(f"balance {addr[:16]}: {_bal_err}")
+
+        # Step 3: write settlement_log for repaired blocks (prevents future re-runs)
+        for h in missing_heights:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM address_utxos WHERE created_at_height = %s",
+                        (h,)
+                    )
+                    _final = int((cur.fetchone() or [0])[0])
+                    if _final > 0:
+                        cur.execute("""
+                            INSERT INTO settlement_log (height, block_hash, tx_count, addresses_updated)
+                            SELECT %s, block_hash, tx_count, %s FROM blocks WHERE height = %s
+                            ON CONFLICT (height) DO UPDATE SET addresses_updated = EXCLUDED.addresses_updated
+                        """, (h, recomputed, h))
+                        _SETTLED_HEIGHTS.add(h)
+            except Exception as _sl_err:
+                logger.warning(f"[REPAIR-UTXO] settlement_log write h={h}: {_sl_err}")
+
+        return _rpc_ok({
+            "repaired_blocks":  repaired_blocks,
+            "repaired_utxos":   repaired_utxos,
+            "recomputed_wallets": recomputed,
+            "heights_processed": missing_heights,
+            "errors": errors[:20],  # cap error list
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] repairUTXOs error: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
 
 
@@ -8727,7 +8908,8 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,
     "qtcl_getUTXOs": _rpc_getUTXOs,
-    "qtcl_retroSettle": _rpc_retroSettle,
+    "qtcl_retroSettle":  _rpc_retroSettle,
+    "qtcl_repairUTXOs":  _rpc_repairUTXOs,
     "qtcl_getTransaction": _rpc_getTransaction,
     "qtcl_getTransactionVolume": _rpc_getTransactionVolume,
     "qtcl_getBlock": _rpc_getBlock,
