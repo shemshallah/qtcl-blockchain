@@ -2270,6 +2270,7 @@ class Mempool:
 
                         # ── 3b: Mark sender UTXOs spent (greedy oldest-first) ─
                         spend_total = amount_base + fee_base
+                        _total_consumed = 0
                         if from_addr and spend_total > 0:
                             cur.execute("""
                                 SELECT tx_hash, output_index, amount
@@ -2292,12 +2293,33 @@ class Mempool:
                                 """, (current_height, tx_hash, u_tx, u_idx))
                                 if getattr(cur, 'rowcount', 0) > 0:
                                     remaining -= u_amt
+                                    _total_consumed += u_amt
 
                             if remaining > 0:
                                 _reconcile_log.warning(
                                     f"[RECONCILE] tx={tx_hash[:16]}… sender {from_addr[:16]}… "
                                     f"under-funded by {remaining} base units"
                                 )
+
+                        # ── 3b-CHANGE: Create change UTXO back to sender ─────
+                        # When greedy UTXO consumption overshoots the spend_total,
+                        # the excess must be returned as a change output. Without
+                        # this, the overshoot is burned (lost forever).
+                        _change_amount = _total_consumed - spend_total
+                        if _change_amount > 0 and from_addr:
+                            # Change output index = len(outputs) so it doesn't
+                            # collide with receiver outputs on (tx_hash, output_index)
+                            _change_idx = len(outputs)
+                            cur.execute("""
+                                INSERT INTO address_utxos
+                                    (address, tx_hash, output_index, amount, spent, created_at_height)
+                                VALUES (%s, %s, %s, %s, FALSE, %s)
+                                ON CONFLICT (tx_hash, output_index) DO NOTHING
+                            """, (from_addr, tx_hash, _change_idx, _change_amount, current_height))
+                            _reconcile_log.info(
+                                f"[RECONCILE] 💰 Change output: {_change_amount} base → "
+                                f"{from_addr[:16]}… (consumed={_total_consumed} spend={spend_total})"
+                            )
 
                         # ── 3c: Create receiver UTXOs ────────────────────────
                         for idx, out in enumerate(outputs):

@@ -1620,6 +1620,7 @@ def _settle_block_rewards(
                             )
                             _spend_fee = int(tx.get("fee_base") or tx.get("fee") or 0)
                             _spend_total = _spend_amount + _spend_fee
+                            _total_consumed = 0
                             if _spend_total > 0:
                                 cur.execute(
                                     "SELECT tx_hash, output_index, amount FROM address_utxos "
@@ -1640,6 +1641,7 @@ def _settle_block_rewards(
                                     )
                                     if getattr(cur, "rowcount", 0) > 0:
                                         _remaining -= int(_u_amt or 0)
+                                        _total_consumed += int(_u_amt or 0)
                                         _settle_log.debug(
                                             f"[SETTLE] h={height} fallback-spent UTXO "
                                             f"{_u_tx[:16]}…[{_u_idx}] amt={_u_amt} "
@@ -1650,6 +1652,24 @@ def _settle_block_rewards(
                                         f"[SETTLE] h={height} tx={tx_id[:16]}… sender "
                                         f"{from_addr[:16]}… under-funded by {_remaining} base units"
                                     )
+                                # ── CHANGE OUTPUT: return overshoot to sender ──────
+                                # Greedy UTXO consumption may overshoot the spend_total.
+                                # The excess must be returned as a change UTXO to the sender.
+                                _change_amount = _total_consumed - _spend_total
+                                if _change_amount > 0:
+                                    _change_idx = len(outputs)  # after all receiver outputs
+                                    cur.execute(
+                                        "INSERT INTO address_utxos "
+                                        "(address, tx_hash, output_index, amount, spent, created_at_height) "
+                                        "VALUES (%s, %s, %s, %s, FALSE, %s) "
+                                        "ON CONFLICT (tx_hash, output_index) DO NOTHING",
+                                        (from_addr, tx_id, _change_idx, _change_amount, height),
+                                    )
+                                    _settle_log.info(
+                                        f"[SETTLE] h={height} 💰 Change output: {_change_amount} base → "
+                                        f"{from_addr[:16]}… (consumed={_total_consumed} spend={_spend_total})"
+                                    )
+                                    touched_addrs.add(from_addr)
 
                     # Phase 1b: INSERT output UTXOs
                     for idx, out in enumerate(outputs):
