@@ -1755,10 +1755,14 @@ def _settle_block_rewards(
                 _fp = hashlib.sha256(addr.encode()).hexdigest()[:64]
                 try:
                     # ── BACKFILL CHECK: detect missing UTXOs from prior blocks ──
-                    # If confirmed coinbase TXs exist in `transactions` but have no matching
-                    # UTXO rows, create them now. This covers blocks settled by legacy paths
-                    # (pre-UTXO settlement) that wrote wallet_addresses.balance but not UTXOs.
+                    # FIX v3.2: Covers ALL confirmed tx types (coinbase + transfer).
+                    # The old query filtered to coinbase/miner_reward/treasury_reward only,
+                    # which left incoming transfer UTXOs permanently missing — the recipient
+                    # showed a phantom balance from transactions_table but 0 spendable UTXOs.
+                    # Now: scan ALL confirmed txs where this address is a recipient output
+                    # (via metadata.outputs OR to_address) and no UTXO row exists yet.
                     try:
+                        # Phase A: coinbase backfill (fast path — no metadata parse needed)
                         cur.execute("""
                             SELECT t.tx_hash, t.amount, t.height
                             FROM transactions t
@@ -1770,28 +1774,78 @@ def _settle_block_rewards(
                                   WHERE u.tx_hash = t.tx_hash AND u.address = %s
                               )
                         """, (addr, addr))
-                        _missing_utxos = cur.fetchall()
-                        if _missing_utxos:
+                        _missing_coinbase = cur.fetchall()
+                        # Phase B: transfer backfill — ANY confirmed tx to this address missing UTXOs
+                        cur.execute("""
+                            SELECT t.tx_hash, t.amount, t.height, t.metadata
+                            FROM transactions t
+                            WHERE t.status = 'confirmed'
+                              AND t.height IS NOT NULL
+                              AND t.tx_type NOT IN ('coinbase', 'miner_reward', 'treasury_reward')
+                              AND (
+                                  t.to_address = %s
+                                  OR t.from_address = %s
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM address_utxos u
+                                  WHERE u.tx_hash = t.tx_hash AND u.address = %s
+                              )
+                        """, (addr, addr, addr))
+                        _missing_transfers = cur.fetchall()
+                        _total_missing = len(_missing_coinbase) + len(_missing_transfers)
+                        if _total_missing:
                             _settle_log.critical(
-                                f"[SETTLE] ⚠️  BACKFILL: {len(_missing_utxos)} coinbase TXs "
-                                f"for {addr[:20]}… have no UTXOs — creating now"
+                                f"[SETTLE] ⚠️  BACKFILL: {len(_missing_coinbase)} coinbase + "
+                                f"{len(_missing_transfers)} transfer TXs for {addr[:20]}… "
+                                f"have no UTXOs — creating now"
                             )
-                            for _m_tx_hash, _m_amount, _m_height in _missing_utxos:
+                        # Insert coinbase UTXOs (output_index=0 always for coinbase)
+                        for _m_tx_hash, _m_amount, _m_height in _missing_coinbase:
+                            _m_amount_int = int(_m_amount) if _m_amount else 0
+                            if _m_amount_int > 0:
+                                cur.execute(
+                                    "INSERT INTO address_utxos "
+                                    "(address, tx_hash, output_index, amount, spent, created_at_height) "
+                                    "VALUES (%s, %s, 0, %s, FALSE, %s) "
+                                    "ON CONFLICT (tx_hash, output_index) DO NOTHING",
+                                    (addr, _m_tx_hash, _m_amount_int, _m_height),
+                                )
+                                _settle_log.critical(
+                                    f"[SETTLE] ✅ BACKFILLED coinbase UTXO: h={_m_height} "
+                                    f"tx={_m_tx_hash[:16]}… amt={_m_amount_int} addr={addr[:20]}…"
+                                )
+                        # Insert transfer UTXOs — parse metadata.outputs for correct per-output amounts
+                        for _m_tx_hash, _m_amount, _m_height, _m_meta in _missing_transfers:
+                            _m_meta_d = _m_meta
+                            if isinstance(_m_meta_d, str) and _m_meta_d.strip():
+                                try: _m_meta_d = json.loads(_m_meta_d)
+                                except Exception: _m_meta_d = {}
+                            if not isinstance(_m_meta_d, dict):
+                                _m_meta_d = {}
+                            _m_outputs = _m_meta_d.get("outputs") or []
+                            # If no metadata outputs, synthesize from to_address + amount
+                            if not _m_outputs:
                                 _m_amount_int = int(_m_amount) if _m_amount else 0
                                 if _m_amount_int > 0:
-                                    cur.execute(
-                                        "INSERT INTO address_utxos "
-                                        "(address, tx_hash, output_index, amount, spent, "
-                                        " created_at_height) "
-                                        "VALUES (%s, %s, 0, %s, FALSE, %s) "
-                                        "ON CONFLICT (tx_hash, output_index) DO NOTHING",
-                                        (addr, _m_tx_hash, _m_amount_int, _m_height),
-                                    )
-                                    _settle_log.critical(
-                                        f"[SETTLE] ✅ BACKFILLED UTXO: h={_m_height} "
-                                        f"tx={_m_tx_hash[:16]}… amt={_m_amount_int} "
-                                        f"for {addr[:20]}…"
-                                    )
+                                    _m_outputs = [{"address": addr, "amount_base": _m_amount_int}]
+                            for _m_out_idx, _m_out in enumerate(_m_outputs):
+                                _m_out_addr = _norm_address(_m_out.get("address") or _m_out.get("addr") or "")
+                                _m_out_amt  = int(_m_out.get("amount_base") or 0)
+                                # Only backfill outputs that belong to the address being processed
+                                if _m_out_addr != addr or _m_out_amt <= 0:
+                                    continue
+                                cur.execute(
+                                    "INSERT INTO address_utxos "
+                                    "(address, tx_hash, output_index, amount, spent, created_at_height) "
+                                    "VALUES (%s, %s, %s, %s, FALSE, %s) "
+                                    "ON CONFLICT (tx_hash, output_index) DO NOTHING",
+                                    (addr, _m_tx_hash, _m_out_idx, _m_out_amt, _m_height),
+                                )
+                                _settle_log.critical(
+                                    f"[SETTLE] ✅ BACKFILLED transfer UTXO: h={_m_height} "
+                                    f"tx={_m_tx_hash[:16]}… out[{_m_out_idx}] amt={_m_out_amt} "
+                                    f"addr={addr[:20]}…"
+                                )
                     except Exception as _bf_err:
                         _settle_log.warning(f"[SETTLE] UTXO backfill non-fatal: {_bf_err}")
 
@@ -8302,12 +8356,13 @@ def _rpc_retroSettle(params: Any, rpc_id: Any) -> dict:
 def _rpc_repairUTXOs(params: Any, rpc_id: Any) -> dict:
     """qtcl_repairUTXOs — Direct-SQL UTXO repair bypassing all settlement machinery.
 
-    Scans every confirmed transaction in blocks that have no UTXOs at that height.
-    For each missing UTXO, inserts directly with ON CONFLICT DO NOTHING.
-    Then recomputes wallet_addresses.balance for all touched addresses.
-    Commits per-block so a single failure doesn't roll back everything.
+    FIX v3.2: Detection changed from height-level (zero UTXOs at height) to
+    tx-output-level (specific output address missing a UTXO row). The old query
+    skipped heights that had ANY UTXOs (e.g. coinbase), leaving transfer recipient
+    UTXOs permanently missing even when a block was otherwise partially settled.
 
-    This is the nuclear option: runs when retroSettle reports success but UTXOs still don't appear.
+    Now scans every confirmed tx output and inserts any missing address_utxos row.
+    Then recomputes wallet_addresses.balance for all touched addresses.
     """
     try:
         repaired_utxos  = 0
@@ -8315,7 +8370,9 @@ def _rpc_repairUTXOs(params: Any, rpc_id: Any) -> dict:
         repaired_addrs  = set()
         errors          = []
 
-        # Step 1: find all heights with confirmed txs but no UTXOs at all
+        # Step 1: FIX v3.2 — find tx outputs (from metadata OR to_address) that have
+        # no matching address_utxos row. This catches transfer UTXOs at heights that
+        # have coinbase UTXOs (old query skipped those heights entirely).
         with get_db_cursor() as cur:
             cur.execute("""
                 SELECT DISTINCT t.height
@@ -8323,14 +8380,31 @@ def _rpc_repairUTXOs(params: Any, rpc_id: Any) -> dict:
                 WHERE t.status = 'confirmed'
                   AND t.height IS NOT NULL
                   AND t.height > 0
-                  AND NOT EXISTS (
-                      SELECT 1 FROM address_utxos u WHERE u.created_at_height = t.height
-                  )
                 ORDER BY t.height
             """)
-            missing_heights = [r[0] for r in cur.fetchall()]
+            all_confirmed_heights = [r[0] for r in cur.fetchall()]
 
-        logger.critical(f"[REPAIR-UTXO] Found {len(missing_heights)} heights missing UTXOs: {missing_heights}")
+        # Filter to heights that have at least one tx with a missing recipient UTXO
+        missing_heights = []
+        for _chk_h in all_confirmed_heights:
+            try:
+                with get_db_cursor() as _chk_cur:
+                    _chk_cur.execute("""
+                        SELECT COUNT(*) FROM transactions t
+                        WHERE t.height = %s AND t.status = 'confirmed'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM address_utxos u
+                              WHERE u.tx_hash = t.tx_hash AND u.address = t.to_address
+                          )
+                          AND t.to_address IS NOT NULL AND t.to_address != ''
+                    """, (_chk_h,))
+                    _missing_count = int((_chk_cur.fetchone() or [0])[0])
+                if _missing_count > 0:
+                    missing_heights.append(_chk_h)
+            except Exception:
+                pass
+
+        logger.critical(f"[REPAIR-UTXO] v3.2: Found {len(missing_heights)} heights with missing output UTXOs: {missing_heights}")
 
         for h in missing_heights:
             _block_utxos = 0
@@ -8455,6 +8529,150 @@ def _rpc_repairUTXOs(params: Any, rpc_id: Any) -> dict:
         }, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] repairUTXOs error: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
+
+
+def _rpc_repairTransferUTXOs(params: Any, rpc_id: Any) -> dict:
+    """qtcl_repairTransferUTXOs — Targeted repair for transfer recipient UTXOs.
+
+    Scans ALL confirmed transfer txs and creates missing address_utxos rows for
+    recipients. Unlike repairUTXOs, this function:
+      1. Is not gated on height-level UTXO absence (works when coinbase UTXOs exist)
+      2. Parses metadata.outputs for correct per-output amounts
+      3. Optionally accepts params[0].address to restrict repair to one address
+      4. Also repairs sender-side: marks spent UTXOs for transferred amounts
+
+    params[0] (optional): { address: <hex addr> }  — restrict to one address
+    """
+    try:
+        _rtu_log = logging.getLogger("REPAIR-TRANSFER")
+        data = {}
+        if params and isinstance(params, (list, tuple)) and len(params) > 0:
+            data = params[0] if isinstance(params[0], dict) else {}
+        elif isinstance(params, dict):
+            data = params
+        target_addr = _norm_address(data.get("address") or "")
+
+        repaired_utxos = 0
+        repaired_addrs: set = set()
+        errors: list = []
+
+        # Query: all confirmed transfer txs where to_address has no UTXO for that tx
+        _addr_filter = "AND (t.to_address = %s OR t.from_address = %s)" if target_addr else ""
+        _query = f"""
+            SELECT t.tx_hash, t.from_address, t.to_address, t.amount, t.height, t.metadata
+            FROM transactions t
+            WHERE t.status = 'confirmed'
+              AND t.height IS NOT NULL
+              AND t.tx_type NOT IN ('coinbase', 'miner_reward', 'treasury_reward')
+              {_addr_filter}
+            ORDER BY t.height, t.transaction_index
+        """
+        with get_db_cursor() as cur:
+            if target_addr:
+                cur.execute(_query, (target_addr, target_addr))
+            else:
+                cur.execute(_query)
+            tx_rows = cur.fetchall()
+
+        _rtu_log.critical(f"[REPAIR-TRANSFER] Scanning {len(tx_rows)} transfer TXs for missing UTXOs"
+                          + (f" (filter: {target_addr[:16]}…)" if target_addr else ""))
+
+        for tx_hash_r, from_addr_r, to_addr_r, amount_r, height_r, meta_r in tx_rows:
+            if not tx_hash_r or not height_r:
+                continue
+            # Parse metadata
+            if isinstance(meta_r, str) and meta_r.strip():
+                try: meta_r = json.loads(meta_r)
+                except Exception: meta_r = {}
+            if not isinstance(meta_r, dict):
+                meta_r = {}
+
+            # Build output list from metadata.outputs or synthesize
+            outputs = meta_r.get("outputs") or []
+            if not outputs and to_addr_r:
+                amt_base = int(amount_r) if amount_r else 0
+                if amt_base > 0:
+                    outputs = [{"address": to_addr_r, "amount_base": amt_base}]
+
+            for out_idx, out in enumerate(outputs):
+                out_addr = _norm_address(out.get("address") or out.get("addr") or "")
+                out_amt  = int(out.get("amount_base") or 0)
+                if not out_addr or out_amt <= 0:
+                    continue
+                # Skip if a UTXO already exists for this (tx_hash, output_index)
+                try:
+                    with get_db_cursor() as _chk:
+                        _chk.execute(
+                            "SELECT 1 FROM address_utxos WHERE tx_hash = %s AND output_index = %s LIMIT 1",
+                            (tx_hash_r, out_idx)
+                        )
+                        if _chk.fetchone():
+                            continue  # already exists
+                except Exception:
+                    pass
+                # Insert missing UTXO
+                try:
+                    with get_db_cursor() as ins:
+                        ins.execute("""
+                            INSERT INTO address_utxos
+                                (address, tx_hash, output_index, amount, spent, created_at_height)
+                            VALUES (%s, %s, %s, %s, FALSE, %s)
+                            ON CONFLICT (tx_hash, output_index) DO NOTHING
+                        """, (out_addr, tx_hash_r, out_idx, out_amt, height_r))
+                        _rows = getattr(ins, "rowcount", -1)
+                    if _rows != 0:
+                        repaired_utxos += 1
+                        repaired_addrs.add(out_addr)
+                        _rtu_log.critical(
+                            f"[REPAIR-TRANSFER] ✅ h={height_r} tx={tx_hash_r[:16]}… "
+                            f"out[{out_idx}] addr={out_addr[:16]}… amt={out_amt}"
+                        )
+                except Exception as _ins_err:
+                    errors.append(f"tx={tx_hash_r[:16]} out[{out_idx}]: {_ins_err}")
+                    _rtu_log.error(f"[REPAIR-TRANSFER] ❌ Insert failed: {_ins_err}")
+
+        # Recompute wallet balances for all touched addresses
+        recomputed = 0
+        for addr in repaired_addrs:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute(
+                        "SELECT COALESCE(SUM(amount),0), COUNT(*) FROM address_utxos "
+                        "WHERE address = %s AND spent = FALSE", (addr,)
+                    )
+                    row = cur.fetchone()
+                    true_balance = int(row[0]) if row and row[0] else 0
+                    utxo_count   = int(row[1]) if row and row[1] else 0
+                    if true_balance > 0:
+                        _fp = hashlib.sha256(addr.encode()).hexdigest()[:64]
+                        cur.execute("""
+                            INSERT INTO wallet_addresses
+                                (address, wallet_fingerprint, public_key, balance,
+                                 transaction_count, address_type, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, 'standard', NOW())
+                            ON CONFLICT (address) DO UPDATE SET
+                                balance           = EXCLUDED.balance,
+                                transaction_count = EXCLUDED.transaction_count,
+                                updated_at        = NOW()
+                        """, (addr, _fp, _fp, true_balance, max(1, utxo_count)))
+                        recomputed += 1
+                        _rtu_log.critical(
+                            f"[REPAIR-TRANSFER] ✅ Wallet {addr[:16]}… "
+                            f"balance={true_balance/100:.4f} QTCL ({utxo_count} UTXOs)"
+                        )
+            except Exception as _bal_err:
+                errors.append(f"balance {addr[:16]}: {_bal_err}")
+
+        return _rpc_ok({
+            "repaired_utxos":     repaired_utxos,
+            "recomputed_wallets": recomputed,
+            "affected_addresses": list(repaired_addrs),
+            "txs_scanned":        len(tx_rows),
+            "errors":             errors[:20],
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] repairTransferUTXOs error: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
 
 
@@ -8902,8 +9120,9 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getBlockHeight": _rpc_getBlockHeight,
     "qtcl_getBalance": _rpc_getBalance,
     "qtcl_getUTXOs": _rpc_getUTXOs,
-    "qtcl_retroSettle":  _rpc_retroSettle,
-    "qtcl_repairUTXOs":  _rpc_repairUTXOs,
+    "qtcl_retroSettle":          _rpc_retroSettle,
+    "qtcl_repairUTXOs":          _rpc_repairUTXOs,
+    "qtcl_repairTransferUTXOs":  _rpc_repairTransferUTXOs,
     "qtcl_getTransaction": _rpc_getTransaction,
     "qtcl_getTransactionVolume": _rpc_getTransactionVolume,
     "qtcl_getBlock": _rpc_getBlock,
