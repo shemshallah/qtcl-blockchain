@@ -2101,6 +2101,7 @@ class QuantumTemporalCoherenceLedgerServer:
                     v1_x, v1_y, v1_name,
                     v2_x, v2_y, v2_name
                 ) VALUES %s
+                ON CONFLICT (triangle_id) DO NOTHING
                 """,
                 rows, page_size=1000
             )
@@ -2117,6 +2118,7 @@ class QuantumTemporalCoherenceLedgerServer:
                     pq_id, triangle_id, x, y,
                     placement_type, phase_theta, coherence_measure
                 ) VALUES %s
+                ON CONFLICT (pq_id) DO NOTHING
                 """,
                 rows[i:i + BATCH], page_size=2000
             )
@@ -2135,6 +2137,16 @@ class QuantumTemporalCoherenceLedgerServer:
         self._start_time = time.time()
 
         try:
+            # ── Safety reset: clear any partial data from a previous interrupted run ──
+            # This is idempotent-safe: nuclear DROP+CREATE handles full rebuilds;
+            # this handles the case where populate_tessellation is retried after
+            # a mid-run failure without a full schema rebuild.
+            logger.info(f"{CLR.WARNING}[POPULATE] Truncating pseudoqubits + hyperbolic_triangles (idempotent reset)...{CLR.E}")
+            self.cursor.execute("TRUNCATE TABLE pseudoqubits CASCADE;")
+            self.cursor.execute("TRUNCATE TABLE hyperbolic_triangles CASCADE;")
+            self._commit()
+            logger.info(f"{CLR.OK}[POPULATE] Tables cleared — starting fresh{CLR.E}")
+
             depth = self.tessellation_depth
             triangle_id_counter = [0]
 
