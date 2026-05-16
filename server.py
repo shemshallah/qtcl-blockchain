@@ -1754,6 +1754,48 @@ def _settle_block_rewards(
             for addr in _phase2_addrs:
                 _fp = hashlib.sha256(addr.encode()).hexdigest()[:64]
                 try:
+                    # ── BACKFILL CHECK: detect missing UTXOs from prior blocks ──
+                    # If confirmed coinbase TXs exist in `transactions` but have no matching
+                    # UTXO rows, create them now. This covers blocks settled by legacy paths
+                    # (pre-UTXO settlement) that wrote wallet_addresses.balance but not UTXOs.
+                    try:
+                        cur.execute("""
+                            SELECT t.tx_hash, t.amount, t.height
+                            FROM transactions t
+                            WHERE t.to_address = %s
+                              AND t.status = 'confirmed'
+                              AND t.tx_type IN ('coinbase', 'miner_reward', 'treasury_reward')
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM address_utxos u
+                                  WHERE u.tx_hash = t.tx_hash AND u.address = %s
+                              )
+                        """, (addr, addr))
+                        _missing_utxos = cur.fetchall()
+                        if _missing_utxos:
+                            _settle_log.critical(
+                                f"[SETTLE] ⚠️  BACKFILL: {len(_missing_utxos)} coinbase TXs "
+                                f"for {addr[:20]}… have no UTXOs — creating now"
+                            )
+                            for _m_tx_hash, _m_amount, _m_height in _missing_utxos:
+                                _m_amount_int = int(_m_amount) if _m_amount else 0
+                                if _m_amount_int > 0:
+                                    cur.execute(
+                                        "INSERT INTO address_utxos "
+                                        "(address, tx_hash, output_index, amount, spent, "
+                                        " created_at_height) "
+                                        "VALUES (%s, %s, 0, %s, FALSE, %s) "
+                                        "ON CONFLICT (tx_hash, output_index) DO NOTHING",
+                                        (addr, _m_tx_hash, _m_amount_int, _m_height),
+                                    )
+                                    _settle_log.critical(
+                                        f"[SETTLE] ✅ BACKFILLED UTXO: h={_m_height} "
+                                        f"tx={_m_tx_hash[:16]}… amt={_m_amount_int} "
+                                        f"for {addr[:20]}…"
+                                    )
+                    except Exception as _bf_err:
+                        _settle_log.warning(f"[SETTLE] UTXO backfill non-fatal: {_bf_err}")
+
+                    # Now compute true balance from UTXO set (includes any just-backfilled rows)
                     cur.execute(
                         "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
                         "WHERE address = %s AND spent = FALSE",
@@ -1761,6 +1803,24 @@ def _settle_block_rewards(
                     )
                     row = cur.fetchone()
                     true_balance = int(row[0]) if row and row[0] is not None else 0
+
+                    # Safety check: if existing wallet balance is HIGHER than UTXO sum,
+                    # there may be confirmed inbound TXs (non-coinbase) also missing UTXOs.
+                    # In that case, keep the higher value to avoid balance regression.
+                    _existing_bal = 0
+                    try:
+                        cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (addr,))
+                        _eb_row = cur.fetchone()
+                        _existing_bal = int(_eb_row[0]) if _eb_row and _eb_row[0] is not None else 0
+                    except Exception:
+                        pass
+
+                    if _existing_bal > true_balance:
+                        _settle_log.critical(
+                            f"[SETTLE] ⚠️  {addr[:20]}… existing_balance={_existing_bal} > "
+                            f"utxo_sum={true_balance} — keeping higher value to prevent regression"
+                        )
+                        true_balance = _existing_bal
 
                     cur.execute(
                         "SELECT COUNT(*) FROM address_transactions WHERE address = %s",
