@@ -1,0 +1,62 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-06-18/server.schema.json",
+  "name": "io.github.qtcl-network.qtcl-blockchain",
+  "title": "QTCL — Quantum Token Chain Ledger",
+  "description": "Post-quantum blockchain with flat-fee agent transactions, native MCP tools for balance, send, quantum metrics, and oracle consensus. Implements MCP 2025-06-18 streamable HTTP transport.",
+  "version": "5.0.0",
+  "protocolVersion": "2025-06-18",
+  "websiteUrl": "https://qtcl-blockchain.koyeb.app/agents",
+  "repository": {"url": "https://github.com/qtcl-network/qtcl-blockchain", "source": "github"},
+  "license": "MIT",
+  "transports": [
+    {
+      "type": "streamable-http",
+      "url": "https://qtcl-blockchain.koyeb.app/mcp",
+      "capabilities": {
+        "tools": {"listChanged": false},
+        "resources": {"subscribe": false},
+        "prompts": {"listChanged": false}
+      }
+    },
+    {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["mcp_server.py", "--transport", "stdio"],
+      "description": "Local stdio transport for Claude Desktop, Cursor, and CLI agents"
+    }
+  ],
+  "tools": {
+    "count": 15,
+    "categories": ["wallet", "chain", "quantum", "network", "price", "maintenance"],
+    "list": [
+      "qtcl_create_wallet", "qtcl_sign_message", "qtcl_get_balance",
+      "qtcl_get_utxos", "qtcl_send_transaction", "qtcl_get_transaction",
+      "qtcl_get_chain_info", "qtcl_get_block", "qtcl_get_recent_transactions",
+      "qtcl_get_quantum_metrics", "qtcl_get_oracle_registry", "qtcl_get_peers",
+      "qtcl_get_price", "qtcl_retro_settle", "qtcl_repair_utxos"
+    ]
+  },
+  "resources": {"count": 4, "uris": ["chain://height", "chain://health", "price://qtcl-usd", "docs://capability"]},
+  "authentication": {
+    "type": "none",
+    "description": "Open public MCP endpoint. Read tools need no auth. qtcl_send_transaction requires on-chain HypΓ Schnorr-Γ signatures; private keys never leave the client."
+  },
+  "transaction_workflow": {
+    "description": "Exact steps to send QTCL — all fields must be consistent between signing and submission",
+    "steps": [
+      {"step": 1, "call": "qtcl_get_balance(from_address)", "purpose": "Verify sufficient funds"},
+      {"step": 2, "code": "nonce = int(time.time() * 1000)", "purpose": "Millisecond epoch nonce", "critical": "Must be > 1700000000000. Sequential ints cause nonce_replay rejection. Mempool rejects nonce <= confirmed."},
+      {"step": 3, "code": "payload = json.dumps({'sender':from_addr,'recipient':to_addr,'amount':amount_float,'nonce':nonce}, sort_keys=True)", "purpose": "Canonical signing payload — sort_keys=True is mandatory"},
+      {"step": 4, "code": "msg_hex = hashlib.sha3_256(payload.encode()).hexdigest()", "purpose": "64-char hex SHA3-256 of payload"},
+      {"step": 5, "call": "sign_result = qtcl_sign_message(message_hex=msg_hex, private_key=private_key)", "purpose": "HypΓ Schnorr-Γ sign; may time out once on cold start — retry once"},
+      {"step": 6, "call": "qtcl_send_transaction(from_address=from_addr, to_address=to_addr, amount=amount_float, signature=sign_result['signature_for_tx'], public_key=public_key, nonce=nonce)", "critical": "signature MUST be sign_result['signature_for_tx'] verbatim — full JSON-encoded canonical dict. Do NOT pass sub-fields. nonce MUST match step 2."}
+    ],
+    "common_errors": {
+      "nonce_replay": "nonce <= confirmed. Fix: use int(time.time()*1000), never sequential ints.",
+      "HypΓ_verification_failed_invalid_v2": "Wrong sig format. Fix: pass signature_for_tx string, not R-matrix sub-dict.",
+      "missing_fields_signature": "signature param missing. Fix: set signature=sign_result['signature_for_tx'].",
+      "sign_timeout": "qtcl_hyp_signMessage timed out (5s). Fix: retry once — engine was cold-starting."
+    }
+  },
+  "contact": {"github": "https://github.com/qtcl-network", "explorer": "https://qtcl-blockchain.koyeb.app/"}
+}

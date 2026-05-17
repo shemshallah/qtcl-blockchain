@@ -387,27 +387,37 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
     ) -> str:
         """
         Submit a signed UTXO transaction. Flat fee: 1 qsat. ~18s finality.
-        Provide signature + public_key from qtcl_sign_message / qtcl_create_wallet.
+
+        WORKFLOW:
+          1. nonce = int(time.time() * 1000)   # ms epoch, e.g. ~1779000000000
+          2. payload = json.dumps({"sender":from_addr,"recipient":to_addr,
+                                   "amount":amount_float,"nonce":nonce}, sort_keys=True)
+          3. msg_hex = sha3_256(payload).hexdigest()
+          4. sign_result = qtcl_sign_message(message_hex=msg_hex, private_key=key)
+          5. qtcl_send_transaction(..., signature=sign_result["signature_for_tx"],
+                                   public_key=public_key, nonce=SAME_nonce)
+
+        CRITICAL: nonce must be ms-epoch (>1700000000000). Sequential ints cause nonce_replay.
+        signature must be the 'signature_for_tx' field from qtcl_sign_message — full JSON string.
         """
-        # _extract_sig_for_mempool handles every nesting variant produced by the
-        # MCP signing pipeline and guarantees public_key is embedded so
-        # HypMempoolVerifier.verify() never fails on missing keys.
         sig_to_send = _extract_sig_for_mempool(signature, public_key)
 
         p: dict = {"from_address": from_address, "to_address": to_address, "amount": amount}
-        # FIX: nonce MUST always be present (mempool requires it). Auto-generate if 0.
-        if nonce:
+        # Nonce: ms timestamp guarantees > any confirmed nonce in the mempool
+        if nonce and nonce > 1_000_000_000_000:   # looks like a real ms-epoch nonce
             p["nonce"] = nonce
+        elif nonce:
+            # Caller passed something small — silently upgrade to ms-epoch to avoid replay
+            p["nonce"] = int(time.time() * 1000)
         else:
-            p["nonce"] = int(time.time() * 1e9)  # nanosecond timestamp
+            p["nonce"] = int(time.time() * 1000)
         if memo:
             p["memo"] = memo
         if sig_to_send:
             p["signature"] = sig_to_send
         if public_key:
-            p["public_key"] = public_key       # top-level for compatibility
-            p["sender_public_key_hex"] = public_key  # mempool metadata field
-        # _rpc_submitTransaction expects params[0] = tx dict
+            p["public_key"]            = public_key
+            p["sender_public_key_hex"] = public_key
         result = qtcl_rpc("qtcl_submitTransaction", [p])
         return json.dumps(result, indent=2, default=str)
 
@@ -529,7 +539,7 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
             "name":          "QTCL — Quantum Temporal Coherence Ledger",
             "version":       MCP_SERVER_VERSION,
             "protocol":      f"JSON-RPC 2.0 + MCP {MCP_PROTOCOL_VERSION}",
-            "tools":         12,
+            "tools":         15,
             "resources":     4,
             "transports":    ["streamable-http", "stdio"],
             "cryptography":  "Schnorr-Γ over PSL(2,R) — Fiat-Shamir on hyperbolic Fuchsian group",
@@ -550,16 +560,17 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         elif task == "send":
             return ("You are helping a user send QTCL. Workflow:\n"
                     "1. qtcl_get_balance(from_address) — check funds\n"
-                    "2. Pick nonce = int(time.time() * 1e9)\n"
-                    "3. Build signing payload: json.dumps({\"sender\": from_addr, "
-                    "\"recipient\": to_addr, \"amount\": amount_float, \"nonce\": nonce}, "
-                    "sort_keys=True)\n"
-                    "4. SHA3-256 hash the payload → 64 hex chars\n"
-                    "5. qtcl_sign_message(message_hex=hash, private_key=key)\n"
-                    "6. qtcl_send_transaction(from, to, amount, "
-                    "signature=full_result_json, public_key=key, nonce=SAME_nonce)\n"
-                    "CRITICAL: nonce + amount must match between step 3 and step 6.\n"
-                    "Flat fee: 1 qsat. ~18s finality.")
+                    "2. nonce = int(time.time() * 1000)  [MILLISECOND epoch ~1779000000000]\n"
+                    "   NEVER use small sequential ints — causes nonce_replay rejection.\n"
+                    "3. payload = json.dumps({'sender':from_addr,'recipient':to_addr,"
+                    "'amount':amount_float,'nonce':nonce}, sort_keys=True)\n"
+                    "   msg_hex = hashlib.sha3_256(payload.encode()).hexdigest()\n"
+                    "4. sign_result = qtcl_sign_message(message_hex=msg_hex, private_key=key)\n"
+                    "5. qtcl_send_transaction(from_address, to_address, amount,\n"
+                    "       signature=sign_result['signature_for_tx'],\n"
+                    "       public_key=public_key, nonce=SAME_nonce_as_step_2)\n"
+                    "INVARIANTS: nonce + amount identical in steps 2 and 5.\n"
+                    "signature = sign_result['signature_for_tx'] verbatim. Flat fee: 1 qsat.")
         return "How can I help you with QTCL today?"
 
     return mcp
@@ -593,7 +604,7 @@ def get_health_dict() -> dict:
         "protocol":        MCP_PROTOCOL_VERSION,
         "transport":       "streamable-http",
         "hyp_engine":      "in-process" if engine_ok else "rpc-fallback",
-        "tools":           12,
+        "tools":           15,
         "sdk":             "mcp-python-sdk" if SDK_AVAILABLE else "legacy",
         "rpc_url":         QTCL_RPC_URL,
     }

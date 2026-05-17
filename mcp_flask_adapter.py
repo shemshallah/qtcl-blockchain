@@ -208,7 +208,9 @@ _TOOLS: List[Dict[str, Any]] = [
             "sort_keys=True)) → pass the 64-char hex as message_hex. "
             "The nonce MUST match the nonce you will use in qtcl_send_transaction. "
             "Returns the full signature dict (with canonical R/Z matrix fields) — "
-            "pass the entire JSON output as the signature field to qtcl_send_transaction."
+            "pass the entire JSON output as the signature field to qtcl_send_transaction. "
+            "CRITICAL: use the 'signature_for_tx' field from the response as the "
+            "'signature' argument to qtcl_send_transaction — do not extract sub-fields."
         ),
         "inputSchema": {
             "type": "object",
@@ -250,9 +252,14 @@ _TOOLS: List[Dict[str, Any]] = [
         "description": (
             "Submit a signed UTXO transaction to the QTCL network. "
             "Flat fee: 1 qsat. Finality: ~18 seconds. "
-            "Provide the full signature JSON from qtcl_sign_message as the signature field, "
-            "and the public_key from qtcl_create_wallet. The nonce must match the nonce "
-            "used in the signing payload. If nonce is omitted, one is auto-generated."
+            "WORKFLOW: (1) pick nonce = int(time.time()*1000) [ms epoch]. "
+            "(2) build payload = JSON.dumps({sender,recipient,amount,nonce}, sort_keys=True). "
+            "(3) hash = SHA3-256(payload) as 64-char hex. "
+            "(4) call qtcl_sign_message(message_hex=hash, private_key=key). "
+            "(5) pass the 'signature_for_tx' field from step 4 as the 'signature' arg here, "
+            "with the SAME nonce used in steps 1-4. "
+            "CRITICAL: nonce must be a millisecond timestamp (>1700000000000) to avoid "
+            "nonce_replay rejection. Never use sequential integers."
         ),
         "inputSchema": {
             "type": "object",
@@ -261,9 +268,24 @@ _TOOLS: List[Dict[str, Any]] = [
                 "to_address":   {"type": "string", "description": "Recipient's 64-char hex QTCL address"},
                 "amount":       {"type": "number", "description": "Amount in QTCL (not qsat). 1 QTCL = 100 qsat."},
                 "memo":         {"type": "string", "description": "Optional transaction memo (max 256 chars)"},
-                "signature":    {"type": "string", "description": "Full signature JSON from qtcl_sign_message (includes R, Z, challenge, c_full)"},
+                "signature":    {
+                    "type": "string",
+                    "description": (
+                        "Use the 'signature_for_tx' value from qtcl_sign_message output — "
+                        "it is the full canonical sig JSON string with R, Z, c_full, challenge fields. "
+                        "Do NOT extract sub-fields. Pass signature_for_tx verbatim."
+                    ),
+                },
                 "public_key":   {"type": "string", "description": "HypΓ public key hex from qtcl_create_wallet"},
-                "nonce":        {"type": "integer", "description": "Replay-prevention nonce (must match signing payload nonce). Auto-generated if omitted."},
+                "nonce":        {
+                    "type": "integer",
+                    "description": (
+                        "Replay-prevention nonce — MUST be a millisecond epoch timestamp "
+                        "(int(time.time()*1000), e.g. ~1779000000000). "
+                        "Must match the nonce used in the signing payload. "
+                        "Auto-generated as ms timestamp if omitted."
+                    ),
+                },
             },
             "required": ["from_address", "to_address", "amount"],
             "additionalProperties": False,
@@ -355,6 +377,33 @@ _TOOLS: List[Dict[str, Any]] = [
             "QTCL network quantum coherence metrics and valuation signals. "
             "Note: QTCL has no public USD exchange. Returns W-state fidelity, "
             "entanglement witness, and oracle coherence as network health proxy."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "qtcl_retro_settle",
+        "description": (
+            "Retroactively settle all blocks whose UTXOs are missing from address_utxos. "
+            "Safe to call repeatedly — idempotent. Returns counts of settled/skipped/error blocks. "
+            "Use this when miner balance is lower than expected after mining blocks."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "qtcl_repair_utxos",
+        "description": (
+            "Nuclear UTXO repair: bypasses settlement machinery and directly inserts missing "
+            "UTXOs from the transactions table. Use when qtcl_retro_settle reports success "
+            "but UTXOs are still missing. Commits per-UTXO for maximum isolation. "
+            "Returns repaired_blocks, repaired_utxos, recomputed_wallets counts."
         ),
         "inputSchema": {
             "type": "object",
@@ -466,22 +515,43 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rpc_url: str) -> Dict[str, A
                 return _err("message_hex and private_key are required")
             if len(mhex) != 64:
                 return _err(f"message_hex must be 64 hex chars (32-byte hash); got {len(mhex)}")
-            # server.py qtcl_hyp_signMessage returns the full sig dict with canonical fields
             r = _rpc("qtcl_hyp_signMessage", {"message": mhex, "private_key": pk}, rpc_url)
-            # FIX: The result from RPC is a flat dict:
-            #   {signature: hex_str, challenge: hex_str, R: {...}, Z: {...}, c_full: ..., ...}
-            # The MCP caller needs to pass the ENTIRE dict (as a JSON string) as the
-            # "signature" field to qtcl_send_transaction. Package it so the caller can
-            # just use result.signature directly:
-            #   result.signature_for_tx = JSON string of the full sig dict
-            #   (plus the raw fields for inspection)
-            sig_for_tx = json.dumps(r, default=str)
-            r["signature_for_tx"] = sig_for_tx
-            r["_usage"] = (
+
+            # ── Normalize: build the flat canonical dict the mempool verifier wants ──
+            # The RPC may return a nested struct where r["signature"] is a JSON string
+            # wrapping the actual {a,b,c,d} Schnorr-Γ R-matrix. We need the FLAT
+            # canonical layout: {R:{a,b,c,d}, Z:{a,b,c,d}, c_full, c_exp, challenge, ...}
+            # at top level. Flatten now so send_transaction gets a clean object.
+            canonical = dict(r)
+            sig_inner = canonical.get("signature", "")
+            if isinstance(sig_inner, str):
+                try:
+                    parsed_inner = json.loads(sig_inner)
+                    if isinstance(parsed_inner, dict) and any(k in parsed_inner for k in ("a", "b", "R")):
+                        # It's an R-matrix dict — hoist it under "R" if not already there
+                        if "R" not in canonical:
+                            canonical["R"] = parsed_inner
+                        # Remove the nested json-string "signature" to avoid confusion
+                        canonical.pop("signature", None)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Guarantee c_full / challenge alias both present
+            if "c_full" in canonical and "challenge" not in canonical:
+                canonical["challenge"] = canonical["c_full"]
+            elif "challenge" in canonical and "c_full" not in canonical:
+                canonical["c_full"] = canonical["challenge"]
+
+            # signature_for_tx = the ENTIRE canonical dict JSON-encoded.
+            # Claude MUST pass this verbatim as the "signature" field to
+            # qtcl_send_transaction — do NOT extract sub-fields.
+            sig_for_tx = json.dumps(canonical, default=str)
+            canonical["signature_for_tx"] = sig_for_tx
+            canonical["_usage"] = (
                 "Pass 'signature_for_tx' as the 'signature' parameter to qtcl_send_transaction. "
                 "It contains the full sig dict (R, Z, c_full, challenge) needed for verification."
             )
-            return _ok(r)
+            return _ok(canonical)
 
         # ── Balance ─────────────────────────────────────────────────────────
         elif name == "qtcl_get_balance":
@@ -516,22 +586,31 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rpc_url: str) -> Dict[str, A
             if memo:
                 p["memo"] = memo
 
-            # Nonce — MUST pass through even if 0 (mempool requires it)
-            # FIX: old code filtered nonce==0 with `v != 0`, breaking required field
+            # ── Nonce ────────────────────────────────────────────────────────
+            # The mempool tracks confirmed nonces and rejects anything <= confirmed.
+            # Confirmed nonces are in the millisecond epoch range (~1.78e12).
+            # Use ms timestamp so auto-generated nonces are always above any
+            # previously confirmed nonce. Never use sequential integers (replay risk).
             nonce_val = args.get("nonce")
             if nonce_val is not None:
                 p["nonce"] = int(nonce_val)
             else:
-                # Auto-generate nonce if not provided (nanosecond timestamp)
-                p["nonce"] = int(time.time() * 1e9)
+                import time as _time
+                p["nonce"] = int(_time.time() * 1000)  # ms epoch — always > confirmed
 
-            # Signature — ensure full sig dict with canonical fields is embedded
-            # Accept signature_for_tx (from qtcl_sign_message output) as alias
+            # ── Signature normalization ───────────────────────────────────────
+            # Accept:
+            #   (a) signature_for_tx JSON string from qtcl_sign_message — PREFERRED
+            #   (b) full sig dict JSON string with R, Z, c_full at top level
+            #   (c) nested wrapper {"signature": "{...}", "challenge": "..."}
+            # All paths normalize to a flat canonical dict with public_key embedded.
             sig_raw = args.get("signature", "") or args.get("signature_for_tx", "")
             pub_key = args.get("public_key", "")
+
             if sig_raw:
-                # Parse signature string to dict if needed
-                sig_dict = None
+                sig_dict: Optional[Dict] = None
+
+                # Parse outer layer
                 if isinstance(sig_raw, str):
                     try:
                         sig_dict = json.loads(sig_raw)
@@ -540,20 +619,49 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rpc_url: str) -> Dict[str, A
                 elif isinstance(sig_raw, dict):
                     sig_dict = dict(sig_raw)
 
-                if sig_dict:
-                    # Inject public_key into sig dict if not already present
+                if isinstance(sig_dict, dict):
+                    # If this is the full qtcl_sign_message output (has signature_for_tx),
+                    # unwrap to the canonical inner dict
+                    if "signature_for_tx" in sig_dict:
+                        inner_raw = sig_dict["signature_for_tx"]
+                        try:
+                            inner = json.loads(inner_raw) if isinstance(inner_raw, str) else inner_raw
+                            if isinstance(inner, dict):
+                                sig_dict = inner
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+
+                    # If still has nested "signature" string wrapping an {a,b,c,d} R-matrix,
+                    # flatten it: hoist inner dict as "R" at top level
+                    inner_sig = sig_dict.get("signature", "")
+                    if isinstance(inner_sig, str) and inner_sig.startswith("{"):
+                        try:
+                            parsed = json.loads(inner_sig)
+                            if isinstance(parsed, dict) and any(k in parsed for k in ("a", "b", "R")):
+                                if "R" not in sig_dict:
+                                    sig_dict["R"] = parsed
+                                sig_dict.pop("signature", None)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+
+                    # Guarantee challenge/c_full alias
+                    if "c_full" in sig_dict and "challenge" not in sig_dict:
+                        sig_dict["challenge"] = sig_dict["c_full"]
+                    elif "challenge" in sig_dict and "c_full" not in sig_dict:
+                        sig_dict["c_full"] = sig_dict["challenge"]
+
+                    # Embed public_key unconditionally — mempool always needs it
                     if pub_key:
-                        if not sig_dict.get("public_key"):
-                            sig_dict["public_key"] = pub_key
-                        if not sig_dict.get("public_key_hex"):
-                            sig_dict["public_key_hex"] = pub_key
+                        sig_dict["public_key"]     = pub_key
+                        sig_dict["public_key_hex"] = pub_key
+
                     p["signature"] = json.dumps(sig_dict, default=str)
                 else:
                     p["signature"] = sig_raw
 
-            # Public key fields — mempool checks both top-level and inside sig
+            # Public key fields at top level too — belt + suspenders
             if pub_key:
-                p["public_key"] = pub_key
+                p["public_key"]           = pub_key
                 p["sender_public_key_hex"] = pub_key
 
             # server.py _rpc_submitTransaction: params[0] dict
@@ -632,6 +740,16 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rpc_url: str) -> Dict[str, A
                 "metrics": r,
             })
 
+        # ── Retro settle ────────────────────────────────────────────────────
+        elif name == "qtcl_retro_settle":
+            r = _rpc("qtcl_retroSettle", [], rpc_url)
+            return _ok(r)
+
+        # ── Repair UTXOs ────────────────────────────────────────────────────
+        elif name == "qtcl_repair_utxos":
+            r = _rpc("qtcl_repairUTXOs", [], rpc_url)
+            return _ok(r)
+
         else:
             return _err(f"Unknown tool: {name!r}. Call tools/list for valid tool names.")
 
@@ -691,16 +809,25 @@ def _get_prompt(name: str, args: Dict[str, Any]) -> List[Dict[str, Any]]:
             text = (
                 "You are helping a user send QTCL. The workflow is:\n"
                 "1. qtcl_get_balance(from_address) — verify sufficient funds\n"
-                "2. Choose a nonce (e.g. int(time.time() * 1e9) — nanosecond timestamp)\n"
-                "3. Build signing payload: JSON.dumps({\"sender\": from_addr, "
-                "\"recipient\": to_addr, \"amount\": amount_float, \"nonce\": nonce_int}, "
-                "sort_keys=True)\n"
-                "4. Compute SHA3-256 hash of that payload → 64-char hex\n"
-                "5. qtcl_sign_message(message_hex=that_hash, private_key=key) — authorize\n"
-                "6. qtcl_send_transaction(from_address, to_address, amount, "
-                "signature=full_sig_json, public_key=key, nonce=same_nonce) — submit\n"
-                "CRITICAL: The nonce in step 3 MUST match the nonce in step 6.\n"
-                "The amount in step 3 MUST match the amount in step 6 (both in QTCL, not qsat).\n"
+                "2. Choose nonce = int(time.time() * 1000)  [MILLISECOND epoch, e.g. ~1779000000000]\n"
+                "   CRITICAL: nonce must be a ms-epoch integer. Never use small sequential ints —\n"
+                "   the mempool tracks confirmed nonces and rejects nonce_replay if nonce <= confirmed.\n"
+                "3. Build signing payload:\n"
+                "   import json, hashlib\n"
+                "   payload = json.dumps({\"sender\": from_addr, \"recipient\": to_addr,\n"
+                "                         \"amount\": amount_float, \"nonce\": nonce}, sort_keys=True)\n"
+                "   msg_hex = hashlib.sha3_256(payload.encode()).hexdigest()  # 64 hex chars\n"
+                "4. sign_result = qtcl_sign_message(message_hex=msg_hex, private_key=private_key)\n"
+                "5. qtcl_send_transaction(\n"
+                "       from_address=from_addr,\n"
+                "       to_address=to_addr,\n"
+                "       amount=amount_float,\n"
+                "       signature=sign_result['signature_for_tx'],  # THE FULL JSON STRING\n"
+                "       public_key=public_key,\n"
+                "       nonce=nonce  # SAME nonce as step 2\n"
+                "   )\n"
+                "INVARIANTS: nonce + amount must be identical in steps 2-5.\n"
+                "signature must be the 'signature_for_tx' value — not sub-fields.\n"
                 "Flat fee: 1 qsat. Finality: ~18 seconds."
             )
         else:
