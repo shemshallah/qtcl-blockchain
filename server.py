@@ -7653,30 +7653,44 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # thread started above, or as a sidecar. POST to its submitBlock RPC so the
         # AttestationCache has the block and ConsensusWorker can generate attestations.
         def _forward_to_oracle_consensus():
-            try:
-                import urllib.request as _ur, json as _json2, os as _os2
-                _op = int(_os2.environ.get("ORACLE_PORT", "9092"))
-                _oracle_rpc_url = f"http://127.0.0.1:{_op}/rpc"
-                _payload = _json2.dumps({
-                    "jsonrpc": "2.0", "method": "qtcl_submitBlock", "id": 1,
-                    "params": {
-                        "height": height, "block_hash": block_hash,
-                        "parent_hash": parent_hash, "merkle_root": merkle_root,
-                        "timestamp": timestamp_s, "nonce": nonce,
-                        "difficulty": difficulty_bits, "miner_address": miner_address,
-                        "transactions": txs or [],
-                    }
-                }).encode()
-                req = _ur.Request(_oracle_rpc_url, data=_payload,
-                                  headers={"Content-Type": "application/json"})
-                with _ur.urlopen(req, timeout=5) as _r:
-                    _resp_data = _json2.loads(_r.read())
-                    logger.info(
-                        f"[RPC-submitBlock] ✅ Oracle consensus server received h={height}: "
-                        f"{_resp_data.get('result', {}).get('status', '?')}"
-                    )
-            except Exception as _oe:
-                logger.debug(f"[RPC-submitBlock] Oracle consensus forward (non-critical): {_oe}")
+            """Forward block to oracle BFT server with retry.
+
+            FIX v4.0: single attempt with 5s timeout silently failed when oracle
+            wasn't fully started yet. Now retries 3× with 0.5s backoff — oracle
+            typically starts within 1-2s of gunicorn worker init.
+            """
+            import urllib.request as _ur, json as _json2, os as _os2
+            _op = int(_os2.environ.get("ORACLE_PORT", "9092"))
+            _oracle_rpc_url = f"http://127.0.0.1:{_op}/rpc"
+            _payload = _json2.dumps({
+                "jsonrpc": "2.0", "method": "qtcl_submitBlock", "id": 1,
+                "params": {
+                    "height": height, "block_hash": block_hash,
+                    "parent_hash": parent_hash, "merkle_root": merkle_root,
+                    "timestamp": timestamp_s, "nonce": nonce,
+                    "difficulty": difficulty_bits, "miner_address": miner_address,
+                    "transactions": txs or [],
+                }
+            }).encode()
+            for _attempt in range(3):
+                try:
+                    req = _ur.Request(_oracle_rpc_url, data=_payload,
+                                      headers={"Content-Type": "application/json"})
+                    with _ur.urlopen(req, timeout=4) as _r:
+                        _resp_data = _json2.loads(_r.read())
+                        logger.info(
+                            f"[RPC-submitBlock] ✅ Oracle forward h={height} attempt={_attempt+1}: "
+                            f"status={_resp_data.get('result', {}).get('status', '?')}"
+                        )
+                        return  # success
+                except Exception as _oe:
+                    if _attempt < 2:
+                        time.sleep(0.5)
+                    else:
+                        logger.warning(
+                            f"[RPC-submitBlock] ⚠️  Oracle forward h={height} failed after 3 attempts: {_oe} "
+                            f"— oracle will fall back to DB on getBlockStatus"
+                        )
 
         threading.Thread(target=_forward_to_oracle_consensus, daemon=True,
                          name=f"OracleForward-{height}").start()
