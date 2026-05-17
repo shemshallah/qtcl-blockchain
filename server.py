@@ -5569,8 +5569,38 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
                 limit = 50
         limit = min(max(int(limit), 1), 200)
 
-        # Return empty peer list immediately — no DB
-        return _rpc_ok({"peers": [], "count": 0, "timestamp": time.time()}, rpc_id)
+        # ── Merge both in-memory peer stores ──────────────────────────────────
+        merged: Dict[str, dict] = {}
+
+        # 1. _LIVE_PEERS_CACHE (from registerPeer RPC — authoritative)
+        with _LIVE_PEERS_LOCK:
+            for nid, p in _LIVE_PEERS_CACHE.items():
+                merged[nid] = {
+                    "node_id": nid,
+                    "external_addr": p.get("external_addr", ""),
+                    "chain_height": p.get("chain_height", 0),
+                    "last_seen": p.get("last_seen", 0),
+                    "caller_ip": p.get("caller_ip", ""),
+                    "ban_score": p.get("ban_score", 0),
+                }
+
+        # 2. _p2p_dht_table (from heartbeat/DHT exchange — supplement)
+        with _p2p_dht_lock:
+            for pid, peer in _p2p_dht_table.items():
+                if pid not in merged:
+                    merged[pid] = {
+                        "node_id": pid,
+                        "external_addr": peer.external_addr,
+                        "chain_height": peer.chain_height,
+                        "last_seen": peer.last_seen,
+                        "caller_ip": "",
+                        "ban_score": 0,
+                    }
+
+        # Sort by last_seen descending, apply limit
+        peers_list = sorted(merged.values(), key=lambda x: x.get("last_seen", 0), reverse=True)[:limit]
+
+        return _rpc_ok({"peers": peers_list, "count": len(peers_list), "timestamp": time.time()}, rpc_id)
 
     except Exception as e:
         logger.debug(f"[RPC-METHOD] qtcl_getPeers: {e}")
@@ -7994,70 +8024,87 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 def _broadcast_block_to_peers(compact_block: dict) -> int:
     """Broadcast a newly accepted block to all connected P2P peers.
 
+    Uses JSON-RPC qtcl_receiveDHTTable-style gossip over /rpc endpoint.
+    Merges peers from DB (peer_registry) + in-memory (_p2p_dht_table + _LIVE_PEERS_CACHE).
+    Detects HTTPS vs HTTP from external_addr format.
     Returns number of peers notified.
     """
     try:
-        # Get connected peers from peer_registry
         peers_notified = 0
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT DISTINCT node_id, external_addr 
-                FROM peer_registry 
-                WHERE last_seen > NOW() - INTERVAL '2 minutes'
-            """)
-            peers = cur.fetchall()
+        peer_targets: Dict[str, str] = {}  # node_id → url
 
-        if not peers:
+        # Source 1: DB peer_registry
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT node_id, external_addr
+                    FROM peer_registry
+                    WHERE last_seen > NOW() - INTERVAL '5 minutes'
+                      AND ban_score < 100
+                    LIMIT %s
+                """, (P2P_MAX_PEERS,))
+                for nid, addr in cur.fetchall():
+                    if nid and addr:
+                        peer_targets[nid] = str(addr).strip()
+        except Exception as _dbe:
+            logger.debug(f"[P2P-BROADCAST] DB fetch: {_dbe}")
+
+        # Source 2: In-memory _LIVE_PEERS_CACHE
+        with _LIVE_PEERS_LOCK:
+            for nid, p in _LIVE_PEERS_CACHE.items():
+                addr = p.get("external_addr", "")
+                if nid not in peer_targets and addr:
+                    peer_targets[nid] = addr
+
+        # Source 3: In-memory _p2p_dht_table
+        with _p2p_dht_lock:
+            for pid, peer in _p2p_dht_table.items():
+                if pid not in peer_targets and peer.external_addr:
+                    peer_targets[pid] = peer.external_addr
+
+        if not peer_targets:
             logger.debug("[P2P-BROADCAST] No active peers to broadcast to")
             return 0
 
-        # Broadcast to each peer via HTTP POST to their /p2p/gossip endpoint
-        for node_id, external_addr in peers:
+        # Build JSON-RPC gossip payload
+        block_msg = json.dumps({
+            "jsonrpc": "2.0",
+            "method": "qtcl_peerHeartbeat",
+            "params": {
+                "peer_id": ORACLE_ID,
+                "chain_height": compact_block.get("height", 0),
+                "block_event": compact_block,
+            },
+            "id": 1,
+        }).encode()
+
+        def _fire_block_gossip(url: str, payload: bytes, _nid: str) -> None:
             try:
-                if not external_addr:
+                req = Request(url, data=payload, headers={"Content-Type": "application/json"})
+                with urlopen(req, timeout=3) as resp:
+                    pass  # fire-and-forget
+            except Exception as _ge:
+                logger.debug(f"[P2P-BROADCAST] gossip to {_nid[:16]} failed: {_ge}")
+
+        for node_id, external_addr in peer_targets.items():
+            if node_id == ORACLE_ID:
+                continue
+            try:
+                url = _resolve_peer_rpc_url(external_addr)
+                if not url:
                     continue
-                # Normalize: strip scheme if present, then reconstruct
-                _addr = str(external_addr).strip()
-                if _addr.startswith("http://"):
-                    _addr = _addr[7:]
-                elif _addr.startswith("https://"):
-                    _addr = _addr[8:]
-                if ":" not in _addr:
-                    continue
-                host, port = _addr.rsplit(":", 1)
-                gossip_url = f"http://{host}:{port}/p2p/gossip"
-
-                # Send the block as event type 10 (BLOCK_SOLVED_SERVER)
-                payload = {
-                    "event_type": 10,
-                    "data": compact_block,
-                    "timestamp": time.time(),
-                }
-
-                # Non-blocking broadcast - don't wait for response
-                import threading
-
-                def _fire_gossip(url: str, pl: dict, _nid: str) -> None:
-                    try:
-                        requests.post(url, json=pl, timeout=2)
-                    except Exception as _ge:
-                        logger.debug(f"[P2P-BROADCAST] gossip to {_nid[:16]} failed: {_ge}")
-
                 threading.Thread(
-                    target=_fire_gossip,
-                    args=(gossip_url, payload, node_id),
+                    target=_fire_block_gossip,
+                    args=(url, block_msg, node_id),
                     daemon=True,
                     name=f"Broadcast-{node_id[:8]}",
                 ).start()
-
                 peers_notified += 1
             except Exception as _peer_err:
-                logger.debug(
-                    f"[P2P-BROADCAST] Failed to notify peer {node_id[:16]}: {_peer_err}"
-                )
+                logger.debug(f"[P2P-BROADCAST] Failed to notify {node_id[:16]}: {_peer_err}")
 
         logger.info(
-            f"[P2P-BROADCAST] 📡 Block h={compact_block.get('height')} broadcast to {peers_notified}/{len(peers)} peers"
+            f"[P2P-BROADCAST] 📡 Block h={compact_block.get('height')} broadcast to {peers_notified}/{len(peer_targets)} peers"
         )
         return peers_notified
 
@@ -8210,6 +8257,60 @@ def _rpc_getMiningETA(params: Any, rpc_id: Any) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTERPRISE P2P NETWORK — Inline Implementation (no external files)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _resolve_peer_rpc_url(external_addr: str) -> Optional[str]:
+    """Convert an external_addr (ip:port, hostname, or full URL) to an /rpc URL.
+
+    Rules:
+      - Already a URL (https://... or http://...): append /rpc if missing
+      - Contains '.koyeb.app' or '.app' domain: force HTTPS
+      - Raw ip:port (e.g. 192.168.1.5:9091): use http://
+      - Bare hostname without port: use https:// (assume reverse proxy)
+    """
+    if not external_addr:
+        return None
+    addr = external_addr.strip()
+
+    # Already a full URL
+    if addr.startswith("http://") or addr.startswith("https://"):
+        if not addr.endswith("/rpc"):
+            addr = addr.rstrip("/") + "/rpc"
+        return addr
+
+    # Domain-based (Koyeb, cloud): force HTTPS, no port
+    if "." in addr and not any(c.isdigit() for c in addr.split(":")[0].split(".")[-1]):
+        host = addr.split(":")[0]  # strip port if present
+        return f"https://{host}/rpc"
+
+    # Raw ip:port
+    if ":" in addr:
+        return f"http://{addr}/rpc"
+
+    # Bare hostname — assume HTTPS behind reverse proxy
+    return f"https://{addr}/rpc"
+
+
+def _sync_peer_stores():
+    """Sync _LIVE_PEERS_CACHE entries into _p2p_dht_table so gossip fan-out sees all peers."""
+    with _LIVE_PEERS_LOCK:
+        snapshot = dict(_LIVE_PEERS_CACHE)
+    with _p2p_dht_lock:
+        for nid, p in snapshot.items():
+            if nid not in _p2p_dht_table:
+                _p2p_dht_table[nid] = P2PPeer(
+                    peer_id=nid,
+                    wallet_address="",
+                    external_addr=p.get("external_addr", ""),
+                    port=9091,
+                    public_key=p.get("pubkey_hash", ""),
+                    chain_height=p.get("chain_height", 0),
+                    last_seen=p.get("last_seen", time.time()),
+                    first_seen=p.get("last_seen", time.time()),
+                    is_alive=True,
+                )
+
+
 P2P_BROADCAST_INTERVAL = 30
 P2P_PEER_TIMEOUT = 300
 P2P_MAX_PEERS = 100
@@ -8436,6 +8537,22 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
                     is_alive=True,
                 )
                 _p2p_dht_table[peer_id] = p
+        # Also update _LIVE_PEERS_CACHE so getPeers sees heartbeated peers
+        with _LIVE_PEERS_LOCK:
+            if peer_id not in _LIVE_PEERS_CACHE:
+                _LIVE_PEERS_CACHE[peer_id] = {
+                    "node_id": peer_id,
+                    "external_addr": external_addr,
+                    "chain_height": chain_height,
+                    "last_seen": time.time(),
+                    "caller_ip": "",
+                    "ban_score": 0,
+                }
+            else:
+                _LIVE_PEERS_CACHE[peer_id]["last_seen"] = time.time()
+                _LIVE_PEERS_CACHE[peer_id]["chain_height"] = max(
+                    _LIVE_PEERS_CACHE[peer_id].get("chain_height", 0), chain_height
+                )
         return {"status": "ok", "peer_id": peer_id, "timestamp": time.time()}
     except Exception as e:
         logger.error(f"[P2P-RPC] peerHeartbeat error: {e}")
@@ -9791,6 +9908,9 @@ def _p2p_fanout_broadcast():
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
+    # Sync _LIVE_PEERS_CACHE → _p2p_dht_table so fan-out sees all registered peers
+    _sync_peer_stores()
+
     with _p2p_dht_lock:
         peers = list(_p2p_dht_table.values())
     if len(peers) < 2:
@@ -9813,13 +9933,10 @@ def _p2p_fanout_broadcast():
         if peer.peer_id == ORACLE_ID:
             continue
         try:
-            # Construct URL with port - external_addr may or may not include port
-            if ":" in peer.external_addr:
-                # Already has port in external_addr (e.g., "192.168.1.100:9091")
-                url = f"http://{peer.external_addr}/rpc"
-            else:
-                # Use port from peer object
-                url = f"http://{peer.external_addr}:{peer.port}/rpc"
+            url = _resolve_peer_rpc_url(peer.external_addr)
+            if not url:
+                failed += 1
+                continue
             payload = json.dumps(
                 {
                     "jsonrpc": "2.0",
