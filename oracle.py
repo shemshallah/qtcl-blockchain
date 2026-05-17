@@ -801,6 +801,28 @@ class ConsensusWorker(threading.Thread):
                                          daemon=True, name=f"OracleDBWrite-{height}").start()
                 except Exception as _hke:
                     logger.debug(f"[CONSENSUS-WORKER] finalize hook error h={height}: {_hke}")
+            # FIX: query miner's settled balance so the SSE event carries
+            # miner_balance_qtcl — client updates display immediately.
+            _oracle_miner_balance = 0.0
+            _oracle_reward_qtcl = reward
+            try:
+                from globals import TessellationRewardSchedule as _TRS_ora
+                _oracle_reward_qtcl = _TRS_ora.get_miner_reward_qtcl(height)
+            except Exception:
+                pass
+            try:
+                import server as _srv
+                with _srv.get_db_cursor() as _ora_cur:
+                    _ora_cur.execute(
+                        "SELECT COALESCE(SUM(amount),0) FROM address_utxos "
+                        "WHERE address=%s AND spent=FALSE",
+                        (block.miner_address,)
+                    )
+                    _ora_row = _ora_cur.fetchone()
+                    if _ora_row and _ora_row[0]:
+                        _oracle_miner_balance = int(_ora_row[0]) / 100.0
+            except Exception as _ora_bal_err:
+                logger.debug(f"[CONSENSUS-WORKER] oracle balance query h={height}: {_ora_bal_err}")
             self._push_sse({
                 "event_type": "block_finalized",
                 "height": height,
@@ -809,6 +831,8 @@ class ConsensusWorker(threading.Thread):
                 "oracle_count": max(count, CONSENSUS_THRESHOLD),
                 "finalized": True,
                 "timestamp": int(time.time()),
+                "miner_reward_qtcl": _oracle_reward_qtcl,
+                "miner_balance_qtcl": _oracle_miner_balance,
             })
         else:
             # Not enough attestations yet; will re-check on next worker loop

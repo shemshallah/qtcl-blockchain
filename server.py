@@ -1507,7 +1507,26 @@ def _settle_block_rewards(
                             cur.execute("RELEASE SAVEPOINT settle_idempotency_check")
                         except Exception:
                             pass
-                        return 0.0
+                        # FIX: idempotent skip must still return miner's real balance
+                        # so the submitBlock response has miner_balance_qtcl != 0.
+                        # Old code returned 0.0 here → client skipped cache update.
+                        try:
+                            cur.execute(
+                                "SELECT COALESCE(SUM(amount),0) FROM address_utxos "
+                                "WHERE address=%s AND spent=FALSE",
+                                (miner_address,)
+                            )
+                            _idem_row = cur.fetchone()
+                            _idem_bal = (int(_idem_row[0]) if _idem_row and _idem_row[0] else 0) / 100.0
+                            if _idem_bal > 0:
+                                _balance_cache_set(miner_address, int(_idem_bal * 100), force=True)
+                            _settle_log.critical(
+                                f"[SETTLE] ⏭  Idempotent miner balance: {_idem_bal:.8f} QTCL"
+                            )
+                            return _idem_bal
+                        except Exception as _idem_err:
+                            _settle_log.warning(f"[SETTLE] idempotent balance query: {_idem_err}")
+                            return 0.0
                     else:
                         # settlement_log present but UTXOs missing — delete poisoned log entry and re-run
                         _settle_log.critical(
@@ -2003,9 +2022,11 @@ def _settle_block_rewards(
                 _miner_balance_base = int(_mbr[0]) if _mbr and _mbr[0] else 0
                 if _miner_balance_base > 0:
                     try:
-                        _balance_cache_set(miner_address, _miner_balance_base)
+                        # force=True: settlement just committed UTXOs in this txn —
+                        # overwrite any stale cached value on this worker unconditionally.
+                        _balance_cache_set(miner_address, _miner_balance_base, force=True)
                         _settle_log.critical(
-                            f"[SETTLE] 🔥 Balance cache warmed: {miner_address[:16]}… "
+                            f"[SETTLE] 🔥 Balance cache warmed (forced): {miner_address[:16]}… "
                             f"= {_miner_balance_base} base ({_miner_balance:.4f} QTCL)"
                         )
                     except Exception as _bcs_err:
@@ -4230,6 +4251,13 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         _force_refresh = False
         if isinstance(params, dict):
             _force_refresh = bool(params.get("force") or params.get("force_refresh"))
+        elif isinstance(params, list) and params and isinstance(params[0], dict):
+            # Also handle list-style params: [{"address": ..., "force_refresh": True}]
+            _force_refresh = bool(params[0].get("force") or params[0].get("force_refresh"))
+        if _force_refresh:
+            # Caller explicitly wants a live read — evict any cached value so
+            # the UTXO sum is always fetched fresh from DB.
+            _balance_cache_invalidate(address)
         _cached_balance = _balance_cache_get(address) if not _force_refresh else None
 
         try:
@@ -4339,7 +4367,10 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                         # settlement committed transactions but UTXO rows may not yet be
                         # visible in this cursor (READ COMMITTED, cross-worker Gunicorn).
                         # Also covers: address_utxos table just created on fresh deploy.
-                        # STRATEGY: trust wallet_addresses if updated_at is recent (≤120s).
+                        # STRATEGY: trust wallet_addresses if updated_at is recent (≤30s).
+                        # FIX: was 120s — far too long. 30s covers normal settlement lag while
+                        # still allowing a newly-settled balance to propagate within the
+                        # _refresh_balance_on_finalize polling window.
                         try:
                             cur.execute(
                                 "SELECT EXTRACT(EPOCH FROM (NOW() - updated_at)) "
@@ -4351,16 +4382,21 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
                         except Exception:
                             _age_s = 999
                         _diagnostic["wallet_addresses_age_s"] = round(_age_s, 1)
-                        if _age_s <= 120:
-                            # Recent record — settlement race window, keep existing balance
+                        if _age_s <= 30:
+                            # Recent record — settlement race window (UTXOs not yet visible
+                            # on this worker's READ COMMITTED snapshot).  Keep old balance
+                            # to prevent flash-zero.
                             _diagnostic["balance_source"] = "wallet_addresses_settle_guard"
                             logger.info(
                                 f"[RPC-getBalance] 🛡 SETTLE-GUARD: UTXO=0 but wallet_addresses "
-                                f"has {wallet['balance']} base units, age={_age_s:.0f}s ≤ 120s — "
+                                f"has {wallet['balance']} base units, age={_age_s:.0f}s ≤ 30s — "
                                 f"returning cached balance to prevent flash-zero for {address[:16]}…"
                             )
                         else:
-                            # Old record + UTXO=0 → address genuinely has 0 balance
+                            # Old record + UTXO=0 → address genuinely has 0 balance.
+                            # FIX: also invalidate the in-process balance cache so next
+                            # call picks up the freshly settled UTXOs.
+                            _balance_cache_invalidate(address)
                             _diagnostic["balance_source"] = "wallet_addresses_stale_zero"
                     elif wallet is None:
                         _diagnostic["balance_source"] = "none"
@@ -4903,10 +4939,10 @@ _BLOCK_CACHE_LOCK = threading.RLock()
 # During that window, getBalance may see UTXO=0 and return 0 — this cache
 # ensures rapid polls return the last known good balance instead.
 _BALANCE_CACHE: dict = {}          # addr → (balance_int, timestamp)
-_BALANCE_CACHE_TTL: float = 5.0   # FIX: was 30s — too long, clients got stale reads
-                                   # for entire _refresh_balance_on_finalize window.
-                                   # 5s is enough to debounce concurrent requests while
-                                   # allowing settlement to propagate quickly.
+_BALANCE_CACHE_TTL: float = 15.0  # 15s: long enough to bridge cross-worker READ COMMITTED
+                                   # lag on Neon/Supabase (multi-worker Gunicorn), short
+                                   # enough that a correct new value from settlement
+                                   # propagates quickly.  force=True writes always win.
 _BALANCE_CACHE_LOCK = threading.Lock()
 
 def _balance_cache_get(address: str) -> Optional[int]:
@@ -4917,12 +4953,19 @@ def _balance_cache_get(address: str) -> Optional[int]:
             return entry[0]
     return None
 
-def _balance_cache_set(address: str, balance_base: int) -> None:
-    """Cache balance for address. Only update if new value >= cached (no ratchet-down on race)."""
+def _balance_cache_set(address: str, balance_base: int, force: bool = False) -> None:
+    """Cache balance for address.
+
+    force=True  → called from _settle_block_rewards immediately after UTXO commit;
+                  always write-through regardless of existing cached value.
+                  This is safe because settlement only runs after UTXOs are committed
+                  inside the same DB transaction.
+    force=False → called from getBalance or other read paths; apply ratchet-up guard
+                  to avoid clobbering a freshly settled value with a stale read.
+    """
     with _BALANCE_CACHE_LOCK:
         existing = _BALANCE_CACHE.get(address)
-        # Accept higher balance always; accept lower balance only if cache is stale
-        if existing is None or balance_base >= existing[0] or (time.time() - existing[1]) >= _BALANCE_CACHE_TTL:
+        if force or existing is None or balance_base >= existing[0] or (time.time() - existing[1]) >= _BALANCE_CACHE_TTL:
             _BALANCE_CACHE[address] = (balance_base, time.time())
 
 def _balance_cache_invalidate(address: str) -> None:
@@ -7541,8 +7584,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             # RUN SETTLEMENT FOR DUPLICATE (in case first attempt failed)
             logger.critical(f"[RPC-submitBlock] 🔥 RUNNING SETTLEMENT FOR DUPLICATE h={height}")
             _SETTLED_HEIGHTS.discard(height)  # FIX: force re-run even if in-process cache says done
-            _settle_block_rewards(height, block_hash, miner_address, txs or [])
-            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height}")
+            _dup_miner_balance = _settle_block_rewards(height, block_hash, miner_address, txs or [])
+            logger.critical(f"[RPC-submitBlock] ✅ SETTLEMENT COMPLETE FOR DUPLICATE h={height} balance={_dup_miner_balance:.4f}")
 
             # 🔴 DO NOT re-push block_finalized for duplicates — the first insertion
             # already broadcast this event. Re-pushing causes the miner to see
@@ -7553,6 +7596,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _dup_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
             except Exception:
                 _dup_reward = 7.20
+            # FIX: include miner_balance_qtcl so client can update its display
             return _rpc_ok(
                 {
                     "status": "accepted_and_finalized",
@@ -7560,9 +7604,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     "block_hash": block_hash,
                     "next_height": height + 1,
                     "miner_reward_qtcl": _dup_reward,
+                    "miner_balance_qtcl": _dup_miner_balance,
                     "oracle_consensus": "5/5",
                     "oracle_ids": ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"],
-                    "diagnostic": {"note": "Block already in database - settlement may have been applied"},
+                    "diagnostic": {"note": "Block already in database - settlement re-applied"},
                 },
                 rpc_id,
             )
@@ -7821,6 +7866,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             logger.warning(f"[RPC-submitBlock] Cache invalidation warning: {_cache_inv_err}")
 
         # Push oracle consensus finalization event (miner listens to this to mark block done)
+        # FIX: include miner_reward_qtcl + miner_balance_qtcl so client can update
+        # its balance display immediately from the SSE event without waiting for
+        # _refresh_balance_on_finalize to poll getBalance.
         try:
             _push_to_sse_service("/push/oracle_consensus", {
                 "event_type": "block_finalized",
@@ -7831,6 +7879,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "oracle_ids": ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"],
                 "finalized": True,
                 "timestamp": int(time.time()),
+                "miner_reward_qtcl": _resp_reward,
+                "miner_balance_qtcl": _miner_balance_qtcl,
             })
         except Exception:
             pass
