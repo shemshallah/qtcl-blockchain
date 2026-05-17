@@ -135,16 +135,6 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_registerMeasurementSubscriber": 3.0,
     "qtcl_unregisterMeasurementSubscriber": 3.0,
     "qtcl_getDeviceChain": 4.0,
-    # HypΓ crypto ops — 512-step random walk signing is computationally heavy
-    "qtcl_hyp_generateKeypair": 30.0,
-    "qtcl_hyp_signMessage": 30.0,
-    "qtcl_hyp_verifySignature": 15.0,
-    "qtcl_hyp_deriveAddress": 10.0,
-    "qtcl_hyp_encryptMessage": 30.0,
-    "qtcl_hyp_decryptMessage": 30.0,
-    "qtcl_hyp_signBlock": 30.0,
-    "qtcl_hyp_verifyBlock": 15.0,
-    "qtcl_createWallet": 60.0,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -860,7 +850,10 @@ def _deferred_lattice_init() -> None:
         # ── INJECT SERVER DB POOL FOR BLOCK PERSISTENCE ──────────────────────────
         if LATTICE.block_manager and LATTICE.block_manager.db:
             LATTICE.block_manager.db.inject_db_pool(db_pool)
-            logger.info("[LATTICE-INIT] ✅ Server db_pool injected into BlockManager")
+            # FIX: also inject get_db_cursor so lattice's QuantumDatabaseConnector
+            # uses the shared Neon pool instead of failing with "No pool available"
+            LATTICE.block_manager.db.inject_db_cursor(get_db_cursor)
+            logger.info("[LATTICE-INIT] ✅ Server db_pool + get_db_cursor injected into BlockManager")
 
         # Check deadline before starting lattice
         if time.time() > _lat_init_deadline:
@@ -915,14 +908,10 @@ def _deferred_lattice_init() -> None:
         _LATTICE_INIT_EVENT.set()  # unblock oracle sync daemon even if lattice failed
 
 
-threading.Thread(
-    target=_deferred_lattice_init,
-    daemon=True,
-    name="LatticeDeferred",
-).start()
 logger.info(
     "[LATTICE] 🔄 Lattice init deferred to background thread — gunicorn will serve /health immediately"
 )
+# NOTE: Thread started at module bottom (after all functions defined) to avoid NameError on _lazy_ensure_blocks
 
 
 def _deferred_oracle_init() -> None:
@@ -1037,8 +1026,6 @@ def _ensure_wallet_addresses_table() -> None:
     """Ensure wallet_addresses, address_utxos, address_transactions tables exist."""
     try:
         with get_db_cursor() as cur:
-            # Advisory lock — prevent two workers from running DDL simultaneously
-            cur.execute("SELECT pg_advisory_xact_lock(82740002)")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS wallet_addresses (
                     address VARCHAR(128) PRIMARY KEY,
@@ -3786,21 +3773,12 @@ def _lazy_ensure_peer_registry():
 
 
 def _lazy_ensure_blocks():
-    """Ensure blocks table exists. Auto-create genesis block if empty.
-
-    FIX v5.2: Uses pg_advisory_xact_lock to prevent deadlock when two
-    gunicorn workers both call this during startup. The DELETE FROM blocks
-    WHERE nonce=0 was causing RowExclusiveLock deadlocks between workers.
-    """
+    """Ensure blocks table exists. Auto-create genesis block if empty."""
     global _SCHEMA_ENSURED_BLOCKS
     if _SCHEMA_ENSURED_BLOCKS:
         return
     try:
         with get_db_cursor() as cur:
-            # Advisory lock — only one worker runs this DDL block at a time
-            # Lock ID 82740001 is arbitrary but unique to this function
-            cur.execute("SELECT pg_advisory_xact_lock(82740001)")
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS blocks (
                     height                     BIGINT PRIMARY KEY,
@@ -3859,12 +3837,13 @@ def _lazy_ensure_blocks():
                     f"[SCHEMA] 🌱 Genesis block auto-created: h=0  hash={genesis_hash[:16]}…"
                 )
 
-            # Cleanup orphaned nonce=0 blocks (old lattice controller bug)
-            # Safe under advisory lock — no deadlock risk
+            # 🔴 CLEANUP: Delete any orphaned nonce=0 blocks (from old lattice controller bug)
+            # These blocks have no valid PoW and block the miner from submitting real blocks
             cur.execute("DELETE FROM blocks WHERE height > 0 AND nonce = 0")
             _cleaned = cur.rowcount
             if _cleaned > 0:
                 logger.warning(f"[SCHEMA] 🧹 Cleaned {_cleaned} orphaned nonce=0 blocks from DB")
+                # Also clean up orphaned transactions referencing those blocks
                 cur.execute("""
                     DELETE FROM transactions
                     WHERE height > 0 AND height NOT IN (SELECT height FROM blocks)
@@ -12068,6 +12047,15 @@ def _db_tables_backfill_daemon():
 
 
 threading.Thread(target=_db_tables_backfill_daemon, daemon=True, name="AuxBackfill").start()
+
+# ── START LATTICE THREAD HERE (after all functions defined) ──────────────────
+# CRITICAL FIX: Previously started at line ~909, before _lazy_ensure_blocks()
+# was defined at line ~3776, causing NameError in background thread.
+threading.Thread(
+    target=_deferred_lattice_init,
+    daemon=True,
+    name="LatticeDeferred",
+).start()
 
 
 # ═══ MODULE LOAD COMPLETE ═══
