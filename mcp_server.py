@@ -85,7 +85,36 @@ def _next_id() -> int:
         return _rpc_counter
 
 def qtcl_rpc(method: str, params: Any = None) -> Any:
-    """Call QTCL JSON-RPC 2.0 endpoint. Raises RuntimeError on failure."""
+    """Call QTCL JSON-RPC 2.0 endpoint. Raises RuntimeError on failure.
+
+    FIX v4.0: Direct in-process dispatch when running in same gunicorn process.
+    Avoids HTTP self-loop deadlock under gthread workers.
+    """
+    # ── FAST PATH: Direct in-process dispatch ──────────────────────────────
+    if QTCL_RPC_URL.startswith("http://localhost") or QTCL_RPC_URL.startswith("http://127.0.0.1"):
+        try:
+            from server import _dispatch_single, _JSONRPC_VERSION
+            req_dict = {
+                "jsonrpc": _JSONRPC_VERSION,
+                "method": method,
+                "params": params if params is not None else [],
+                "id": _next_id(),
+            }
+            result = _dispatch_single(req_dict)
+            if result is None:
+                return {}
+            if "error" in result:
+                err = result["error"]
+                raise RuntimeError(err.get("message", "RPC error"))
+            return result.get("result", result)
+        except ImportError:
+            pass  # server not loaded yet — fall through to HTTP
+        except RuntimeError:
+            raise
+        except Exception:
+            pass  # direct dispatch failed — try HTTP
+
+    # ── SLOW PATH: HTTP transport ──────────────────────────────────────────
     payload = {"jsonrpc": "2.0", "method": method,
                 "params": params if params is not None else [], "id": _next_id()}
     data = json.dumps(payload).encode()

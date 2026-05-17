@@ -103,16 +103,21 @@ def _log_mode_detection():
         else:
             print(f"[MODE]    Using SQLite - public local database with triggers")
 
-_pkgs = ["mpmath", "tqdm"]
-if _pg_mode:
-    _pkgs.append("psycopg2-binary")
-_pkgs.append("argon2-cffi")
-
-try:
-    subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages"] + _pkgs)
-except subprocess.CalledProcessError:
-    print("Installing packages without --break-system-packages...")
-    subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "--user"] + _pkgs)
+def _install_runtime_deps():
+    """Install optional deps only when running as __main__ (never on import)."""
+    _pkgs = ["mpmath", "tqdm"]
+    if _pg_mode:
+        _pkgs.append("psycopg2-binary")
+    _pkgs.append("argon2-cffi")
+    try:
+        subprocess.check_call(
+            [_sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages"] + _pkgs
+        )
+    except subprocess.CalledProcessError:
+        print("Installing packages without --break-system-packages...")
+        subprocess.check_call(
+            [_sys.executable, "-m", "pip", "install", "--quiet", "--user"] + _pkgs
+        )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2: IMPORTS & SETUP
@@ -4606,6 +4611,7 @@ EXAMPLES:
 
 def main():
     """Main entry point with comprehensive CLI"""
+    _install_runtime_deps()
     import argparse
     
     parser = argparse.ArgumentParser(

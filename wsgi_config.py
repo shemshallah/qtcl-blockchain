@@ -61,7 +61,7 @@ def _mcp_health_instant():
         response=json.dumps({
             "status":   "ok" if ready else "starting",
             "server":   "qtcl-blockchain",
-            "version":  "4.0.0",
+            "version":  "5.0.0",
             "protocol": "2025-06-18",
             "uptime_s": round(elapsed, 1),
             "ready":    ready,
@@ -76,18 +76,42 @@ print(f"[WSGI] ✅ /health + /mcp/health ready at {time.time() - _STARTUP:.2f}s"
 _full_app  = None
 _load_done = threading.Event()
 
+# ── FIX v5.0: Retry server load on transient failures ──────────────────────
+# If server.py import crashes (missing dep, Neon cold-start, QRNG timeout),
+# retrying after a delay often succeeds. Without this, _full_app stays None
+# FOREVER and every single request 503s until Koyeb kills/restarts the pod.
+_LOAD_MAX_RETRIES = 3
+_LOAD_RETRY_DELAY = 10.0  # seconds between retries
+
 def _load_server():
     global _full_app
-    try:
-        print("[WSGI] Loading full server (MCP 2025-06-18 + JSON-RPC 2.0)...", flush=True)
-        from server import app as full_app
-        _full_app = full_app
-        print(f"[WSGI] ✅ Full server loaded at {time.time() - _STARTUP:.1f}s", flush=True)
-        print("[WSGI] ✅ Endpoints live: /rpc (JSON-RPC 2.0) | /mcp (MCP 2025-06-18) | /mcp/health", flush=True)
-    except Exception as e:
-        print(f"[WSGI] ❌ Server load failed: {e}", flush=True)
-    finally:
-        _load_done.set()
+    for attempt in range(1, _LOAD_MAX_RETRIES + 1):
+        try:
+            print(f"[WSGI] Loading full server attempt {attempt}/{_LOAD_MAX_RETRIES} "
+                  f"(MCP 2025-06-18 + JSON-RPC 2.0)...", flush=True)
+            # Force reimport on retry — clear any partial module state
+            import importlib
+            if attempt > 1 and "server" in sys.modules:
+                # Remove stale partial import so Python re-executes the module
+                del sys.modules["server"]
+            from server import app as full_app
+            _full_app = full_app
+            print(f"[WSGI] ✅ Full server loaded at {time.time() - _STARTUP:.1f}s "
+                  f"(attempt {attempt})", flush=True)
+            print("[WSGI] ✅ Endpoints live: /rpc (JSON-RPC 2.0) | /mcp (MCP 2025-06-18) "
+                  "| /mcp/health", flush=True)
+            return  # success
+        except Exception as e:
+            import traceback
+            print(f"[WSGI] ❌ Server load attempt {attempt}/{_LOAD_MAX_RETRIES} failed: {e}",
+                  flush=True)
+            traceback.print_exc()
+            if attempt < _LOAD_MAX_RETRIES:
+                print(f"[WSGI] ⏳ Retrying in {_LOAD_RETRY_DELAY:.0f}s...", flush=True)
+                time.sleep(_LOAD_RETRY_DELAY)
+    print("[WSGI] ❌❌❌ All server load attempts exhausted — server will not start. "
+          "Check logs above for the root cause.", flush=True)
+    _load_done.set()
 
 _thread = threading.Thread(target=_load_server, daemon=True)
 _thread.start()
@@ -269,7 +293,7 @@ def application(environ, start_response):
 
 app = application
 
-print(f"[WSGI] ✅ WSGI v4.0 ready at {time.time() - _STARTUP:.2f}s", flush=True)
+print(f"[WSGI] ✅ WSGI v5.0 ready at {time.time() - _STARTUP:.2f}s", flush=True)
 print(
     "[WSGI] Routes: /health=instant | /mcp/health=instant "
     f"| /mcp POST waits {_TIMEOUT_MCP_POST:.0f}s "
@@ -278,7 +302,7 @@ print(
     flush=True,
 )
 print(
-    "[WSGI] FIX v4.0: /rpc POST (qtcl_submitTransaction) now waits for boot — "
-    "cold-start tx rejections eliminated.",
+    f"[WSGI] FIX v5.0: _load_server retries {_LOAD_MAX_RETRIES}× with "
+    f"{_LOAD_RETRY_DELAY:.0f}s delay — transient import crashes no longer brick the server.",
     flush=True,
 )

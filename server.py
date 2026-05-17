@@ -678,7 +678,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from io import BytesIO
-import msgpack
+try:
+    import msgpack
+except ImportError:
+    msgpack = None
+    logger.warning("[IMPORT] msgpack not available — P2P binary encoding disabled")
 import base64
 import queue as _queue_mod
 import uuid
@@ -7240,7 +7244,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     f"Transaction verification failed: {str(_tx_verify_err)}",
                     rpc_id,
                 )
-                )
 
             # Validate sender has sufficient balance by tracing unspent outputs
             _from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
@@ -10189,15 +10192,16 @@ def _start_p2p_broadcast():
 # Handle POST to /rpc by extracting JSON body and processing (backward compat during migration)
 @app.route("/rpc", methods=["POST"])
 def rpc_endpoint_post():
-    """POST /rpc — Accept JSON body and convert to internal processing (backward compatibility)."""
-    try:
-        logger.warning(
-            f"[RPC-POST] RAW: {request.method} /rpc data_preview={request.data[:200]}"
-        )
+    """POST /rpc — JSON-RPC 2.0 endpoint (body-based).
 
+    FIX v7.0: Route through _dispatch_single (same as GET) for:
+      - Thread pool timeout protection (signAndSubmitTx = 90s max)
+      - Consistent error handling and id mirroring
+      - No inline blocking of gthread workers
+    """
+    try:
         # Parse JSON body
         req_dict = request.get_json(force=True, silent=True)
-        logger.warning(f"[RPC-POST] parsed req_dict={req_dict}")
 
         if not req_dict:
             return jsonify(
@@ -10211,8 +10215,9 @@ def rpc_endpoint_post():
         method = req_dict.get("method")
         params = req_dict.get("params", [])
         rpc_id = req_dict.get("id", 1)
-        logger.warning(
-            f"[RPC-POST] method={method} params_type={type(params)} params={str(params)[:100]}"
+
+        logger.debug(
+            f"[RPC-POST] method={method} params_type={type(params).__name__}"
         )
 
         if method == "qtcl_submitBlock":
@@ -10220,7 +10225,7 @@ def rpc_endpoint_post():
                 f"[RPC-POST] SUBMIT BLOCK DETECTED! params={str(params)[:200]}"
             )
 
-        # Process same as GET
+        # No method → discovery
         if not method:
             method_names = sorted(list(_RPC_METHODS.keys()))
             return jsonify(
@@ -10236,18 +10241,16 @@ def rpc_endpoint_post():
                 }
             ), 200
 
-        # Dispatch to handler
-        if method not in _RPC_METHODS:
-            return jsonify(
-                {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32601, "message": f"Method not found: {method}"},
-                    "id": rpc_id,
-                }
-            ), 200
+        # ── FIX: Ensure jsonrpc version in request dict for _dispatch_single ──
+        req_dict.setdefault("jsonrpc", _JSONRPC_VERSION)
+        req_dict.setdefault("id", rpc_id)
 
-        handler = _RPC_METHODS[method]
-        result = handler(params, rpc_id)
+        # ── Dispatch through _dispatch_single (thread pool + timeout) ──────
+        result = _dispatch_single(req_dict)
+
+        if result is None:
+            return "", 204
+
         return jsonify(result), 200
 
     except Exception as e:

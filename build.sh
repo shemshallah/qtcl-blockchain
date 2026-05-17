@@ -38,5 +38,10 @@ pip install secp256k1 || {
     echo "[BUILD] WARNING: secp256k1 build failed."
 }
 
+echo "[BUILD] Installing msgpack..."
+pip install --quiet msgpack || {
+    echo "[BUILD] WARNING: msgpack install failed — P2P binary encoding disabled."
+}
+
 echo "[BUILD] cffi version: $(python3 -c 'import cffi; print(cffi.__version__)')"
 echo "[BUILD] ✅ Build complete"

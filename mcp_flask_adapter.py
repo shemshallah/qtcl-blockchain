@@ -116,7 +116,42 @@ def _next_rpc_id() -> int:
 
 
 def _rpc(method: str, params: Any = None, rpc_url: str = QTCL_RPC_URL, timeout: float = 20.0) -> Any:
-    """Issue a JSON-RPC 2.0 call to the QTCL server and return result or raise RuntimeError."""
+    """Issue a JSON-RPC 2.0 call to the QTCL server and return result or raise RuntimeError.
+
+    FIX v6.0: When running in-process (same gunicorn worker), try direct dispatch
+    first to avoid the HTTP self-loop deadlock under gthread. Falls back to HTTP
+    for out-of-process or when server module isn't loaded yet.
+    """
+    # ── FAST PATH: Direct in-process dispatch (no HTTP self-loop) ──────────
+    # When mcp_flask_adapter is loaded by server.py (via register_mcp_routes),
+    # both modules run in the same worker process. Calling localhost:8000/rpc
+    # would consume a gthread worker waiting for another gthread worker → deadlock.
+    # Instead, import server's _dispatch_single and call it directly.
+    if rpc_url.startswith("http://localhost") or rpc_url.startswith("http://127.0.0.1"):
+        try:
+            from server import _dispatch_single, _JSONRPC_VERSION
+            req_dict = {
+                "jsonrpc": _JSONRPC_VERSION,
+                "method": method,
+                "params": params if params is not None else [],
+                "id": _next_rpc_id(),
+            }
+            result = _dispatch_single(req_dict)
+            if result is None:
+                return {}
+            if "error" in result:
+                err = result["error"]
+                raise RuntimeError(f"[{err.get('code', -1)}] {err.get('message', 'RPC error')}")
+            return result.get("result", result)
+        except ImportError:
+            pass  # server not loaded yet — fall through to HTTP
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            # Direct dispatch failed — fall through to HTTP as backup
+            logger.debug(f"[MCP-RPC] Direct dispatch failed for {method}, trying HTTP: {exc}")
+
+    # ── SLOW PATH: HTTP transport (out-of-process or fallback) ─────────────
     payload = {
         "jsonrpc": "2.0",
         "method": method,
