@@ -1435,20 +1435,8 @@ def _settle_block_rewards(
 
     # ── BUG-2 FIX: in-process idempotency guard ──────────────────────────────
     if height in _SETTLED_HEIGHTS:
-        _settle_log.warning(f"[SETTLE] ⏭  h={height} already settled in this process — fetching actual balance")
-        # FIX: return real miner balance so submitBlock response has correct miner_balance_qtcl
-        _norm_miner = _norm_address(miner_address)
-        try:
-            with get_db_cursor() as _idm_cur:
-                _idm_cur.execute(
-                    "SELECT COALESCE(SUM(amount), 0) FROM address_utxos WHERE address = %s AND spent = FALSE",
-                    (_norm_miner,),
-                )
-                _idm_row = _idm_cur.fetchone()
-                return float(_idm_row[0]) if _idm_row and _idm_row[0] else 0.0
-        except Exception as _idm_err:
-            _settle_log.warning(f"[SETTLE] idempotency balance query failed: {_idm_err}")
-            return 0.0
+        _settle_log.warning(f"[SETTLE] ⏭  h={height} already settled in this process — skipping")
+        return 0.0
 
     if not miner_address or len(str(miner_address).strip()) < 10:
         _settle_log.critical(f"❌ [SETTLE-REJECT] Invalid miner: {miner_address!r}")
@@ -1512,27 +1500,14 @@ def _settle_block_rewards(
                         _utxo_at_height = -1  # unknown → re-run to be safe
                     if _utxo_at_height > 0:
                         _SETTLED_HEIGHTS.add(height)
-                        # FIX: return real miner balance so submitBlock/timeout path gets correct value
-                        _norm_miner_idm = _norm_address(miner_address)
-                        _idm_bal = 0.0
-                        try:
-                            cur.execute(
-                                "SELECT COALESCE(SUM(amount), 0) FROM address_utxos WHERE address = %s AND spent = FALSE",
-                                (_norm_miner_idm,),
-                            )
-                            _idm_bal_row = cur.fetchone()
-                            _idm_bal = float(_idm_bal_row[0]) if _idm_bal_row and _idm_bal_row[0] else 0.0
-                        except Exception as _idm_bal_err:
-                            _settle_log.warning(f"[SETTLE] DB-idempotency balance query failed: {_idm_bal_err}")
                         _settle_log.critical(
-                            f"[SETTLE] ⏭  h={height} already settled ({_utxo_at_height} UTXOs in DB) — "
-                            f"miner_balance={_idm_bal:.4f} QTCL"
+                            f"[SETTLE] ⏭  h={height} already settled ({_utxo_at_height} UTXOs in DB) — skipping"
                         )
                         try:
                             cur.execute("RELEASE SAVEPOINT settle_idempotency_check")
                         except Exception:
                             pass
-                        return _idm_bal
+                        return 0.0
                     else:
                         # settlement_log present but UTXOs missing — delete poisoned log entry and re-run
                         _settle_log.critical(
@@ -6688,9 +6663,10 @@ def qtcl_pow_hash(
     logger.info(f"[qtcl_pow_hash] miner='{miner_address}' → bytes={_ph_miner.hex()}")
     logger.info(f"[qtcl_pow_hash] entropy={w_entropy_seed.hex()}")
 
-    # 🔴 CRITICAL: Include epoch in scratchpad seed — must match miner's _make_scratchpad(epoch)
-    # Miner rotates scratchpad every 524,288 nonces: epoch = nonce // 524288
-    _SCRATCHPAD_EPOCH_NONCES = 524_288
+    # 🔴 CRITICAL: Must match client _SCRATCHPAD_EPOCH_NONCES exactly.
+    # Client patched from 524_288 → 2_097_152 to eliminate epoch-boundary stalls.
+    # Server verifier must use the identical value or scratchpad diverges → hash mismatch.
+    _SCRATCHPAD_EPOCH_NONCES = 2_097_152
     _epoch = nonce // _SCRATCHPAD_EPOCH_NONCES
     scratchpad = hashlib.shake_256(
         _POW_SCRATCHPAD_PFX + w_entropy_seed + _epoch.to_bytes(8, "big")
@@ -9692,29 +9668,6 @@ def _rpc_getBlockStatus(params: Any, rpc_id: Any) -> dict:
             _fin_at = int(db_finalized_at or 0)
             age_s = max(0, _now - _fin_at) if _fin_at > 0 else 0
 
-            # FIX: fetch miner_reward_qtcl and miner_balance_qtcl so the client's
-            # oracle_task timeout-fallback path can recover the correct reward value
-            # instead of showing reward=0.0 when submitBlock timed out but settled.
-            _miner_reward = 0.0
-            _miner_balance = 0.0
-            if is_finalized and db_miner:
-                _norm_status_miner = _norm_address(str(db_miner))
-                try:
-                    _miner_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) \
-                        if TessellationRewardSchedule else 7.20
-                except Exception:
-                    _miner_reward = 7.20
-                try:
-                    cur.execute(
-                        "SELECT COALESCE(SUM(amount), 0) FROM address_utxos "
-                        "WHERE address = %s AND spent = FALSE",
-                        (_norm_status_miner,),
-                    )
-                    _bal_row = cur.fetchone()
-                    _miner_balance = float(_bal_row[0]) if _bal_row and _bal_row[0] else 0.0
-                except Exception as _bal_err:
-                    logger.debug(f"[RPC-getBlockStatus] balance query: {_bal_err}")
-
         _ids = ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"] if is_finalized else []
 
         return _rpc_ok(
@@ -9728,8 +9681,6 @@ def _rpc_getBlockStatus(params: Any, rpc_id: Any) -> dict:
                 "finalized": is_finalized,
                 "age_seconds": age_s,
                 "miner_address": str(db_miner or ""),
-                "miner_reward_qtcl": _miner_reward,
-                "miner_balance_qtcl": _miner_balance,
                 "source": "DB-authoritative",
             },
             rpc_id,
