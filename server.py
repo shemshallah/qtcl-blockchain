@@ -7181,51 +7181,65 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
             try:
                 _engine = _init_hlwe_engine()
-                # ── CATHEDRAL FIX: Reconstruct signing hash from TX fields ──
-                # Must match the signing path in qtcl_signAndSubmitTx:
-                #   sign_payload = {"sender", "recipient", "amount", "nonce"}
-                #   message_hash = sha3_256(json.dumps(sign_payload, sort_keys=True))
-                _tx_from = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
-                _tx_to = tx.get("to_addr") or tx.get("to_address") or tx.get("to", "")
-                _tx_amount_raw = tx.get("amount") or tx.get("amount_qtcl") or 0
-                _tx_nonce = tx.get("nonce") or 0
+                # ══ UNIFIED SIGNING HASH v2 (integer-only, language-agnostic) ════════
+                # Mirror of: mempool._verify_signature / _rpc_signAndSubmitTx /
+                #            qtcl_client._send_tx_wizard / tx.html qtclSigningHash()
+                # ════════════════════════════════════════════════════════════════════
+                _tx_from      = tx.get("from_addr") or tx.get("from_address") or tx.get("from", "")
+                _tx_to        = tx.get("to_addr")   or tx.get("to_address")   or tx.get("to", "")
+                _tx_nonce     = int(tx.get("nonce") or 0)
+                _tx_ts_ns     = int(tx.get("timestamp_ns") or 0)
 
-                # Ensure amount is float QTCL (not base units) to match signing path
-                _tx_amount = float(_tx_amount_raw)
-                if _tx_amount >= 10_000:
-                    # Looks like base units — convert to QTCL
-                    _tx_amount = _tx_amount / 100.0
-                
-                _sign_payload = {
-                    "sender": _tx_from,
-                    "recipient": _tx_to,
-                    "amount": _tx_amount,
-                    "nonce": _tx_nonce,
-                }
-                _sign_json = json.dumps(_sign_payload, sort_keys=True, default=str)
-                _signing_hash_bytes = hashlib.sha3_256(_sign_json.encode("utf-8")).digest()
-                
-                # Call engine's verify_signature method
-                # It expects (message_hash: bytes, sig: Dict[str, str], public_key: str)
-                _tx_sig_valid = _engine.verify_signature(
-                    _signing_hash_bytes, _sig, _tx_pubkey
-                )
+                _tx_amount_base = int(tx.get("amount_base") or 0)
+                if _tx_amount_base == 0:
+                    _raw_a = float(tx.get("amount") or tx.get("amount_qtcl") or 0)
+                    _tx_amount_base = int(round(_raw_a * 100)) if 0 < _raw_a < 10_000 else int(_raw_a)
+
+                _tx_fee_base = int(tx.get("fee_base") or 0)
+                if _tx_fee_base == 0:
+                    _raw_f = float(tx.get("fee") or tx.get("fee_qtcl") or 0)
+                    _tx_fee_base = int(round(_raw_f * 100)) if 0 < _raw_f < 10_000 else int(_raw_f)
+
+                # v2: integer fields — no float repr divergence
+                _sp_v2 = {"sender": _tx_from, "recipient": _tx_to,
+                           "amount_base": _tx_amount_base, "fee_base": _tx_fee_base,
+                           "nonce": _tx_nonce, "timestamp_ns": _tx_ts_ns}
+                _sh_v2 = hashlib.sha3_256(
+                    json.dumps(_sp_v2, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).digest()
+
+                # v1 fallback — old wallets: {sender,recipient,amount(float),nonce}
+                _sp_v1 = {"sender": _tx_from, "recipient": _tx_to,
+                           "amount": _tx_amount_base / 100.0, "nonce": _tx_nonce}
+                _sh_v1 = hashlib.sha3_256(
+                    json.dumps(_sp_v1, sort_keys=True, default=str).encode("utf-8")
+                ).digest()
+
+                _tx_sig_valid = _engine.verify_signature(_sh_v2, _sig, _tx_pubkey)
+                if not _tx_sig_valid:
+                    _tx_sig_valid = _engine.verify_signature(_sh_v1, _sig, _tx_pubkey)
+                    if _tx_sig_valid:
+                        logger.info(
+                            f"[RPC-submitBlock] \u26a0\ufe0f  v1 float sig accepted {_tx_id[:16]}\u2026 "
+                            f"(client upgrade recommended)"
+                        )
+
                 if not _tx_sig_valid:
                     logger.error(
-                        f"[RPC-submitBlock] ❌ Transaction signature verification FAILED {_tx_id[:16]}..."
+                        f"[RPC-submitBlock] \u274c TX sig FAILED (v2+v1) {_tx_id[:16]}\u2026 "
+                        f"from={_tx_from[:16]}\u2026 amt={_tx_amount_base} fee={_tx_fee_base}"
                     )
-                    return _rpc_error(-32003, f"Transaction signature invalid", rpc_id)
-                logger.debug(
-                    f"[RPC-submitBlock] ✅ Transaction signature verified: {_tx_id[:16]}..."
-                )
+                    return _rpc_error(-32003, "Transaction signature invalid", rpc_id)
+                logger.debug(f"[RPC-submitBlock] \u2705 TX sig verified {_tx_id[:16]}\u2026")
             except Exception as _tx_verify_err:
                 logger.error(
-                    f"[RPC-submitBlock] ❌ Transaction verification error {_tx_id[:16]}...: {_tx_verify_err}"
+                    f"[RPC-submitBlock] \u274c TX verify error {_tx_id[:16]}\u2026: {_tx_verify_err}"
                 )
                 return _rpc_error(
                     -32003,
                     f"Transaction verification failed: {str(_tx_verify_err)}",
                     rpc_id,
+                )
                 )
 
             # Validate sender has sufficient balance by tracing unspent outputs
@@ -9632,20 +9646,37 @@ def _rpc_signAndSubmitTx(params: Any, rpc_id: Any) -> dict:
         memo = tx_fields.get("memo", "")
         timestamp_ns = int(time.time() * 1e9)
 
-        # ── Compute tx_hash (must match mempool's canonical_hash) ──────────────
-        tx_data_str = f"{from_addr}:{to_addr}:{amount_qtcl}:{fee_qtcl}:{nonce}:{timestamp_ns}"
-        tx_hash = hashlib.sha3_256(tx_data_str.encode()).hexdigest()
+        # ── Compute tx_hash — v2 INTEGER CANONICAL (language-agnostic) ──────
+        # Format: SHA3-256("{from}:{to}:{amount_base}:{fee_base}:{nonce}:{timestamp_ns}")
+        # All fields integers — no float repr divergence between Python/JS/any runtime.
+        # Mirror of: mempool.MempoolTx.canonical_hash / qtcl_client._send_tx_wizard
+        #            / tx.html qtclCanonicalHash()
+        _canon_str = (
+            f"{from_addr}:{to_addr}"
+            f":{int(amount_base)}:{int(fee_base)}"
+            f":{int(nonce)}:{int(timestamp_ns)}"
+        )
+        tx_hash = hashlib.sha3_256(_canon_str.encode('utf-8')).hexdigest()
 
         # ── Sign the transaction ───────────────────────────────────────────────
         try:
-            # Build the signing payload (must match client-side _integrate_wallet_send)
+            # ══ UNIFIED SIGNING HASH v2 ═══════════════════════════════════════
+            # SHA3-256(compact-JSON({sender,recipient,amount_base,fee_base,nonce,timestamp_ns}))
+            # INTEGER FIELDS ONLY — eliminates float repr divergence.
+            # Must match exactly:
+            #   mempool.py      _verify_signature  tx_data dict
+            #   qtcl_client.py  _send_tx_wizard    _sign_data dict
+            #   tx.html         qtclSigningHash()
+            # ══════════════════════════════════════════════════════════════════
             sign_payload = {
-                "sender": from_addr,
-                "recipient": to_addr,
-                "amount": amount_qtcl,
-                "nonce": nonce,
+                "sender"      : from_addr,
+                "recipient"   : to_addr,
+                "amount_base" : int(amount_base),
+                "fee_base"    : int(fee_base),
+                "nonce"       : int(nonce),
+                "timestamp_ns": int(timestamp_ns),
             }
-            sign_json = json.dumps(sign_payload, sort_keys=True, default=str)
+            sign_json = json.dumps(sign_payload, sort_keys=True, separators=(',', ':'))
             message_hash = hashlib.sha3_256(sign_json.encode("utf-8")).digest()
 
             logger.info(

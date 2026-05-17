@@ -342,29 +342,57 @@ class MempoolTx:
         timestamp_ns: int,
     ) -> str:
         """
-        Deterministic TX hash — identical to qtcl_client.py submit_transaction.
-        Uses colon-separated format for the public tx_hash.
+        Deterministic TX hash v2 — integer-only format, no float repr divergence.
+        Format: SHA3-256("from:to:amount_base:fee_base:nonce:timestamp_ns")
+        Python str(100) == JS String(100) == "100" — no float formatting discrepancy.
         """
-        # Convert base units back to QTCL (float) to match client-side calculation
-        # Important: maintain exact string representation as float
+        # v2: use raw integer base units — identical in Python and JavaScript
+        tx_data = f"{from_address}:{to_address}:{amount_base}:{fee_base}:{nonce}:{timestamp_ns}"
+        return hashlib.sha3_256(tx_data.encode()).hexdigest()
+
+    @staticmethod
+    def canonical_hash_v1_float(
+        from_address: str,
+        to_address  : str,
+        amount_base : int,
+        nonce       : int,
+        fee_base    : int,
+        timestamp_ns: int,
+    ) -> str:
+        """
+        Legacy TX hash v1 — float repr format kept for backward-compat tx lookup.
+        Format: SHA3-256("from:to:amount_qtcl_float:fee_qtcl_float:nonce:ts")
+        WARNING: str(100.0)="100.0" in Python but String(100)="100" in JS — avoid for new TXs.
+        """
         amount_qtcl = float(amount_base / 100.0)
-        fee_qtcl = float(fee_base / 100.0)
-        
-        # Format: from_addr:to_addr:amount:fee:nonce:ts
+        fee_qtcl    = float(fee_base    / 100.0)
         tx_data = f"{from_address}:{to_address}:{amount_qtcl}:{fee_qtcl}:{nonce}:{timestamp_ns}"
         return hashlib.sha3_256(tx_data.encode()).hexdigest()
 
     def get_signing_hash(self) -> bytes:
         """
-        Calculate binary hash used for HypΓ signing (must match client _integrate_wallet_send).
-        Uses JSON-serialized payload with keys: sender, recipient, amount, nonce.
+        Binary hash used for HypΓ signing — integer fields, no float repr ambiguity.
+        Matches client _send_tx_wizard signing payload exactly (v2 format).
         """
-        # Mapping mempool fields back to client-side signing fields
+        # v2: integer-only signing payload — reproducible across Python and JS
         tx_data = {
-            'sender': self.from_address,
+            'sender'    : self.from_address,
+            'recipient' : self.to_address,
+            'amount_base': self.amount_base,
+            'fee_base'   : self.fee_base,
+            'nonce'      : self.nonce,
+            'timestamp_ns': self.timestamp_ns,
+        }
+        tx_json = json.dumps(tx_data, sort_keys=True)
+        return hashlib.sha3_256(tx_json.encode('utf-8')).digest()
+
+    def get_signing_hash_v1(self) -> bytes:
+        """Legacy signing hash v1 — float amount, no fee/timestamp — for old wallet compat."""
+        tx_data = {
+            'sender'   : self.from_address,
             'recipient': self.to_address,
-            'amount': self.amount_base / 100.0,
-            'nonce': self.nonce
+            'amount'   : self.amount_base / 100.0,
+            'nonce'    : self.nonce,
         }
         tx_json = json.dumps(tx_data, sort_keys=True, default=str)
         return hashlib.sha3_256(tx_json.encode('utf-8')).digest()
@@ -1164,15 +1192,22 @@ class Mempool:
                 _is_oracle_reg = (tx_type == 'oracle_reg' or tx_type == 'oracle_reg_info')
                 _is_info_null = tx_type == 'info_null' or from_addr.startswith('qtcl0null')
 
-                # ── CANONICAL HASH ─────────────────────────────────────────
-                tx_hash = MempoolTx.canonical_hash(
+                # ── CANONICAL HASH (v2 integer-only, v1 float fallback for legacy clients) ──
+                tx_hash_v2 = MempoolTx.canonical_hash(
                     from_addr, to_addr, amount_base, nonce, fee_base, timestamp_ns
                 )
-                # Allow client to supply pre-computed hash; log mismatch but don't reject
+                tx_hash_v1 = MempoolTx.canonical_hash_v1_float(
+                    from_addr, to_addr, amount_base, nonce, fee_base, timestamp_ns
+                )
                 client_hash = raw.get('tx_hash', '')
-                if client_hash and client_hash != tx_hash:
-                    logger.debug(f"[MEMPOOL] Hash mismatch client={client_hash[:12]}… canonical={tx_hash[:12]}…")
-                    client_tx_id = client_tx_id or client_hash
+                if client_hash and client_hash == tx_hash_v1 and client_hash != tx_hash_v2:
+                    tx_hash = tx_hash_v1  # honour legacy hash so duplicate-check works
+                    logger.debug(f"[MEMPOOL] Accepted legacy v1 float hash {tx_hash[:12]}... (client should upgrade)")
+                else:
+                    tx_hash = tx_hash_v2
+                    if client_hash and client_hash != tx_hash_v2:
+                        logger.debug(f"[MEMPOOL] Hash mismatch client={client_hash[:12]}... v2={tx_hash_v2[:12]}...")
+                        client_tx_id = client_tx_id or client_hash
 
                 # ── DUPLICATE CHECK ────────────────────────────────────────
                 # Return existing TX so callers can treat idempotent re-submits
@@ -1793,50 +1828,60 @@ class Mempool:
                 f"c_exp={sig_dict.get('c_exp','?')}"
             )
 
-            # 1. Reconstruct signing hash (the actual bytes signed by client)
-            # Client signs: sha3_256(json.dumps({'sender':..., 'recipient':..., 'amount':..., 'nonce':...}))
-            tx_data = {
-                'sender': norm['from_address'],
-                'recipient': norm['to_address'],
-                'amount': norm['amount_base'] / 100.0,
-                'nonce': norm['nonce']
+            # 1. Reconstruct signing hash v2 (integer fields — matches client v2)
+            tx_data_v2 = {
+                'sender'     : norm['from_address'],
+                'recipient'  : norm['to_address'],
+                'amount_base': norm['amount_base'],
+                'fee_base'   : norm['fee_base'],
+                'nonce'      : norm['nonce'],
+                'timestamp_ns': norm['timestamp_ns'],
             }
-            tx_json = json.dumps(tx_data, sort_keys=True, default=str)
-            logger.info(f"[MEMPOOL-SIG] 🔍 verifier payload: {tx_json[:120]}")
-            signing_hash_bytes = hashlib.sha3_256(tx_json.encode('utf-8')).digest()
-            signing_hash_hex = signing_hash_bytes.hex()
-            logger.info(f"[MEMPOOL-SIG] 🔍 signing hash: {signing_hash_hex[:32]}…")
+            tx_json_v2 = json.dumps(tx_data_v2, sort_keys=True)
+            signing_hash_bytes_v2 = hashlib.sha3_256(tx_json_v2.encode('utf-8')).digest()
+            # Legacy v1 signing hash (float amount, no fee/timestamp) for old wallets
+            tx_data_v1 = {
+                'sender'   : norm['from_address'],
+                'recipient': norm['to_address'],
+                'amount'   : norm['amount_base'] / 100.0,
+                'nonce'    : norm['nonce'],
+            }
+            tx_json_v1 = json.dumps(tx_data_v1, sort_keys=True, default=str)
+            signing_hash_bytes_v1 = hashlib.sha3_256(tx_json_v1.encode('utf-8')).digest()
+            logger.info(f"[MEMPOOL-SIG] v2 payload: {tx_json_v2[:100]} hash={signing_hash_bytes_v2.hex()[:24]}...")
 
-            # 2. Verify via Oracle (preferred) or direct engine (fallback)
+            def _try_verify(sh_bytes: bytes, label: str):
+                sh_hex = sh_bytes.hex()
+                if _ORACLE_AVAILABLE:
+                    ok, reason = ORACLE.verify_transaction(sh_hex, sig_dict, from_address)
+                    if ok: return True, f"valid_{label}"
+                    logger.debug(f"[MEMPOOL-SIG] oracle {label} failed: {reason}")
+                    # Don't return failure yet — try engine too
+                try:
+                    from hlwe.hyp_engine import HypGammaEngine
+                    engine = HypGammaEngine()
+                    if engine.verify_signature(sh_bytes, sig_dict, pub_key_hex):
+                        return True, f"valid_direct_{label}"
+                except Exception as _e:
+                    logger.debug(f"[MEMPOOL-SIG] engine {label} error: {_e}")
+                return False, f"invalid_{label}"
+
+            # 2. Try v2 first, fall back to v1 for legacy wallets
+            ok_v2, reason_v2 = _try_verify(signing_hash_bytes_v2, "v2")
+            if ok_v2:
+                return True, reason_v2
+            ok_v1, reason_v1 = _try_verify(signing_hash_bytes_v1, "v1_legacy")
+            if ok_v1:
+                logger.info("[MEMPOOL-SIG] ⚠️ accepted v1 legacy signature — wallet should upgrade")
+                return True, reason_v1
+            logger.warning(
+                f"[MEMPOOL-SIG] ❌ both v2 and v1 verification failed: v2={reason_v2} v1={reason_v1} "                f"sig_keys={list(sig_dict.keys())[:12]}"
+            )
             if _ORACLE_AVAILABLE:
-                # Pass the ACTUAL signing hash to the oracle
-                ok, reason = ORACLE.verify_transaction(signing_hash_hex, sig_dict, from_address)
-                if ok:
-                    return True, "valid"
-                logger.warning(
-                    f"[MEMPOOL-SIG] Oracle verification failed: {reason} — "
-                    f"sig_keys={list(sig_dict.keys())[:12]}"
-                )
-                return False, reason
+                return False, reason_v2  # surface v2 failure as primary
 
-            # Fallback: direct engine verification (no oracle available)
-            try:
-                from hlwe.hyp_engine import HypGammaEngine
-                engine = HypGammaEngine()
-                is_valid = engine.verify_signature(
-                    signing_hash_bytes,
-                    sig_dict,
-                    pub_key_hex
-                )
-                if is_valid:
-                    return True, "valid_direct_engine"
-                return False, "hyp_signature_invalid_direct"
-            except ImportError:
-                logger.warning("[MEMPOOL-SIG] ⚠️ Neither oracle nor engine available")
-                return False, "no_verification_backend"
-            except Exception as eng_err:
-                logger.error(f"[MEMPOOL-SIG] Direct engine verify error: {eng_err}")
-                return False, f"engine_verification_error: {str(eng_err)}"
+            # If oracle not available, _try_verify already tried direct engine for both v2 and v1
+            return False, f"no_verification_backend: v2={reason_v2} v1={reason_v1}"
 
         except Exception as e:
             logger.error(f"[MEMPOOL-SIG] Verification error: {e}")
