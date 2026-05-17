@@ -151,11 +151,12 @@ try:
         _oracle_consensus_channel,
         _mempool_channel,
         _db_sync_channel,
+        _balance_channel,
         register_sse_routes,
     )
 except Exception as _sse_init_err:
     logger.warning(f"[SSE] ⚠️ Could not import SSE channels: {_sse_init_err}")
-    _snapshot_channel = _blocks_channel = _oracle_consensus_channel = _db_sync_channel = None
+    _snapshot_channel = _blocks_channel = _oracle_consensus_channel = _db_sync_channel = _balance_channel = None
     register_sse_routes = None
 
 _SSE_AVAILABLE = False  # Set to True after register_sse_routes(app) succeeds
@@ -180,6 +181,8 @@ def _push_to_sse_service(path: str, payload: dict) -> None:
             _mempool_channel.fan_out(payload)
         elif path == "/push/db_sync" and _db_sync_channel:
             _db_sync_channel.fan_out(payload)
+        elif path == "/push/balance" and _balance_channel:
+            _balance_channel.fan_out(payload)
     except Exception:
         pass
 
@@ -1931,6 +1934,40 @@ def _settle_block_rewards(
                 except Exception as _bal_err:
                     _settle_log.error(f"[SETTLE] balance recompute for {addr[:20]}… failed: {_bal_err}")
 
+            # ── Push SSE balance updates for ALL touched addresses ──
+            # This ensures real-time balance propagation to /rpc/events/balance clients
+            # immediately after settlement, without waiting for UTXOBalanceWatcher poll.
+            if _phase2_addrs:
+                try:
+                    from sse_server import fan_out_balance as _sse_fan_all
+                    _sse_pushed = 0
+                    for _pa in _phase2_addrs:
+                        try:
+                            cur.execute(
+                                "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM address_utxos "
+                                "WHERE address = %s AND spent = FALSE",
+                                (_pa,),
+                            )
+                            _par = cur.fetchone()
+                            if _par:
+                                _pbal = int(_par[0]) if _par[0] else 0
+                                _pcnt = int(_par[1]) if _par[1] else 0
+                                if _pbal > 0:
+                                    _sse_fan_all(
+                                        address=_pa, balance_base=_pbal,
+                                        utxo_count=_pcnt, delta_base=_pbal,
+                                        trigger="settle", block_height=height,
+                                    )
+                                    _sse_pushed += 1
+                        except Exception:
+                            pass
+                    if _sse_pushed:
+                        _settle_log.info(
+                            f"[SETTLE] 📡 SSE balance pushed for {_sse_pushed}/{len(_phase2_addrs)} addresses"
+                        )
+                except Exception as _sse_all_err:
+                    _settle_log.debug(f"[SETTLE] SSE batch balance push non-critical: {_sse_all_err}")
+
             # ── Update chain_state (SAVEPOINT-isolated so failure never poisons tx) ──
             try:
                 cur.execute("SAVEPOINT sp_chain_state")
@@ -2031,6 +2068,23 @@ def _settle_block_rewards(
                         )
                     except Exception as _bcs_err:
                         pass  # cache is non-critical
+                    # ── Push real-time SSE balance update to all /rpc/events/balance clients ──
+                    try:
+                        from sse_server import fan_out_balance as _sse_fan
+                        _sse_fan(
+                            address=miner_address,
+                            balance_base=_miner_balance_base,
+                            utxo_count=1,
+                            delta_base=_miner_balance_base,
+                            trigger="settle",
+                            block_height=height,
+                        )
+                        _settle_log.info(
+                            f"[SETTLE] 📡 SSE balance pushed: {miner_address[:16]}… "
+                            f"= {_miner_balance_base} base ({_miner_balance:.4f} QTCL)"
+                        )
+                    except Exception as _sse_push_err:
+                        _settle_log.debug(f"[SETTLE] SSE balance push non-critical: {_sse_push_err}")
             except Exception as _mbq_err:
                 _settle_log.warning(f"[SETTLE] Balance query on settlement cursor: {_mbq_err}")
 

@@ -2953,19 +2953,20 @@ class UTXOBalanceWatcher:
                         GROUP BY address
                     """)
                 else:
-                    # Delta scan: only addresses whose UTXOs changed in last poll window
-                    # Use GREATEST to capture both new UTXOs and freshly-spent ones
+                    # Delta scan: only addresses whose UTXOs changed in last poll window.
+                    # address_utxos has no updated_at column — use created_at_timestamp (epoch BIGINT)
+                    # for new UTXOs, and spent_in_tx_hash/spent_at_height for recently spent ones.
                     cur.execute("""
                         SELECT address,
                                COALESCE(SUM(CASE WHEN spent=FALSE THEN amount ELSE 0 END), 0)::bigint AS balance_base,
                                COUNT(*) FILTER (WHERE spent=FALSE) AS utxo_count
                         FROM address_utxos
-                        WHERE updated_at > NOW() - INTERVAL '10 seconds'
-                              OR spent_in_tx_hash IS NOT NULL AND spent_at_height IS NOT NULL
-                                 AND ctid IN (
-                                     SELECT ctid FROM address_utxos
-                                     ORDER BY utxo_id DESC LIMIT 200
-                                 )
+                        WHERE created_at_timestamp > EXTRACT(EPOCH FROM NOW() - INTERVAL '10 seconds')::BIGINT
+                              OR (spent_in_tx_hash IS NOT NULL AND spent_at_height IS NOT NULL
+                                  AND ctid IN (
+                                      SELECT ctid FROM address_utxos
+                                      ORDER BY utxo_id DESC LIMIT 200
+                                  ))
                         GROUP BY address
                     """)
 
