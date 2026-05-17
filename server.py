@@ -124,7 +124,7 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_getTransaction": 8.0,
     "qtcl_getTransactionVolume": 8.0,
     "qtcl_submitBlock": 30.0,
-    "qtcl_submitTransaction": 6.0,
+    "qtcl_submitTransaction": 20.0,
     "qtcl_signAndSubmitTx": 90.0,
     "qtcl_walletAuth": 60.0,
     "qtcl_submitOracleReg": 6.0,
@@ -1405,10 +1405,9 @@ _SETTLED_HEIGHTS: set = set()
 # Previously this function was defined but NEVER called — settlement silently
 # failed because address_utxos, wallet_addresses, settlement_log did not exist.
 # ═══════════════════════════════════════════════════════════════════════════════
-try:
-    _ensure_wallet_addresses_table()
-except Exception as _ewat_err:
-    logger.warning(f"[STARTUP] ⚠️  UTXO table creation deferred: {_ewat_err}")
+# FIX v5.1: DEFERRED — get_db_cursor() isn't defined until after DatabasePool.
+# The actual call is now at the bottom of the module (after get_db_cursor exists).
+# See: _deferred_ensure_tables()
 
 def _settle_block_rewards(
     height: int, block_hash: str, miner_address: str, txs: list
@@ -3582,6 +3581,15 @@ def get_db_cursor():
 
 
 # ── DATABASE SCHEMA ENSURE: Lazy creation of tables missing from migration ─────
+
+# FIX v5.1: _ensure_wallet_addresses_table was called at line ~1409 BEFORE
+# get_db_cursor() existed (defined at line ~3545). Now it runs here, after both
+# DatabasePool and get_db_cursor are defined.
+try:
+    _ensure_wallet_addresses_table()
+except Exception as _ewat_err:
+    logger.warning(f"[STARTUP] ⚠️  wallet_addresses DDL deferred: {_ewat_err}")
+
 _SCHEMA_ENSURED_PEER_REGISTRY = False
 _SCHEMA_ENSURED_ORACLE_REGISTRY = False
 _SCHEMA_ENSURED_CHAIN_STATE = False
