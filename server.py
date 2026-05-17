@@ -4761,12 +4761,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
         height = None
         block_hash = None
         if isinstance(params, list) and len(params) >= 1:
-            p0 = params[0]
-            if isinstance(p0, dict):
-                height = int(p0["height"]) if "height" in p0 else None
-                block_hash = p0.get("hash") or block_hash
-            else:
-                height = int(p0)
+            height = int(params[0])
         elif isinstance(params, dict):
             height = params.get("height")
             block_hash = params.get("hash")
@@ -5051,21 +5046,9 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
     """
     try:
         if not isinstance(params, (list, tuple)) or len(params) < 2:
-            # Also accept dict directly
-            if isinstance(params, dict) and "from_height" in params and "to_height" in params:
-                from_h = int(params["from_height"])
-                to_h = int(params["to_height"])
-            elif isinstance(params, (list, tuple)) and len(params) >= 1 and isinstance(params[0], dict):
-                from_h = int(params[0].get("from_height", 0))
-                to_h   = int(params[0].get("to_height", -1))
-            else:
-                return _rpc_error(-32602, "params: [from_height, to_height]", rpc_id)
-        elif isinstance(params[0], dict):
-            from_h = int(params[0].get("from_height", 0))
-            to_h   = int(params[0].get("to_height", -1))
-        else:
-            from_h = int(params[0])
-            to_h = int(params[1])
+            return _rpc_error(-32602, "params: [from_height, to_height]", rpc_id)
+        from_h = int(params[0])
+        to_h = int(params[1])
 
         # Resolve negative to_height using DB tip
         if to_h < 0:
@@ -5576,8 +5559,7 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
         limit = 50
         if isinstance(params, list) and params:
             try:
-                p0 = params[0]
-                limit = int(p0.get("limit", 50) if isinstance(p0, dict) else p0)
+                limit = int(params[0])
             except (ValueError, TypeError):
                 limit = 50
         elif isinstance(params, dict):
@@ -8143,8 +8125,7 @@ def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
         max_count = None  # default: ALL pending
         if isinstance(params, list) and params:
             try:
-                p0 = params[0]
-                val = int(p0.get("max_count", 0) if isinstance(p0, dict) else p0)
+                val = int(params[0])
                 if val > 0:
                     max_count = min(val, 2000)
             except (ValueError, TypeError):
@@ -9689,17 +9670,39 @@ def _rpc_getBlockStatus(params: Any, rpc_id: Any) -> dict:
             _fin_at = int(db_finalized_at or 0)
             age_s   = max(0, _now - _fin_at) if _fin_at > 0 else 0
 
+        # Compute miner_reward_qtcl so client recovery path gets real value, not 0
+        _miner_reward_qtcl = 0.0
+        _miner_balance_qtcl = 0.0
+        try:
+            from globals import TessellationRewardSchedule as _TRS
+            _miner_reward_qtcl = _TRS.get_miner_reward_qtcl(height)
+            if height == 1:  # genesis extra
+                _miner_reward_qtcl += _TRS.get_miner_reward_qtcl(0)
+        except Exception:
+            _miner_reward_qtcl = 7.20  # depth-5 default
+        if is_finalized and db_miner:
+            try:
+                cur.execute(
+                    "SELECT COALESCE(SUM(amount),0) FROM wallet_balances WHERE address=%s",
+                    (_norm_address(str(db_miner)),))
+                _bal_row = cur.fetchone()
+                _miner_balance_qtcl = float(_bal_row[0] or 0) / 100.0 if _bal_row else 0.0
+            except Exception:
+                pass
+
         return _rpc_ok({
-            "height":           int(db_height),
-            "block_hash":       str(db_hash or ""),
-            "status":           "FINALIZED" if is_finalized else "PENDING",
-            "attestation_count": att_count,
-            "oracle_ids":       oracle_ids,
-            "threshold":        3,
-            "finalized":        is_finalized,
-            "age_seconds":      age_s,
-            "miner_address":    str(db_miner or ""),
-            "source":           "oracle-cache+DB",
+            "height":             int(db_height),
+            "block_hash":         str(db_hash or ""),
+            "status":             "FINALIZED" if is_finalized else "PENDING",
+            "attestation_count":  att_count,
+            "oracle_ids":         oracle_ids,
+            "threshold":          3,
+            "finalized":          is_finalized,
+            "age_seconds":        age_s,
+            "miner_address":      str(db_miner or ""),
+            "miner_reward_qtcl":  _miner_reward_qtcl,
+            "miner_balance_qtcl": _miner_balance_qtcl,
+            "source":             "oracle-cache+DB",
         }, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC] getBlockStatus: {e}")
@@ -10031,11 +10034,10 @@ def rpc_endpoint():
         try:
             params = json.loads(params_str)
             if not isinstance(params, list):
-                # A JSON object like {"height": 40} is passed directly as the params
-                # dict — do NOT wrap it in a list, or handlers see params[0]=dict.
+                # Dict params (e.g. {"height": 40}) stay as-is — handlers check isinstance(params, dict).
+                # Only wrap primitives (int, str, etc.) to avoid params[0]=dict TypeError.
                 if not isinstance(params, dict):
-                    params = [params]  # Only wrap primitives (int, str, etc.)
-                # dict params stay as-is; handlers already check isinstance(params, dict)
+                    params = [params]
         except json.JSONDecodeError as e:
             # JSON parse error on params: return -32700
             error_response = _rpc_error(
