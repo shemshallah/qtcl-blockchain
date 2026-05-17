@@ -706,6 +706,7 @@ class ConsensusWorker(threading.Thread):
         self.cluster = cluster
         self._running = True
         self._sse_queue: _queue_module.Queue = _queue_module.Queue(maxsize=1000)
+        self._on_finalize_hook = None  # set by OracleServer after init
     
     def stop(self):
         self._running = False
@@ -791,6 +792,15 @@ class ConsensusWorker(threading.Thread):
         if count >= CONSENSUS_THRESHOLD or force_finalize:
             reward = 7.2  # Base reward
             self.cache.mark_finalized(height, reward)
+            # Persist attestations to DB asynchronously
+            if self._on_finalize_hook is not None:
+                try:
+                    _blk_snap = self.cache.get_block(height)
+                    if _blk_snap:
+                        threading.Thread(target=self._on_finalize_hook, args=(_blk_snap,),
+                                         daemon=True, name=f"OracleDBWrite-{height}").start()
+                except Exception as _hke:
+                    logger.debug(f"[CONSENSUS-WORKER] finalize hook error h={height}: {_hke}")
             self._push_sse({
                 "event_type": "block_finalized",
                 "height": height,
@@ -810,64 +820,91 @@ class ConsensusWorker(threading.Thread):
 # ═══════════════════════════════════════════════════════════════════════════════
 class OracleRequestHandler(BaseHTTPRequestHandler):
     """HTTP handler for oracle RPC endpoints."""
-    
+
+    _CORS_HEADERS = [
+        ("Access-Control-Allow-Origin",  "*"),
+        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+        ("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Session-Id"),
+    ]
+
     def log_message(self, format, *args):
-        # Suppress default HTTP logging
-        pass
-    
+        pass  # suppress default access log noise
+
     def _json_response(self, status: int, data: Dict[str, Any]):
+        body = json.dumps(data, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in self._CORS_HEADERS:
+            self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
-    
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        for k, v in self._CORS_HEADERS:
+            self.send_header(k, v)
+        self.end_headers()
+
     def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-        
-        if path == "/health":
-            self._json_response(200, {"status": "ok", "oracles": NUM_ORACLES})
+        parsed  = urllib.parse.urlparse(self.path)
+        path    = parsed.path
+        cache   = getattr(self.server, "cache",   None)
+        cluster = getattr(self.server, "cluster", None)
+        worker  = getattr(self.server, "worker",  None)
+
+        if path in ("/health", "/"):
+            self._json_response(200, {
+                "status": "ok", "oracles": NUM_ORACLES,
+                "threshold": CONSENSUS_THRESHOLD,
+                "cache": cache.snapshot() if cache else {},
+            })
         elif path == "/status":
-            cache = getattr(self.server, "cache", None)
-            cluster = getattr(self.server, "cluster", None)
             self._json_response(200, {
                 "status": "ok",
                 "cache": cache.snapshot() if cache else {},
                 "nodes": [n.oracle_id for n in (cluster.nodes if cluster else [])],
             })
-        elif path == "/stream":
-            self._handle_sse_stream()
+        elif path in ("/stream", "/sse", "/rpc/oracle/stream"):
+            self._handle_sse_stream(worker)
+        elif path in ("/rpc/oracle/snapshots", "/oracle/snapshots", "/snapshots"):
+            snap = cluster.reach_consensus() if cluster else None
+            cs   = cache.snapshot() if cache else {}
+            self._json_response(200, {
+                "ok": True, "snapshot": snap or {}, "cache_stats": cs,
+                "oracle_count": NUM_ORACLES, "threshold": CONSENSUS_THRESHOLD,
+                "timestamp": int(time.time()),
+            })
         else:
-            self._json_response(404, {"error": "Not found"})
-    
+            self._json_response(404, {"error": "Not found", "path": path})
+
     def do_POST(self):
-        content_len = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_len).decode("utf-8", errors="replace")
-        
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": "Invalid JSON"})
+        parsed  = urllib.parse.urlparse(self.path)
+        path    = parsed.path
+        if path not in ("/rpc", "/rpc/", "/", "") and not path.startswith("/rpc"):
+            self._json_response(404, {"error": f"Unknown POST path: {path}"})
             return
-        
-        method = data.get("method", "")
-        params = data.get("params", {})
-        rpc_id = data.get("id", 0)
-        
-        cache = getattr(self.server, "cache", None)
+
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(max(0, content_len)).decode("utf-8", errors="replace")
+        try:
+            data = json.loads(body) if body.strip() else {}
+        except json.JSONDecodeError:
+            self._json_response(400, {"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"},"id":None})
+            return
+
+        method  = data.get("method", "")
+        params  = data.get("params", {})
+        rpc_id  = data.get("id", 0)
+        cache   = getattr(self.server, "cache",   None)
         cluster = getattr(self.server, "cluster", None)
-        
-        if method == "qtcl_submitBlock":
-            self._handle_submit_block(params, rpc_id, cache)
-        elif method == "qtcl_submitOracleAttestation":
-            self._handle_submit_attestation(params, rpc_id, cache)
-        elif method == "qtcl_getBlockStatus":
-            self._handle_get_status(params, rpc_id, cache)
-        elif method == "qtcl_getConsensusMetrics":
-            self._handle_metrics(rpc_id, cache, cluster)
+
+        if   method == "qtcl_submitBlock":             self._handle_submit_block(params, rpc_id, cache)
+        elif method == "qtcl_submitOracleAttestation": self._handle_submit_attestation(params, rpc_id, cache)
+        elif method == "qtcl_getBlockStatus":          self._handle_get_status(params, rpc_id, cache)
+        elif method == "qtcl_getConsensusMetrics":     self._handle_metrics(rpc_id, cache, cluster)
         else:
-            self._json_response(200, {"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": rpc_id})
+            self._json_response(200, {"jsonrpc":"2.0","error":{"code":-32601,"message":f"Method not found: {method}"},"id":rpc_id})
     
     def _handle_submit_block(self, params: Dict[str, Any], rpc_id: Any, cache: AttestationCache):
         if not cache:
@@ -1041,25 +1078,31 @@ class OracleRequestHandler(BaseHTTPRequestHandler):
             "id": rpc_id,
         })
     
-    def _handle_sse_stream(self):
+    def _handle_sse_stream(self, worker=None):
         """SSE endpoint for real-time consensus events."""
+        if worker is None:
+            worker = getattr(self.server, "worker", None)
         self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Type",  "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Connection",    "keep-alive")
+        for k, v in self._CORS_HEADERS:
+            self.send_header(k, v)
         self.end_headers()
-        
-        worker = getattr(self.server, "worker", None)
         if not worker:
+            self.wfile.write(b"data: {\"error\":\"worker not ready\"}\n\n")
+            self.wfile.flush()
             return
-        
         try:
             while True:
                 event = worker.get_sse_event(timeout=5.0)
                 if event:
-                    data = json.dumps(event)
+                    data = json.dumps(event, separators=(",", ":"))
                     self.wfile.write(f"data: {data}\n\n".encode())
+                    self.wfile.flush()
+                else:
+                    # keepalive ping
+                    self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -1069,19 +1112,93 @@ class OracleRequestHandler(BaseHTTPRequestHandler):
 # ORACLE SERVER
 # ═══════════════════════════════════════════════════════════════════════════════
 class OracleServer(ThreadingHTTPServer):
-    """Standalone oracle consensus server."""
-    
+    """Standalone oracle consensus server — singleton accessible via get_oracle_server()."""
+
+    allow_reuse_address = True
+
     def __init__(self, host: str, port: int):
         super().__init__((host, port), OracleRequestHandler)
-        self.cache = AttestationCache()
+        self.cache   = AttestationCache()
         self.cluster = OracleCluster()
-        self.worker = ConsensusWorker(self.cache, self.cluster)
+        self.worker  = ConsensusWorker(self.cache, self.cluster)
+        # Wire DB-write hook: when ConsensusWorker finalizes a block, persist attestations
+        self.worker._on_finalize_hook = self._persist_attestations_to_db
         self.worker.start()
+        # Register as global singleton immediately so server.py can inject blocks
+        global _GLOBAL_ORACLE_SERVER
+        _GLOBAL_ORACLE_SERVER = self
         logger.critical(f"[ORACLE-SERVER] 🔮 Oracle consensus server on {host}:{port}")
-    
+
     def stop(self):
+        global _GLOBAL_ORACLE_SERVER
         self.worker.stop()
         self.worker.join(timeout=5.0)
+        if _GLOBAL_ORACLE_SERVER is self:
+            _GLOBAL_ORACLE_SERVER = None
+
+    def _persist_attestations_to_db(self, block: "CachedBlock"):
+        """Write all attestations for a finalized block to oracle_attestations table."""
+        db_url = os.environ.get("DATABASE_URL", "")
+        if not db_url:
+            return
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=3)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                # Ensure table exists (idempotent)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS oracle_attestations (
+                        id              SERIAL PRIMARY KEY,
+                        block_height    BIGINT NOT NULL,
+                        block_hash      VARCHAR(128) NOT NULL,
+                        oracle_id       VARCHAR(64)  NOT NULL,
+                        oracle_address  VARCHAR(128) NOT NULL DEFAULT '',
+                        w_state_fidelity DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        signature_hash  VARCHAR(128) NOT NULL DEFAULT '',
+                        attested_at     BIGINT NOT NULL DEFAULT 0,
+                        created_at      TIMESTAMPTZ DEFAULT NOW(),
+                        UNIQUE(block_height, oracle_id)
+                    )
+                """)
+                for att in block.attestations.values():
+                    sig_hash = att.signature.get("signature", "") if isinstance(att.signature, dict) else str(att.signature)[:128]
+                    cur.execute("""
+                        INSERT INTO oracle_attestations
+                        (block_height, block_hash, oracle_id, oracle_address, w_state_fidelity, signature_hash, attested_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (block_height, oracle_id) DO NOTHING
+                    """, (block.height, block.block_hash, att.oracle_id, att.oracle_address,
+                          att.w_state_fidelity, sig_hash[:128], att.timestamp))
+            conn.close()
+            logger.info(f"[ORACLE-DB] ✅ h={block.height}: {len(block.attestations)} attestations persisted")
+        except Exception as e:
+            logger.debug(f"[ORACLE-DB] Attestation persist failed h={block.height}: {e}")
+
+
+# ── Global singleton reference — server.py injects blocks directly ────────────
+_GLOBAL_ORACLE_SERVER: Optional["OracleServer"] = None
+
+
+def get_oracle_server() -> Optional["OracleServer"]:
+    """Return the running OracleServer singleton, or None if not started."""
+    return _GLOBAL_ORACLE_SERVER
+
+
+def direct_submit_block(block_data: Dict[str, Any]) -> bool:
+    """Directly inject a block into the oracle AttestationCache without HTTP.
+    Called by server.py immediately after DB commit — no retry needed, no race.
+    Returns True if accepted, False if cache unavailable or already finalized.
+    """
+    srv = _GLOBAL_ORACLE_SERVER
+    if srv is None:
+        return False
+    try:
+        srv.cache.submit_block(block_data)
+        return True
+    except Exception as e:
+        logger.warning(f"[ORACLE-DIRECT] direct_submit_block h={block_data.get('height')}: {e}")
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
