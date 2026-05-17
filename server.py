@@ -4903,8 +4903,10 @@ _BLOCK_CACHE_LOCK = threading.RLock()
 # During that window, getBalance may see UTXO=0 and return 0 — this cache
 # ensures rapid polls return the last known good balance instead.
 _BALANCE_CACHE: dict = {}          # addr → (balance_int, timestamp)
-_BALANCE_CACHE_TTL: float = 30.0  # FIX: was 4s — extends to 30s to bridge
-                                   # full _refresh_balance_on_finalize poll window
+_BALANCE_CACHE_TTL: float = 5.0   # FIX: was 30s — too long, clients got stale reads
+                                   # for entire _refresh_balance_on_finalize window.
+                                   # 5s is enough to debounce concurrent requests while
+                                   # allowing settlement to propagate quickly.
 _BALANCE_CACHE_LOCK = threading.Lock()
 
 def _balance_cache_get(address: str) -> Optional[int]:
