@@ -4903,7 +4903,8 @@ _BLOCK_CACHE_LOCK = threading.RLock()
 # During that window, getBalance may see UTXO=0 and return 0 — this cache
 # ensures rapid polls return the last known good balance instead.
 _BALANCE_CACHE: dict = {}          # addr → (balance_int, timestamp)
-_BALANCE_CACHE_TTL: float = 4.0   # seconds
+_BALANCE_CACHE_TTL: float = 30.0  # FIX: was 4s — extends to 30s to bridge
+                                   # full _refresh_balance_on_finalize poll window
 _BALANCE_CACHE_LOCK = threading.Lock()
 
 def _balance_cache_get(address: str) -> Optional[int]:
@@ -9799,11 +9800,26 @@ def _rpc_getBlockStatus(params: Any, rpc_id: Any) -> dict:
             _miner_reward_qtcl = 7.20  # depth-5 default
         if is_finalized and db_miner:
             try:
+                # FIX: was querying wallet_balances (nonexistent table) → always returned 0.
+                # Query address_utxos directly — same source of truth as qtcl_getBalance.
+                _norm_miner = _norm_address(str(db_miner))
                 cur.execute(
-                    "SELECT COALESCE(SUM(amount),0) FROM wallet_balances WHERE address=%s",
-                    (_norm_address(str(db_miner)),))
+                    "SELECT COALESCE(SUM(amount),0) FROM address_utxos "
+                    "WHERE address=%s AND spent=FALSE",
+                    (_norm_miner,))
                 _bal_row = cur.fetchone()
                 _miner_balance_qtcl = float(_bal_row[0] or 0) / 100.0 if _bal_row else 0.0
+                if _miner_balance_qtcl == 0.0:
+                    # Fallback: wallet_addresses balance cache
+                    try:
+                        cur.execute(
+                            "SELECT balance FROM wallet_addresses WHERE address=%s",
+                            (_norm_miner,))
+                        _wa_row = cur.fetchone()
+                        if _wa_row and _wa_row[0]:
+                            _miner_balance_qtcl = float(_wa_row[0]) / 100.0
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
