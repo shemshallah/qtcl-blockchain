@@ -7650,7 +7650,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 _dup_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
             except Exception:
                 _dup_reward = 7.20
-            # FIX: include miner_balance_qtcl so client can update its display
             return _rpc_ok(
                 {
                     "status": "accepted_and_finalized",
@@ -7658,7 +7657,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     "block_hash": block_hash,
                     "next_height": height + 1,
                     "miner_reward_qtcl": _dup_reward,
-                    "miner_balance_qtcl": _dup_miner_balance,
                     "oracle_consensus": "5/5",
                     "oracle_ids": ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"],
                     "diagnostic": {"note": "Block already in database - settlement re-applied"},
@@ -7919,10 +7917,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception as _cache_inv_err:
             logger.warning(f"[RPC-submitBlock] Cache invalidation warning: {_cache_inv_err}")
 
-        # Push oracle consensus finalization event (miner listens to this to mark block done)
-        # FIX: include miner_reward_qtcl + miner_balance_qtcl so client can update
-        # its balance display immediately from the SSE event without waiting for
-        # _refresh_balance_on_finalize to poll getBalance.
+        # Push oracle consensus finalization event
         try:
             _push_to_sse_service("/push/oracle_consensus", {
                 "event_type": "block_finalized",
@@ -7934,7 +7929,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "finalized": True,
                 "timestamp": int(time.time()),
                 "miner_reward_qtcl": _resp_reward,
-                "miner_balance_qtcl": _miner_balance_qtcl,
             })
         except Exception:
             pass
@@ -8102,7 +8096,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 "block_hash": block_hash,
                 "difficulty_bits": difficulty_bits,
                 "miner_reward_qtcl": _resp_reward,
-                "miner_balance_qtcl": _miner_balance_qtcl,
                 "oracle_consensus": "5/5",
                 "oracle_ids": ["oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"],
                 "next_height": height + 1,
