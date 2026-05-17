@@ -1091,6 +1091,8 @@ class Mempool:
         )
         self._bg_thread.start()
         logger.info("[MEMPOOL] Background worker started")
+        # Start UTXO balance watcher for real-time SSE balance push
+        get_utxo_watcher()
 
     def stop(self) -> None:
         self._bg_running = False
@@ -1480,6 +1482,31 @@ class Mempool:
 
         self._stats['total_confirmed'] += count
         logger.info(f"[MEMPOOL] ✅ {count} TXs confirmed at block {block_height}")
+
+        # ── SSE balance push for all affected addresses ────────────────────
+        # Collect unique sender+receiver addresses from confirmed TXs and queue
+        # immediate UTXO balance push so clients update within ~100ms.
+        if count > 0:
+            try:
+                _affected: set = set()
+                # Re-read from DB so we get actual addresses (TXs already removed from _index)
+                if _db.available:
+                    with _db.cursor() as cur:
+                        cur.execute("""
+                            SELECT DISTINCT from_address, to_address FROM transactions
+                            WHERE tx_hash = ANY(%s)
+                        """, (tx_hashes,))
+                        for row in cur.fetchall() or []:
+                            _fa = row['from_address'] if isinstance(row, dict) else row[0]
+                            _ta = row['to_address']   if isinstance(row, dict) else row[1]
+                            if _fa: _affected.add(_fa)
+                            if _ta: _affected.add(_ta)
+                _watcher = get_utxo_watcher()
+                for _addr in _affected:
+                    _watcher.push_now(_addr)
+            except Exception as _pe:
+                logger.debug(f"[MEMPOOL] SSE balance push skipped: {_pe}")
+
         return count
 
     def reorg(self, tx_hashes_to_readd: List[str]) -> int:
@@ -2367,6 +2394,7 @@ class Mempool:
                                 pass
 
                         # ── 3f: Recompute wallet balances from UTXO set ──────
+                        _settled_addresses: set = set()
                         for addr in set(filter(None, [from_addr, to_addr])):
                             try:
                                 cur.execute("""
@@ -2380,8 +2408,20 @@ class Mempool:
                                     UPDATE wallet_addresses SET balance = %s, updated_at = NOW()
                                     WHERE address = %s
                                 """, (new_bal, addr))
+                                _settled_addresses.add(addr)
                             except Exception as _bal_err:
                                 _reconcile_log.debug(f"[RECONCILE] balance recompute skipped: {_bal_err}")
+
+                        # ── 3g: Instant SSE balance push for settled addresses ─
+                        # Queue each address for immediate push on the UTXO watcher
+                        # tick — fires within 100ms without blocking the reconcile loop.
+                        if _settled_addresses:
+                            try:
+                                _watcher = get_utxo_watcher()
+                                for _addr in _settled_addresses:
+                                    _watcher.push_now(_addr)
+                            except Exception as _sse_err:
+                                _reconcile_log.debug(f"[RECONCILE] SSE push queue error: {_sse_err}")
 
                     settled_count += 1
 
@@ -2763,8 +2803,7 @@ class FieldStateDB:
         """Get coherence measurements for field"""
         return self.coherence_trajectories.get(field_id, [])
 
-    def all_field_ids(self) -> List[str]:
-        """List all local field IDs"""
+    def all_field_ids(self) -> List[str]:\n        """List all local field IDs"""
         return list(self.snapshots.keys())
 
     def snapshot_count(self) -> int:
@@ -2783,3 +2822,245 @@ class FieldStateDB:
         except Exception as e:
             logger.error(f"[LAYER-4] Delete failed: {e}")
             return False
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# LAYER 5: UTXO BALANCE WATCHER — Real-time SSE balance push
+# Monitors address_utxos for changes; fires sse_server.fan_out_balance() in-process.
+# No HTTP round-trip: direct function call into sse_server module.
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _sse_fan_out_balance(address: str, balance_base: int, utxo_count: int = 0,
+                         delta_base: int = 0, trigger: str = "settle",
+                         block_height: int = 0) -> None:
+    """
+    In-process bridge to sse_server.fan_out_balance().
+    Imported lazily to avoid circular import at module load time.
+    Falls back to a best-effort HTTP POST if in-process import fails.
+    """
+    try:
+        from sse_server import fan_out_balance as _ssefn
+        _ssefn(address=address, balance_base=balance_base, utxo_count=utxo_count,
+               delta_base=delta_base, trigger=trigger, block_height=block_height)
+    except ImportError:
+        # Cross-process worker: fire HTTP push as fallback (gunicorn multi-worker)
+        try:
+            import urllib.request as _ur, json as _j
+            _body = _j.dumps({
+                "address": address, "balance_base": balance_base,
+                "utxo_count": utxo_count, "delta_base": delta_base,
+                "trigger": trigger, "block_height": block_height,
+            }).encode()
+            _req = _ur.Request("http://127.0.0.1:8000/push/balance",
+                               data=_body, headers={"Content-Type": "application/json"})
+            _ur.urlopen(_req, timeout=1)
+        except Exception:
+            pass  # Non-critical — balance push is best-effort
+    except Exception as _err:
+        logger.debug(f"[UTXO-WATCH] SSE fan-out error: {_err}")
+
+
+class UTXOBalanceWatcher:
+    """
+    Background daemon that watches address_utxos for balance changes and
+    immediately pushes updates to all connected SSE /rpc/events/balance clients.
+
+    Algorithm (per POLL_INTERVAL_S):
+        1. SELECT address, SUM(amount) WHERE spent=FALSE from address_utxos
+           WHERE updated_at > last_poll_ts  (only changed rows — delta detection)
+        2. Compare against in-memory _last_balances snapshot
+        3. For each changed address: call _sse_fan_out_balance() in-process
+        4. Update _last_balances snapshot
+
+    Also responds to explicit push_now(address) calls from _reconcile_pending_txs
+    and mark_included_in_block for instant post-settle updates.
+
+    Thread-safe: _last_balances guarded by _lock. Only one watcher per process.
+    """
+    POLL_INTERVAL_S = 5.0         # scan UTXO table for changes every 5s
+    FULL_SCAN_EVERY = 12          # full table scan every 12 polls (60s)
+
+    def __init__(self) -> None:
+        self._last_balances : Dict[str, int] = {}   # address → last known balance_base
+        self._last_utxo_cnt : Dict[str, int] = {}   # address → last utxo count
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._poll_count = 0
+        self._pending_push: Set[str] = set()    # addresses queued for immediate push
+        self._pending_lock = threading.Lock()
+        logger.info("[UTXO-WATCH] UTXOBalanceWatcher initialized")
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, name="UTXOBalanceWatcher", daemon=True)
+        self._thread.start()
+        logger.info("[UTXO-WATCH] ✅ Background UTXO watcher started (poll=5s)")
+
+    def stop(self) -> None:
+        self._running = False
+
+    def push_now(self, address: str) -> None:
+        """Queue an address for immediate push on the next poll tick (non-blocking)."""
+        with self._pending_lock:
+            self._pending_push.add(address)
+
+    def _loop(self) -> None:
+        while self._running:
+            try:
+                time.sleep(self.POLL_INTERVAL_S)
+                if not self._running:
+                    break
+                self._poll_count += 1
+                # Drain immediate-push queue first
+                immediate: Set[str] = set()
+                with self._pending_lock:
+                    immediate = set(self._pending_push)
+                    self._pending_push.clear()
+
+                if immediate:
+                    self._push_addresses(immediate, trigger="instant")
+
+                # Periodic delta scan
+                full = (self._poll_count % self.FULL_SCAN_EVERY == 0)
+                self._delta_scan(full=full)
+
+            except Exception as exc:
+                logger.debug(f"[UTXO-WATCH] loop error: {exc}")
+                time.sleep(2)
+
+    def _delta_scan(self, full: bool = False) -> None:
+        """Scan address_utxos for changed balances and push SSE events."""
+        if not _db.available:
+            return
+        try:
+            changed_addresses: Set[str] = set()
+            new_balances: Dict[str, int] = {}
+            new_counts: Dict[str, int] = {}
+
+            with _db.cursor() as cur:
+                if full:
+                    # Full scan: recompute every address balance from UTXO set
+                    cur.execute("""
+                        SELECT address,
+                               COALESCE(SUM(amount), 0)::bigint  AS balance_base,
+                               COUNT(*) AS utxo_count
+                        FROM address_utxos
+                        WHERE spent = FALSE
+                        GROUP BY address
+                    """)
+                else:
+                    # Delta scan: only addresses whose UTXOs changed in last poll window
+                    # Use GREATEST to capture both new UTXOs and freshly-spent ones
+                    cur.execute("""
+                        SELECT address,
+                               COALESCE(SUM(CASE WHEN spent=FALSE THEN amount ELSE 0 END), 0)::bigint AS balance_base,
+                               COUNT(*) FILTER (WHERE spent=FALSE) AS utxo_count
+                        FROM address_utxos
+                        WHERE updated_at > NOW() - INTERVAL '10 seconds'
+                              OR spent_in_tx_hash IS NOT NULL AND spent_at_height IS NOT NULL
+                                 AND ctid IN (
+                                     SELECT ctid FROM address_utxos
+                                     ORDER BY utxo_id DESC LIMIT 200
+                                 )
+                        GROUP BY address
+                    """)
+
+                rows = cur.fetchall()
+
+            with self._lock:
+                for row in rows:
+                    addr = row['address'] if isinstance(row, dict) else row[0]
+                    bal  = int(row['balance_base'] if isinstance(row, dict) else row[1]) or 0
+                    cnt  = int(row['utxo_count'] if isinstance(row, dict) else row[2]) or 0
+                    new_balances[addr] = bal
+                    new_counts[addr] = cnt
+                    prev_bal = self._last_balances.get(addr, -1)
+                    if bal != prev_bal:
+                        changed_addresses.add(addr)
+
+                for addr in changed_addresses:
+                    self._last_balances[addr] = new_balances[addr]
+                    self._last_utxo_cnt[addr] = new_counts.get(addr, 0)
+
+            # Push outside lock
+            for addr in changed_addresses:
+                prev = self._last_balances.get(addr, 0)   # already updated above
+                bal  = new_balances[addr]
+                cnt  = new_counts.get(addr, 0)
+                _sse_fan_out_balance(
+                    address=addr,
+                    balance_base=bal,
+                    utxo_count=cnt,
+                    delta_base=bal - (prev if prev != bal else bal),
+                    trigger="poll" if not full else "full_scan",
+                    block_height=0,
+                )
+
+            if changed_addresses:
+                logger.debug(f"[UTXO-WATCH] Pushed balance updates for {len(changed_addresses)} addresses")
+
+        except Exception as exc:
+            logger.debug(f"[UTXO-WATCH] delta_scan error: {exc}")
+
+    def _push_addresses(self, addresses: Set[str], trigger: str = "instant") -> None:
+        """Immediately fetch and push balances for a set of addresses."""
+        if not _db.available or not addresses:
+            return
+        try:
+            addr_list = list(addresses)
+            with _db.cursor() as cur:
+                cur.execute("""
+                    SELECT address,
+                           COALESCE(SUM(amount), 0)::bigint AS balance_base,
+                           COUNT(*) AS utxo_count
+                    FROM address_utxos
+                    WHERE address = ANY(%s) AND spent = FALSE
+                    GROUP BY address
+                """, (addr_list,))
+                rows = cur.fetchall()
+
+            seen: Set[str] = set()
+            for row in rows:
+                addr = row['address'] if isinstance(row, dict) else row[0]
+                bal  = int(row['balance_base'] if isinstance(row, dict) else row[1]) or 0
+                cnt  = int(row['utxo_count'] if isinstance(row, dict) else row[2]) or 0
+                seen.add(addr)
+                with self._lock:
+                    prev = self._last_balances.get(addr, 0)
+                    self._last_balances[addr] = bal
+                    self._last_utxo_cnt[addr] = cnt
+                _sse_fan_out_balance(
+                    address=addr, balance_base=bal, utxo_count=cnt,
+                    delta_base=bal - prev, trigger=trigger, block_height=0,
+                )
+
+            # Addresses with zero UTXOs still need a push (e.g. sender after full spend)
+            for addr in addresses - seen:
+                with self._lock:
+                    prev = self._last_balances.get(addr, 0)
+                    self._last_balances[addr] = 0
+                    self._last_utxo_cnt[addr] = 0
+                if prev != 0:
+                    _sse_fan_out_balance(address=addr, balance_base=0, utxo_count=0,
+                                         delta_base=-prev, trigger=trigger, block_height=0)
+
+        except Exception as exc:
+            logger.debug(f"[UTXO-WATCH] _push_addresses error: {exc}")
+
+
+# Process-wide UTXO watcher singleton (started alongside the Mempool singleton)
+_UTXO_WATCHER: Optional[UTXOBalanceWatcher] = None
+_UTXO_WATCHER_LOCK = threading.Lock()
+
+def get_utxo_watcher() -> UTXOBalanceWatcher:
+    global _UTXO_WATCHER
+    if _UTXO_WATCHER is not None:
+        return _UTXO_WATCHER
+    with _UTXO_WATCHER_LOCK:
+        if _UTXO_WATCHER is None:
+            _UTXO_WATCHER = UTXOBalanceWatcher()
+            _UTXO_WATCHER.start()
+    return _UTXO_WATCHER

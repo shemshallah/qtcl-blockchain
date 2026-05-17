@@ -199,6 +199,10 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 .loading{display:flex;align-items:center;justify-content:center;padding:30px;font-family:var(--mono);font-size:9px;color:var(--dim2);gap:8px}
 .spinner{width:14px;height:14px;border:1px solid var(--border2);border-top-color:var(--cy);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+@keyframes bal-flash-up{0%{color:var(--gr);text-shadow:0 0 12px var(--gr)}100%{color:inherit;text-shadow:none}}
+@keyframes bal-flash-down{0%{color:var(--re);text-shadow:0 0 12px var(--re)}100%{color:inherit;text-shadow:none}}
+.bal-flash-up{animation:bal-flash-up 1.2s ease-out forwards}
+.bal-flash-down{animation:bal-flash-down 1.2s ease-out forwards}
 .error-msg{padding:16px;background:var(--re2);border:1px solid rgba(244,63,94,.2);border-radius:var(--r6);font-family:var(--mono);font-size:9px;color:var(--re)}
 
 /* ── EXPLORER PAGE ── */
@@ -1581,15 +1585,107 @@ async function init() {
   // EventSource connection flood blocking the fetch queue during startup
   startBlockSSEListener();
   startDbSyncListener();
+  startBalanceSSEListener();
 }
 
 init();
 
 let _blockSSE = null;
 let _dbSyncSSE = null;
+let _balanceSSE = null;
 
-// ═══ SSE BLOCK STREAM LISTENER ═══════════════════════════════════════════════════
-// Real-time block events: when a new block is confirmed, immediately refresh display
+// ═══ UTXO BALANCE SSE LISTENER ════════════════════════════════════════════════════
+// Real-time UTXO balance stream. Fired by server whenever a UTXO is settled,
+// confirmed, or a new TX is accepted. Client filters events by wallet address.
+// ──────────────────────────────────────────────────────────────────────────────────
+
+let _watchedAddress = null;  // set to wallet address once unlocked
+
+function setWatchedAddress(addr) {
+  _watchedAddress = addr || null;
+}
+
+function startBalanceSSEListener() {
+  if (_balanceSSE) { try { _balanceSSE.close(); } catch(e) {} _balanceSSE = null; }
+  try {
+    const sseUrl = `${RPC.replace('/rpc', '')}/rpc/events/balance`;
+    _balanceSSE = new EventSource(sseUrl);
+
+    _balanceSSE.addEventListener('connected', () => {
+      console.log('[SSE-BAL] ✅ Balance stream connected');
+    });
+
+    _balanceSSE.addEventListener('message', (event) => {
+      try {
+        const ev = JSON.parse(event.data);
+        if (ev.type !== 'balance_update') return;
+        if (_watchedAddress && ev.address !== _watchedAddress) return;
+
+        const balQtcl = parseFloat(ev.balance_qtcl || 0);
+        const deltaQtcl = parseFloat(ev.delta_qtcl || 0);
+
+        // ── Update any balance display element with data-balance-address ──
+        document.querySelectorAll(`[data-balance-address="${ev.address}"]`).forEach(el => {
+          el.textContent = balQtcl.toFixed(8) + ' QTCL';
+          el.classList.remove('bal-flash-up', 'bal-flash-down');
+          void el.offsetWidth;  // force reflow to restart animation
+          if (deltaQtcl > 0) el.classList.add('bal-flash-up');
+          else if (deltaQtcl < 0) el.classList.add('bal-flash-down');
+        });
+
+        // ── If the wallet panel is open for this address, update it ──────
+        if (typeof updateWalletBalance === 'function') {
+          updateWalletBalance(ev.address, balQtcl, deltaQtcl, ev.trigger);
+        }
+
+        // ── Emit custom DOM event for any other listeners ─────────────────
+        document.dispatchEvent(new CustomEvent('qtcl:balance', { detail: ev }));
+
+        if (Math.abs(deltaQtcl) > 0) {
+          console.log(`[SSE-BAL] 💰 ${ev.address.slice(0,12)}… ` +
+                      `${balQtcl.toFixed(4)} QTCL (${deltaQtcl >= 0 ? '+' : ''}${deltaQtcl.toFixed(4)}) [${ev.trigger}]`);
+        }
+      } catch(parseErr) {
+        console.debug('[SSE-BAL] parse error:', parseErr);
+      }
+    });
+
+    _balanceSSE.addEventListener('error', () => {
+      try { _balanceSSE.close(); } catch(e) {}
+      _balanceSSE = null;
+      setTimeout(() => startBalanceSSEListener(), 5000);
+    });
+
+    console.log(`[SSE-BAL] 🔗 Connecting to ${sseUrl}`);
+  } catch(e) {
+    console.warn(`[SSE-BAL] Setup failed: ${e.message}`);
+    setTimeout(() => startBalanceSSEListener(), 8000);
+  }
+}
+
+// updateWalletBalance — called by SSE handler; integrates with existing wallet UI.
+// Finds balance elements by convention: #wallet-balance or .wallet-balance-display.
+function updateWalletBalance(address, balQtcl, deltaQtcl, trigger) {
+  // Try primary wallet balance display elements
+  const candidates = [
+    document.getElementById('wallet-balance'),
+    document.getElementById('balance-display'),
+    ...document.querySelectorAll('.wallet-balance-display'),
+    ...document.querySelectorAll('[data-wallet-balance]'),
+  ].filter(Boolean);
+
+  for (const el of candidates) {
+    const elAddr = el.dataset.address || el.dataset.walletAddress || _watchedAddress;
+    if (!elAddr || elAddr === address) {
+      el.textContent = balQtcl.toFixed(8) + ' QTCL';
+      // Flash animation
+      el.style.transition = 'color 0.3s';
+      el.style.color = deltaQtcl > 0 ? 'var(--gr, #39ff14)' : deltaQtcl < 0 ? 'var(--re, #ff4444)' : '';
+      setTimeout(() => { el.style.color = ''; }, 1200);
+    }
+  }
+}
+
 function startBlockSSEListener() {
   if (_blockSSE) {
     try { _blockSSE.close(); } catch(e) {}

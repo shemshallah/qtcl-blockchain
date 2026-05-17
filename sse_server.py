@@ -65,12 +65,14 @@ def register_sse_routes(flask_app) -> None:
     flask_app.add_url_rule("/rpc/oracle/consensus",  view_func=rpc_oracle_consensus,  methods=["GET", "OPTIONS"])
     flask_app.add_url_rule("/rpc/events/mempool",   view_func=rpc_events_mempool,   methods=["GET", "OPTIONS"])
     flask_app.add_url_rule("/rpc/events/db_sync",   view_func=sse_db_sync,          methods=["GET"])
+    flask_app.add_url_rule("/rpc/events/balance",   view_func=rpc_events_balance,   methods=["GET", "OPTIONS"])
     # Internal push endpoints (for direct fan-out bypass; server.py now uses in-memory fan-out)
     flask_app.add_url_rule("/push/snapshot",         view_func=push_snapshot,         methods=["POST"])
     flask_app.add_url_rule("/push/block",            view_func=push_block,            methods=["POST"])
     flask_app.add_url_rule("/push/metric",           view_func=push_metric,           methods=["POST"])
     flask_app.add_url_rule("/push/oracle_consensus", view_func=push_oracle_consensus, methods=["POST"])
     flask_app.add_url_rule("/push/mempool",          view_func=push_mempool,          methods=["POST"])
+    flask_app.add_url_rule("/push/balance",          view_func=push_balance_http,     methods=["POST"])
     logger.info(f"[SSE] Registered {len(_registered_apps)} SSE route group(s)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -220,6 +222,7 @@ _metrics_channel = SSEChannel("metrics")
 _oracle_consensus_channel = SSEChannel("oracle_consensus")
 _mempool_channel = SSEChannel("mempool")
 _db_sync_channel = SSEChannel("db_sync")
+_balance_channel = SSEChannel("balance")   # ── UTXO real-time balance stream
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -237,6 +240,7 @@ def _cleanup_worker():
             total_removed += _metrics_channel.cleanup_stale(max_age=15.0)
             total_removed += _oracle_consensus_channel.cleanup_stale(max_age=15.0)
             total_removed += _mempool_channel.cleanup_stale(max_age=15.0)
+            total_removed += _balance_channel.cleanup_stale(max_age=30.0)
             
             if total_removed > 0:
                 snap_total, _ = _snapshot_channel.get_client_counts()
@@ -581,6 +585,84 @@ def rpc_events_mempool():
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTXO BALANCE STREAM — Real-time balance/UTXO updates keyed by address
+# Push payload: {"address": hex, "balance_base": int, "balance_qtcl": float,
+#                "utxo_count": int, "delta_base": int, "trigger": str,
+#                "block_height": int, "ts": float}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fan_out_balance(address: str, balance_base: int, utxo_count: int = 0,
+                    delta_base: int = 0, trigger: str = "settle",
+                    block_height: int = 0) -> int:
+    """
+    Push UTXO balance update to all /rpc/events/balance subscribers in-process.
+    Called directly from mempool reconcile + UTXOBalanceWatcher — no HTTP overhead.
+    """
+    payload = {
+        "type":         "balance_update",
+        "address":      address,
+        "balance_base": balance_base,
+        "balance_qtcl": round(balance_base / 100.0, 8),
+        "utxo_count":   utxo_count,
+        "delta_base":   delta_base,
+        "delta_qtcl":   round(delta_base / 100.0, 8),
+        "trigger":      trigger,   # "settle" | "confirm" | "poll" | "tx_accepted"
+        "block_height": block_height,
+        "ts":           time.time(),
+    }
+    return _balance_channel.fan_out(payload)
+
+
+@app.route("/push/balance", methods=["POST"])
+def push_balance_http():
+    """Internal HTTP push fallback for cross-process balance fanout."""
+    try:
+        payload = request.get_json(force=True) or {}
+        n = fan_out_balance(
+            address=payload.get("address", ""),
+            balance_base=int(payload.get("balance_base", 0)),
+            utxo_count=int(payload.get("utxo_count", 0)),
+            delta_base=int(payload.get("delta_base", 0)),
+            trigger=payload.get("trigger", "push"),
+            block_height=int(payload.get("block_height", 0)),
+        )
+        return {"status": "ok", "clients": n}, 200
+    except Exception as e:
+        logger.error(f"[SSE-BAL] /push/balance error: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route("/rpc/events/balance", methods=["GET", "OPTIONS"])
+def rpc_events_balance():
+    """
+    SSE stream: Real-time UTXO balance events. All addresses broadcast on one channel;
+    client-side filtering by address. Heartbeat keeps Koyeb LB connection alive.
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+    if not _is_sse_client():
+        return _oneshot_json_response({"status": "ok", "channel": "balance"})
+
+    client_ip = _get_client_ip()
+    client = _balance_channel.connect(client_ip)
+
+    def _balance_gen():
+        yield (f"event: connected\ndata: "
+               f'{{\"status\":\"subscribed\",\"channel\":\"balance\",\"ts\":{time.time()}}}\n\n')
+        yield from _sse_generator(_balance_channel, client)
+
+    return Response(
+        _balance_gen(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",
             "Access-Control-Allow-Origin": "*",
         },
     )
