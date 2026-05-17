@@ -2803,7 +2803,8 @@ class FieldStateDB:
         """Get coherence measurements for field"""
         return self.coherence_trajectories.get(field_id, [])
 
-    def all_field_ids(self) -> List[str]:\n        """List all local field IDs"""
+    def all_field_ids(self) -> List[str]:
+        """List all local field IDs"""
         return list(self.snapshots.keys())
 
     def snapshot_count(self) -> int:
