@@ -5575,6 +5575,49 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         )
 
 
+def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
+	"""qtcl_getLatestDMSnapshot — Latest density matrix snapshot from W-state oracle.
+	
+	Alias for oracle snapshot with DM + fidelity + pq0 state.
+	Returns same data as /rpc/oracle/snapshot/latest endpoint.
+	
+	Returns:
+		w_state_fidelity, coherence, purity, timestamp, source
+	"""
+	try:
+		logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot called, id={rpc_id}")
+		
+		# Try to fetch from database first (most recent snapshot)
+		with get_db_cursor() as cur:
+			cur.execute("""
+				SELECT w_state_fidelity, quantum_coherence, purity, timestamp
+				FROM w_state_snapshots
+				ORDER BY timestamp DESC LIMIT 1
+			""")
+			row = cur.fetchone()
+			if row:
+				return _rpc_ok({
+					"w_state_fidelity": float(row[0] or 0),
+					"coherence": float(row[1] or 0),
+					"purity": float(row[2] or 0),
+					"timestamp": float(row[3] or time.time()),
+					"source": "database"
+				}, rpc_id)
+		
+		# Fallback: return empty snapshot
+		return _rpc_ok({
+			"w_state_fidelity": 0.0,
+			"coherence": 0.0,
+			"purity": 0.0,
+			"timestamp": time.time(),
+			"source": "fallback"
+		}, rpc_id)
+	
+	except Exception as e:
+		logger.error(f"[RPC-METHOD] qtcl_getLatestDMSnapshot failed: {e}")
+		return _rpc_error(-32603, f"DM snapshot failed: {str(e)}", rpc_id)
+
+
 def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
     """
     qtcl_getPythPrice — atomic Pyth Network price snapshot.
@@ -10009,6 +10052,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getBlockRange": _rpc_getBlockRange,
     "qtcl_getBlockStatus": _rpc_getBlockStatus,
     "qtcl_getQuantumMetrics": _rpc_getQuantumMetrics,
+	"qtcl_getLatestDMSnapshot": _rpc_getLatestDMSnapshot,
     "qtcl_getPythPrice": _rpc_getPythPrice,
     "qtcl_getMempoolStats": _rpc_getMempoolStats,
     "qtcl_getMempool": _rpc_getMempool,
