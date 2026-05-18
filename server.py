@@ -7012,7 +7012,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # value -> different hash -> guaranteed mismatch. Env var minimum enforced after verify.
         _submitted_diff = hdr.get("difficulty_bits") or hdr.get("difficulty")
         _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
-        _min_diff = int(_env_diff) if _env_diff.isdigit() else 4
+        _min_diff = int(_env_diff) if _env_diff.isdigit() else 5  # FIX: default 5 matches pending_block template
         difficulty_bits = int(_submitted_diff) if _submitted_diff is not None else _min_diff
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
@@ -10496,6 +10496,26 @@ def rpc_health():
             "uptime_s": time.time() - _SERVER_START_TIME,
         }
     ), 200
+
+
+@app.route("/rpc/config/difficulty", methods=["GET"])
+def rpc_config_difficulty():
+    """GET /rpc/config/difficulty — authoritative PoW difficulty for miners.
+    Returns the minimum difficulty the server enforces on block submission.
+    Miners MUST use this value; falling back to block.difficulty causes rejected blocks
+    when the minimum was raised (e.g. 4→5 migration).
+    """
+    _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
+    _authoritative = int(_env_diff) if _env_diff.isdigit() else 5
+    return jsonify({
+        "jsonrpc": _JSONRPC_VERSION,
+        "result": {
+            "difficulty": _authoritative,
+            "minimum": _authoritative,
+            "source": "env:BLOCK_DIFFICULTY" if _env_diff.isdigit() else "default",
+        },
+        "id": None,
+    }), 200
 
 
 @app.route("/health", methods=["GET"])
