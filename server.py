@@ -10072,8 +10072,31 @@ def _rpc_getBlockStatus(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
+def _rpc_signAndSubmitBlock(params: Any, rpc_id: Any) -> dict:
+    """qtcl_signAndSubmitBlock — Unified sign + submit for miner clients.
+
+    Accepts a complete, already-PoW-solved and HypΓ-signed block payload from
+    the miner client and routes it through the same _rpc_submitBlock pipeline.
+    This is the preferred submission path; qtcl_submitBlock remains as fallback.
+
+    params[0] = complete block dict (identical schema to qtcl_submitBlock).
+    Returns the same response shape as qtcl_submitBlock with an added
+    'method': 'signAndSubmitBlock' tag for client-side routing tracing.
+    """
+    try:
+        result = _rpc_submitBlock(params, rpc_id)
+        # Tag result so client can confirm it hit the new path
+        if isinstance(result, dict) and "result" in result and isinstance(result["result"], dict):
+            result["result"]["method"] = "signAndSubmitBlock"
+        return result
+    except Exception as e:
+        logger.exception(f"[RPC] signAndSubmitBlock error: {e}")
+        return _rpc_error(-32603, f"signAndSubmitBlock internal error: {str(e)}", rpc_id)
+
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock": _rpc_submitBlock,
+    "qtcl_signAndSubmitBlock": _rpc_signAndSubmitBlock,
     "qtcl_flushBlockCache": _rpc_flushBlockCache,
     "qtcl_forgeGenesis": _rpc_forgeGenesis,
     "qtcl_getBlockHeight": _rpc_getBlockHeight,

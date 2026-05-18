@@ -519,6 +519,75 @@ def create_mcp_server(stateless: bool = True) -> Optional[Any]:
         result = qtcl_rpc("qtcl_repairUTXOs", [])
         return json.dumps(result, indent=2, default=str)
 
+    @mcp.tool()
+    async def qtcl_submit_block(
+        height: int,
+        block_hash: str,
+        parent_hash: str,
+        merkle_root: str,
+        timestamp: int,
+        nonce: int,
+        miner_address: str,
+        difficulty_bits: int,
+        w_entropy_hash: str,
+        hyp_signature: str,
+        miner_public_key_hex: str,
+        transactions: str = "[]",
+        w_state_fidelity: float = 0.75,
+        pq0: int = 0,
+        pq_curr: int = 0,
+        pq_last: int = 0,
+        mermin_value: float = 0.0,
+        mermin_violated: bool = False,
+        quantum_field_16x16x16: str = "",
+    ) -> str:
+        """
+        Submit a fully PoW-solved and HypΓ-signed block to the chain.
+
+        This is the unified miner submission path (qtcl_signAndSubmitBlock).
+        The miner client performs PoW locally, signs the block header, then calls
+        this tool with the complete payload. The server verifies and persists.
+
+        Required fields:
+          height, block_hash, parent_hash, merkle_root, timestamp, nonce,
+          miner_address, difficulty_bits, w_entropy_hash, hyp_signature,
+          miner_public_key_hex
+
+        Optional quantum attestation:
+          transactions (JSON array string), w_state_fidelity, pq0, pq_curr,
+          pq_last, mermin_value, mermin_violated, quantum_field_16x16x16
+
+        Returns: {status, height, block_hash, next_height, miner_reward_qtcl}
+        """
+        import json as _j
+        try:
+            txs = _j.loads(transactions) if isinstance(transactions, str) else transactions
+        except Exception:
+            txs = []
+        payload = {
+            "height":               int(height),
+            "block_hash":           str(block_hash),
+            "parent_hash":          str(parent_hash),
+            "merkle_root":          str(merkle_root),
+            "timestamp":            int(timestamp),
+            "nonce":                int(nonce),
+            "miner_address":        str(miner_address),
+            "difficulty_bits":      int(difficulty_bits),
+            "w_entropy_hash":       str(w_entropy_hash),
+            "hyp_signature":        str(hyp_signature),
+            "miner_public_key_hex": str(miner_public_key_hex),
+            "transactions":         txs,
+            "w_state_fidelity":     float(w_state_fidelity),
+            "pq0":                  int(pq0),
+            "pq_curr":              int(pq_curr),
+            "pq_last":              int(pq_last),
+            "mermin_value":         float(mermin_value),
+            "mermin_violated":      bool(mermin_violated),
+            "quantum_field_16x16x16": str(quantum_field_16x16x16),
+        }
+        result = qtcl_rpc("qtcl_signAndSubmitBlock", [payload])
+        return json.dumps(result, indent=2, default=str)
+
     # ── Resources ───────────────────────────────────────────────────────────────
 
     @mcp.resource("chain://height")
