@@ -2213,7 +2213,9 @@ class Mempool:
 
                 self._expire_old_txs()
                 self._compact_heap()
-                self._reconcile_pending_txs()
+                # self._reconcile_pending_txs()  # DISABLED: causes UTXO settlement without miner block.
+                # Block submission (server.py _rpc_submitBlock) auto-injects pending mempool
+                # TXs into the block's tx list, so settlement happens through miner blocks only.
 
                 size = self.size()
                 if size > MAX_MEMPOOL_SIZE * 0.95:
@@ -2241,18 +2243,22 @@ class Mempool:
         """
         Settlement daemon — reconciles pending transfer TXs stuck in the mempool.
 
-        Problem solved:
+        ⚠ DISABLED in _background_worker to prevent UTXO settlement without miner block.
+        Block submission (server.py _rpc_submitBlock) auto-injects pending mempool TXs
+        into miner blocks, so settlement only happens through actual mined blocks.
+
+        Problem this was built for:
             Transfer TXs accepted into the mempool are never included in miner-submitted
             blocks because the miner client only packs coinbase+treasury. These TXs sit
             at status='pending' with block_height=NULL forever.
+        The fix: server-side auto-injection in _rpc_submitBlock (lines 6943-6983).
 
-        Algorithm:
+        Algorithm (preserved for manual use / future re-enable):
             1. Query DB for transfer TXs with status='pending' older than 15s
             2. Check if the chain has advanced past the TX's acceptance time
             3. For each stale pending TX, mark it confirmed at the current tip height
             4. Create receiver UTXOs, mark sender UTXOs spent, recompute balances
 
-        This runs every BACKGROUND_INTERVAL_S (30s) as part of the background worker.
         Idempotent: UTXOs use ON CONFLICT DO NOTHING, balance is SUM(unspent).
         """
         if not _db.available:
