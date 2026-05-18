@@ -38,9 +38,11 @@ if _HYP_DIR not in sys.path:
 _STARTUP = time.time()
 
 # ── Tunable timeouts ──────────────────────────────────────────────────────────
-_TIMEOUT_RPC_POST  = float(os.environ.get("WSGI_RPC_INIT_TIMEOUT",  "10"))
-_TIMEOUT_MCP_POST  = float(os.environ.get("WSGI_MCP_INIT_TIMEOUT",  "8"))
-_TIMEOUT_SSE       = float(os.environ.get("WSGI_SSE_INIT_TIMEOUT",  "30"))
+# RPC_POST: raised to 60s — Neon DB cold-start + server.py import on Koyeb free
+# tier regularly takes 20-45s. 10s was too short and caused the perpetual 503 loop.
+_TIMEOUT_RPC_POST  = float(os.environ.get("WSGI_RPC_INIT_TIMEOUT",  "60"))
+_TIMEOUT_MCP_POST  = float(os.environ.get("WSGI_MCP_INIT_TIMEOUT",  "30"))
+_TIMEOUT_SSE       = float(os.environ.get("WSGI_SSE_INIT_TIMEOUT",  "60"))
 _POLL_INTERVAL     = 0.20
 
 # ── Instant health app — zero heavy imports ────────────────────────────────────
@@ -59,7 +61,7 @@ def _mcp_health_instant():
         response=json.dumps({
             "status":   "ok" if ready else "starting",
             "server":   "qtcl-blockchain",
-            "version":  "5.1.0",
+            "version":  "5.2.0",
             "protocol": "2025-06-18",
             "uptime_s": round(elapsed, 1),
             "ready":    ready,
@@ -233,11 +235,11 @@ def application(environ, start_response):
         if method == "GET":
             if _full_app:
                 return _full_app(environ, start_response)
-            _wait_for_app(_TIMEOUT_SSE)
+            _wait_for_app(_TIMEOUT_RPC_POST)
             if _full_app:
                 return _full_app(environ, start_response)
             req_id = _parse_request_id(environ)
-            return _jsonrpc_503(start_response, req_id, "Server initializing, retry in 5s")
+            return _jsonrpc_503(start_response, req_id, "Server initializing, retry in 3s")
 
         if _full_app:
             return _full_app(environ, start_response)
