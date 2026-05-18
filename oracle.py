@@ -1369,6 +1369,20 @@ _ORACLE_FACADE = _OracleFacade()
 ORACLE = _ORACLE_FACADE
 ORACLE_W_STATE_MANAGER = _WStateManagerFacade(_ORACLE_FACADE)
 
+# ── Auto-setup oracles on import ──────────────────────────────────────────────
+# _auto_setup_oracles() was previously only called from main(), meaning it
+# never ran when oracle.py was imported as a module by server.py on Koyeb.
+# This left oracle_registry empty, causing qtcl_get_oracle_registry to return
+# total: 0 forever. Calling it here ensures the table is seeded on every
+# cold start regardless of how oracle.py is loaded.
+# The function is idempotent (COUNT check + ON CONFLICT DO UPDATE) so calling
+# it at import time is always safe.
+threading.Thread(
+    target=_auto_setup_oracles,
+    daemon=True,
+    name="OracleAutoSetup",
+).start()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BROADCAST FACADE (server.py compatibility)
@@ -1454,11 +1468,23 @@ def _auto_setup_oracles():
             except Exception:
                 pass
 
+        # Ensure confirmed column exists — server.py registry handler filters on it
+        try:
+            cur.execute("ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS confirmed BOOLEAN NOT NULL DEFAULT TRUE")
+        except Exception:
+            pass
+
         # Count existing
         cur.execute("SELECT COUNT(*) FROM oracle_registry WHERE mode IN ('full', 'primary')")
         existing = cur.fetchone()[0]
         if existing >= 5:
-            logger.info(f"[ORACLE-SETUP] {existing} oracles already registered — skipping setup")
+            # Refresh last_seen + confirmed so the MCP registry handler returns them
+            cur.execute(
+                "UPDATE oracle_registry "
+                "SET last_seen = EXTRACT(EPOCH FROM NOW())::BIGINT, confirmed = TRUE "
+                "WHERE mode IN ('full', 'primary')"
+            )
+            logger.info(f"[ORACLE-SETUP] {existing} oracles registered — refreshed last_seen + confirmed=TRUE")
             return
 
         # Generate 5 fresh keypairs
@@ -1485,14 +1511,17 @@ def _auto_setup_oracles():
 
             cur.execute("""
                 INSERT INTO oracle_registry
-                (oracle_id, oracle_address, oracle_pub_key, cert_sig, mode, is_primary, last_seen, registered_at)
-                VALUES (%s, %s, %s, %s, %s, %s, EXTRACT(EPOCH FROM NOW())::BIGINT, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                (oracle_id, oracle_address, oracle_pub_key, cert_sig, mode, is_primary,
+                 confirmed, last_seen, registered_at)
+                VALUES (%s, %s, %s, %s, %s, %s, TRUE,
+                        EXTRACT(EPOCH FROM NOW())::BIGINT, EXTRACT(EPOCH FROM NOW())::BIGINT)
                 ON CONFLICT (oracle_id) DO UPDATE SET
                     oracle_address = EXCLUDED.oracle_address,
                     oracle_pub_key = EXCLUDED.oracle_pub_key,
                     cert_sig       = EXCLUDED.cert_sig,
                     mode           = EXCLUDED.mode,
                     is_primary     = EXCLUDED.is_primary,
+                    confirmed      = TRUE,
                     last_seen      = EXTRACT(EPOCH FROM NOW())::BIGINT,
                     registered_at  = EXTRACT(EPOCH FROM NOW())::BIGINT
             """, (

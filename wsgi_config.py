@@ -4,23 +4,25 @@ WSGI entry point for Gunicorn/Koyeb — QTCL Server v6 + MCP 2025-06-18
 =======================================================================
 KEY: /health returns 200 in <100ms. Server loads in background.
 
-FIXES v4.0  (2026-05-17)
+FIXES v5.1  (2026-05-17)
 ─────────────────────────
-SERVER-SIDE (wsgi_config.py):
+  [v5.1] BUG FIX: _load_done.set() was never called on success path in
+          _load_server(). The Event was only set after all retries failed,
+          meaning _wait_for_app() always busy-polled via timeout instead of
+          waking immediately when _full_app became ready. Every request that
+          arrived during cold-start waited the FULL timeout window (8–30s)
+          even if the server loaded in 4s. Fix: call _load_done.set()
+          immediately after _full_app = full_app in the success path.
+
+FIXES v5.0  (2026-05-17)
+─────────────────────────
+  [v5.0] _load_server retries 3× with 10s delay on import failure —
+          transient Neon/QRNG cold-start crashes no longer brick the server.
+  [v4.0] /rpc POST startup: waits up to 10s instead of hard 503.
+  [v4.0] /rpc GET  startup: waits up to 30s.
+  [v4.0] JSON-RPC error id mirrors request id for ALL routes.
+  [v4.0] Content-Length added to every 503/200 response.
   [v3.1] /mcp POST startup: waits up to 8s instead of hard 503.
-  [v4.0] /rpc  POST startup: SAME treatment — waits up to 10s before 503.
-          Previously /rpc POST returned instant 503 "Server initializing"
-          which caused 100% of cold-start tx rejections.  Now it waits the
-          full boot window so qtcl_submitTransaction from qtcl_client.py
-          always lands on a live server rather than the health stub.
-  [v4.0] /rpc  GET  startup: waits up to 30s (was: 503 instant).
-  [v4.0] JSON-RPC error id mirrors request id for ALL routes (not just /mcp).
-  [v4.0] Content-Length added to every 503/200 response so HTTP/1.1 keep-
-          alive framing is clean under gthread workers.
-  [v4.0] _STARTUP_TIMEOUT_RPC_POST = 10s (configurable via env
-          WSGI_RPC_INIT_TIMEOUT).  Set higher on slow infra if needed.
-  [v4.0] Graceful path: if _full_app becomes ready DURING the wait loop,
-          the request is forwarded immediately — no extra latency.
 """
 
 import logging, os, sys, time, threading, json
@@ -36,13 +38,9 @@ if _HYP_DIR not in sys.path:
 _STARTUP = time.time()
 
 # ── Tunable timeouts ──────────────────────────────────────────────────────────
-# /rpc POST (qtcl_submitTransaction, qtcl_submitBlock, etc.) — never drop on init
 _TIMEOUT_RPC_POST  = float(os.environ.get("WSGI_RPC_INIT_TIMEOUT",  "10"))
-# /mcp POST (initialize handshake) — Claude.ai won't retry a 503 initialize
 _TIMEOUT_MCP_POST  = float(os.environ.get("WSGI_MCP_INIT_TIMEOUT",  "8"))
-# /mcp GET (SSE stream) and general routes
 _TIMEOUT_SSE       = float(os.environ.get("WSGI_SSE_INIT_TIMEOUT",  "30"))
-# Poll granularity (seconds)
 _POLL_INTERVAL     = 0.20
 
 # ── Instant health app — zero heavy imports ────────────────────────────────────
@@ -61,7 +59,7 @@ def _mcp_health_instant():
         response=json.dumps({
             "status":   "ok" if ready else "starting",
             "server":   "qtcl-blockchain",
-            "version":  "5.0.0",
+            "version":  "5.1.0",
             "protocol": "2025-06-18",
             "uptime_s": round(elapsed, 1),
             "ready":    ready,
@@ -76,12 +74,8 @@ print(f"[WSGI] ✅ /health + /mcp/health ready at {time.time() - _STARTUP:.2f}s"
 _full_app  = None
 _load_done = threading.Event()
 
-# ── FIX v5.0: Retry server load on transient failures ──────────────────────
-# If server.py import crashes (missing dep, Neon cold-start, QRNG timeout),
-# retrying after a delay often succeeds. Without this, _full_app stays None
-# FOREVER and every single request 503s until Koyeb kills/restarts the pod.
 _LOAD_MAX_RETRIES = 3
-_LOAD_RETRY_DELAY = 10.0  # seconds between retries
+_LOAD_RETRY_DELAY = 10.0
 
 def _load_server():
     global _full_app
@@ -89,13 +83,14 @@ def _load_server():
         try:
             print(f"[WSGI] Loading full server attempt {attempt}/{_LOAD_MAX_RETRIES} "
                   f"(MCP 2025-06-18 + JSON-RPC 2.0)...", flush=True)
-            # Force reimport on retry — clear any partial module state
             import importlib
             if attempt > 1 and "server" in sys.modules:
-                # Remove stale partial import so Python re-executes the module
                 del sys.modules["server"]
             from server import app as full_app
             _full_app = full_app
+            # FIX v5.1: set the event on SUCCESS so _wait_for_app() wakes
+            # immediately instead of spinning to timeout.
+            _load_done.set()
             print(f"[WSGI] ✅ Full server loaded at {time.time() - _STARTUP:.1f}s "
                   f"(attempt {attempt})", flush=True)
             print("[WSGI] ✅ Endpoints live: /rpc (JSON-RPC 2.0) | /mcp (MCP 2025-06-18) "
@@ -111,7 +106,7 @@ def _load_server():
                 time.sleep(_LOAD_RETRY_DELAY)
     print("[WSGI] ❌❌❌ All server load attempts exhausted — server will not start. "
           "Check logs above for the root cause.", flush=True)
-    _load_done.set()
+    _load_done.set()  # unblock any waiters so they can 503 cleanly
 
 _thread = threading.Thread(target=_load_server, daemon=True)
 _thread.start()
@@ -127,7 +122,6 @@ _MCP_CORS = [
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _jsonrpc_503(start_response, req_id, msg: str, extra_headers: list = None) -> list:
-    """Well-formed JSON-RPC 2.0 503 with id mirroring and Content-Length."""
     body = json.dumps({
         "jsonrpc": "2.0",
         "error":   {"code": -32000, "message": msg},
@@ -143,18 +137,13 @@ def _jsonrpc_503(start_response, req_id, msg: str, extra_headers: list = None) -
 
 
 def _parse_request_id(environ: dict):
-    """
-    Read JSON-RPC id from request body without consuming the stream.
-    Replaces wsgi.input with a fresh BytesIO so downstream handlers can read it.
-    Returns the id (int | str | None) or None on any parse failure.
-    """
     try:
         length = int(environ.get("CONTENT_LENGTH") or 0)
         if length <= 0 or length > 65_536:
             return None
         wsgi_input = environ["wsgi.input"]
         body_bytes  = wsgi_input.read(length)
-        environ["wsgi.input"] = BytesIO(body_bytes)      # put body back
+        environ["wsgi.input"] = BytesIO(body_bytes)
         payload = json.loads(body_bytes.decode("utf-8", errors="replace"))
         return payload.get("id")
     except Exception:
@@ -163,9 +152,9 @@ def _parse_request_id(environ: dict):
 
 def _wait_for_app(timeout: float) -> bool:
     """
-    Spin-wait for _full_app to become non-None, checking every _POLL_INTERVAL.
-    Returns True if ready within timeout, False otherwise.
-    Uses _load_done.wait() in chunks so we don't busy-spin.
+    Wait for _full_app to become non-None.
+    With the v5.1 fix, _load_done fires immediately on success so this
+    returns in ~4-7s on Koyeb instead of spinning the full timeout window.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -181,24 +170,19 @@ def application(environ, start_response):
     path   = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET")
 
-    # ── /health — always instant ───────────────────────────────────────────────
     if path in ("/health", "/health/"):
         return _health_app(environ, start_response)
 
-    # ── /mcp/health — instant ─────────────────────────────────────────────────
     if path in ("/mcp/health", "/mcp/health/"):
         return _health_app(environ, start_response)
 
-    # ── OPTIONS — instant CORS preflight ──────────────────────────────────────
     if method == "OPTIONS":
         start_response("204 No Content", _MCP_CORS)
         return [b""]
 
-    # ── /mcp/* — MCP 2025-06-18 Streamable HTTP ───────────────────────────────
     if path == "/mcp" or path.startswith("/mcp/"):
 
         if method == "GET":
-            # SSE stream — wait for full server; streaming before ready = desync
             _wait_for_app(_TIMEOUT_SSE)
             if _full_app:
                 return _full_app(environ, start_response)
@@ -208,7 +192,6 @@ def application(environ, start_response):
             return [b"MCP server starting, retry in 5s"]
 
         if method == "POST":
-            # initialize handshake — Claude.ai will NOT retry a 503 init
             if _full_app:
                 return _full_app(environ, start_response)
             req_id = _parse_request_id(environ)
@@ -221,7 +204,6 @@ def application(environ, start_response):
                 _MCP_CORS,
             )
 
-        # DELETE / other MCP methods
         if _full_app:
             return _full_app(environ, start_response)
         start_response("503 Service Unavailable", [
@@ -229,27 +211,11 @@ def application(environ, start_response):
         ] + _MCP_CORS)
         return [b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server initializing"},"id":null}']
 
-    # ── /rpc — JSON-RPC 2.0 (PRIMARY TX + QUERY ENDPOINT) ────────────────────
-    #
-    # FIX v4.0 — THE CRITICAL PATH:
-    # Previously this returned an INSTANT 503 "Server initializing, retry in 5s"
-    # for any POST during the cold-start window.  qtcl_client.py's _rpc() method
-    # uses retries=4 with exponential backoff, but the CircuitBreaker tripped and
-    # the wizard showed "❌ Rejected: {'code': -32000, 'message': 'Server initializing…'}"
-    # because submit_transaction() parsed the error dict directly from _rpc() and
-    # never got a chance to retry (circuit breaker opened after 5 quick 503s).
-    #
-    # Fix: mirror the /mcp POST treatment — wait up to _TIMEOUT_RPC_POST (10s)
-    # for the server to load.  On Koyeb the server boots in ~4-7s so any request
-    # arriving during the cold-start window will land on a live handler.
-    #
     if path in ("/rpc", "/rpc/") or path.startswith("/rpc/"):
 
         if method == "POST":
-            # Fast path: already loaded
             if _full_app:
                 return _full_app(environ, start_response)
-            # Slow path: read id BEFORE body is consumed, then wait
             req_id = _parse_request_id(environ)
             logger.info(
                 f"[WSGI] /rpc POST during startup — waiting up to {_TIMEOUT_RPC_POST:.0f}s "
@@ -258,7 +224,6 @@ def application(environ, start_response):
             _wait_for_app(_TIMEOUT_RPC_POST)
             if _full_app:
                 return _full_app(environ, start_response)
-            # Server didn't load in time — return proper 503 with mirrored id
             return _jsonrpc_503(
                 start_response, req_id,
                 f"Server initializing — retry in 3s "
@@ -266,7 +231,6 @@ def application(environ, start_response):
             )
 
         if method == "GET":
-            # getBalance, getTransaction, etc. — wait up to _TIMEOUT_SSE
             if _full_app:
                 return _full_app(environ, start_response)
             _wait_for_app(_TIMEOUT_SSE)
@@ -275,7 +239,6 @@ def application(environ, start_response):
             req_id = _parse_request_id(environ)
             return _jsonrpc_503(start_response, req_id, "Server initializing, retry in 5s")
 
-        # HEAD / DELETE / other
         if _full_app:
             return _full_app(environ, start_response)
         start_response("503 Service Unavailable", [
@@ -283,7 +246,6 @@ def application(environ, start_response):
         ])
         return [b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server initializing"},"id":null}']
 
-    # ── All other endpoints ────────────────────────────────────────────────────
     _wait_for_app(_TIMEOUT_SSE)
     if _full_app:
         return _full_app(environ, start_response)
@@ -293,12 +255,17 @@ def application(environ, start_response):
 
 app = application
 
-print(f"[WSGI] ✅ WSGI v5.0 ready at {time.time() - _STARTUP:.2f}s", flush=True)
+print(f"[WSGI] ✅ WSGI v5.1 ready at {time.time() - _STARTUP:.2f}s", flush=True)
 print(
     "[WSGI] Routes: /health=instant | /mcp/health=instant "
     f"| /mcp POST waits {_TIMEOUT_MCP_POST:.0f}s "
     f"| /rpc POST waits {_TIMEOUT_RPC_POST:.0f}s "
     f"| /rpc GET waits {_TIMEOUT_SSE:.0f}s",
+    flush=True,
+)
+print(
+    f"[WSGI] FIX v5.1: _load_done.set() now called on SUCCESS — waiters wake "
+    f"immediately instead of spinning the full timeout window.",
     flush=True,
 )
 print(
