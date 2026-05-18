@@ -124,6 +124,7 @@ _RPC_TIMEOUT_MAP: dict = {
     "qtcl_getTransaction": 8.0,
     "qtcl_getTransactionVolume": 8.0,
     "qtcl_submitBlock": 30.0,
+    "qtcl_signAndSubmitBlock": 30.0,
     "qtcl_submitTransaction": 20.0,
     "qtcl_signAndSubmitTx": 90.0,
     "qtcl_walletAuth": 60.0,
