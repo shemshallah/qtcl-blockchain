@@ -3839,18 +3839,27 @@ def _lazy_ensure_blocks():
 
             # 🔴 CLEANUP: Delete any orphaned nonce=0 blocks (from old lattice controller bug)
             # These blocks have no valid PoW and block the miner from submitting real blocks
-            cur.execute("DELETE FROM blocks WHERE height > 0 AND nonce = 0")
-            _cleaned = cur.rowcount
-            if _cleaned > 0:
-                logger.warning(f"[SCHEMA] 🧹 Cleaned {_cleaned} orphaned nonce=0 blocks from DB")
-                # Also clean up orphaned transactions referencing those blocks
-                cur.execute("""
-                    DELETE FROM transactions
-                    WHERE height > 0 AND height NOT IN (SELECT height FROM blocks)
-                """)
-                _tx_cleaned = cur.rowcount
-                if _tx_cleaned > 0:
-                    logger.warning(f"[SCHEMA] 🧹 Cleaned {_tx_cleaned} orphaned transactions")
+            # Use advisory lock to prevent deadlock when multiple gunicorn workers start simultaneously
+            try:
+                # Skip cleanup if already done by another worker
+                cur.execute("SELECT pg_try_advisory_xact_lock(3775842)")
+                got_lock = cur.fetchone()[0]
+            except Exception:
+                got_lock = False
+
+            if got_lock:
+                cur.execute("DELETE FROM blocks WHERE height > 0 AND nonce = 0")
+                _cleaned = cur.rowcount
+                if _cleaned > 0:
+                    logger.warning(f"[SCHEMA] 🧹 Cleaned {_cleaned} orphaned nonce=0 blocks from DB")
+                    # Also clean up orphaned transactions referencing those blocks
+                    cur.execute("""
+                        DELETE FROM transactions
+                        WHERE height > 0 AND height NOT IN (SELECT height FROM blocks)
+                    """)
+                    _tx_cleaned = cur.rowcount
+                    if _tx_cleaned > 0:
+                        logger.warning(f"[SCHEMA] 🧹 Cleaned {_tx_cleaned} orphaned transactions")
 
         # Create quantum_field_distribution table with triggers for neighbor broadcast
         try:
