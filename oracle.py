@@ -1370,18 +1370,10 @@ ORACLE = _ORACLE_FACADE
 ORACLE_W_STATE_MANAGER = _WStateManagerFacade(_ORACLE_FACADE)
 
 # ── Auto-setup oracles on import ──────────────────────────────────────────────
-# _auto_setup_oracles() was previously only called from main(), meaning it
-# never ran when oracle.py was imported as a module by server.py on Koyeb.
-# This left oracle_registry empty, causing qtcl_get_oracle_registry to return
-# total: 0 forever. Calling it here ensures the table is seeded on every
-# cold start regardless of how oracle.py is loaded.
-# The function is idempotent (COUNT check + ON CONFLICT DO UPDATE) so calling
-# it at import time is always safe.
-threading.Thread(
-    target=_auto_setup_oracles,
-    daemon=True,
-    name="OracleAutoSetup",
-).start()
+# Thread spawn moved to AFTER _auto_setup_oracles() is defined (line ~1413+).
+# Spawning it here caused NameError because Python executes module-level
+# statements sequentially — the function did not yet exist at this point.
+# See FIX below, immediately after _auto_setup_oracles() definition.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1538,6 +1530,26 @@ def _auto_setup_oracles():
             conn.close()
         except Exception:
             pass
+
+
+# ── FIX: Auto-setup oracles on import — thread spawned HERE, after definition ─
+# Root cause of NameError: the original code spawned this thread at line ~1381,
+# before _auto_setup_oracles was defined at line ~1413. Python's sequential
+# module execution evaluates the threading.Thread(target=_auto_setup_oracles)
+# call immediately, looks up '_auto_setup_oracles' in the module namespace,
+# finds nothing (the def statement hasn't been executed yet), and raises:
+#   NameError: name '_auto_setup_oracles' is not defined
+# This poisoned every import of oracle.py — mempool.py line 117 imports ORACLE
+# from oracle.py, which triggered the crash, which cascaded into every RPC that
+# lazily imported mempool: qtcl_getMempoolStats, qtcl_getHealth, qtcl_getMempool.
+# FIX: moved the threading.Thread(...).start() to HERE — after the def — where
+# the name is guaranteed to exist in the module's global scope.
+# The function remains idempotent (COUNT check + ON CONFLICT DO UPDATE).
+threading.Thread(
+    target=_auto_setup_oracles,
+    daemon=True,
+    name="OracleAutoSetup",
+).start()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
