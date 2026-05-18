@@ -5421,13 +5421,38 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                     timeout_sec=5.0,
                 )
                 if w_snap:
+                    # FIX v6.0: w_snap is a dict (from OracleCluster.reach_consensus()),
+                    # NOT an object with attributes. Previous code used getattr() which
+                    # always returned None, causing all-zero metrics in the audit panel.
                     result["w_state"] = {
-                        "purity": getattr(w_snap, "purity", None),
-                        "entropy": getattr(w_snap, "entropy", None),
-                        "coherence": getattr(w_snap, "coherence", None),
-                        "fidelity": getattr(w_snap, "fidelity", None),
-                        "snapshot_id": getattr(w_snap, "snapshot_id", None),
+                        "purity": w_snap.get("purity") if isinstance(w_snap, dict) else getattr(w_snap, "purity", None),
+                        "entropy": w_snap.get("entropy") if isinstance(w_snap, dict) else getattr(w_snap, "entropy", None),
+                        "coherence": w_snap.get("coherence") if isinstance(w_snap, dict) else getattr(w_snap, "coherence", None),
+                        "fidelity": w_snap.get("fidelity") if isinstance(w_snap, dict) else getattr(w_snap, "fidelity", None),
+                        "snapshot_id": w_snap.get("snapshot_id") if isinstance(w_snap, dict) else getattr(w_snap, "snapshot_id", None),
+                        # ── NEW: pass through Mermin, oracle measurements, and DM-derived fields ──
+                        "von_neumann_entropy": w_snap.get("von_neumann_entropy") if isinstance(w_snap, dict) else None,
+                        "mermin_test": w_snap.get("mermin_test") if isinstance(w_snap, dict) else None,
+                        "oracle_measurements": w_snap.get("oracle_measurements") if isinstance(w_snap, dict) else None,
                     }
+                    # ── Pass through density_matrix_hex at top level (client reads it here) ──
+                    if isinstance(w_snap, dict):
+                        _dm_hex = w_snap.get("density_matrix_hex", "")
+                        if _dm_hex:
+                            result["density_matrix_hex"] = _dm_hex
+                        _mermin = w_snap.get("mermin_test")
+                        if _mermin:
+                            result["mermin_test"] = _mermin
+                        # pq0 fields
+                        for _pq0k in ("pq0_oracle_fidelity", "theta", "phi"):
+                            _pq0v = w_snap.get(_pq0k)
+                            if _pq0v is not None:
+                                result[_pq0k] = _pq0v
+                        # Per-node measurements at top level
+                        _omeas = w_snap.get("oracle_measurements")
+                        if _omeas:
+                            result["oracle_measurements"] = _omeas
+
                     logger.debug(
                         f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained"
                     )
@@ -5532,6 +5557,11 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                         _ws.pack(">dd", re, im) for re, im in w_amplitudes
                     ).hex()
                     result["w_state_size"] = 8  # 8 qubits
+            # FIX v6.0: If LATTICE has no DM, use oracle's w_state_hex from consensus
+            if "w_state_hex" not in result or not result.get("w_state_hex"):
+                if isinstance(w_snap, dict) and w_snap.get("w_state_hex"):
+                    result["w_state_hex"] = w_snap["w_state_hex"]
+                    result["w_state_size"] = 8
         except Exception as wse:
             logger.debug(f"[RPC-METHOD] w_state_hex (non-fatal): {wse}")
 
@@ -12111,6 +12141,53 @@ threading.Thread(target=_db_tables_backfill_daemon, daemon=True, name="AuxBackfi
 # Defining them here with @app.route would duplicate the endpoint name and
 # crash Flask with "View function mapping is overwriting an existing endpoint
 # function: rpc_oracle_snapshot_latest".
+
+
+# ── ORACLE SNAPSHOT BROADCASTER — feeds SSE /rpc/oracle/snapshot channel ──────
+# FIX v6.0: The SSE snapshot channel was never populated because
+# _broadcast_snapshot_to_database() was never called. This background thread
+# polls the oracle cluster every 4s and pushes the consensus snapshot (with
+# 8×8 DM hex, Mermin test, per-node measurements) to the SSE channel.
+
+def _oracle_snapshot_broadcaster():
+    """Periodically poll oracle consensus and push to SSE snapshot channel."""
+    import time as _osb_time
+    _osb_time.sleep(15.0)  # Wait for server to fully initialize
+    _cycle = 0
+    while True:
+        try:
+            if ORACLE_AVAILABLE and ORACLE is not None:
+                snap = ORACLE.get_snapshot()
+                if snap and not snap.get("error"):
+                    # Inject block height from DB
+                    try:
+                        _db_tip = query_latest_block()
+                        _bh = int(_db_tip["height"]) if _db_tip else 0
+                        snap["block_height"] = _bh
+                        snap["height"] = _bh
+                        snap["pq_curr"] = _bh + 1
+                        snap["pq_last"] = _bh
+                    except Exception:
+                        pass
+                    snap["cycle"] = _cycle
+                    snap["consensus"] = True
+                    # Push to SSE snapshot channel
+                    _push_to_sse_service("/push/snapshot", snap)
+                    _cycle += 1
+                    if _cycle % 15 == 1:
+                        logger.info(
+                            f"[ORACLE-BROADCAST] cycle={_cycle} fid={snap.get('w_state_fidelity', 0):.4f} "
+                            f"dm_hex={len(snap.get('density_matrix_hex', ''))} chars"
+                        )
+        except Exception as _obe:
+            logger.debug(f"[ORACLE-BROADCAST] error: {_obe}")
+        _osb_time.sleep(4.0)
+
+threading.Thread(
+    target=_oracle_snapshot_broadcaster,
+    daemon=True,
+    name="OracleSnapshotBroadcast",
+).start()
 
 
 # ── START LATTICE THREAD HERE (after all functions defined) ──────────────────

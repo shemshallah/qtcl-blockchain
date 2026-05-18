@@ -631,7 +631,16 @@ class OracleCluster:
         return results
     
     def reach_consensus(self) -> Optional[Dict[str, Any]]:
-        """Run all nodes, take median of middle 3 results."""
+        """Run all nodes, take median of middle 3 results.
+
+        Returns a rich consensus dict including:
+          - Median fidelity/purity/entropy/coherence from selected nodes
+          - density_matrix_hex: 8×8 complex128 LE row-major (2048 hex chars)
+          - w_state_hex: 8 complex doubles BE (256 hex chars)
+          - mermin_test: {M_value, is_quantum, verdict}
+          - oracle_measurements: per-node breakdown
+          - pq0 fields: pq0_oracle_fidelity etc.
+        """
         results = self.measure_all()
         if len(results) < CONSENSUS_THRESHOLD:
             logger.warning(f"[ORACLE-CLUSTER] Only {len(results)} nodes responded (need {CONSENSUS_THRESHOLD})")
@@ -642,14 +651,155 @@ class OracleCluster:
         selected = results[:max(CONSENSUS_THRESHOLD, len(results) - 1)]
         
         # Median metrics
+        med_fid = round(float(np.median([r["fidelity"] for r in selected])), 6)
+        med_pur = round(float(np.median([r["purity"] for r in selected])), 6)
+        med_ent = round(float(np.median([r["entropy"] for r in selected])), 6)
+        med_coh = round(float(np.median([r["coherence"] for r in selected])), 6)
+
+        # ── Build averaged 8×8 density matrix from selected nodes ──
+        dm_avg = np.zeros((8, 8), dtype=complex)
+        dm_count = 0
+        for node in self.nodes:
+            if node.oracle_id in [r["oracle_id"] for r in selected]:
+                with node._lock:
+                    dm_avg += node._dm
+                    dm_count += 1
+        if dm_count > 0:
+            dm_avg /= dm_count
+            # Re-hermitianize and normalize
+            dm_avg = 0.5 * (dm_avg + dm_avg.conj().T)
+            tr = float(np.real(np.trace(dm_avg)))
+            if tr > 1e-12:
+                dm_avg /= tr
+
+        # ── Serialize 8×8 DM as hex (complex128 LE row-major, 2048 hex chars) ──
+        import struct as _rstruct
+        dm_hex = ""
+        try:
+            dm_bytes = bytearray()
+            for r in range(8):
+                for c in range(8):
+                    v = dm_avg[r, c]
+                    dm_bytes.extend(_rstruct.pack("<dd", float(v.real), float(v.imag)))
+            dm_hex = dm_bytes.hex()
+        except Exception as _dme:
+            logger.debug(f"[ORACLE-CLUSTER] DM hex serialization: {_dme}")
+
+        # ── Serialize w_state_hex: 8 diagonal amplitudes as complex doubles BE (256 hex) ──
+        w_state_hex = ""
+        try:
+            w_bytes = bytearray()
+            for i in range(8):
+                re_v = float(dm_avg[i, i].real)
+                im_v = float(dm_avg[i, i].imag)
+                w_bytes.extend(_rstruct.pack(">dd", re_v, im_v))
+            w_state_hex = w_bytes.hex()
+        except Exception as _wse:
+            logger.debug(f"[ORACLE-CLUSTER] w_state_hex serialization: {_wse}")
+
+        # ── Compute W-state entanglement witness ⟨M_W⟩ from the 8×8 DM ──
+        # NOTE: The standard Mermin operator M₃ = XXX - XYY - YXY - YYX gives exactly 0
+        # for the W-state (it's designed for GHZ states). Instead we use the W-state
+        # entanglement witness: M_W(ρ) = 3·F(ρ,|W₃⟩) - 1
+        # where F = Tr(ρ·|W₃⟩⟨W₃|) is the W-state fidelity.
+        #   M_W > 1  → genuine tripartite entanglement (QUANTUM)
+        #   M_W ≤ 1  → consistent with separable states (classical)
+        #   Scale: M_W ∈ [-1, +2] for physical states
+        # This correctly identifies W-state entanglement unlike the GHZ Mermin operator.
+        mermin_val = 0.0
+        mermin_quantum = False
+        mermin_verdict = "classical"
+        try:
+            mermin_val = round(3.0 * med_fid - 1.0, 6)
+            mermin_quantum = mermin_val > 1.0
+            if mermin_quantum:
+                mermin_verdict = f"QUANTUM (M_W={mermin_val:+.4f} > 1)"
+            else:
+                mermin_verdict = f"classical (M_W={mermin_val:+.4f} ≤ 1)"
+        except Exception as _me:
+            logger.debug(f"[ORACLE-CLUSTER] Mermin computation: {_me}")
+
+        # ── pq0 Bloch-like data from PRIMARY_LATTICE node ──
+        pq0_fid = 0.0
+        pq0_theta = None
+        pq0_phi = None
+        try:
+            primary = self.nodes[0]
+            with primary._lock:
+                pdm = primary._dm
+            # pq0 = qubit 0 partial trace — trace out qubits 1,2
+            # Reduced DM for qubit 0: ρ_0 = Tr_{1,2}(ρ)
+            rho_0 = np.zeros((2, 2), dtype=complex)
+            for i in range(4):  # trace over qubits 1,2 (indices 0-3 in 4-dim subspace)
+                rho_0[0, 0] += pdm[i, i]         # |0xx⟩ → |0⟩
+                rho_0[1, 1] += pdm[i + 4, i + 4]  # |1xx⟩ → |1⟩
+                rho_0[0, 1] += pdm[i, i + 4]
+                rho_0[1, 0] += pdm[i + 4, i]
+            # Normalize
+            tr0 = float(np.real(np.trace(rho_0)))
+            if tr0 > 1e-12:
+                rho_0 /= tr0
+            # Bloch vector: r = (Tr(ρX), Tr(ρY), Tr(ρZ))
+            _pX = np.array([[0, 1], [1, 0]], dtype=complex)
+            _pY = np.array([[0, -1j], [1j, 0]], dtype=complex)
+            _pZ = np.array([[1, 0], [0, -1]], dtype=complex)
+            rx = float(np.real(np.trace(rho_0 @ _pX)))
+            ry = float(np.real(np.trace(rho_0 @ _pY)))
+            rz = float(np.real(np.trace(rho_0 @ _pZ)))
+            r_mag = float(np.sqrt(rx**2 + ry**2 + rz**2))
+            pq0_fid = round(float(np.real(np.trace(rho_0 @ rho_0))), 6)  # purity of reduced state
+            if r_mag > 1e-6:
+                import math
+                pq0_theta = round(math.acos(max(-1.0, min(1.0, rz / r_mag))), 6)
+                pq0_phi = round(math.atan2(ry, rx), 6)
+        except Exception as _pq0e:
+            logger.debug(f"[ORACLE-CLUSTER] pq0 computation: {_pq0e}")
+
+        # ── Per-node measurement breakdown for audit display ──
+        oracle_measurements = []
+        for r in results:
+            oracle_measurements.append({
+                "oracle_id": r.get("oracle_id", ""),
+                "oracle_address": r.get("oracle_address", ""),
+                "fidelity": r.get("fidelity", 0.0),
+                "w_state_fidelity": r.get("fidelity", 0.0),
+                "purity": r.get("purity", 0.0),
+                "coherence": r.get("coherence", 0.0),
+                "entropy": r.get("entropy", 0.0),
+                "in_consensus": r.get("oracle_id") in [s["oracle_id"] for s in selected],
+                "oracle_role": _ORACLE_ROLES[int(r.get("oracle_id", "oracle_1").split("_")[1]) - 1]
+                              if r.get("oracle_id") else "",
+                "fallback": r.get("fallback", False),
+            })
+
         consensus = {
-            "fidelity": round(float(np.median([r["fidelity"] for r in selected])), 6),
-            "purity": round(float(np.median([r["purity"] for r in selected])), 6),
-            "entropy": round(float(np.median([r["entropy"] for r in selected])), 6),
-            "coherence": round(float(np.median([r["coherence"] for r in selected])), 6),
+            "fidelity": med_fid,
+            "purity": med_pur,
+            "entropy": med_ent,
+            "coherence": med_coh,
             "node_count": len(results),
             "selected_nodes": [r["oracle_id"] for r in selected],
             "timestamp": int(time.time()),
+            # ── NEW: real density matrix data ──
+            "density_matrix_hex": dm_hex,
+            "w_state_hex": w_state_hex,
+            "w_state_fidelity": med_fid,
+            "coherence_l1": med_coh,
+            "von_neumann_entropy": med_ent,
+            # ── NEW: Mermin inequality test ──
+            "mermin_test": {
+                "M_value": mermin_val,
+                "mermin_M": mermin_val,
+                "is_quantum": mermin_quantum,
+                "quantum": mermin_quantum,
+                "verdict": mermin_verdict,
+            },
+            # ── NEW: pq0 Bloch data ──
+            "pq0_oracle_fidelity": pq0_fid,
+            "theta": pq0_theta,
+            "phi": pq0_phi,
+            # ── NEW: per-node breakdown for audit panel ──
+            "oracle_measurements": oracle_measurements,
         }
         return consensus
     
@@ -1265,13 +1415,14 @@ class _OracleFacade:
             return self._last_consensus
 
     def get_latest_density_matrix(self):
+        """Return the latest consensus snapshot including density_matrix_hex."""
         snap = self.get_latest_snapshot()
         if snap:
             return snap
         return None
 
     def get_snapshot(self, symbols=None):
-        """Wire to real quantum consensus — returns dict with fidelity/purity/coherence."""
+        """Wire to real quantum consensus — returns dict with fidelity/purity/coherence + DM + Mermin."""
         consensus = self.get_latest_snapshot()
         if not consensus:
             return {"error": "oracle not ready", "feeds": {}}
@@ -1288,8 +1439,20 @@ class _OracleFacade:
             },
             "selected_nodes": consensus.get("selected_nodes", []),
             "timestamp": consensus.get("timestamp", int(time.time())),
-            "snapshot_id": hashlib.sha3_256(json.dumps(consensus, sort_keys=True).encode()).hexdigest()[:16],
+            "snapshot_id": hashlib.sha3_256(json.dumps(consensus, sort_keys=True, default=str).encode()).hexdigest()[:16],
             "hermes_ok": True,
+            # ── Pass through full DM + Mermin + pq0 data ──
+            "density_matrix_hex": consensus.get("density_matrix_hex", ""),
+            "w_state_hex": consensus.get("w_state_hex", ""),
+            "w_state_fidelity": consensus.get("fidelity", 0.0),
+            "coherence_l1": consensus.get("coherence", 0.0),
+            "purity": consensus.get("purity", 0.0),
+            "von_neumann_entropy": consensus.get("entropy", 0.0),
+            "mermin_test": consensus.get("mermin_test", {}),
+            "pq0_oracle_fidelity": consensus.get("pq0_oracle_fidelity", 0.0),
+            "theta": consensus.get("theta"),
+            "phi": consensus.get("phi"),
+            "oracle_measurements": consensus.get("oracle_measurements", []),
         }
         return result
 
