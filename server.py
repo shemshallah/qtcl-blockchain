@@ -7007,8 +7007,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         timestamp_s = int(hdr.get("timestamp", 0))
         nonce = int(hdr.get("nonce", 0))
         miner_address = _norm_address(str(hdr.get("miner_address", "")))
+        # FIX: use difficulty_bits from submitted block (what client packed into header struct).
+        # Overriding with env var caused server to recompute header with different difficulty
+        # value -> different hash -> guaranteed mismatch. Env var minimum enforced after verify.
+        _submitted_diff = hdr.get("difficulty_bits") or hdr.get("difficulty")
         _env_diff = os.environ.get("BLOCK_DIFFICULTY", "").strip()
-        difficulty_bits = int(_env_diff) if _env_diff.isdigit() else 5
+        _min_diff = int(_env_diff) if _env_diff.isdigit() else 4
+        difficulty_bits = int(_submitted_diff) if _submitted_diff is not None else _min_diff
         w_entropy_hex = str(hdr.get("w_entropy_hash", ""))
 
         logger.info(f"[RPC-submitBlock] h={height} hash={block_hash[:16]}... processing...")
@@ -7450,7 +7455,11 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 if not _pow_valid:
                     logger.error(f"[RPC-submitBlock] ❌ PoW verification FAILED for h={height}: {_pow_reason}")
                     return _rpc_error(-32003, f"Proof-of-Work verification failed: {_pow_reason}", rpc_id)
-                logger.info(f"[RPC-submitBlock] ✅ PoW verified for h={height} nonce={nonce} hash={block_hash[:16]}…")
+                # Enforce minimum difficulty AFTER hash check — block_hash already verified correct
+                if difficulty_bits < _min_diff:
+                    logger.error(f"[RPC-submitBlock] ❌ difficulty too low: submitted={difficulty_bits} min={_min_diff}")
+                    return _rpc_error(-32003, f"Difficulty too low: submitted={difficulty_bits} minimum={_min_diff}", rpc_id)
+                logger.info(f"[RPC-submitBlock] ✅ PoW verified for h={height} nonce={nonce} diff={difficulty_bits} hash={block_hash[:16]}…")
             except Exception as _pow_err:
                 logger.error(f"[RPC-submitBlock] ❌ PoW verification error for h={height}: {_pow_err}")
                 return _rpc_error(-32003, f"PoW verification error: {str(_pow_err)}", rpc_id)
