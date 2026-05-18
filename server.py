@@ -6886,13 +6886,12 @@ def qtcl_pow_hash(
     logger.info(f"[qtcl_pow_hash] miner='{miner_address}' → bytes={_ph_miner.hex()}")
     logger.info(f"[qtcl_pow_hash] entropy={w_entropy_seed.hex()}")
 
-    # 🔴 CRITICAL: Must match client _SCRATCHPAD_EPOCH_NONCES exactly.
-    # Client patched from 524_288 → 2_097_152 to eliminate epoch-boundary stalls.
-    # Server verifier must use the identical value or scratchpad diverges → hash mismatch.
-    _SCRATCHPAD_EPOCH_NONCES = 2_097_152
-    _epoch = nonce // _SCRATCHPAD_EPOCH_NONCES
+    # 🔴 CRITICAL: Scratchpad must match client exactly.
+    # Client builds scratchpad once per block from seed only (no epoch suffix).
+    # Epoch logic was removed from client but left in server — causing hash mismatch.
+    # FIX: build scratchpad identically to client: SCRATCHPAD_PFX + w_entropy_seed only.
     scratchpad = hashlib.shake_256(
-        _POW_SCRATCHPAD_PFX + w_entropy_seed + _epoch.to_bytes(8, "big")
+        _POW_SCRATCHPAD_PFX + w_entropy_seed
     ).digest(_POW_SCRATCHPAD_BYTES)
     sp_mv = memoryview(scratchpad)
 
