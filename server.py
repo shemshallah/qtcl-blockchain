@@ -157,7 +157,7 @@ try:
     )
 except Exception as _sse_init_err:
     logger.warning(f"[SSE] ⚠️ Could not import SSE channels: {_sse_init_err}")
-    _snapshot_channel = _blocks_channel = _oracle_consensus_channel = _db_sync_channel = _balance_channel = None
+    _snapshot_channel = _blocks_channel = _oracle_consensus_channel = _mempool_channel = _db_sync_channel = _balance_channel = None
     register_sse_routes = None
 
 _SSE_AVAILABLE = False  # Set to True after register_sse_routes(app) succeeds
