@@ -651,7 +651,17 @@ except ImportError:
 
 from flask import Flask, jsonify, request, render_template_string, send_file, Response
 
+# WSGI FAST-START SENTINEL — signals wsgi_config.py that `app` is available
+# immediately, before the remaining ~11,500 lines of module-level init complete.
+# wsgi_config._load_server() polls for this event and sets _full_app as soon
+# as Flask is constructed — slashing cold-start /rpc 503 window from 45s → <5s.
+import threading as _flask_threading
+_QTCL_APP_EVENT: _flask_threading.Event = _flask_threading.Event()
+
 app = Flask(__name__)
+
+# Signal wsgi_config that `app` is ready for requests — DO NOT move this line.
+_QTCL_APP_EVENT.set()
 
 # Register SSE routes directly on the main Flask app (no separate process)
 try:

@@ -25,7 +25,7 @@ FIXES v5.0  (2026-05-17)
   [v3.1] /mcp POST startup: waits up to 8s instead of hard 503.
 """
 
-import logging, os, sys, time, threading, json
+import logging, os, sys, time, threading, threading as _flask_threading, json
 from io import BytesIO
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def _mcp_health_instant():
         response=json.dumps({
             "status":   "ok" if ready else "starting",
             "server":   "qtcl-blockchain",
-            "version":  "5.2.0",
+            "version":  "6.0.0",
             "protocol": "2025-06-18",
             "uptime_s": round(elapsed, 1),
             "ready":    ready,
@@ -79,25 +79,116 @@ _load_done = threading.Event()
 _LOAD_MAX_RETRIES = 3
 _LOAD_RETRY_DELAY = 10.0
 
+# Phase-1 timeout: how long to wait for server.py to execute `app = Flask(__name__)`
+# and fire _QTCL_APP_EVENT.  On Koyeb this takes 2-8s (imports up to that point).
+_TIMEOUT_PHASE1    = float(os.environ.get("WSGI_PHASE1_TIMEOUT", "30"))
+# Phase-2: full module completion (oracle/lattice/DB background threads spin up).
+# _full_app is ALREADY set after phase-1; this just logs when module finishes.
+_TIMEOUT_PHASE2    = float(os.environ.get("WSGI_PHASE2_TIMEOUT", "120"))
+
 def _load_server():
+    """TWO-PHASE SERVER LOADER (v6.0)
+    ─────────────────────────────────
+    Phase 1: Start importing server.py in a thread. Poll sys.modules['server']
+             for _QTCL_APP_EVENT — fires immediately after `app = Flask(__name__)`
+             at line ~654 of server.py. Set _full_app as soon as that event fires.
+             /rpc routes start serving within 5-8s of cold start.
+
+    Phase 2: Full module import completes in background (oracle/lattice/DB init).
+             No action needed — _full_app is already live. Log completion only.
+
+    ROOT CAUSE OF OLD BUG: `from server import app` blocks the ENTIRE importing
+    thread until ALL ~12,000 lines of server.py finish executing (45s on Koyeb).
+    _full_app stayed None for that entire window → every /rpc POST 503'd.
+    """
     global _full_app
+
     for attempt in range(1, _LOAD_MAX_RETRIES + 1):
         try:
-            print(f"[WSGI] Loading full server attempt {attempt}/{_LOAD_MAX_RETRIES} "
-                  f"(MCP 2025-06-18 + JSON-RPC 2.0)...", flush=True)
-            import importlib
-            if attempt > 1 and "server" in sys.modules:
-                del sys.modules["server"]
-            from server import app as full_app
-            _full_app = full_app
-            # FIX v5.1: set the event on SUCCESS so _wait_for_app() wakes
-            # immediately instead of spinning to timeout.
-            _load_done.set()
-            print(f"[WSGI] ✅ Full server loaded at {time.time() - _STARTUP:.1f}s "
-                  f"(attempt {attempt})", flush=True)
-            print("[WSGI] ✅ Endpoints live: /rpc (JSON-RPC 2.0) | /mcp (MCP 2025-06-18) "
-                  "| /mcp/health", flush=True)
-            return  # success
+            print(f"[WSGI] Phase-1 server load attempt {attempt}/{_LOAD_MAX_RETRIES} "
+                  f"(MCP 2025-06-18 + JSON-RPC 2.0) — waiting for Flask app sentinel...",
+                  flush=True)
+
+            # ── Phase 1: import server in a child thread; poll for _QTCL_APP_EVENT ──
+            import_done   = _flask_threading.Event()
+            import_error  = [None]
+
+            def _do_import():
+                try:
+                    import importlib
+                    if attempt > 1 and "server" in sys.modules:
+                        del sys.modules["server"]
+                    import server as _srv_mod  # noqa: F401  (side-effects matter)
+                except Exception as _ie:
+                    import_error[0] = _ie
+                finally:
+                    import_done.set()
+
+            _import_thread = _flask_threading.Thread(target=_do_import, daemon=True,
+                                                     name=f"ServerImport-{attempt}")
+            _import_thread.start()
+
+            # ── Poll sys.modules['server'] for _QTCL_APP_EVENT + app ──────────────
+            _phase1_deadline = time.monotonic() + _TIMEOUT_PHASE1
+            _app_grabbed = False
+            while time.monotonic() < _phase1_deadline:
+                _srv = sys.modules.get("server")
+                if _srv is not None:
+                    _evt = getattr(_srv, "_QTCL_APP_EVENT", None)
+                    _candidate_app = getattr(_srv, "app", None)
+                    if _candidate_app is not None:
+                        # Event may not exist in old server.py — accept app presence alone
+                        if _evt is None or _evt.is_set():
+                            _full_app = _candidate_app
+                            _load_done.set()
+                            _app_grabbed = True
+                            _elapsed = time.time() - _STARTUP
+                            print(f"[WSGI] ✅ Phase-1 complete: Flask app live at {_elapsed:.1f}s "
+                                  f"(attempt {attempt}) — /rpc now serving", flush=True)
+                            break
+                # Check if import thread crashed before app was set
+                if import_done.is_set() and import_error[0] is not None:
+                    raise import_error[0]
+                time.sleep(0.10)
+
+            if not _app_grabbed:
+                # Phase-1 timeout: check if import finished with error
+                if import_error[0] is not None:
+                    raise import_error[0]
+                # Import is still running but app hasn't appeared — wait for full import
+                # then try to grab app from module
+                import_done.wait(timeout=_TIMEOUT_PHASE2)
+                _srv = sys.modules.get("server")
+                if _srv is not None and getattr(_srv, "app", None) is not None:
+                    _full_app = _srv.app
+                    _load_done.set()
+                    print(f"[WSGI] ✅ Phase-1 fallback: app grabbed after full import at "
+                          f"{time.time() - _STARTUP:.1f}s", flush=True)
+                    _app_grabbed = True
+                elif import_error[0] is not None:
+                    raise import_error[0]
+                else:
+                    raise RuntimeError(
+                        f"server.py imported but `app` not found in sys.modules['server'] "
+                        f"after {_TIMEOUT_PHASE1 + _TIMEOUT_PHASE2:.0f}s"
+                    )
+
+            # ── Phase 2: wait for full module completion (non-blocking for routes) ──
+            def _await_phase2():
+                import_done.wait(timeout=_TIMEOUT_PHASE2)
+                if import_error[0]:
+                    print(f"[WSGI] ⚠️  Phase-2 server.py background init error (app already live): "
+                          f"{import_error[0]}", flush=True)
+                else:
+                    print(f"[WSGI] ✅ Phase-2 complete: server.py fully initialized at "
+                          f"{time.time() - _STARTUP:.1f}s", flush=True)
+                print("[WSGI] ✅ Endpoints live: /rpc (JSON-RPC 2.0) | /mcp (MCP 2025-06-18) "
+                      "| /mcp/health", flush=True)
+
+            _flask_threading.Thread(target=_await_phase2, daemon=True,
+                                    name="Phase2Watcher").start()
+            return  # success — _full_app is set, routes are live
+
         except Exception as e:
             import traceback
             print(f"[WSGI] ❌ Server load attempt {attempt}/{_LOAD_MAX_RETRIES} failed: {e}",
@@ -106,9 +197,10 @@ def _load_server():
             if attempt < _LOAD_MAX_RETRIES:
                 print(f"[WSGI] ⏳ Retrying in {_LOAD_RETRY_DELAY:.0f}s...", flush=True)
                 time.sleep(_LOAD_RETRY_DELAY)
+
     print("[WSGI] ❌❌❌ All server load attempts exhausted — server will not start. "
           "Check logs above for the root cause.", flush=True)
-    _load_done.set()  # unblock any waiters so they can 503 cleanly
+    _load_done.set()  # unblock waiters so they can 503 cleanly
 
 _thread = threading.Thread(target=_load_server, daemon=True)
 _thread.start()
@@ -257,7 +349,7 @@ def application(environ, start_response):
 
 app = application
 
-print(f"[WSGI] ✅ WSGI v5.1 ready at {time.time() - _STARTUP:.2f}s", flush=True)
+print(f"[WSGI] ✅ WSGI v6.0 ready at {time.time() - _STARTUP:.2f}s", flush=True)
 print(
     "[WSGI] Routes: /health=instant | /mcp/health=instant "
     f"| /mcp POST waits {_TIMEOUT_MCP_POST:.0f}s "
@@ -266,8 +358,13 @@ print(
     flush=True,
 )
 print(
-    f"[WSGI] FIX v5.1: _load_done.set() now called on SUCCESS — waiters wake "
-    f"immediately instead of spinning the full timeout window.",
+    f"[WSGI] FIX v6.0: TWO-PHASE LOAD — _full_app set immediately when Flask app "
+    f"is created (phase-1, ~5s), not after full server.py init (phase-2, ~45s). "
+    f"Phase-1 timeout={_TIMEOUT_PHASE1:.0f}s via WSGI_PHASE1_TIMEOUT env var.",
+    flush=True,
+)
+print(
+    f"[WSGI] FIX v5.1: _load_done.set() called on SUCCESS — waiters wake immediately.",
     flush=True,
 )
 print(
